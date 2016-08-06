@@ -5,7 +5,7 @@ include $(CLEAR_VARS)
 
 LOCAL_CPP_EXTENSION := .cc
 LOCAL_LDFLAGS   := -llog -ljnigraphics
-LOCAL_SDK_VERSION := 9
+LOCAL_SDK_VERSION := 17
 LOCAL_MODULE    := libjni_tinyplanet
 LOCAL_SRC_FILES := tinyplanet.cc
 
@@ -20,7 +20,7 @@ include $(CLEAR_VARS)
 LOCAL_CFLAGS := -std=c++11
 LOCAL_NDK_STL_VARIANT := c++_static
 LOCAL_LDFLAGS   := -llog -ldl -ljnigraphics
-LOCAL_SDK_VERSION := 9
+LOCAL_SDK_VERSION := 17
 LOCAL_MODULE    := libjni_jpegutil
 LOCAL_SRC_FILES := jpegutil.cpp jpegutilnative.cpp
 
