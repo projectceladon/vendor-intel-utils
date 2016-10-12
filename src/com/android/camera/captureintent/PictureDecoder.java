@@ -43,11 +43,11 @@ public class PictureDecoder {
         Matrix m = new Matrix();
         // Rotate if needed.
         if (pictureOrientation != 0) {
-            m.preRotate(pictureOrientation);
+            m.setRotate(pictureOrientation);
         }
         // Flip horizontally if needed.
         if (needMirror) {
-            m.setScale(-1f, 1f);
+            m.postScale(-1f, 1f);
         }
         return Bitmap.createBitmap(
                 pictureBitmap, 0, 0, pictureBitmap.getWidth(), pictureBitmap.getHeight(), m, false);
