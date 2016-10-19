@@ -29,7 +29,7 @@
 namespace jpegutil {
 
 class Transform;
-class Plane;
+struct Plane;
 
 inline int sgn(int val) { return (0 < val) - (val < 0); }
 
