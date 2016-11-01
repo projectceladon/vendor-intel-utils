@@ -1,3 +1,0 @@
-add_lunch_combo android_ia_64-eng
-add_lunch_combo android_ia_64-userdebug
-add_lunch_combo android_ia_64-user

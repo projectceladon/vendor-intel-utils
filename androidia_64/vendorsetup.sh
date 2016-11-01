@@ -1,0 +1,3 @@
+add_lunch_combo androidia_64-eng
+add_lunch_combo androidia_64-userdebug
+add_lunch_combo androidia_64-user
