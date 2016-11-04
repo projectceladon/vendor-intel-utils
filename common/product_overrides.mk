@@ -113,7 +113,8 @@ PRODUCT_PROPERTY_OVERRIDES += \
 
 # GLES version
 PRODUCT_PROPERTY_OVERRIDES += \
-   ro.opengles.version=196609
+   ro.opengles.version=196609 \
+   ro.sf.lcd_density=213 \
 
 # HWC
 PRODUCT_PROPERTY_OVERRIDES += \
