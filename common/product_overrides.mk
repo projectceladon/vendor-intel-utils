@@ -86,12 +86,11 @@ PRODUCT_PROPERTY_OVERRIDES += \
 
 # Gralloc
 PRODUCT_PROPERTY_OVERRIDES += \
-    ro.hardware.gralloc android_ia \
-    ro.setupwizard.mode ENABLED
+    ro.hardware.gralloc=android_ia
 
 # HW Composer
 PRODUCT_PROPERTY_OVERRIDES += \
-    ro.hardware.hwcomposer android_ia
+    ro.hardware.hwcomposer=drm
 
 # Houdini
 PRODUCT_PROPERTY_OVERRIDES += \

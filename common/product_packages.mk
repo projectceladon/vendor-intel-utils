@@ -18,7 +18,7 @@ PRODUCT_PACKAGES += \
     camera.android_ia \
     drmserver \
     gps.default \
-    hwcomposer.android_ia \
+    hwcomposer.drm \
     libGLES_android \
     lights.default \
     power.android_ia \
