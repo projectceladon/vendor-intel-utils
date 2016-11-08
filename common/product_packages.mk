@@ -47,10 +47,6 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += \
     com.android.future.usb.accessory
 
-# NFC
-PRODUCT_PACKAGES += \
-    NfcNci
-
 # Audio
 PRODUCT_PACKAGES += \
     audio.r_submix.default \
