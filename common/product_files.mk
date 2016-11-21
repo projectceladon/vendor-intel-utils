@@ -97,12 +97,6 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.usb.accessory.xml:system/etc/permissions/android.hardware.usb.accessory.xml \
     frameworks/native/data/etc/android.hardware.usb.host.xml:system/etc/permissions/android.hardware.usb.host.xml \
 
-#Sound
-# audio mixer paths
-PRODUCT_COPY_FILES += \
-    device/android_ia/sound/mixer_paths.xml:system/etc/mixer_paths.xml \
-    device/android_ia/sound/audio_policy.conf:system/etc/audio_policy.conf
-
 #Firmware
 SYMLINKS := $(subst $(FIRMWARES_DIR),$(TARGET_OUT)/lib/firmware,$(filter-out $(FIRMWARES_DIR)/$(FIRMWARE_FILTERS),$(shell find $(FIRMWARES_DIR) -type l)))
 
