@@ -13,12 +13,6 @@ PRODUCT_AAPT_PREF_CONFIG := xxhdpi
 
 DEVICE_PACKAGE_OVERLAYS += device/intel/android_ia/common/overlay
 
-# Kernel
-TARGET_KERNEL_ARCH := x86_64
-
-KERNEL_MODULES_ROOT_PATH ?= /system/lib/modules
-KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
-
 TARGET_HAS_THIRD_PARTY_APPS := true
 
 PRODUCT_PACKAGES += $(THIRD_PARTY_APPS)
@@ -58,10 +52,6 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.camera.flash-autofocus.xml:system/etc/permissions/android.hardware.camera.flash-autofocus.xml \
     frameworks/native/data/etc/android.hardware.camera.front.xml:system/etc/permissions/android.hardware.camera.front.xml \
     frameworks/native/data/etc/android.hardware.camera.xml:system/etc/permissions/android.hardware.camera.xml \
-
-# Ethernet support.
-PRODUCT_COPY_FILES += \
-	frameworks/native/data/etc/android.hardware.ethernet.xml:system/etc/permissions/android.hardware.ethernet.xml
 
 # Wifi
 PRODUCT_COPY_FILES += \
@@ -211,10 +201,6 @@ endif
 
 #Enable low latency stream
 PRODUCT_PROPERTY_OVERRIDES += persist.audio.low_latency=1
-
-# Ethernet
-PRODUCT_PROPERTY_OVERRIDES += \
-   net.eth0.startonboot=1
 
 # AOSP Packages
 PRODUCT_PACKAGES += \
@@ -388,4 +374,16 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.dalvik.vm.native.bridge=libhoudini.so
 ifneq ($(TARGET_BUILD_VARIANT),eng)
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.adb.secure=1
 endif
+##############################################################
+# Source: device/intel/mixins/groups/bluetooth/btusb/product.mk
+##############################################################
+PRODUCT_PACKAGES += \
+    audio.a2dp.default \
+		ath3k-1.fw \
+
+PRODUCT_COPY_FILES += frameworks/native/data/etc/android.hardware.bluetooth.xml:system/etc/permissions/android.hardware.bluetooth.xml \
+		frameworks/native/data/etc/android.hardware.bluetooth_le.xml:system/etc/permissions/android.hardware.bluetooth_le.xml
+
+ADDITIONAL_BUILD_PROPERTIES += bluetooth.hwcfg=stop \
+                bluetooth.rfkill=1
 # ------------------ END MIX-IN DEFINITIONS ------------------
