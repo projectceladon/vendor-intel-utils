@@ -11,6 +11,7 @@ TARGET_BOARD_PLATFORM := android_ia
 
 # Some framework code requires this to enable BT
 BOARD_HAVE_BLUETOOTH := true
+BOARD_HAVE_BLUETOOTH_LINUX := true
 BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := device/generic/common/bluetooth
 
 BOARD_USE_LEGACY_UI := true
