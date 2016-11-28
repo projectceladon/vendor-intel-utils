@@ -2,7 +2,7 @@ ifneq ($(TARGET_PREBUILT_KERNEL),)
 $(error TARGET_PREBUILT_KERNEL defined but AndroidIA kernels build from source)
 endif
 
-TARGET_KERNEL_SRC ?= device/intel/android_ia/kernel
+TARGET_KERNEL_SRC ?= kernel/android_ia
 
 TARGET_KERNEL_ARCH := x86_64
 KERNEL_NAME := bzImage
