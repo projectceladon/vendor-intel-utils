@@ -1,0 +1,1227 @@
+From f21f6185516553395ff1203618b1c5aecd019ed5 Mon Sep 17 00:00:00 2001
+From: Chih-Wei Huang <cwhuang@linux.org.tw>
+Date: Fri, 26 Aug 2016 01:02:30 +0800
+Subject: [PATCH 5/7] ueventd: auto load modules on uevents
+
+This is a squashed and refactory patch of the following commits
+from marshmallow-x86:
+
+ *  add modprobe-like capability and automatic ueventd loading
+
+    Author: Jianxun Zhang <jianxun.zhang@intel.com>
+    Author: Daniel Leung <daniel.leung@intel.com>
+    Author: Andrew Boie <andrew.p.boie@intel.com>
+
+    - insmod_by_dep() added to libcutils; loads a module into kernel.
+    Modules the target module depends on will be loaded first. Loading
+    will be stopped when an error occurs.
+
+    - rmmod_by_dep() added to libcutils; removes a module from kernel.
+    It also tries to remove other modules the target module depends
+    on until an error occurs.
+
+    - Implement wildcard matching for ueventd rules.
+    The PCI and USB addresses for devices can change from devices
+    from devices for a particular class of peripheral, for example,
+    bluetooth. The ueventd rules created with these addresses are
+    then device-specific.
+
+    This changes the way ueventd rules with wildcard are handled.
+    Instead of matching just the prefix with a trailing wildcard,
+    now these rules can have wildcard anywhere in the rule.
+    The wildcard matching is implemented using fnmatch(), where
+    its matching is simliar to shell pathname expansion. It suits
+    this particular usage model well.
+
+    For example, instead of creating a rule to match:
+
+      /sys/devices/pci0000:00/0000:00:1d.0/usb2/2-1/2-1.3/2-1.3:1.0/bluetooth/hci0/rfkill*
+
+    , this would suffice:
+
+      /sys/devices/*/bluetooth/hci0/rfkill*
+
+    - Let ueventd auto-load kernel modules. Implements the functionality
+    for ueventd to auto-load kernel modules when uevents are triggered.
+    Since /system may not be mounted when uevents are fired,
+    a deferred loading mechanism is implemented. Once mapping of
+    module and alias is available, these modules are then loaded.
+    Modules can also be blacklisted so they will not be loaded
+    automatically. One example would be the Wifi driver, as
+    Android's has to control its loading and unloading.
+
+    - add 'probemod' builtin command. This command accepts the name of a
+    kernel module plus a set of command line arguments. The module will
+    be loaded, along with all its dependencies, using the libcutils
+    insmod_by_dep() API.
+
+    - Drivers in kernel can request modules by launching a program in
+    user space, the program's path by default is "/sbin/modprobe".
+    Because Android system has no modprobe and ueventd is the only
+    program handling the module aliases so far, This patch provides a
+    cheap approach to handle kernel's requests in ueventd executable.
+
+    - Add new builtin init command "coldboot". The main purpose is to
+    provide an approach in init.*.rc files to fire uevents for devices
+    under the path which is passed as the the argument. This should be
+    called after /system is mounted so any queued events that need to
+    load a module can be fired.
+
+ *  allow to load modules from standard module path
+
+ *  ueventd: load modules in a forked process
+
+    Loading some modules (e.g., ath3k) will be blocked to wait for
+    firmware. The forking is necessary, otherwise ueventd has no
+    chance to load the firmware.
+
+ *  init: add modprobe to load kernel requested modules
+
+ *  libcutils: refine probe_module
+
+    Make the code be more elegant and fix the realloc bug.
+
+ *  ueventd: refactory module and firmware loading mechanism
+
+    Currently each module and firmware loading event is forked to
+    a child process to handle. It may cause some race conditions.
+
+    Now we fork ueventd into two processes. The parent process handles
+    normal uevents including modules loading, while the child process
+    only handles firmware loading events. All events are handled
+    sequentially.
+
+ *  ueventd: load all modules with the matched alias
+
+    Originally we only load the first module with the matched alias.
+    It causes some necessary modules are not loaded.
+---
+ include/cutils/probe_module.h | 103 +++++++++++
+ init/Android.mk               |   1 +
+ init/builtins.cpp             |  16 +-
+ init/devices.cpp              | 366 +++++++++++++++++++++++++++++++++++++--
+ init/devices.h                |   5 +-
+ init/init.cpp                 |   4 +
+ init/ueventd.cpp              |  10 +-
+ libcutils/Android.mk          |   1 +
+ libcutils/probe_module.c      | 387 ++++++++++++++++++++++++++++++++++++++++++
+ 9 files changed, 860 insertions(+), 33 deletions(-)
+ create mode 100644 include/cutils/probe_module.h
+ create mode 100644 libcutils/probe_module.c
+
+diff --git a/include/cutils/probe_module.h b/include/cutils/probe_module.h
+new file mode 100644
+index 0000000..7fbd5cd
+--- /dev/null
++++ b/include/cutils/probe_module.h
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (C) 2012 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef _LIBS_CUTILS_PROBEMODULE_H
++#define _LIBS_CUTILS_PROBEMODULE_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* get_default_mod_path() - get the default modules path
++ * It checks /system/lib/modules/$(uname -r)/ first. If it doesn't exist,
++ * fall back to /system/lib/modules/.
++ *
++ * def_mod_path: The buffer to be filled
++ *
++ * return      : def_mod_path
++ */
++extern char *get_default_mod_path(char *def_mod_path);
++
++/* insmod() - load a kernel module (target) from a file
++ *
++ * filename   : Filename of the target module.
++ *
++ * args       : A string of target module's parameters. NOTE: we only
++ *              support parameters of the target module.
++ *
++ */
++extern int insmod(const char *filename, const char *args);
++
++/* insmod_by_dep() - load a kernel module (target) with its dependency
++ * The module's dependency must be described in the provided dependency file.
++ * other modules in the dependency chain will be loaded prior to the target.
++ *
++ * module_name: Name of the target module. e.g. name "MyModule" is for
++ *              module file MyModule.ko.
++ *
++ * args       : A string of target module's parameters. NOTE: we only
++ *              support parameters of the target module.
++ *
++ * dep_name   : Name of dependency file. If it is NULL, we will look
++ *              up /system/lib/modules/modules.dep by default.
++ *
++ * strip      : Non-zero values remove paths of modules in dependency.
++ *              before loading them. The final path of a module will be
++ *              base/MyModule.ko. This is for devices which put every
++ *              modules into a single directory.
++ *
++ *              Passing 0 to strip keeps module paths in dependency file.
++ *              e.g. "kernel/drivers/.../MyModule.ko" in dep file will
++ *              be loaded as base/kernel/drivers/.../MyModule.ko .
++ *
++ * base       : Base dir, a prefix to be added to module's path prior to
++ *              loading. The last character prior to base string's terminator
++ *              must be a '/'. If it is NULL, we will take
++ *              /system/lib/modules/modules.dep by default.
++ *
++ * return     : 0 for success; non-zero for any errors.
++ *
++ * Note:
++ * When loading modules, function will not fail for any modules which are
++ * already in kernel. The module parameters passed to function will not be
++ * effective in this case if target module is already loaded into kernel.
++ */
++extern int insmod_by_dep(
++        const char *module_name,
++        const char *args,
++        const char *dep_name,
++        int strip,
++        const char * base);
++
++/* rmmod_by_dep() - remove a module (target) from kernel with its dependency
++ * The module's dependency must be described in the provided dependency file.
++ * This function will try to remove other modules in the dependency chain too
++ *
++ * module_name: Name of the target module. e.g. name "MyModule" is for
++ *              module file MyModule.ko.
++ *
++ * dep_name   : Name of dependency file. If it is NULL, we will look
++ *              up /system/lib/modules/modules.dep by default.
++ *
++ * return     : 0 for success; non-zero for any errors.
++ */
++extern int rmmod_by_dep(const char *module_name, const char *dep_name);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /*_LIBS_CUTILS_PROBEMODULE_H*/
+diff --git a/init/Android.mk b/init/Android.mk
+index 67541b8..65aab82 100644
+--- a/init/Android.mk
++++ b/init/Android.mk
+@@ -105,6 +105,7 @@ LOCAL_STATIC_LIBRARIES := \
+
+ # Create symlinks
+ LOCAL_POST_INSTALL_CMD := $(hide) mkdir -p $(TARGET_ROOT_OUT)/sbin; \
++    ln -sf ../init $(TARGET_ROOT_OUT)/sbin/modprobe; \
+     ln -sf ../init $(TARGET_ROOT_OUT)/sbin/ueventd; \
+     ln -sf ../init $(TARGET_ROOT_OUT)/sbin/watchdogd
+
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index 70f9194..0cad92d 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -29,7 +29,6 @@
+ #include <sys/socket.h>
+ #include <sys/mount.h>
+ #include <sys/resource.h>
+-#include <sys/syscall.h>
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+@@ -49,6 +48,7 @@
+ #include <bootloader_message/bootloader_message.h>
+ #include <cutils/partition_utils.h>
+ #include <cutils/android_reboot.h>
++#include <cutils/probe_module.h>
+ #include <logwrap/logwrap.h>
+ #include <private/android_filesystem_config.h>
+
+@@ -69,20 +69,6 @@
+
+ static const int kTerminateServiceDelayMicroSeconds = 50000;
+
+-static int insmod(const char *filename, const char *options) {
+-    int fd = open(filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+-    if (fd == -1) {
+-        ERROR("insmod: open(\"%s\") failed: %s", filename, strerror(errno));
+-        return -1;
+-    }
+-    int rc = syscall(__NR_finit_module, fd, options, 0);
+-    if (rc == -1) {
+-        ERROR("finit_module for \"%s\" failed: %s", filename, strerror(errno));
+-    }
+-    close(fd);
+-    return rc;
+-}
+-
+ static int __ifupdown(const char *interface, int up) {
+     struct ifreq ifr;
+     int s, ret;
+diff --git a/init/devices.cpp b/init/devices.cpp
+index cffc561..3abaace 100644
+--- a/init/devices.cpp
++++ b/init/devices.cpp
+@@ -42,18 +42,24 @@
+
+ #include <android-base/file.h>
+ #include <cutils/list.h>
++#include <cutils/probe_module.h>
+ #include <cutils/uevent.h>
+
+ #include "devices.h"
+ #include "ueventd_parser.h"
+ #include "util.h"
+ #include "log.h"
++#include "parser.h"
+
+ #define SYSFS_PREFIX    "/sys"
+ static const char *firmware_dirs[] = { "/etc/firmware",
+                                        "/vendor/firmware",
+                                        "/firmware/image" };
+
++#define MODULES_BLKLST  "/system/etc/modules.blacklist"
++#define READ_MODULES_ALIAS	1
++#define READ_MODULES_BLKLST	2
++
+ extern struct selabel_handle *sehandle;
+
+ static int device_fd = -1;
+@@ -65,6 +71,7 @@ struct uevent {
+     const char *firmware;
+     const char *partition_name;
+     const char *device_name;
++    const char *modalias;
+     int partition_num;
+     int major;
+     int minor;
+@@ -92,9 +99,26 @@ struct platform_node {
+     struct listnode list;
+ };
+
++struct module_alias_node {
++    char *name;
++    char *pattern;
++    struct listnode list;
++};
++
++struct module_blacklist_node {
++    char *name;
++    struct listnode list;
++};
++
+ static list_declare(sys_perms);
+ static list_declare(dev_perms);
+ static list_declare(platform_names);
++static list_declare(modules_aliases_map);
++static list_declare(modules_blacklist);
++static list_declare(deferred_module_loading_list);
++
++static int read_modules_aliases();
++static int read_modules_blacklist();
+
+ int add_dev_perms(const char *name, const char *attr,
+                   mode_t perm, unsigned int uid, unsigned int gid,
+@@ -373,6 +397,7 @@ static void parse_event(const char *msg, struct uevent *uevent)
+     uevent->partition_name = NULL;
+     uevent->partition_num = -1;
+     uevent->device_name = NULL;
++    uevent->modalias = NULL;
+
+         /* currently ignoring SEQNUM */
+     while(*msg) {
+@@ -403,6 +428,9 @@ static void parse_event(const char *msg, struct uevent *uevent)
+         } else if(!strncmp(msg, "DEVNAME=", 8)) {
+             msg += 8;
+             uevent->device_name = msg;
++        } else if(!strncmp(msg, "MODALIAS=", 9)) {
++            msg += 9;
++            uevent->modalias = msg;
+         }
+
+         /* advance to after the next \0 */
+@@ -742,8 +770,182 @@ static void handle_generic_device_event(struct uevent *uevent)
+              uevent->major, uevent->minor, links);
+ }
+
++static int is_module_blacklisted(const char *name)
++{
++    struct listnode *blklst_node;
++    struct module_blacklist_node *blacklist;
++    int ret = 0;
++
++    if (!name) goto out;
++
++    /* See if module is blacklisted, skip if it is */
++    list_for_each(blklst_node, &modules_blacklist) {
++        blacklist = node_to_item(blklst_node,
++                                 struct module_blacklist_node,
++                                 list);
++        if (!strcmp(name, blacklist->name)) {
++            INFO("modules %s is blacklisted\n", name);
++            ret = 1;
++            goto out;
++        }
++    }
++
++out:
++    return ret;
++}
++
++static int load_module_by_device_modalias(const char *id)
++{
++    struct listnode *alias_node;
++    struct module_alias_node *alias;
++    int ret = -1;
++
++    list_for_each(alias_node, &modules_aliases_map) {
++        alias = node_to_item(alias_node, struct module_alias_node, list);
++
++        if (alias && alias->name && alias->pattern) {
++            if (fnmatch(alias->pattern, id, 0) == 0) {
++                INFO("trying to load module %s due to uevents\n", alias->name);
++
++                if (!is_module_blacklisted(alias->name)) {
++                    if (insmod_by_dep(alias->name, "", NULL, 0, NULL)) {
++                        /* cannot load module. try another one since
++                         * there may be another match.
++                         */
++                        NOTICE("failed to load %s for modalias %s\n",
++                             alias->name, id);
++                    } else {
++                        /* loading was successful */
++                        INFO("loaded module %s due to uevents\n", alias->name);
++                        ret = 0;
++                    }
++                }
++            }
++        }
++    }
++
++    return ret;
++}
++
++static void handle_deferred_module_loading()
++{
++    /* try to read the module alias mapping if map is empty
++     * if succeed, loading all the modules in the queue
++     */
++    if (!list_empty(&modules_aliases_map)) {
++        struct listnode *node = NULL;
++        struct listnode *next = NULL;
++        struct module_alias_node *alias = NULL;
++
++        list_for_each_safe(node, next, &deferred_module_loading_list) {
++            alias = node_to_item(node, struct module_alias_node, list);
++
++            if (alias && alias->pattern) {
++                INFO("deferred loading of module for %s\n", alias->pattern);
++                load_module_by_device_modalias(alias->pattern);
++                free(alias->pattern);
++                list_remove(node);
++                free(alias);
++            }
++        }
++    }
++}
++
++static int module_probe(int argc, char **argv)
++{
++    if (list_empty(&modules_aliases_map)) {
++        read_modules_aliases();
++        read_modules_blacklist();
++    }
++
++    // is it a modalias?
++    int ret = load_module_by_device_modalias(argv[1]);
++    if (ret) {
++        // treat it as a module name
++        std::string options;
++        if (argc > 2) {
++            options = argv[2];
++            for (int i = 3; i < argc; ++i) {
++                options += ' ';
++                options += argv[i];
++            }
++        }
++        ret = insmod_by_dep(argv[1], options.c_str(), NULL, 0, NULL);
++    }
++    return ret;
++}
++
++int modprobe_main(int argc, char **argv)
++{
++    const char *prog = argv[0];
++
++    /* We only accept requests from root user (kernel) */
++    if (getuid())
++        return -EPERM;
++
++    /* Kernel will launch a user space program specified by
++     * /proc/sys/kernel/modprobe to load modules.
++     * No deferred loading in this case.
++     */
++    while (argc > 1 && (!strcmp(argv[1], "-q") || !strcmp(argv[1], "--"))) {
++        klog_set_level(KLOG_NOTICE_LEVEL);
++        argc--, argv++;
++    }
++
++    if (argc < 2) {
++        /* it is called without enough arguments */
++        return -EINVAL;
++    }
++
++    NOTICE("%s %s\n", prog, argv[1]);
++    return module_probe(argc, argv);
++}
++
++static void handle_module_loading(const char *modalias)
++{
++    struct module_alias_node *node;
++
++    /* once modules.alias can be read,
++     * we load all the deferred ones
++     */
++    if (list_empty(&modules_aliases_map)) {
++        if (read_modules_aliases() == 0) {
++            read_modules_blacklist();
++            handle_deferred_module_loading();
++        }
++    }
++
++    if (!modalias) return;
++
++    if (list_empty(&modules_aliases_map)) {
++        /* if module alias mapping is empty,
++         * queue it for loading later
++         */
++        node = (module_alias_node *) calloc(1, sizeof(*node));
++        if (node) {
++            node->pattern = strdup(modalias);
++            if (!node->pattern) {
++                free(node);
++            } else {
++                list_add_tail(&deferred_module_loading_list, &node->list);
++                INFO("add to queue for deferred module loading: %s",
++                        node->pattern);
++            }
++        } else {
++            ERROR("failed to allocate memory to store device id for deferred module loading.\n");
++        }
++    } else {
++        load_module_by_device_modalias(modalias);
++    }
++
++}
++
+ static void handle_device_event(struct uevent *uevent)
+ {
++    if (!strcmp(uevent->action,"add")) {
++        handle_module_loading(uevent->modalias);
++    }
++
+     if (!strcmp(uevent->action,"add") || !strcmp(uevent->action, "change") || !strcmp(uevent->action, "online"))
+         fixup_sys_perms(uevent->path);
+
+@@ -806,7 +1008,7 @@ static void process_firmware_event(struct uevent *uevent)
+     size_t i;
+     int booting = is_booting();
+
+-    INFO("firmware: loading '%s' for '%s'\n",
++    NOTICE("firmware: loading '%s' for '%s'\n",
+          uevent->firmware, uevent->path);
+
+     l = asprintf(&root, SYSFS_PREFIX"%s/", uevent->path);
+@@ -874,26 +1076,155 @@ root_free_out:
+
+ static void handle_firmware_event(struct uevent *uevent)
+ {
+-    pid_t pid;
+-
+     if(strcmp(uevent->subsystem, "firmware"))
+         return;
+
+     if(strcmp(uevent->action, "add"))
+         return;
+
+-    /* we fork, to avoid making large memory allocations in init proper */
+-    pid = fork();
+-    if (!pid) {
+-        process_firmware_event(uevent);
+-        _exit(EXIT_SUCCESS);
+-    } else if (pid < 0) {
+-        ERROR("could not fork to process firmware event: %s\n", strerror(errno));
++    process_firmware_event(uevent);
++}
++
++static void parse_line_module_alias(struct parse_state *state, int nargs, char **args)
++{
++    struct module_alias_node *node;
++
++    if (!args ||
++        (nargs != 3) ||
++        !args[0] || !args[1] || !args[2]) {
++        /* empty line or not enough arguments */
++        return;
++    }
++
++    node = (module_alias_node *) calloc(1, sizeof(*node));
++    if (!node) return;
++
++    node->name = strdup(args[2]);
++    if (!node->name) {
++        free(node);
++        return;
++    }
++
++    node->pattern = strdup(args[1]);
++    if (!node->pattern) {
++        free(node->name);
++        free(node);
++        return;
+     }
++
++    list_add_tail(&modules_aliases_map, &node->list);
++}
++
++static void parse_line_module_blacklist(struct parse_state *state, int nargs, char **args)
++{
++    struct module_blacklist_node *node;
++
++    if (!args ||
++        (nargs != 2) ||
++        !args[0] || !args[1]) {
++        /* empty line or not enough arguments */
++        return;
++    }
++
++    /* this line does not being with "blacklist" */
++    if (strncmp(args[0], "blacklist", 9)) return;
++
++    node = (module_blacklist_node *) calloc(1, sizeof(*node));
++    if (!node) return;
++
++    node->name = strdup(args[1]);
++    if (!node->name) {
++        free(node);
++        return;
++    }
++
++    list_add_tail(&modules_blacklist, &node->list);
++}
++
++static int __read_modules_desc_file(int mode)
++{
++    struct parse_state state;
++    char *args[3];
++    int nargs;
++    char fn[PATH_MAX];
++    int fd = -1;
++    int ret = -1;
++    int args_to_read = 0;
++    std::string data;
++
++    if (mode == READ_MODULES_ALIAS) {
++        /* read modules.alias */
++        strcat(get_default_mod_path(fn), "modules.alias");
++    } else if (mode == READ_MODULES_BLKLST) {
++        /* read modules.blacklist */
++        strcpy(fn, MODULES_BLKLST);
++    } else {
++        /* unknown mode */
++        goto out;
++    }
++
++    fd = open(fn, O_RDONLY);
++    if (fd == -1) {
++        goto out;
++    }
++
++    /* read the whole file */
++    if (!read_file(fn, &data)) {
++        goto out;
++    }
++
++    /* invoke tokenizer */
++    nargs = 0;
++    state.filename = fn;
++    state.line = 1;
++    state.ptr = &data[0];
++    state.nexttoken = 0;
++    if (mode == READ_MODULES_ALIAS) {
++        state.parse_line = parse_line_module_alias;
++        args_to_read = 3;
++    } else if (mode == READ_MODULES_BLKLST) {
++        state.parse_line = parse_line_module_blacklist;
++        args_to_read = 2;
++    }
++    for (;;) {
++        int token = next_token(&state);
++        switch (token) {
++        case T_EOF:
++            state.parse_line(&state, 0, 0);
++            ret = 0;
++            goto out;
++        case T_NEWLINE:
++            if (nargs) {
++                state.parse_line(&state, nargs, args);
++                nargs = 0;
++            }
++            break;
++        case T_TEXT:
++            if (nargs < args_to_read) {
++                args[nargs++] = state.text;
++            }
++            break;
++        }
++    }
++    ret = 0;
++
++out:
++    if (fd != -1) {
++        close(fd);
++    }
++    return ret;
++}
++
++static int read_modules_aliases() {
++    return __read_modules_desc_file(READ_MODULES_ALIAS);
++}
++
++static int read_modules_blacklist() {
++    return __read_modules_desc_file(READ_MODULES_BLKLST);
+ }
+
+ #define UEVENT_MSG_LEN  2048
+-void handle_device_fd()
++void handle_device_fd(bool child)
+ {
+     char msg[UEVENT_MSG_LEN+2];
+     int n;
+@@ -916,8 +1247,11 @@ void handle_device_fd()
+             }
+         }
+
+-        handle_device_event(&uevent);
+-        handle_firmware_event(&uevent);
++        if (child) {
++            handle_firmware_event(&uevent);
++        } else {
++            handle_device_event(&uevent);
++        }
+     }
+ }
+
+@@ -973,7 +1307,8 @@ static void coldboot(const char *path)
+     }
+ }
+
+-void device_init() {
++void device_init(bool child)
++{
+     sehandle = selinux_android_file_context_handle();
+     selinux_status_open(true);
+
+@@ -984,6 +1319,9 @@ void device_init() {
+     }
+     fcntl(device_fd, F_SETFL, O_NONBLOCK);
+
++    if (child) {
++        return; // don't do coldboot in child
++    }
+     if (access(COLDBOOT_DONE, F_OK) == 0) {
+         NOTICE("Skipping coldboot, already done!\n");
+         return;
+diff --git a/init/devices.h b/init/devices.h
+index 6cb0a77..2d181bb 100644
+--- a/init/devices.h
++++ b/init/devices.h
+@@ -19,8 +19,9 @@
+
+ #include <sys/stat.h>
+
+-extern void handle_device_fd();
+-extern void device_init(void);
++extern void handle_device_fd(bool = false);
++extern void device_init(bool);
++extern int modprobe_main(int argc, char **argv);
+ extern int add_dev_perms(const char *name, const char *attr,
+                          mode_t perm, unsigned int uid,
+                          unsigned int gid, unsigned short prefix,
+diff --git a/init/init.cpp b/init/init.cpp
+index 84da2b9..83104ca 100644
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -585,6 +585,10 @@ static void selinux_initialize(bool in_kernel_domain) {
+ }
+
+ int main(int argc, char** argv) {
++    if (strstr(argv[0], "modprobe")) {
++        return modprobe_main(argc, argv);
++    }
++
+     if (!strcmp(basename(argv[0]), "ueventd")) {
+         return ueventd_main(argc, argv);
+     }
+diff --git a/init/ueventd.cpp b/init/ueventd.cpp
+index 249739b..c0f166c 100644
+--- a/init/ueventd.cpp
++++ b/init/ueventd.cpp
+@@ -15,12 +15,14 @@
+  */
+
+ #include <ctype.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include <poll.h>
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <unistd.h>
+
+ #include <android-base/stringprintf.h>
+ #include <private/android_filesystem_config.h>
+@@ -64,8 +66,12 @@ int ueventd_main(int argc, char **argv)
+     ueventd_parse_config_file("/ueventd.rc");
+     ueventd_parse_config_file(android::base::StringPrintf("/ueventd.%s.rc", hardware.c_str()).c_str());
+
+-    device_init();
++    pid_t pid = fork();
++    if (pid < 0) {
++        ERROR("could not fork to process firmware event: %s\n", strerror(errno));
++    }
+
++    device_init(pid == 0);
+     pollfd ufd;
+     ufd.events = POLLIN;
+     ufd.fd = get_device_fd();
+@@ -77,7 +83,7 @@ int ueventd_main(int argc, char **argv)
+             continue;
+         }
+         if (ufd.revents & POLLIN) {
+-            handle_device_fd();
++            handle_device_fd(pid == 0);
+         }
+     }
+
+diff --git a/libcutils/Android.mk b/libcutils/Android.mk
+index 0c6e5a1..c3322a8 100644
+--- a/libcutils/Android.mk
++++ b/libcutils/Android.mk
+@@ -98,6 +98,7 @@ LOCAL_SRC_FILES := $(libcutils_common_sources) \
+         debugger.c \
+         klog.c \
+         partition_utils.c \
++        probe_module.c \
+         properties.c \
+         qtaguid.c \
+         trace-dev.c \
+diff --git a/libcutils/probe_module.c b/libcutils/probe_module.c
+new file mode 100644
+index 0000000..38a6dfb
+--- /dev/null
++++ b/libcutils/probe_module.c
+@@ -0,0 +1,387 @@
++/*
++ * Copyright (C) 2012 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <limits.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <cutils/misc.h>
++#include <sys/syscall.h>
++#include <sys/utsname.h>
++
++#define LOG_TAG "ProbeModule"
++#include <cutils/log.h>
++
++#define LDM_DEFAULT_MOD_PATH "/system/lib/modules/"
++
++extern int delete_module(const char *, unsigned int);
++
++/* get_default_mod_path() interface to outside,
++ * refer to its description in probe_module.h
++ */
++char *get_default_mod_path(char *def_mod_path)
++{
++    int len;
++    struct utsname buf;
++    uname(&buf);
++    len = snprintf(def_mod_path, PATH_MAX, "%s", LDM_DEFAULT_MOD_PATH);
++    strcpy(def_mod_path + len, buf.release);
++    if (access(def_mod_path, F_OK))
++        def_mod_path[len] = '\0';
++    else
++        strcat(def_mod_path, "/");
++    return def_mod_path;
++}
++
++int insmod(const char *filename, const char *options)
++{
++    int fd = open(filename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
++    if (fd == -1) {
++        ALOGE("insmod: open(\"%s\") failed: %s", filename, strerror(errno));
++        return -1;
++    }
++    int rc = syscall(__NR_finit_module, fd, options, 0);
++    if (rc == -1) {
++        if (errno == EEXIST) {
++            rc = 0;
++        } else {
++            ALOGE("finit_module for \"%s\" failed: %s", filename, strerror(errno));
++        }
++    }
++    close(fd);
++    return rc;
++}
++
++static char *strip_path(char *str)
++{
++    char *ptr = strrchr(str, '/');
++    return ptr ? ptr + 1 : str;
++}
++
++static void hyphen_to_underscore(char *str)
++{
++    while (str && *str != '\0') {
++        if (*str == '-')
++            *str = '_';
++        str++;
++    }
++}
++
++/* Compare module names, but don't differentiate '_' and '-'.
++ * return: 0 when s1 is matched to s2 or size is zero.
++ *         non-zero in any other cases.
++ */
++static int match_name(const char *s1, const char *s2, const size_t size)
++{
++    size_t i;
++
++    if (!size)
++        return 0;
++
++    for (i = 0; i < size; i++, s1++, s2++) {
++
++        if ((*s1 == '_' || *s1 == '-') && (*s2 == '_' || *s2 == '-'))
++            continue;
++
++        if (*s1 != *s2)
++            return -1;
++
++        if (*s1 == '\0')
++            return 0;
++    }
++
++    return 0;
++}
++
++/* check if a line in dep file is target module's dependency.
++ * return 1 when it is, otherwise 0 in any other cases.
++ */
++static int is_target_module(char *line, const char *target)
++{
++    char *token;
++    char name[PATH_MAX];
++    const char *delimiter = ":";
++    int ret = 0;
++
++    /* search token */
++    token = strstr(line, delimiter);
++
++    if (!token) {
++        ALOGE("invalid line: no token");
++        return 0;
++    }
++
++    /* only take stuff before the token */
++    *token = '\0';
++
++    /* use "module.ko" in comparision */
++    strcat(strcpy(name, target), ".ko");
++
++    ret = !match_name(strip_path(line), name, strlen(name));
++
++    /* restore [single] token, keep line unchanged until we parse it later */
++    *token = *delimiter;
++
++    return ret;
++
++}
++
++/* turn a single string into an array of dependency.
++ *
++ * return: dependency array's address if it succeeded. Caller
++ *         is responsible to free the array's memory.
++ *         NULL when any error happens.
++ */
++static char **setup_dep(char *line)
++{
++    char *tmp = line;
++    char *brk;
++    int i;
++    char **dep;
++
++    for (i = 2; (tmp = strchr(tmp, ' ')); i++)
++        tmp++;
++
++    dep = malloc(sizeof(char *) * i);
++    if (dep) {
++        i = 0;
++        do {
++            tmp = strtok_r(i ? NULL : line, ": ", &brk);
++        } while ((dep[i++] = tmp));
++    }
++
++    return dep;
++}
++
++/* install all modules in the dependency chain
++ * deps    : A array of module file names, must be terminated by a NULL pointer
++ * args    : The module parameters for target module.
++ * strip   : Non-zero to strip out path info in the file name;
++ *           0 to keep path info when loading modules.
++ * base    : a prefix to module path, it will NOT be affected by strip flag.
++ * return  : 0 for success or nothing to do; non-zero when any error occurs.
++ */
++static int insmod_s(char *dep[], const char *args, int strip, const char *base)
++{
++    char *name;
++    int cnt;
++    size_t len;
++    int ret = 0;
++    char path_name[PATH_MAX];
++    char def_mod_path[PATH_MAX];
++    const char *base_dir;
++
++    if (base && strlen(base))
++        base_dir = base;
++    else
++        base_dir = get_default_mod_path(def_mod_path);
++
++    /* load modules in reversed order */
++    for (cnt = 0; dep[cnt]; cnt++)
++        ;
++
++    len = strlen(strcpy(path_name, base_dir));
++
++    while (!ret && cnt--) {
++
++        name = strip ? strip_path(dep[cnt]) : dep[cnt];
++
++        strcpy(path_name + len, name);
++
++        ret = insmod(path_name, cnt ? "" : args);
++    }
++
++    return ret;
++}
++
++/* remove all modules in a dependency chain
++ * NOTE: We assume module name in kernel is same as the file name without .ko
++ */
++static int rmmod_s(char *dep[], int flags)
++{
++    int i;
++    int ret = 0;
++
++    for (i = 0; dep[i]; i++) {
++        char *mod_name = strip_path(dep[i]);
++        size_t len = strlen(mod_name);
++
++        if (len > 3 && strstr(mod_name, ".ko") == (mod_name + len - 3)) {
++            mod_name[len - 3] = '\0';
++
++            hyphen_to_underscore(mod_name);
++
++            ret = delete_module(mod_name, flags);
++
++            if (ret) {
++                ALOGE("%s: Failed to remove module [%s] error (%s)",
++                        __FUNCTION__, mod_name, strerror(errno));
++                break;
++
++            }
++        }
++    }
++
++    return ret;
++}
++
++/* look_up_dep() find and setup target module's dependency in modules.dep
++ *
++ * dep_file:    a pointer to module's dep file loaded in memory, its content
++ *              will be CHANGED during parsing.
++ *
++ * return:      a pointer to an array which holds the dependency strings and
++ *              terminated by a NULL pointer. Caller is responsible to free the
++ *              array's memory.
++ *
++ *              non-zero in any other cases. Content of dep array is invalid.
++ */
++static char **look_up_dep(const char *module_name, void *dep_file)
++{
++    char *line;
++    char *saved_pos;
++    char *start;
++    char **dep = NULL;
++
++    if (!dep_file || !module_name || *module_name == '\0')
++        return NULL;
++
++    start = (char *)dep_file;
++
++    /* We expect modules.dep file has a new line char before EOF. */
++    while ((line = strtok_r(start, "\n", &saved_pos)) != NULL) {
++
++        start = NULL;
++
++        if (is_target_module(line, module_name)) {
++
++            dep = setup_dep(line);
++            /* job done */
++            break;
++        }
++    }
++
++    return dep;
++}
++
++/* load_dep_file() load a dep file (usually it is modules.dep)
++ * into memory. Caller is responsible to free the memory.
++ *
++ * file_name:   dep file's name, if it is NULL or an empty string,
++ *              This function will try to load a dep file in the
++ *              default path defined in LDM_DEFAULT_DEP_FILE
++ *
++ * return:      a pointer to the allocated mem which holds all
++ *              content of the depfile. a zero pointer will be
++ *              returned for any errors.
++ * */
++static void *load_dep_file(const char *file_name)
++{
++    unsigned int len;
++    char def_mod_path[PATH_MAX];
++    if (!file_name || *file_name == '\0') {
++        file_name = get_default_mod_path(def_mod_path);
++        strcat(def_mod_path, "modules.dep");
++    }
++
++    return load_file(file_name, &len);
++}
++
++/* insmod_by_dep() interface to outside,
++ * refer to its description in probe_module.h
++ */
++int insmod_by_dep(const char *module_name,
++        const char *args,
++        const char *dep_name,
++        int strip,
++        const char *base)
++{
++    void *dep_file;
++    char **dep = NULL;
++    int ret = -1;
++
++    if (!module_name || *module_name == '\0') {
++        ALOGE("need valid module name");
++        return ret;
++    }
++
++    dep_file = load_dep_file(dep_name);
++
++    if (!dep_file) {
++        ALOGE("cannot load dep file : %s", dep_name);
++        return ret;
++    }
++
++    dep = look_up_dep(module_name, dep_file);
++
++    if (!dep) {
++        ALOGE("%s: cannot load module: [%s]", __FUNCTION__, module_name);
++        goto free_file;
++    }
++
++    ret = insmod_s(dep, args, strip, base);
++
++    free(dep);
++
++free_file:
++    free(dep_file);
++
++    return ret;
++
++}
++
++/* rmmod_by_dep() interface to outside,
++ * refer to its description in probe_module.h
++ */
++int rmmod_by_dep(const char *module_name,
++        const char *dep_name)
++{
++    void *dep_file;
++    char **dep = NULL;
++    int ret = -1;
++
++    if (!module_name || *module_name == '\0') {
++        ALOGE("need valid module name");
++        return ret;
++    }
++
++    dep_file = load_dep_file(dep_name);
++
++    if (!dep_file) {
++        ALOGE("cannot load dep file : %s", dep_name);
++        return ret;
++    }
++
++    dep = look_up_dep(module_name, dep_file);
++
++    if (!dep) {
++        ALOGE("%s: cannot remove module: [%s]", __FUNCTION__, module_name);
++        goto free_file;
++    }
++
++    ret = rmmod_s(dep, O_NONBLOCK);
++
++    free(dep);
++
++free_file:
++    free(dep_file);
++
++    return ret;
++}
++
++/* end of file */
+--
+2.7.4

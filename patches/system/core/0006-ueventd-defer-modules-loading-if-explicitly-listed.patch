@@ -1,0 +1,185 @@
+From 27eb96ed6f6254d986d80690be06cabc2a25e394 Mon Sep 17 00:00:00 2001
+From: Chih-Wei Huang <cwhuang@linux.org.tw>
+Date: Tue, 27 Sep 2016 19:14:12 +0800
+Subject: [PATCH 6/7] ueventd: defer modules loading if explicitly listed
+
+The patch extends the syntax of /etc/modules.blacklist.
+The modules marked as deferred in this file will be loaded
+after all other modules are loaded at coldboot stage.
+---
+ init/devices.cpp | 48 ++++++++++++++++++++++++++++--------------------
+ 1 file changed, 28 insertions(+), 20 deletions(-)
+
+diff --git a/init/devices.cpp b/init/devices.cpp
+index 3abaace..2517002 100644
+--- a/init/devices.cpp
++++ b/init/devices.cpp
+@@ -107,6 +107,7 @@ struct module_alias_node {
+
+ struct module_blacklist_node {
+     char *name;
++    bool deferred;
+     struct listnode list;
+ };
+
+@@ -770,7 +771,7 @@ static void handle_generic_device_event(struct uevent *uevent)
+              uevent->major, uevent->minor, links);
+ }
+
+-static int is_module_blacklisted(const char *name)
++static int is_module_blacklisted_or_deferred(const char *name, bool need_deferred)
+ {
+     struct listnode *blklst_node;
+     struct module_blacklist_node *blacklist;
+@@ -785,7 +786,7 @@ static int is_module_blacklisted(const char *name)
+                                  list);
+         if (!strcmp(name, blacklist->name)) {
+             INFO("modules %s is blacklisted\n", name);
+-            ret = 1;
++            ret = blacklist->deferred ? (need_deferred ? 2 : 0) : 1;
+             goto out;
+         }
+     }
+@@ -794,7 +795,7 @@ out:
+     return ret;
+ }
+
+-static int load_module_by_device_modalias(const char *id)
++static int load_module_by_device_modalias(const char *id, bool need_deferred)
+ {
+     struct listnode *alias_node;
+     struct module_alias_node *alias;
+@@ -807,8 +808,9 @@ static int load_module_by_device_modalias(const char *id)
+             if (fnmatch(alias->pattern, id, 0) == 0) {
+                 INFO("trying to load module %s due to uevents\n", alias->name);
+
+-                if (!is_module_blacklisted(alias->name)) {
+-                    if (insmod_by_dep(alias->name, "", NULL, 0, NULL)) {
++                ret = is_module_blacklisted_or_deferred(alias->name, need_deferred);
++                if (ret == 0) {
++                    if ((ret = insmod_by_dep(alias->name, "", NULL, 0, NULL))) {
+                         /* cannot load module. try another one since
+                          * there may be another match.
+                          */
+@@ -817,8 +819,9 @@ static int load_module_by_device_modalias(const char *id)
+                     } else {
+                         /* loading was successful */
+                         INFO("loaded module %s due to uevents\n", alias->name);
+-                        ret = 0;
+                     }
++                } else {
++                    NOTICE("blacklisted module %s: %d\n", alias->name, ret);
+                 }
+             }
+         }
+@@ -842,7 +845,7 @@ static void handle_deferred_module_loading()
+
+             if (alias && alias->pattern) {
+                 INFO("deferred loading of module for %s\n", alias->pattern);
+-                load_module_by_device_modalias(alias->pattern);
++                load_module_by_device_modalias(alias->pattern, false);
+                 free(alias->pattern);
+                 list_remove(node);
+                 free(alias);
+@@ -859,7 +862,7 @@ static int module_probe(int argc, char **argv)
+     }
+
+     // is it a modalias?
+-    int ret = load_module_by_device_modalias(argv[1]);
++    int ret = load_module_by_device_modalias(argv[1], false);
+     if (ret) {
+         // treat it as a module name
+         std::string options;
+@@ -901,6 +904,11 @@ int modprobe_main(int argc, char **argv)
+     return module_probe(argc, argv);
+ }
+
++static int is_booting(void)
++{
++    return access("/dev/.booting", F_OK) == 0;
++}
++
+ static void handle_module_loading(const char *modalias)
+ {
+     struct module_alias_node *node;
+@@ -911,13 +919,13 @@ static void handle_module_loading(const char *modalias)
+     if (list_empty(&modules_aliases_map)) {
+         if (read_modules_aliases() == 0) {
+             read_modules_blacklist();
+-            handle_deferred_module_loading();
+         }
+     }
+
+     if (!modalias) return;
+
+-    if (list_empty(&modules_aliases_map)) {
++    if (list_empty(&modules_aliases_map) ||
++            load_module_by_device_modalias(modalias, is_booting()) == 2) {
+         /* if module alias mapping is empty,
+          * queue it for loading later
+          */
+@@ -934,10 +942,7 @@ static void handle_module_loading(const char *modalias)
+         } else {
+             ERROR("failed to allocate memory to store device id for deferred module loading.\n");
+         }
+-    } else {
+-        load_module_by_device_modalias(modalias);
+     }
+-
+ }
+
+ static void handle_device_event(struct uevent *uevent)
+@@ -996,11 +1001,6 @@ static int load_firmware(int fw_fd, int loading_fd, int data_fd)
+     return ret;
+ }
+
+-static int is_booting(void)
+-{
+-    return access("/dev/.booting", F_OK) == 0;
+-}
+-
+ static void process_firmware_event(struct uevent *uevent)
+ {
+     char *root, *loading, *data;
+@@ -1118,6 +1118,7 @@ static void parse_line_module_alias(struct parse_state *state, int nargs, char *
+ static void parse_line_module_blacklist(struct parse_state *state, int nargs, char **args)
+ {
+     struct module_blacklist_node *node;
++    bool deferred;
+
+     if (!args ||
+         (nargs != 2) ||
+@@ -1126,8 +1127,13 @@ static void parse_line_module_blacklist(struct parse_state *state, int nargs, ch
+         return;
+     }
+
+-    /* this line does not being with "blacklist" */
+-    if (strncmp(args[0], "blacklist", 9)) return;
++    /* this line does not being with "blacklist" or "deferred" */
++    if (!strncmp(args[0], "blacklist", 9))
++        deferred = false;
++    else if (!strncmp(args[0], "deferred", 8))
++        deferred = true;
++    else
++        return;
+
+     node = (module_blacklist_node *) calloc(1, sizeof(*node));
+     if (!node) return;
+@@ -1137,6 +1143,7 @@ static void parse_line_module_blacklist(struct parse_state *state, int nargs, ch
+         free(node);
+         return;
+     }
++    node->deferred = deferred;
+
+     list_add_tail(&modules_blacklist, &node->list);
+ }
+@@ -1331,6 +1338,7 @@ void device_init(bool child)
+     coldboot("/sys/class");
+     coldboot("/sys/block");
+     coldboot("/sys/devices");
++    handle_deferred_module_loading();
+     close(open(COLDBOOT_DONE, O_WRONLY|O_CREAT|O_CLOEXEC, 0000));
+     NOTICE("Coldboot took %.2fs.\n", t.duration());
+ }
+--
+2.7.4
