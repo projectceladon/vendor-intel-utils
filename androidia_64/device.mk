@@ -6,6 +6,8 @@
 #Product Characteristics
 PRODUCT_DIR := $(dir $(lastword $(filter-out device/common/%,$(filter device/%,$(ALL_PRODUCTS)))))
 
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.dalvik.vm.native.bridge=libhoudini.so
+
 PRODUCT_TAGS += dalvik.gc.type-precise
 
 PRODUCT_AAPT_CONFIG := normal large xlarge mdpi hdpi xhdpi xxhdpi
@@ -57,11 +59,6 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
 	device/intel/android_ia/common/wifi/wpa_supplicant-common.conf:system/etc/wifi/wpa_supplicant.conf \
 	frameworks/native/data/etc/android.hardware.wifi.xml:system/etc/permissions/android.hardware.wifi.xml \
-
-# Bluetooth
-PRODUCT_COPY_FILES += \
-    frameworks/native/data/etc/android.hardware.bluetooth.xml:system/etc/permissions/android.hardware.bluetooth.xml \
-    frameworks/native/data/etc/android.hardware.bluetooth_le.xml:system/etc/permissions/android.hardware.bluetooth_le.xml
 
 # Voip
 PRODUCT_COPY_FILES += \
@@ -275,9 +272,7 @@ PRODUCT_PACKAGES += \
     libsync
 
 PRODUCT_COPY_FILES += \
-    device/intel/android_ia/common/graphics/drirc:system/etc/drirc \
-    frameworks/native/data/etc/android.hardware.vulkan.level-1.xml:system/etc/permissions/android.hardware.vulkan.level.xml \
-    frameworks/native/data/etc/android.hardware.vulkan.version-1_0_3.xml:system/etc/permissions/android.hardware.vulkan.version.xml \
+    device/intel/android_ia/common/graphics/drirc:system/etc/drirc
 
 
 # HWComposer
@@ -303,6 +298,9 @@ PRODUCT_COPY_FILES += \
 # GLES version
 PRODUCT_PROPERTY_OVERRIDES += \
    ro.opengles.version=196609
+
+
+
 ##############################################################
 # Source: device/intel/mixins/groups/media/android_ia/product.mk
 ##############################################################
@@ -365,8 +363,6 @@ ifeq ($(ENABLE_NATIVEBRIDGE_64BIT),true)
   PRODUCT_PACKAGES += houdini64
   PRODUCT_PROPERTY_OVERRIDES += ro.dalvik.vm.isa.arm64=x86_64 ro.enable.native.bridge.exec64=1
 endif
-
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.dalvik.vm.native.bridge=libhoudini.so
 ##############################################################
 # Source: device/intel/mixins/groups/adb_net/true/product.mk
 ##############################################################
@@ -374,6 +370,15 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.dalvik.vm.native.bridge=libhoudini.so
 ifneq ($(TARGET_BUILD_VARIANT),eng)
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.adb.secure=1
 endif
+##############################################################
+# Source: device/intel/mixins/groups/kernel/android_ia/product.mk
+##############################################################
+TARGET_KERNEL_ARCH := x86_64
+BOARD_USE_64BIT_KERNEL := true
+
+
+KERNEL_MODULES_ROOT_PATH ?= /system/lib/modules
+KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
 ##############################################################
 # Source: device/intel/mixins/groups/bluetooth/btusb/product.mk
 ##############################################################

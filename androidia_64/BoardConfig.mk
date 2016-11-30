@@ -17,7 +17,7 @@ BOARD_CACHEIMAGE_PARTITION_SIZE := 69206016
 BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
 BOARD_FLASH_BLOCK_SIZE := 512
 TARGET_USERIMAGES_SPARSE_EXT_DISABLED := true
-BOARD_SYSTEMIMAGE_PARTITION_SIZE = 1610612736
+BOARD_SYSTEMIMAGE_PARTITION_SIZE = 2010612736
 
 TARGET_NO_BOOTLOADER := true
 TARGET_CPU_ABI := x86_64
@@ -157,13 +157,8 @@ ADDITIONAL_DEFAULT_PROPERTIES += ro.sf.lcd_density=160
 ##############################################################
 # Source: device/intel/mixins/groups/kernel/android_ia/BoardConfig.mk
 ##############################################################
-TARGET_KERNEL_ARCH := x86_64
-BOARD_USE_64BIT_KERNEL := true
 TARGET_USES_64_BIT_BINDER := true
 
-
-KERNEL_MODULES_ROOT_PATH ?= /system/lib/modules
-KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
 
 TARGET_PRELINK_MODULE := false
 TARGET_NO_KERNEL ?= false
@@ -176,5 +171,4 @@ BOARD_HAVE_BLUETOOTH := true
 BOARD_HAVE_BLUETOOTH_LINUX := true
 BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := device/intel/common/bluetooth/bcm43241/
 DEVICE_PACKAGE_OVERLAYS += device/intel/common/bluetooth/overlay-bt-pan
-
 # ------------------ END MIX-IN DEFINITIONS ------------------
