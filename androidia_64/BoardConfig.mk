@@ -105,8 +105,8 @@ ifneq ($(strip $(BOARD_GPU_DRIVERS)),)
 TARGET_HARDWARE_3D := true
 endif
 
+TARGET_USES_HWC2 := true
 
-TARGET_USES_HWC2 := false
 
 
 ##############################################################
