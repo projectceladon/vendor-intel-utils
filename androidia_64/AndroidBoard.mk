@@ -79,5 +79,4 @@ installclean: FILES += $(KERNEL_OUT) $(PRODUCT_OUT)/kernel
 
 .PHONY: kernel
 kernel: $(PRODUCT_OUT)/kernel
-
 # ------------------ END MIX-IN DEFINITIONS ------------------

@@ -18,3 +18,4 @@ display-density: default
 adb_net: true
 kernel: android_ia
 bluetooth: btusb
+boot-arch: android_ia

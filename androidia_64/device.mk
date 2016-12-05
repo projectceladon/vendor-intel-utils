@@ -61,11 +61,6 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.camera.front.xml:system/etc/permissions/android.hardware.camera.front.xml \
     frameworks/native/data/etc/android.hardware.camera.xml:system/etc/permissions/android.hardware.camera.xml \
 
-# Wifi
-PRODUCT_COPY_FILES += \
-	device/intel/android_ia/common/wifi/wpa_supplicant-common.conf:system/etc/wifi/wpa_supplicant.conf \
-	frameworks/native/data/etc/android.hardware.wifi.xml:system/etc/permissions/android.hardware.wifi.xml \
-
 # Voip
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.software.sip.voip.xml:system/etc/permissions/android.software.sip.voip.xml \
@@ -232,13 +227,6 @@ PRODUCT_PACKAGES += \
     sftp \
     ssh \
     sshd
-
-PRODUCT_PACKAGES += \
-    libwpa_client \
-    hostapd \
-    wificond \
-    wpa_supplicant \
-    wpa_supplicant.conf
 
 # Sensors
 PRODUCT_PACKAGES += \
