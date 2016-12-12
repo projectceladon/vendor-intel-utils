@@ -11,14 +11,6 @@ TARGET_BOARD_PLATFORM := android_ia
 
 BOARD_USE_LEGACY_UI := true
 
-TARGET_USERIMAGES_USE_EXT4 := true
-BOARD_USERDATAIMAGE_PARTITION_SIZE := 576716800
-BOARD_CACHEIMAGE_PARTITION_SIZE := 69206016
-BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_FLASH_BLOCK_SIZE := 512
-TARGET_USERIMAGES_SPARSE_EXT_DISABLED := true
-BOARD_SYSTEMIMAGE_PARTITION_SIZE = 2010612736
-
 TARGET_NO_BOOTLOADER := true
 TARGET_CPU_ABI := x86_64
 TARGET_ARCH := x86_64
@@ -168,6 +160,14 @@ DEVICE_PACKAGE_OVERLAYS += device/intel/common/bluetooth/overlay-bt-pan
 ##############################################################
 # Source: device/intel/mixins/groups/boot-arch/android_ia/BoardConfig.mk
 ##############################################################
+TARGET_USERIMAGES_USE_EXT4 := true
+BOARD_USERDATAIMAGE_PARTITION_SIZE := 576716800
+BOARD_CACHEIMAGE_PARTITION_SIZE := 69206016
+BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
+BOARD_FLASH_BLOCK_SIZE := 512
+TARGET_USERIMAGES_SPARSE_EXT_DISABLED := true
+BOARD_SYSTEMIMAGE_PARTITION_SIZE = 2010612736
+
 # Kernel Flinger
 TARGET_UEFI_ARCH := x86_64
 # Kernelflinger won't check the ACPI table oem_id, oem_table_id and
@@ -180,4 +180,10 @@ KERNELFLINGER_IGNORE_RSCI := true
 KERNELFLINGER_SSL_LIBRARY := boringssl
 # Specify system verity partition
 #PRODUCT_SYSTEM_VERITY_PARTITION := /dev/block/by-name/system
+##############################################################
+# Source: device/intel/mixins/groups/audio/android_ia/BoardConfig.mk
+##############################################################
+BOARD_USES_ALSA_AUDIO := true
+BOARD_USES_TINY_ALSA_AUDIO := true
+BOARD_USES_GENERIC_AUDIO ?= false
 # ------------------ END MIX-IN DEFINITIONS ------------------
