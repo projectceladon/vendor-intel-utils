@@ -17,14 +17,6 @@ DEVICE_PACKAGE_OVERLAYS += device/intel/android_ia/common/overlay
 
 PRODUCT_PACKAGES += $(THIRD_PARTY_APPS)
 
-FIRMWARES_DIR ?= device/intel/android_ia/firmware
-
-# Include common settings.
-FIRMWARE_FILTERS ?= .git/% %.mk
-
-# Firmware
-$(call inherit-product,device/intel/android_ia/common/firmware.mk)
-
 # Get a list of languages.
 $(call inherit-product,$(SRC_TARGET_DIR)/product/locales_full.mk)
 
@@ -96,17 +88,6 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.usb.accessory.xml:system/etc/permissions/android.hardware.usb.accessory.xml \
     frameworks/native/data/etc/android.hardware.usb.host.xml:system/etc/permissions/android.hardware.usb.host.xml \
-
-#Firmware
-SYMLINKS := $(subst $(FIRMWARES_DIR),$(TARGET_OUT)/etc/firmware,$(filter-out $(FIRMWARES_DIR)/$(FIRMWARE_FILTERS),$(shell find $(FIRMWARES_DIR) -type l)))
-
-$(SYMLINKS): FW_PATH := $(FIRMWARES_DIR)
-$(SYMLINKS):
-	@link_to=`readlink $(subst $(TARGET_OUT)/lib/firmware,$(FW_PATH),$@)`; \
-	echo "Symlink: $@ -> $$link_to"; \
-	mkdir -p $(@D); ln -sf $$link_to $@
-
-ALL_DEFAULT_INSTALLED_MODULES += $(SYMLINKS)
 
 # please modify to appropriate value based on tuning
 PRODUCT_PROPERTY_OVERRIDES += \
@@ -312,6 +293,14 @@ BOARD_USE_64BIT_KERNEL := true
 
 KERNEL_MODULES_ROOT_PATH ?= /system/lib/modules
 KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
+
+FIRMWARES_DIR ?= device/intel/android_ia/firmware
+
+# Include common settings.
+FIRMWARE_FILTERS ?= .git/% %.mk
+
+# Firmware
+$(call inherit-product,device/intel/android_ia/common/firmware.mk)
 ##############################################################
 # Source: device/intel/mixins/groups/bluetooth/btusb/product.mk
 ##############################################################
@@ -378,5 +367,4 @@ PRODUCT_COPY_FILES += \
 # usb accessory
 PRODUCT_PACKAGES += \
     com.android.future.usb.accessory
-
 # ------------------ END MIX-IN DEFINITIONS ------------------

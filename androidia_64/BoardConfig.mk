@@ -177,6 +177,7 @@ BOARD_SEPOLICY_DIRS += device/intel/sepolicy/rfkill
 ##############################################################
 # enable dex-preoptimization.
 WITH_DEXPREOPT := true
+WITH_DEXPREOPT_PIC := true
 ##############################################################
 # Source: device/intel/mixins/groups/disk-bus/auto/BoardConfig.mk
 ##############################################################
