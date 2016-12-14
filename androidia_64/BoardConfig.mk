@@ -12,13 +12,6 @@ TARGET_BOARD_PLATFORM := android_ia
 BOARD_USE_LEGACY_UI := true
 
 TARGET_NO_BOOTLOADER := true
-TARGET_CPU_ABI := x86_64
-TARGET_ARCH := x86_64
-TARGET_ARCH_VARIANT := x86_64
-
-TARGET_2ND_CPU_ABI := x86
-TARGET_2ND_ARCH := x86
-TARGET_2ND_ARCH_VARIANT := x86
 
 BOARD_USE_64BIT_USERSPACE := true
 TARGET_SUPPORTS_64_BIT_APPS := true
@@ -199,4 +192,24 @@ BOARD_WPA_SUPPLICANT_PRIVATE_LIB := private_lib_driver_cmd_intel
 BOARD_HOSTAPD_PRIVATE_LIB := private_lib_driver_cmd_intel
 
 COMBO_CHIP_VENDOR := intel
+##############################################################
+# Source: device/intel/mixins/groups/cpu-arch/skl/BoardConfig.mk
+##############################################################
+ifeq ($(BOARD_USE_64BIT_USERSPACE),true)
+# 64b-specific items:
+TARGET_ARCH := x86_64
+TARGET_CPU_ABI := x86_64
+TARGET_2ND_CPU_ABI := x86
+TARGET_2ND_ARCH := x86
+TARGET_2ND_ARCH_VARIANT := x86
+TARGET_2ND_CPU_VARIANT := x86
+else
+# 32b-specific items:
+TARGET_ARCH := x86
+TARGET_CPU_ABI := x86
+endif
+##############################################################
+# Source: device/intel/mixins/groups/rfkill/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += device/intel/sepolicy/rfkill
 # ------------------ END MIX-IN DEFINITIONS ------------------
