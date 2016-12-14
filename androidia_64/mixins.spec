@@ -24,3 +24,6 @@ wlan: android_ia
 cpu-arch: skl
 cpuset: 2cores
 rfkill: true(force_disable=)
+dexpreopt: enabled
+disk-bus: auto
+usb: host+acc

@@ -15,14 +15,6 @@ PRODUCT_AAPT_PREF_CONFIG := xxhdpi
 
 DEVICE_PACKAGE_OVERLAYS += device/intel/android_ia/common/overlay
 
-# Kernel
-TARGET_KERNEL_ARCH := x86_64
-
-KERNEL_MODULES_ROOT_PATH ?= /system/lib/modules
-KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
-
-TARGET_HAS_THIRD_PARTY_APPS := true
-
 PRODUCT_PACKAGES += $(THIRD_PARTY_APPS)
 
 FIRMWARES_DIR ?= device/intel/android_ia/firmware
@@ -91,15 +83,6 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.touchscreen.multitouch.distinct.xml:system/etc/permissions/android.hardware.touchscreen.multitouch.distinct.xml \
     frameworks/native/data/etc/android.hardware.touchscreen.multitouch.jazzhand.xml:system/etc/permissions/android.hardware.touchscreen.multitouch.jazzhand.xml \
 
-# Midi
-PRODUCT_COPY_FILES += \
-    frameworks/native/data/etc/android.software.midi.xml:system/etc/permissions/android.software.midi.xml
-
-# APN list
-PRODUCT_COPY_FILES += \
-    device/sample/etc/old-apns-conf.xml:system/etc/old-apns-conf.xml \
-    device/sample/etc/apns-full-conf.xml:system/etc/apns-conf.xml
-
 #Sensors
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.sensor.accelerometer.xml:system/etc/permissions/android.hardware.sensor.accelerometer.xml \
@@ -125,9 +108,6 @@ $(SYMLINKS):
 
 ALL_DEFAULT_INSTALLED_MODULES += $(SYMLINKS)
 
-PRODUCT_PROPERTY_OVERRIDES += \
-    ro.com.android.dateformat=MM-dd-yyyy \
-
 # please modify to appropriate value based on tuning
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.hwui.texture_cache_size=24.0f \
@@ -141,16 +121,11 @@ PRODUCT_PROPERTY_OVERRIDES += \
     ro.com.android.dataroaming=true
 
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
-    ro.arch=x86 \
     persist.rtc_local_time=1 \
 
 # Enable MultiWindow
 PRODUCT_PROPERTY_OVERRIDES += \
     persist.sys.debug.multi_window=true
-
-# ADBoverWIFI
-PRODUCT_PROPERTY_OVERRIDES += \
-    service.adb.tcp.port=5555
 
 # DRM service
 PRODUCT_PROPERTY_OVERRIDES += \
@@ -178,27 +153,6 @@ PRODUCT_PROPERTY_OVERRIDES += \
 # set default USB configuration
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
     persist.sys.usb.config=mtp
-
-# Audio Configuration
-PRODUCT_PROPERTY_OVERRIDES += \
-    persist.audio.handset.mic.type=digital \
-    persist.audio.dualmic.config=endfire \
-    persist.audio.fluence.voicecall=false \
-    persist.audio.fluence.voicecomm=true \
-    persist.audio.fluence.voicerec=true \
-    persist.audio.fluence.speaker=true
-
-# Audio logging property for audio driver
-ifeq ($(TARGET_BUILD_VARIANT),eng)
-PRODUCT_PROPERTY_OVERRIDES += persist.audio.log=2
-else ifeq ($(TARGET_BUILD_VARIANT),userdebug)
-PRODUCT_PROPERTY_OVERRIDES += persist.audio.log=1
-else
-PRODUCT_PROPERTY_OVERRIDES += persist.audio.log=0
-endif
-
-#Enable low latency stream
-PRODUCT_PROPERTY_OVERRIDES += persist.audio.low_latency=1
 
 # AOSP Packages
 PRODUCT_PACKAGES += \
@@ -237,21 +191,6 @@ PRODUCT_PACKAGES += \
 # USB
 PRODUCT_PACKAGES += \
     com.android.future.usb.accessory
-
-# Audio
-PRODUCT_PACKAGES += \
-    audio.r_submix.default \
-    libauddriver \
-    tinyplay \
-    tinymix \
-    tinycap \
-    audio.primary.android_ia \
-    audio.hdmi.android_ia \
-    audio.a2dp.default \
-    audio.usb.default \
-    audio_policy.default \
-    audio.r_submix.default \
-    libasound
 ##############################################################
 # Source: device/intel/mixins/groups/graphics/android_ia/product.mk
 ##############################################################
@@ -424,4 +363,20 @@ PRODUCT_COPY_FILES += \
 # Source: device/intel/mixins/groups/rfkill/true/product.mk
 ##############################################################
 PRODUCT_COPY_FILES += device/intel/common/rfkill/rfkill-init.sh:system/bin/rfkill-init.sh
+##############################################################
+# Source: device/intel/mixins/groups/disk-bus/auto/product.mk
+##############################################################
+# create primary storage symlink dynamically
+PRODUCT_PACKAGES += set_storage
+##############################################################
+# Source: device/intel/mixins/groups/usb/host+acc/product.mk
+##############################################################
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.usb.accessory.xml:system/etc/permissions/android.hardware.usb.accessory.xml \
+    frameworks/native/data/etc/android.hardware.usb.host.xml:system/etc/permissions/android.hardware.usb.host.xml
+
+# usb accessory
+PRODUCT_PACKAGES += \
+    com.android.future.usb.accessory
+
 # ------------------ END MIX-IN DEFINITIONS ------------------
