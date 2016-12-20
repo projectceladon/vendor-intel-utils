@@ -40,8 +40,6 @@ endif
 
 TARGET_USES_HWC2 := true
 
-
-
 ##############################################################
 # Source: device/intel/mixins/groups/device-type/tablet/BoardConfig.mk
 ##############################################################
