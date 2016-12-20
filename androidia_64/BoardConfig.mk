@@ -10,7 +10,7 @@ BOARD_KERNEL_CMDLINE += enforcing=0 androidboot.selinux=permissive
 # Source: device/intel/mixins/groups/sepolicy/permissive/BoardConfig.mk
 ##############################################################
 # SELinux Policy
-BOARD_SEPOLICY_DIRS += device/intel/sepolicy
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy
 
 # Pass device target to build
 BOARD_SEPOLICY_M4DEFS += board_sepolicy_target_product=$(TARGET_PRODUCT)
@@ -49,7 +49,7 @@ DEVICE_PACKAGE_OVERLAYS += device/intel/common/device-type/overlay-tablet
 ##############################################################
 # Source: device/intel/mixins/groups/debugfs/default/BoardConfig.mk
 ##############################################################
-BOARD_SEPOLICY_DIRS += device/intel/sepolicy/debugfs
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/debugfs
 ##############################################################
 # Source: device/intel/mixins/groups/houdini/true/BoardConfig.mk
 ##############################################################
@@ -81,7 +81,7 @@ else
 endif
 
 BOARD_SEPOLICY_M4DEFS += module_houdini=true
-BOARD_SEPOLICY_DIRS += device/intel/sepolicy/houdini
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/houdini
 ##############################################################
 # Source: device/intel/mixins/groups/display-density/default/BoardConfig.mk
 ##############################################################
@@ -171,7 +171,7 @@ endif
 ##############################################################
 # Source: device/intel/mixins/groups/rfkill/true/BoardConfig.mk
 ##############################################################
-BOARD_SEPOLICY_DIRS += device/intel/sepolicy/rfkill
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/rfkill
 ##############################################################
 # Source: device/intel/mixins/groups/dexpreopt/enabled/BoardConfig.mk
 ##############################################################
@@ -181,5 +181,5 @@ WITH_DEXPREOPT_PIC := true
 ##############################################################
 # Source: device/intel/mixins/groups/disk-bus/auto/BoardConfig.mk
 ##############################################################
-BOARD_SEPOLICY_DIRS += device/intel/sepolicy/set_storage
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/set_storage
 # ------------------ END MIX-IN DEFINITIONS ------------------
