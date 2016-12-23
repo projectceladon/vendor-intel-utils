@@ -12,7 +12,6 @@ media: android_ia
 device-type: tablet
 ethernet: dhcp
 debugfs: default
-houdini: true
 storage: default
 display-density: default
 adb_net: true

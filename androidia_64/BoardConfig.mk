@@ -49,17 +49,6 @@ DEVICE_PACKAGE_OVERLAYS += device/intel/common/device-type/overlay-tablet
 ##############################################################
 BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/debugfs
 ##############################################################
-# Source: device/intel/mixins/groups/houdini/true/BoardConfig.mk
-##############################################################
-# Install Native Bridge
-WITH_NATIVE_BRIDGE := true
-
-# Enable ARM codegen for x86 with Native Bridge
-BUILD_ARM_FOR_X86 := true
-
-BOARD_SEPOLICY_M4DEFS += module_houdini=true
-BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/houdini
-##############################################################
 # Source: device/intel/mixins/groups/display-density/default/BoardConfig.mk
 ##############################################################
 ADDITIONAL_DEFAULT_PROPERTIES += ro.sf.lcd_density=160
@@ -145,6 +134,27 @@ else
 TARGET_ARCH := x86
 TARGET_CPU_ABI := x86
 endif
+##############################################################
+# Source: device/intel/mixins/groups/rfkill/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/rfkill
+##############################################################
+# Source: device/intel/mixins/groups/dexpreopt/enabled/BoardConfig.mk
+##############################################################
+# enable dex-preoptimization.
+WITH_DEXPREOPT := true
+WITH_DEXPREOPT_PIC := true
+##############################################################
+# Source: device/intel/mixins/groups/disk-bus/auto/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/set_storage
+# ------------------ END MIX-IN DEFINITIONS ------------------
+
+# Install Native Bridge
+WITH_NATIVE_BRIDGE := true
+
+# Enable ARM codegen for x86 with Native Bridge
+BUILD_ARM_FOR_X86 := true
 
 # Native Bridge ABI List
 NB_ABI_LIST_32_BIT := armeabi-v7a armeabi
@@ -167,18 +177,5 @@ else
   TARGET_CPU_ABI_LIST := $(TARGET_CPU_ABI_LIST_32_BIT)
 endif
 
-##############################################################
-# Source: device/intel/mixins/groups/rfkill/true/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/rfkill
-##############################################################
-# Source: device/intel/mixins/groups/dexpreopt/enabled/BoardConfig.mk
-##############################################################
-# enable dex-preoptimization.
-WITH_DEXPREOPT := true
-WITH_DEXPREOPT_PIC := true
-##############################################################
-# Source: device/intel/mixins/groups/disk-bus/auto/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/set_storage
-# ------------------ END MIX-IN DEFINITIONS ------------------
+BOARD_SEPOLICY_M4DEFS += module_houdini=true
+BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/houdini
