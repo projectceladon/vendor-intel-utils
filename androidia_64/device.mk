@@ -191,11 +191,11 @@ PRODUCT_COPY_FILES += \
 
 # HWComposer
 PRODUCT_PACKAGES += \
-    hwcomposer.drm
+    hwcomposer.android_ia
 
 PRODUCT_PROPERTY_OVERRIDES += \
    hwc.drm.use_overlay_planes=1 \
-   ro.hardware.hwcomposer=drm
+   ro.hardware.hwcomposer=android_ia
 
 #Gralloc
 PRODUCT_PROPERTY_OVERRIDES += \
