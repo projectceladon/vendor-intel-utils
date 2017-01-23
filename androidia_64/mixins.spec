@@ -14,6 +14,7 @@ ethernet: dhcp
 debugfs: default
 storage: default
 display-density: default
+usb-gadget: default
 adb_net: true
 kernel: android_ia
 bluetooth: btusb
@@ -26,4 +27,3 @@ rfkill: true(force_disable=)
 dexpreopt: enabled
 disk-bus: auto
 usb: host+acc
-usb-gadget: default
