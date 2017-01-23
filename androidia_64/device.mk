@@ -189,7 +189,7 @@ PRODUCT_COPY_FILES += \
     device/intel/android_ia/common/graphics/drirc:system/etc/drirc
 
 
-# HWComposer
+# HWComposer IA
 PRODUCT_PACKAGES += \
     hwcomposer.android_ia
 
@@ -213,8 +213,19 @@ PRODUCT_COPY_FILES += \
 PRODUCT_PROPERTY_OVERRIDES += \
    ro.opengles.version=196609
 
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.vulkan.level-1.xml:system/etc/permissions/android.hardware.vulkan.level.xml
 
 
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.vulkan.version-1_0_3.xml:system/etc/permissions/android.hardware.vulkan.version.xml
+
+PRODUCT_PACKAGES += \
+    vulkan.android_ia \
+    vulkan.mesa_intel
+
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.hardware.vulkan=android_ia
 ##############################################################
 # Source: device/intel/mixins/groups/media/android_ia/product.mk
 ##############################################################
