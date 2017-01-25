@@ -34,6 +34,7 @@ PRODUCT_COPY_FILES += \
     $(if $(wildcard $(PRODUCT_DIR)fstab.$(TARGET_PRODUCT)),$(PRODUCT_DIR)fstab.$(TARGET_PRODUCT),$(LOCAL_PATH)/fstab):root/fstab.$(TARGET_PRODUCT) \
     $(if $(wildcard $(PRODUCT_DIR)init.$(TARGET_PRODUCT).rc),$(PRODUCT_DIR)init.$(TARGET_PRODUCT).rc,$(LOCAL_PATH)/init.rc):root/init.$(TARGET_PRODUCT).rc \
     $(if $(wildcard $(PRODUCT_DIR)ueventd.$(TARGET_PRODUCT).rc),$(PRODUCT_DIR)ueventd.$(TARGET_PRODUCT).rc,$(LOCAL_PATH)/ueventd.rc):root/ueventd.$(TARGET_PRODUCT).rc \
+    $(LOCAL_PATH)/gpt.ini:root/gpt.$(TARGET_PRODUCT).ini \
 
 PRODUCT_COPY_FILES += \
 	frameworks/native/data/etc/tablet_core_hardware.xml:system/etc/permissions/tablet_core_hardware.xml
@@ -359,6 +360,10 @@ PRODUCT_COPY_FILES += \
 # usb accessory
 PRODUCT_PACKAGES += \
     com.android.future.usb.accessory
+##############################################################
+# Source: device/intel/mixins/groups/vendor-partition/true/product.mk
+##############################################################
+PRODUCT_VENDOR_VERITY_PARTITION := /dev/block/mmcblk1p10
 # ------------------ END MIX-IN DEFINITIONS ------------------
 PRODUCT_PACKAGES += libhoudini houdini
 PRODUCT_PROPERTY_OVERRIDES += ro.dalvik.vm.isa.arm=x86 ro.enable.native.bridge.exec=1
