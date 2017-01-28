@@ -362,10 +362,6 @@ PRODUCT_COPY_FILES += \
 # usb accessory
 PRODUCT_PACKAGES += \
     com.android.future.usb.accessory
-##############################################################
-# Source: device/intel/mixins/groups/vendor-partition/true/product.mk
-##############################################################
-PRODUCT_VENDOR_VERITY_PARTITION := /dev/block/mmcblk1p10
 # ------------------ END MIX-IN DEFINITIONS ------------------
 PRODUCT_PACKAGES += libhoudini houdini
 PRODUCT_PROPERTY_OVERRIDES += ro.dalvik.vm.isa.arm=x86 ro.enable.native.bridge.exec=1

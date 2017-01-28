@@ -182,14 +182,6 @@ BOARD_SEPOLICY_DIRS += device/intel/android_ia/sepolicy/set_storage
 # Source: device/intel/mixins/groups/config-partition/enabled/BoardConfig.mk
 ##############################################################
 BOARD_CONFIGIMAGE_PARTITION_SIZE := 8388608
-##############################################################
-# Source: device/intel/mixins/groups/vendor-partition/true/BoardConfig.mk
-##############################################################
-# Those 3 lines are required to enable vendor image generation.
-# Remove them if vendor partition is not used.
-TARGET_COPY_OUT_VENDOR := vendor
-BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_VENDORIMAGE_PARTITION_SIZE := 1572864000
 # ------------------ END MIX-IN DEFINITIONS ------------------
 
 # Install Native Bridge
