@@ -20,7 +20,7 @@ kernel: android_ia
 bluetooth: btusb
 boot-arch: android_ia
 audio: android_ia
-wlan: android_ia
+wlan: iwlwifi
 cpu-arch: skl
 cpuset: 2cores
 rfkill: true(force_disable=)

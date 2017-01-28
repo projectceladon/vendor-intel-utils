@@ -327,20 +327,22 @@ PRODUCT_COPY_FILES += \
     device/intel/android_ia/common/audio/mixer_paths.xml:system/etc/mixer_paths.xml \
     device/intel/android_ia/common/audio/audio_policy.conf:system/etc/audio_policy.conf
 ##############################################################
-# Source: device/intel/mixins/groups/wlan/android_ia/product.mk
+# Source: device/intel/mixins/groups/wlan/iwlwifi/product.mk
 ##############################################################
 PRODUCT_PACKAGES += \
-    hostapd \
-    hostapd_cli \
-    wpa_supplicant \
+    libwpa_client \
     wpa_cli \
-    wificond
+    wpa_supplicant
 
-#copy iwlwifi wpa config files
 PRODUCT_COPY_FILES += \
-        device/intel/android_ia/common/wifi/wpa_supplicant-common.conf:system/etc/wifi/wpa_supplicant.conf \
-        device/intel/android_ia/common/wifi/wpa_supplicant_overlay.conf:system/etc/wifi/wpa_supplicant_overlay.conf \
-        frameworks/native/data/etc/android.hardware.wifi.xml:system/etc/permissions/android.hardware.wifi.xml
+  device/intel/common/wlan/wpa_supplicant-common.conf:/system/etc/wifi/wpa_supplicant.conf \
+  hardware/broadcom/wlan/bcmdhd/config/wpa_supplicant_overlay.conf:system/etc/wifi/wpa_supplicant_overlay.conf \
+  frameworks/native/data/etc/android.software.app_widgets.xml:system/etc/permissions/android.software.app_widgets.xml \
+  frameworks/native/data/etc/android.hardware.wifi.xml:system/etc/permissions/android.hardware.wifi.xml
+
+# Wifi configuration
+BOARD_WPA_SUPPLICANT_DRIVER := NL80211
+BOARD_WLAN_DEVICE := iwlwifi
 ##############################################################
 # Source: device/intel/mixins/groups/rfkill/true/product.mk
 ##############################################################
