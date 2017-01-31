@@ -136,7 +136,8 @@ BOARD_FLASHFILES += $(PRODUCT_OUT)/recovery.img
 BOARD_FLASHFILES += $(PRODUCT_OUT)/cache.img
 BOARD_FLASHFILES += $(PRODUCT_OUT)/userdata.img
 BOARD_FLASHFILES += $(PRODUCT_OUT)/config.img
-BOARD_FLASHFILES += $(PRODUCT_OUT)/vendor.img
+#HACK: comment this out until we fix the vendor partition
+#BOARD_FLASHFILES += $(PRODUCT_OUT)/vendor.img
 ##############################################################
 # Source: device/intel/mixins/groups/audio/android_ia/BoardConfig.mk
 ##############################################################
