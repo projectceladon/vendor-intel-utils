@@ -85,7 +85,7 @@ SYMLINKS := $(subst $(FIRMWARES_DIR),$(TARGET_OUT)/etc/firmware,$(filter-out $(F
 
 $(SYMLINKS): FW_PATH := $(FIRMWARES_DIR)
 $(SYMLINKS):
-	@link_to=`readlink $(subst $(TARGET_OUT)/lib/firmware,$(FW_PATH),$@)`; \
+	@link_to=`readlink $(subst $(TARGET_OUT)/etc/firmware,$(FW_PATH),$@)`; \
 	echo "Symlink: $@ -> $$link_to"; \
 	mkdir -p $(@D); ln -sf $$link_to $@
 
