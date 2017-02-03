@@ -11,7 +11,6 @@ erase metadata
 format config
 format cache
 format data
-flash vendor vendor.img
 flash boot boot.img
 flash recovery recovery.img
 flash system system.img
