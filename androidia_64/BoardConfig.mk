@@ -47,6 +47,9 @@ TARGET_USES_HWC2 := true
 
 BOARD_USES_DRM_HWCOMPOSER := false
 BOARD_USES_IA_HWCOMPOSER := true
+
+
+BOARD_USES_MINIGBM := false
 ##############################################################
 # Source: device/intel/mixins/groups/device-type/tablet/BoardConfig.mk
 ##############################################################

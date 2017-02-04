@@ -201,6 +201,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
    hwc.drm.use_overlay_planes=1 \
    ro.hardware.hwcomposer=android_ia
 
+
 #Gralloc
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.hardware.gralloc=drm
