@@ -74,7 +74,7 @@ TARGET_SUPPORTS_64_BIT_APPS := true
 TARGET_PRELINK_MODULE := false
 TARGET_NO_KERNEL ?= false
 
-BOARD_KERNEL_CMDLINE += root=/dev/ram0 androidboot.hardware=$(TARGET_PRODUCT) androidboot.selinux=permissive firmware_class.path=/system/etc/firmware
+BOARD_KERNEL_CMDLINE += root=/dev/ram0 androidboot.hardware=$(TARGET_PRODUCT) androidboot.selinux=permissive firmware_class.path=/vendor/firmware
 ##############################################################
 # Source: device/intel/mixins/groups/bluetooth/btusb/BoardConfig.mk
 ##############################################################
