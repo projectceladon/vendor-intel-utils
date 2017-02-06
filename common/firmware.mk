@@ -17,4 +17,4 @@
 LOCAL_FIRMWARES ?= $(filter-out $(FIRMWARE_FILTERS),$(subst ./,,$(shell cd $(FIRMWARES_DIR) && find . -type f)))
 
 PRODUCT_COPY_FILES := \
-    $(foreach f,$(LOCAL_FIRMWARES),$(FIRMWARES_DIR)/$(f):system/etc/firmware/$(f))
+    $(foreach f,$(LOCAL_FIRMWARES),$(FIRMWARES_DIR)/$(f):system/vendor/firmware/$(f))
