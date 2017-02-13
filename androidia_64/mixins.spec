@@ -27,4 +27,5 @@ rfkill: true(force_disable=)
 dexpreopt: enabled
 disk-bus: auto
 usb: host+acc
+lights: true
 config-partition: enabled
