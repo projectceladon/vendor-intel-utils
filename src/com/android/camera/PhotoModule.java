@@ -1455,6 +1455,10 @@ public class PhotoModule
             return;
         }
 
+        // Close the review UI if it's currently visible.
+        mUI.hidePostCaptureAlert();
+        mUI.hideIntentReviewImageView();
+
         requestCameraOpen();
 
         mJpegPictureCallbackTime = 0;
