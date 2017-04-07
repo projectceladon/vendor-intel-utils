@@ -67,7 +67,7 @@ using namespace jpegutil;
  */
 extern "C" JNIEXPORT jint JNICALL
 Java_com_android_camera_util_JpegUtilNative_compressJpegFromYUV420pNative(
-    JNIEnv* env, jclass clazz,
+    JNIEnv* env, jclass clazz __unused,
     /** Input image dimensions */
     jint width, jint height,
     /** Y Plane */
@@ -116,7 +116,7 @@ Java_com_android_camera_util_JpegUtilNative_compressJpegFromYUV420pNative(
  */
 extern "C" JNIEXPORT void JNICALL
 Java_com_android_camera_util_JpegUtilNative_copyImagePlaneToBitmap(
-    JNIEnv* env, jclass clazz, jint width, jint height, jobject planeBuf,
+    JNIEnv* env, jclass clazz __unused, jint width, jint height, jobject planeBuf,
     jint pStride, jint rStride, jobject outBitmap, jint rot90) {
   jbyte* src = (jbyte*)env->GetDirectBufferAddress(planeBuf);
 

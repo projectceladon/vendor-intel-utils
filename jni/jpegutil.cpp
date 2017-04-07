@@ -230,7 +230,7 @@ int jpegutil::Compress(int img_width, int img_height,
     return true;
   };
 
-  dest.term_destination = [](j_compress_ptr cinfo) {
+  dest.term_destination = [](j_compress_ptr cinfo __unused) {
     // do nothing to terminate the output buffer
   };
 
@@ -339,7 +339,7 @@ int jpegutil::Compress(
   const Plane cbP = {width / 2, height / 2, cbBuf, cbPStride, cbRStride};
   const Plane crP = {width / 2, height / 2, crBuf, crPStride, crRStride};
 
-  auto flush = [](size_t numBytes) {
+  auto flush = [](size_t numBytes __unused) {
     // do nothing
   };
 

@@ -181,7 +181,7 @@ template <unsigned int ROWS>
 const std::array<unsigned char*, ROWS> jpegutil::RowIterator<ROWS>::LoadAt(
     int y_base) {
   std::array<unsigned char*, ROWS> buf_ptrs;
-  for (int i = 0; i < ROWS; i++) {
+  for (unsigned int i = 0; i < ROWS; i++) {
     buf_ptrs[i] = &buf_[padded_row_length_ * i];
   }
 
@@ -189,7 +189,7 @@ const std::array<unsigned char*, ROWS> jpegutil::RowIterator<ROWS>::LoadAt(
     return buf_ptrs;
   }
 
-  for (int i = 0; i < ROWS; i++) {
+  for (unsigned int i = 0; i < ROWS; i++) {
     int y = i + y_base;
     y = min(y, transform_.output_height() - 1);
 

@@ -130,7 +130,9 @@ void StereographicProjection(float scale, float angle, unsigned char* input_imag
 }
 
 
-JNIEXPORT void JNICALL Java_com_android_camera_tinyplanet_TinyPlanetNative_process(JNIEnv* env, jobject obj, jobject bitmap_in, jint width, jint height, jobject bitmap_out, jint output_size, jfloat scale, jfloat angle)
+JNIEXPORT void JNICALL Java_com_android_camera_tinyplanet_TinyPlanetNative_process(JNIEnv* env,
+        jobject obj __unused, jobject bitmap_in, jint width, jint height, jobject bitmap_out,
+        jint output_size, jfloat scale, jfloat angle)
 {
     char* source = 0;
     char* destination = 0;
