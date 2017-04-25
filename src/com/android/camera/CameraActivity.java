@@ -1655,7 +1655,7 @@ public class CameraActivity extends QuickActivity
         mMotionManager = getServices().getMotionManager();
 
         mFirstRunDialog = new FirstRunDialog(this,
-              getAndroidContext(),
+              this /* as context */,
               mResolutionSetting,
               mSettingsManager,
               mOneCameraManager,
@@ -2188,6 +2188,9 @@ public class CameraActivity extends QuickActivity
         mButtonManager = null;
         if (mSoundPlayer != null) {
           mSoundPlayer.release();
+        }
+        if (mFirstRunDialog != null) {
+            mFirstRunDialog.dismiss();
         }
         CameraAgentFactory.recycle(CameraAgentFactory.CameraApi.API_1);
         CameraAgentFactory.recycle(CameraAgentFactory.CameraApi.AUTO);
