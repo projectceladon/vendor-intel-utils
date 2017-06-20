@@ -1862,7 +1862,7 @@ public class CameraActivity extends QuickActivity
             finish();
             return;
         }
-        if (!mSecureCamera) {
+        if (!isSecureCamera() && !isCaptureIntent()) {
             // Show the dialog if necessary. The rest resume logic will be invoked
             // at the onFirstRunStateReady() callback.
             try {
