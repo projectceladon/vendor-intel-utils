@@ -48,14 +48,14 @@ public final class PictureTakerFactory {
         // performs the AF & AE precapture sequence.
         ImageCaptureCommand flashOnCommand = new ConvergedImageCaptureCommand(
                 sharedImageReader, frameServer, rootRequestBuilder,
-                CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG, CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG,
+                CameraDevice.TEMPLATE_STILL_CAPTURE, CameraDevice.TEMPLATE_STILL_CAPTURE,
                 Arrays.asList(rootRequestBuilder), true /* ae */, true /* af */);
 
         // When flash is OFF, wait for AF convergence, but not AE convergence
         // (which can be very slow).
         ImageCaptureCommand flashOffCommand = new ConvergedImageCaptureCommand(
                 sharedImageReader, frameServer, rootRequestBuilder,
-                CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG, CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG,
+                CameraDevice.TEMPLATE_STILL_CAPTURE, CameraDevice.TEMPLATE_STILL_CAPTURE,
                 Arrays.asList(rootRequestBuilder), false /* ae */, true /* af */);
 
         // When flash is AUTO, wait for AF & AE.
@@ -63,7 +63,7 @@ public final class PictureTakerFactory {
         // not necessary, then this could skip waiting for AE convergence.
         ImageCaptureCommand flashAutoCommand = new ConvergedImageCaptureCommand(
                 sharedImageReader, frameServer, rootRequestBuilder,
-                CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG, CameraDevice.TEMPLATE_ZERO_SHUTTER_LAG,
+                CameraDevice.TEMPLATE_STILL_CAPTURE, CameraDevice.TEMPLATE_STILL_CAPTURE,
                 Arrays.asList(rootRequestBuilder), true /* ae */, true /* af */);
 
         ImageCaptureCommand flashBasedCommand = new FlashBasedPhotoCommand(logFactory, flashMode,

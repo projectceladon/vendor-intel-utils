@@ -45,8 +45,13 @@ public class OneCameraCaptureSetting {
             final HardwareSpec hardwareSpec,
             String cameraSettingScope,
             boolean isHdrPlusEnabled) {
-        Observable<OneCamera.PhotoCaptureParameters.Flash> flashSetting = new FlashSetting(
-                SettingObserver.ofString(settingsManager, cameraSettingScope, Keys.KEY_FLASH_MODE));
+        Observable<OneCamera.PhotoCaptureParameters.Flash> flashSetting;
+        if (hardwareSpec.isFlashSupported()) {
+            flashSetting = new FlashSetting(SettingObserver.ofString(
+                        settingsManager, cameraSettingScope, Keys.KEY_FLASH_MODE));
+        } else {
+            flashSetting = new FlashSetting(Observables.of("off"));
+        }
         Observable<Integer> exposureSetting = SettingObserver.ofInteger(
                 settingsManager, cameraSettingScope, Keys.KEY_EXPOSURE);
         Observable<Boolean> hdrSceneSetting;
