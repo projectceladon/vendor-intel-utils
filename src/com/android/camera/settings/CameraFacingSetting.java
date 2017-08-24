@@ -16,6 +16,7 @@
 
 package com.android.camera.settings;
 
+import com.android.camera.app.AppController;
 import com.android.camera.CameraActivity;
 import com.android.camera.one.OneCamera;
 import com.android.camera2.R;
@@ -40,18 +41,24 @@ public class CameraFacingSetting {
     public CameraFacingSetting(
             Resources resources,
             SettingsManager settingsManager,
-            String moduleSettingScope) {
+            String moduleSettingScope,
+            AppController appController) {
         mSettingsManager = settingsManager;
 
         mSettingScope = SettingsManager.getModuleSettingScope(moduleSettingScope);
 
         mCameraFacingSettingKey = Keys.KEY_CAMERA_ID;
-        mCameraFacingBackValue =
-                Integer.parseInt(resources.getString(R.string.pref_camera_id_entry_back_value));
-        mCameraFacingFrontValue =
-                Integer.parseInt(resources.getString(R.string.pref_camera_id_entry_front_value));
         mCameraFacingDefaultValue =
                 Integer.parseInt(resources.getString(R.string.pref_camera_id_default));
+
+        if (appController.getCameraProvider().getCharacteristics(mCameraFacingDefaultValue).
+                isFacingFront()) {
+            mCameraFacingFrontValue = 0;
+            mCameraFacingBackValue = 1;
+        } else {
+            mCameraFacingBackValue = 0;
+            mCameraFacingFrontValue = 1;
+        }
     }
 
     @Override
