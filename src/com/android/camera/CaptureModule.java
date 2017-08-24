@@ -1537,12 +1537,10 @@ public class CaptureModule extends CameraModule implements
 
     /**
      * Returns which way around the camera is facing, based on it's ID.
-     * <p>
-     * TODO: This needs to change so that we store the direction directly in the
-     * settings, rather than a Camera ID.
      */
-    private static Facing getFacingFromCameraId(int cameraId) {
-        return cameraId == 1 ? Facing.FRONT : Facing.BACK;
+    private Facing getFacingFromCameraId(int cameraId) {
+        return mAppController.getCameraProvider().getCharacteristics(cameraId)
+                .isFacingFront() ? Facing.FRONT : Facing.BACK;
     }
 
     private void resetTextureBufferSize() {
