@@ -28,11 +28,19 @@ LOCAL_AAPT_FLAGS := \
         --version-name "$(version_name_package)" \
         --version-code $(version_code_package) \
         --extra-packages android.support.compat \
+        --extra-packages android.support.mediacompat \
+        --extra-packages android.support.coreui \
 
 ifeq ($(TARGET_BUILD_APPS),)
-    LOCAL_RESOURCE_DIR += frameworks/support/compat/res
+    LOCAL_RESOURCE_DIR += \
+        frameworks/support/compat/res \
+        frameworks/support/media-compat/res \
+        frameworks/support/core-ui/res
 else
-    LOCAL_RESOURCE_DIR += prebuilts/sdk/current/support/compat/res
+    LOCAL_RESOURCE_DIR += \
+        prebuilts/sdk/current/support/compat/res \
+        prebuilts/sdk/current/support/media-compat/res \
+        prebuilts/sdk/current/support/core-ui/res
 endif
 
 LOCAL_PACKAGE_NAME := Camera2
