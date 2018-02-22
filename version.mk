@@ -43,7 +43,7 @@ base_version_build := 002
 #####################################################
 #####################################################
 # Collect automatic version code parameters
-ifneq "" "$(filter eng.%,$(BUILD_NUMBER))"
+ifeq ($(strip $(HAS_BUILD_NUMBER)),false)
   # This is an eng build
   base_version_buildtype := 0
 else
@@ -85,7 +85,7 @@ version_code_package := $(base_version_major)$(base_version_minor)$(base_version
 #       where nnnnnn is the build number from the build server (no zero-padding)
 # On eng builds, the BUILD_NUMBER has the user and timestamp inline
 ifdef TARGET_BUILD_APPS
-ifneq "" "$(filter eng.%,$(BUILD_NUMBER))"
+ifeq ($(strip $(HAS_BUILD_NUMBER)),false)
   git_hash := $(shell git --git-dir $(LOCAL_PATH)/.git log -n 1 --pretty=format:%h)
   date_string := $$(date +%m%d%y_%H%M%S)
   version_name_package := $(base_version_major).$(base_version_minor).$(base_version_build) (eng.$(USER).$(git_hash).$(date_string)-$(base_version_arch)$(base_version_density))
