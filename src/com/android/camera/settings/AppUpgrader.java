@@ -145,6 +145,7 @@ public class AppUpgrader extends SettingsUpgrader {
             // chooser if applicable.
             settingsManager.remove(SettingsManager.SCOPE_GLOBAL,
                     Keys.KEY_STARTUP_MODULE_INDEX);
+            CameraAgentFactory.recycle(CameraAgentFactory.CameraApi.API_1);
         }
 
         if (lastVersion < CAMERA_MODULE_SETTINGS_FILES_RENAMED_VERSION) {
