@@ -1503,7 +1503,9 @@ public class CameraActivity extends QuickActivity
         // version.
         profile.mark();
         try {
-            (new PictureSizeLoader(mAppContext)).computePictureSizes();
+            PictureSizeLoader pictureSizeLoader = new PictureSizeLoader(mAppContext);
+            pictureSizeLoader.computePictureSizes();
+            pictureSizeLoader.release();
         } catch (AssertionError e) {
             Log.e(TAG, "Creating camera controller failed.", e);
             mFatalErrorHandler.onGenericCameraAccessFailure();
