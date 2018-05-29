@@ -97,6 +97,10 @@ public class PictureSizeLoader {
         mCachedOnly = cachedOnly;
     }
 
+    public void release(){
+        CameraAgentFactory.recycle(CameraAgentFactory.CameraApi.API_1);
+    }
+
     /**
      * Computes the list of picture sizes that should be displayed by settings.
      * <p>
