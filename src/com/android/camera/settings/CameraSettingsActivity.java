@@ -180,6 +180,7 @@ public class CameraSettingsActivity extends FragmentActivity {
             mInfos = CameraAgentFactory
                     .getAndroidCameraAgent(context, CameraAgentFactory.CameraApi.API_1)
                     .getCameraDeviceInfo();
+            CameraAgentFactory.recycle(CameraAgentFactory.CameraApi.API_1);
         }
 
         @Override
@@ -498,6 +499,7 @@ public class CameraSettingsActivity extends FragmentActivity {
             }
             PictureSizeLoader loader = new PictureSizeLoader(getActivity().getApplicationContext());
             mPictureSizes = loader.computePictureSizes();
+            loader.release();
         }
 
         /**
