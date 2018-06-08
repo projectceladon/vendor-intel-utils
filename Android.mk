@@ -4,8 +4,12 @@ include $(CLEAR_VARS)
 
 LOCAL_MODULE_TAGS := optional
 
-LOCAL_STATIC_JAVA_LIBRARIES := android-support-v13
-LOCAL_STATIC_JAVA_LIBRARIES += android-ex-camera2-portability
+LOCAL_STATIC_ANDROID_LIBRARIES := \
+    android-support-v13 \
+    android-support-v4 \
+    android-support-compat
+
+LOCAL_STATIC_JAVA_LIBRARIES := android-ex-camera2-portability
 LOCAL_STATIC_JAVA_LIBRARIES += xmp_toolkit
 LOCAL_STATIC_JAVA_LIBRARIES += glide
 LOCAL_STATIC_JAVA_LIBRARIES += guava
@@ -19,12 +23,14 @@ LOCAL_RESOURCE_DIR += \
 	$(LOCAL_PATH)/res \
 	$(LOCAL_PATH)/res_p
 
-
 include $(LOCAL_PATH)/version.mk
+
 LOCAL_AAPT_FLAGS := \
         --auto-add-overlay \
         --version-name "$(version_name_package)" \
         --version-code $(version_code_package) \
+
+LOCAL_USE_AAPT2 := true
 
 LOCAL_PACKAGE_NAME := Camera2
 
