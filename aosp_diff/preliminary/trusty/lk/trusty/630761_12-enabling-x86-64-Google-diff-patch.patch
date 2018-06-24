@@ -1,0 +1,1317 @@
+From f2df0152c3d85c7f27213516ad548964313fd312 Mon Sep 17 00:00:00 2001
+From: "Zhong,Fangjian" <fangjian.zhong@intel.com>
+Date: Mon, 23 Apr 2018 08:25:42 +0800
+Subject: [PATCH] enabling x86-64 Google diff patch
+
+Change-Id: I9a043fcf25dcf20479d9d98d5d1248fbf8a48d88
+Tracked-On: https://jira01.devtools.intel.com/browse/OAM-63646
+Signed-off-by: Zhong,Fangjian <fangjian.zhong@intel.com>
+---
+ app/trusty/arch/x86/rules.mk         |  10 +-
+ app/trusty/arch/x86/stack_chk.c      |  31 +++
+ lib/memlog/memlog.c                  |  17 ++
+ lib/sm/include/lib/sm.h              |  30 +++
+ lib/sm/include/lib/sm/sm_wall.h      |  98 ++++++++
+ lib/sm/include/lib/sm/smcall.h       |  19 ++
+ lib/sm/rules.mk                      |   5 +
+ lib/sm/sm.c                          |   5 +-
+ lib/sm/smcall.c                      |   7 +
+ lib/sm/smwall.c                      | 330 +++++++++++++++++++++++++++
+ lib/trusty/include/lib/trusty/uio.h  |   2 +-
+ lib/trusty/include/lib/trusty/uuid.h |   1 +
+ lib/trusty/include/syscall_table.h   |   3 +
+ lib/trusty/syscall.c                 |  26 ++-
+ lib/trusty/tipc_dev.c                |  12 +-
+ lib/trusty/tipc_dev_ql.c             |  21 +-
+ lib/trusty/trusty_app.c              |  62 +++--
+ lib/trusty/trusty_virtio.c           |  19 +-
+ lib/trusty/uctx.c                    |   2 +-
+ lib/trusty/vqueue.c                  |  28 +++
+ make/xbin.mk                         |  14 +-
+ 21 files changed, 695 insertions(+), 47 deletions(-)
+ create mode 100644 app/trusty/arch/x86/stack_chk.c
+ create mode 100644 lib/sm/include/lib/sm/sm_wall.h
+ create mode 100644 lib/sm/smwall.c
+
+diff --git a/app/trusty/arch/x86/rules.mk b/app/trusty/arch/x86/rules.mk
+index 33d45f9..b6ea77f 100644
+--- a/app/trusty/arch/x86/rules.mk
++++ b/app/trusty/arch/x86/rules.mk
+@@ -27,7 +27,9 @@ MODULE := $(LOCAL_DIR)
+ 
+ # some linkers set the default arm pagesize to 32K. No idea why.
+ XBIN_LDFLAGS += \
+-	-z max-page-size=0x1000
++	-z max-page-size=0x1000 \
++	-z noexecstack \
++	-z relro -z now
+ 
+ # linking script to link this user task
+ USER_TASK_LINKER_SCRIPT := $(BUILDDIR)/user_task.ld
+@@ -42,6 +44,12 @@ $(USER_TASK_LINKER_SCRIPT): $(SUBARCH_DIR)/user_task-trusty.ld
+ 	@$(MKDIR)
+ 	$(NOECHO)cp $< $@
+ 
++ifeq (true,$(call TOBOOL,$(STACK_PROTECTOR)))
++MODULE_SRCS += \
++	$(LOCAL_DIR)/stack_chk.c
++include make/module.mk
++endif
++
+ GENERATED +=  $(USER_TASK_LINKER_SCRIPT)
+ 
+ LOCAL_DIR :=
+diff --git a/app/trusty/arch/x86/stack_chk.c b/app/trusty/arch/x86/stack_chk.c
+new file mode 100644
+index 0000000..6a4db82
+--- /dev/null
++++ b/app/trusty/arch/x86/stack_chk.c
+@@ -0,0 +1,31 @@
++/*
++ * Copyright (c) 2019 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files
++ * (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge,
++ * publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so,
++ * subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include <stdio.h>
++#include <trusty_std.h>
++
++void __stack_chk_fail(void)
++{
++    fprintf(stderr, "TA stack is corrupted\n");
++    exit(1);
++}
+diff --git a/lib/memlog/memlog.c b/lib/memlog/memlog.c
+index 99e4d91..0db7784 100644
+--- a/lib/memlog/memlog.c
++++ b/lib/memlog/memlog.c
+@@ -38,7 +38,12 @@
+ 
+ #include "trusty-log.h"
+ 
++#ifdef EPT_DEBUG
++#include <platform/vmcall.h>
++#endif
++
+ #define LOG_LOCK_FLAGS SPIN_LOCK_FLAG_IRQ_FIQ
++int having_print_cb = 0;
+ 
+ struct memlog {
+ 	struct log_rb *rb;
+@@ -140,6 +145,11 @@ static status_t map_rb(paddr_t pa, size_t sz, vaddr_t *va)
+ 	if (err) {
+ 		return err;
+ 	}
++
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(ADD, pa, sz);
++#endif
++
+ 	*va += offset;
+ 	return err;
+ }
+@@ -195,6 +205,8 @@ long memlog_add(paddr_t pa, size_t sz)
+ 
+ 	log->cb.print = memlog_print_callback;
+ 	register_print_callback(&log->cb);
++	having_print_cb = 0;
++
+ 	return 0;
+ 
+ error_failed_to_map:
+@@ -214,6 +226,11 @@ long memlog_rm(paddr_t pa)
+ 	unregister_print_callback(&log->cb);
+ 	list_delete(&log->entry);
+ 	result = vmm_free_region(vmm_get_kernel_aspace(), (vaddr_t)log->rb);
++
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(REMOVE, pa, log->buf_sz);
++#endif
++
+ 	free(log);
+ 	if (result != NO_ERROR) {
+ 		return SM_ERR_INTERNAL_FAILURE;
+diff --git a/lib/sm/include/lib/sm.h b/lib/sm/include/lib/sm.h
+index 4fca6bf..fcc6ca4 100644
+--- a/lib/sm/include/lib/sm.h
++++ b/lib/sm/include/lib/sm.h
+@@ -27,6 +27,7 @@
+ #include <stddef.h>
+ #include <sys/types.h>
+ #include <lib/sm/smcall.h>
++#include <lk/list.h>
+ 
+ typedef uint64_t ns_addr_t;
+ typedef uint32_t ns_size_t;
+@@ -85,5 +86,34 @@ status_t sm_decode_ns_memory_attr(struct ns_page_info *pinf,
+ status_t smc32_decode_mem_buf_info(struct smc32_args *args, ns_addr_t *ppa,
+                                    ns_size_t *psz, uint *pmmu);
+ 
++/* sm_wall */
++#if WITH_SM_WALL
++
++struct sm_wall_item {
++	struct list_node node;
++	void (*update_cb)(struct sm_wall_item *wi, void *item);
++	uint32_t item_id;
++	uint32_t size;
++	uint32_t offset;
++};
++
++#define SM_WALL_ITEM_INITIALIZE(id, cb, sz) \
++{                                           \
++	.node = LIST_INITIAL_CLEARED_VALUE,     \
++	.item_id = (id),                        \
++	.update_cb = (cb),                      \
++	.size  = (sz),                          \
++	.offset = 0,                            \
++}
++
++void sm_wall_register_per_cpu_item(struct sm_wall_item *wi);
++void sm_wall_update(void);
++
++/* smc handlers */
++long smc_get_wall_size(smc32_args_t *args);
++long smc_setup_wall_stdcall(smc32_args_t *args);
++long smc_destroy_wall_stdcall(smc32_args_t *args);
++
++#endif /* WITH_SM_WALL */
+ #endif /* __SM_H */
+ 
+diff --git a/lib/sm/include/lib/sm/sm_wall.h b/lib/sm/include/lib/sm/sm_wall.h
+new file mode 100644
+index 0000000..68404e8
+--- /dev/null
++++ b/lib/sm/include/lib/sm/sm_wall.h
+@@ -0,0 +1,98 @@
++/*
++ * Copyright (c) 2016 Google Inc. All rights reserved
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files
++ * (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge,
++ * publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so,
++ * subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++#ifndef __LIB_SM_SM_WALL_H
++#define __LIB_SM_SM_WALL_H
++
++/**
++ * DOC: Introduction
++ *
++ * SM Wall buffer is formatted by secure side to contain the location of
++ * objects it exports:
++ *
++ * In general it starts with sm_wall_toc header struct followed
++ * by array of sm_wall_toc_item objects describing location of
++ * individual objects within SM Wall buffer.
++ */
++
++/* current version of TOC structure */
++#define SM_WALL_TOC_VER   1
++
++/**
++ * struct sm_wall_toc_item - describes individual table of content item
++ * @id:           item id
++ * @offset:       item offset relative to appropriate base. For global items
++ * it is relative to SM wall buffer base address. For per cpu item, this is an
++ * offset within each individual per cpu region.
++ * @size:         item size
++ * @reserved:     reserved: must be set to zero
++ */
++struct sm_wall_toc_item {
++	u32 id;
++	u32 offset;
++	u32 size;
++	u32 reserved;
++};
++
++/**
++ * struct sm_wall_toc - describes sm_wall table of content structure
++ * @version:             current toc structure version
++ * @cpu_num:             number of cpus supported
++ * @per_cpu_toc_offset:  offset of the start of per_cpu item table relative to
++ *                       SM wall buffer base address.
++ * @per_cpu_num_items:   number of per cpu toc items located at position
++ *                       specified by @per_cpu_toc_offset.
++ * @per_cpu_base_offset: offset of the start of a sequence of per cpu data
++ *                       regions (@cpu_num total) relative to SM wall buffer
++ *                       base address.
++ * @per_cpu_region_size: size of each per cpu data region.
++ * @global_toc_offset:   offset of the start of global item table relative to
++ *                       SM wall buffer base address.
++ * @global_num_items:    number of items in global item table
++ */
++struct sm_wall_toc {
++	u32 version;
++	u32 cpu_num;
++	u32 per_cpu_toc_offset;
++	u32 per_cpu_num_items;
++	u32 per_cpu_base_offset;
++	u32 per_cpu_region_size;
++	u32 global_toc_offset;
++	u32 global_num_items;
++};
++
++/* ID's of well known wall objects */
++#define SM_WALL_PER_CPU_SEC_TIMER_ID  1
++
++/**
++ * struct sec_timer_state - structure to hold secute timer state
++ * @tv_ns:      If non-zero this field contains snapshot of timers
++ *              current time (ns). Timer is not set otherwise.
++ * @cv_ns:      next timer event configured (ns)
++ */
++struct sec_timer_state {
++	u64 tv_ns;
++	u64 cv_ns;
++};
++
++#endif /* __LIB_SM_SM_WALL_H */
++
+diff --git a/lib/sm/include/lib/sm/smcall.h b/lib/sm/include/lib/sm/smcall.h
+index dc73270..13a2349 100644
+--- a/lib/sm/include/lib/sm/smcall.h
++++ b/lib/sm/include/lib/sm/smcall.h
+@@ -126,6 +126,25 @@
+ 
+ #define SMC_FC_FIQ_RESUME	SMC_FASTCALL_NR (SMC_ENTITY_SECURE_MONITOR, 12)
+ 
++/*
++ * SM Wall is a shared memory buffer established between secure and non-secure
++ * side that allows for secure side to publish certain state that non-secure
++ * side might acts on. One known example is a state of per CPU timer on
++ * platforms that require migration to broadcast timer in deep idle states.
++ *
++ * SMC_FC_GET_WALL_SIZE - retrieves the size of memory buffer that will be
++ * required to setup the SM Wall object.
++ *
++ * SMC_SC_SETUP_WALL - specifies location, size and attributes of memory buffer
++ * allocated by non-secure side to setup the SM Wall object.
++ *
++ * SMC_SC_DESTROY_WALL - notifies secure side that previously specifies SM Wall
++ * object should be released usually as part of normal shutdown sequence.
++ */
++#define SMC_FC_GET_WALL_SIZE	SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 20)
++#define SMC_SC_SETUP_WALL	SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR,  12)
++#define SMC_SC_DESTROY_WALL	SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR,  13)
++
+ /* TRUSTED_OS entity calls */
+ #define SMC_SC_VIRTIO_GET_DESCR	SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 20)
+ #define SMC_SC_VIRTIO_START	SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 21)
+diff --git a/lib/sm/rules.mk b/lib/sm/rules.mk
+index 6950f24..12da425 100644
+--- a/lib/sm/rules.mk
++++ b/lib/sm/rules.mk
+@@ -34,6 +34,11 @@ MODULE_SRCS += \
+ 	$(LOCAL_DIR)/smcall.c \
+ 	$(LOCAL_DIR)/ns_mem.c \
+ 
++ifeq (true,$(call TOBOOL,$(WITH_SM_WALL)))
++GLOBAL_DEFINES += WITH_SM_WALL=1
++MODULE_SRCS += \
++	$(LOCAL_DIR)/smwall.c
++endif
+ include $(LOCAL_DIR)/arch/$(ARCH)/rules.mk
+ 
+ include make/module.mk
+diff --git a/lib/sm/sm.c b/lib/sm/sm.c
+index 7b91044..0cda51e 100644
+--- a/lib/sm/sm.c
++++ b/lib/sm/sm.c
+@@ -186,6 +186,9 @@ static void sm_return_and_wait_for_next_stdcall(long ret, int cpu)
+ {
+ 	smc32_args_t args = SMC32_ARGS_INITIAL_VALUE(args);
+ 
++#if WITH_SM_WALL
++	sm_wall_update();
++#endif
+ 	do {
+ 		arch_disable_fiqs();
+ 		sm_sched_nonsecure(ret, &args);
+@@ -514,4 +517,4 @@ static void sm_release_boot_args(uint level)
+ 				"at the end of initialzation!\n");
+ }
+ 
+-LK_INIT_HOOK(libsm_bootargs, sm_release_boot_args, LK_INIT_LEVEL_LAST);
++LK_INIT_HOOK(libsm_bootargs, sm_release_boot_args, LK_INIT_LEVEL_LAST-1);
+diff --git a/lib/sm/smcall.c b/lib/sm/smcall.c
+index e78e704..731b433 100644
+--- a/lib/sm/smcall.c
++++ b/lib/sm/smcall.c
+@@ -96,6 +96,10 @@ static smc32_handler_t sm_stdcall_function_table[] = {
+ 	[SMC_FUNCTION(SMC_SC_LOCKED_NOP)] = smc_nop_stdcall,
+ 	[SMC_FUNCTION(SMC_SC_RESTART_FIQ)] = smc_restart_stdcall,
+ 	[SMC_FUNCTION(SMC_SC_NOP)] = smc_undefined, /* reserve slot in table, not called */
++#if WITH_SM_WALL
++	[SMC_FUNCTION(SMC_SC_SETUP_WALL)] = smc_setup_wall_stdcall,
++	[SMC_FUNCTION(SMC_SC_DESTROY_WALL)] = smc_destroy_wall_stdcall,
++#endif
+ };
+ 
+ static long smc_stdcall_secure_monitor(smc32_args_t *args)
+@@ -171,6 +175,9 @@ smc32_handler_t sm_fastcall_function_table[] = {
+ #endif
+ 	[SMC_FUNCTION(SMC_FC_API_VERSION)] = smc_sm_api_version,
+ 	[SMC_FUNCTION(SMC_FC_FIQ_RESUME)] = smc_intc_fiq_resume,
++#if WITH_SM_WALL
++	[SMC_FUNCTION(SMC_FC_GET_WALL_SIZE)] = smc_get_wall_size,
++#endif
+ };
+ 
+ uint32_t sm_nr_fastcall_functions = countof(sm_fastcall_function_table);
+diff --git a/lib/sm/smwall.c b/lib/sm/smwall.c
+new file mode 100644
+index 0000000..8f22ec6
+--- /dev/null
++++ b/lib/sm/smwall.c
+@@ -0,0 +1,330 @@
++/*
++ * Copyright (c) 2016, Google, Inc. All rights reserved
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files
++ * (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge,
++ * publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so,
++ * subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++#include <assert.h>
++#include <arch/spinlock.h>
++#include <err.h>
++#include <kernel/mutex.h>
++#include <kernel/vm.h>
++#include <list.h>
++#include <lib/sm.h>
++#include <lib/sm/sm_err.h>
++#include <lib/sm/sm_wall.h>
++#include <lk/init.h>
++#include <malloc.h>
++#include <pow2.h>
++#include <stdlib.h>
++#include <trace.h>
++#include <debug.h>
++
++#ifdef EPT_DEBUG
++#include <platform/vmcall.h>
++#endif
++
++#define LOCAL_TRACE 0
++
++#define ITEM_ALIGNMENT  8
++
++#ifdef EPT_DEBUG
++static paddr_t wall_pa;
++#endif
++
++static vaddr_t wall_va;
++static size_t  wall_sz;
++static bool    wall_registration_closed;
++
++static uint32_t per_cpu_sz;
++static uint32_t per_cpu_offset;
++static uint32_t per_cpu_item_cnt;
++static struct list_node per_cpu_items = LIST_INITIAL_VALUE(per_cpu_items);
++
++static spin_lock_t wall_locks[SMP_MAX_CPUS] = {
++    [0 ... SMP_MAX_CPUS-1] = SPIN_LOCK_INITIAL_VALUE,
++};
++
++static void lock_wall(void)
++{
++    for (int i = 0; i < SMP_MAX_CPUS; i++)
++        spin_lock(&wall_locks[i]);
++}
++
++static void unlock_wall(void)
++{
++    for (int i = SMP_MAX_CPUS-1; i >= 0; i--)
++        spin_unlock(&wall_locks[i]);
++}
++
++/*
++ *  Called by sm module before returning to non-secure world
++ */
++void sm_wall_update(void)
++{
++    struct sm_wall_item *wi;
++    uint cpu = arch_curr_cpu_num();
++
++    //:TODO: Need to fix this bug.
++    //ASSERT(wall_registration_closed);
++    ASSERT(arch_ints_disabled());
++
++    /* update per cpu items */
++    spin_lock(&wall_locks[cpu]);
++    if (wall_va) {
++        list_for_every_entry(&per_cpu_items, wi, struct sm_wall_item, node) {
++            if (wi->update_cb) {
++                vaddr_t item_va = wall_va + per_cpu_offset +
++                                  cpu * per_cpu_sz + wi->offset;
++                wi->update_cb(wi, (void *)item_va);
++            }
++        }
++    }
++    spin_unlock(&wall_locks[cpu]);
++}
++
++/*
++ * called by non-secure side to get required buffer size
++ */
++long smc_get_wall_size(smc32_args_t *args)
++{
++    ASSERT(wall_registration_closed);
++    return wall_sz;
++}
++
++/*
++ * Write The Wall Table of Content to provided buffer
++ */
++static void sm_wall_format(void *va)
++{
++    uint32_t offset = 0;
++    struct sm_wall_item *wi;
++    struct sm_wall_toc_item *item;
++    struct sm_wall_toc *toc = (struct sm_wall_toc *)va;
++
++    toc->version = SM_WALL_TOC_VER;
++    toc->cpu_num = SMP_MAX_CPUS;
++
++    /* per cpu items */
++    toc->per_cpu_region_size = per_cpu_sz;
++    toc->per_cpu_num_items = per_cpu_item_cnt;
++
++    /* global items are not supported yet */
++    toc->global_num_items = 0;
++
++    /* setup per_cpu toc offset and itemst */
++    offset = ALIGN(sizeof(struct sm_wall_toc), ITEM_ALIGNMENT);
++    toc->per_cpu_toc_offset = offset;
++
++    item = va + toc->per_cpu_toc_offset;
++    list_for_every_entry(&per_cpu_items, wi, struct sm_wall_item, node) {
++        item->id = wi->item_id;
++        item->size = wi->size;
++        item->offset = wi->offset;
++        item->reserved  = 0;
++        offset += sizeof(struct sm_wall_toc_item);
++    }
++
++    /* setup global toc offset and items */
++    toc->global_toc_offset = offset;
++
++    /* setup per_cpu data region base offset */
++    offset = ALIGN(offset, ITEM_ALIGNMENT);
++    toc->per_cpu_base_offset = per_cpu_offset = offset;
++
++    /* TODO: implement global items if needed */
++}
++
++/*
++ *  Called by non-secure side to setup shared buffer
++ */
++long smc_setup_wall_stdcall(smc32_args_t *args)
++{
++    status_t rc;
++    void *ns_va;
++    ns_addr_t ns_pa;
++    ns_size_t ns_sz;
++    uint  mmu_flags;
++
++    ASSERT(wall_registration_closed);
++
++    rc = smc32_decode_mem_buf_info(args, &ns_pa, &ns_sz, &mmu_flags);
++    if (rc) {
++        LTRACEF("smc32_decode_mem_buf_info returned %d\n", rc);
++        if (rc == ERR_NOT_SUPPORTED)
++            return SM_ERR_NOT_SUPPORTED;
++        else
++            return SM_ERR_INTERNAL_FAILURE;
++    }
++
++    /* check provided buffer size */
++    if (ns_sz < wall_sz) {
++        LTRACEF("buffer is too small (%zd bytes required)\n", wall_sz);
++        return SM_ERR_INVALID_PARAMETERS;
++    }
++
++    if (ns_pa & (PAGE_SIZE-1)) {
++        LTRACEF("unexpected alignment 0x%llx\n", ns_pa);
++        return SM_ERR_INVALID_PARAMETERS;
++    }
++
++    if (!ns_pa) {
++        LTRACEF("invalid descr addr 0x%llx\n", ns_pa);
++        return SM_ERR_INVALID_PARAMETERS;
++    }
++
++    if (ns_pa != (paddr_t)ns_pa) {
++        LTRACEF("unsuported addr range 0x%llx\n", ns_pa);
++        return SM_ERR_INVALID_PARAMETERS;
++    }
++
++    /* check other attributes */
++    if (mmu_flags & ARCH_MMU_FLAG_PERM_RO) {
++        LTRACEF("read-write accessible buffer is expected\n");
++        return SM_ERR_INVALID_PARAMETERS;
++    }
++
++#if !ARCH_X86_64
++    if ((mmu_flags & ARCH_MMU_FLAG_CACHE_MASK) != ARCH_MMU_FLAG_CACHED) {
++        LTRACEF("cached memory buffer is expected\n");
++        return SM_ERR_INVALID_PARAMETERS;
++    }
++#endif
++
++    /* map non-secure wall buffer */
++    rc = vmm_alloc_physical(vmm_get_kernel_aspace(), "the wall",
++                            ROUNDUP(ns_sz, PAGE_SIZE),
++                            &ns_va, PAGE_SIZE_SHIFT,
++                            (paddr_t)ns_pa, 0, mmu_flags);
++    if (rc) {
++        LTRACEF("vmm alloc failed (%d)\n", rc);
++        return SM_ERR_INTERNAL_FAILURE;
++    }
++
++#ifdef EPT_DEBUG
++    make_ept_update_vmcall(ADD, ns_pa, wall_sz);
++#endif
++
++    LTRACEF("Mapped: pa=%lld sz=%u @ %p\n", ns_pa, ns_sz, ns_va);
++
++    lock_wall();
++    if (wall_va) {
++        LTRACEF("Already initialized\n");
++        unlock_wall();
++        rc = vmm_free_region(vmm_get_kernel_aspace(), (vaddr_t)ns_va);
++        ASSERT(rc == NO_ERROR);
++        return SM_ERR_NOT_ALLOWED;
++    }
++    sm_wall_format(ns_va);
++    wall_va = (vaddr_t)ns_va;
++
++#ifdef EPT_DEBUG
++    wall_pa = (paddr_t)ns_pa;
++#endif
++
++    unlock_wall();
++
++    return 0;
++}
++
++/*
++ *  Called by non-secure side to release shared buffer
++ */
++long smc_destroy_wall_stdcall(smc32_args_t *args)
++{
++    status_t rc;
++    vaddr_t va = 0;
++
++    ASSERT(wall_registration_closed);
++
++    lock_wall();
++    if (wall_va) {
++        /* detach wall pointer */
++        va = wall_va;
++        wall_va = 0;
++    }
++    unlock_wall();
++
++#ifdef EPT_DEBUG
++    make_ept_update_vmcall(REMOVE, wall_pa, wall_sz);
++#endif
++
++
++    if (va) {
++        LTRACEF("Releasing the wall buffer: %p\n", (void*) va);
++        rc = vmm_free_region(vmm_get_kernel_aspace(), va);
++        ASSERT(rc == NO_ERROR);
++    } else {
++        LTRACEF("Sm_wall is not initialized\n");
++        rc = SM_ERR_NOT_ALLOWED;
++    }
++    return rc;
++}
++
++
++/*
++ * Called during trusty initialization to allocate speace in shared buffer.
++ * All calls to this routine has to be complete before LK_INIT_LEVEL_APPS-2
++ * init level.
++ */
++void sm_wall_register_per_cpu_item(struct sm_wall_item *wi)
++{
++    struct sm_wall_item *tmp;
++
++    ASSERT(wi);
++    ASSERT(!list_in_list(&wi->node));
++    ASSERT(!wall_registration_closed);
++
++    /* check for item_id duplicates and add to the list */
++    lock_wall();
++    list_for_every_entry(&per_cpu_items, tmp, struct sm_wall_item, node) {
++        ASSERT(tmp->item_id == wi->item_id);
++    }
++    list_add_tail(&per_cpu_items, &wi->node);
++    wi->offset = per_cpu_sz;
++    per_cpu_sz = ALIGN(wi->offset + wi->size, ITEM_ALIGNMENT);
++    per_cpu_item_cnt++;
++    unlock_wall();
++}
++
++/*
++ * Invoked at boot to close wall registration
++ */
++static void sm_wall_finish_init(uint lvl)
++{
++    ASSERT(!wall_registration_closed);
++
++    /* close registration */
++    wall_registration_closed = true;
++
++    /* calculate total requred wall buffer size */
++    wall_sz = sizeof(struct sm_wall_toc) +
++              sizeof(struct sm_wall_toc_item) * per_cpu_item_cnt;
++    wall_sz = ALIGN(wall_sz, ITEM_ALIGNMENT);
++    wall_sz += SMP_MAX_CPUS * per_cpu_sz;
++    wall_sz = ALIGN(wall_sz, PAGE_SIZE);
++}
++
++/*
++ * BSP has to launch applications first to make sure APs have
++ * finished register sm wall items.
++ */
++LK_INIT_HOOK_FLAGS(sm_wall_finish_init, sm_wall_finish_init,
++        LK_INIT_LEVEL_APPS + 2, LK_INIT_FLAG_PRIMARY_CPU);
++
+diff --git a/lib/trusty/include/lib/trusty/uio.h b/lib/trusty/include/lib/trusty/uio.h
+index a32af08..542f362 100644
+--- a/lib/trusty/include/lib/trusty/uio.h
++++ b/lib/trusty/include/lib/trusty/uio.h
+@@ -29,7 +29,7 @@
+ 
+ typedef struct iovec_kern {
+ 	void		*base;
+-	size_t		len;
++	uint32_t	len;
+ } iovec_kern_t;
+ 
+ typedef struct iovec_user {
+diff --git a/lib/trusty/include/lib/trusty/uuid.h b/lib/trusty/include/lib/trusty/uuid.h
+index 3baf36b..e91896d 100644
+--- a/lib/trusty/include/lib/trusty/uuid.h
++++ b/lib/trusty/include/lib/trusty/uuid.h
+@@ -23,6 +23,7 @@
+ #pragma once
+ 
+ #include <sys/types.h>
++#include "trusty_apps_uuid.h"
+ 
+ typedef struct uuid
+ {
+diff --git a/lib/trusty/include/syscall_table.h b/lib/trusty/include/syscall_table.h
+index 9cb1d40..cefdfb2 100644
+--- a/lib/trusty/include/syscall_table.h
++++ b/lib/trusty/include/syscall_table.h
+@@ -56,3 +56,6 @@ DEF_SYSCALL(0x20, get_msg, long, 2, uint32_t handle, ipc_msg_info_t *msg_info)
+ DEF_SYSCALL(0x21, read_msg, long, 4, uint32_t handle, uint32_t msg_id, uint32_t offset, ipc_msg_t *msg)
+ DEF_SYSCALL(0x22, put_msg, long, 2, uint32_t handle, uint32_t msg_id)
+ DEF_SYSCALL(0x23, send_msg, long, 2, uint32_t handle, ipc_msg_t *msg)
++#if WITH_CUSTOMIZED_SYSCALL
++#include "customized_syscall_table.h"
++#endif
+diff --git a/lib/trusty/syscall.c b/lib/trusty/syscall.c
+index 72f575c..a362bbb 100644
+--- a/lib/trusty/syscall.c
++++ b/lib/trusty/syscall.c
+@@ -38,6 +38,7 @@
+ #include <lib/trusty/trusty_app.h>
+ 
+ #define LOCAL_TRACE 0
++#define STD_WRITE_BUF_SIZE 128
+ 
+ static int32_t sys_std_write(uint32_t fd, user_addr_t user_ptr, uint32_t size);
+ 
+@@ -97,17 +98,28 @@ static bool valid_address(vaddr_t addr, u_int size)
+ /* handle stdout/stderr */
+ static int32_t sys_std_write(uint32_t fd, user_addr_t user_ptr, uint32_t size)
+ {
+-	size_t ret;
++	int32_t ret = 0;
+ 
+ 	/* check buffer is in task's address space */
+-	if (!valid_address((vaddr_t)user_ptr, size))
++	if ((int32_t)size <= 0 || !valid_address((vaddr_t)user_ptr, size))
+ 		return ERR_INVALID_ARGS;
+ 
+ 	if (((fd == 2) ? INFO : SPEW) > LK_DEBUGLEVEL) {
+ 		ret = size;
+ 	} else {
+-		ret = fwrite((const void *)(uintptr_t)user_ptr, 1, size,
+-		             (fd == 2) ? stderr : stdout);
++		char str[STD_WRITE_BUF_SIZE];
++		uint32_t cnt;
++		status_t rc;
++
++		do {
++			cnt = MIN(size, STD_WRITE_BUF_SIZE);
++			rc = copy_from_user(str, user_ptr, cnt);
++			if (rc != NO_ERROR)
++				return rc;
++
++			ret += fwrite(str, 1, cnt, (fd == 2) ? stderr : stdout);
++			size -= cnt;
++		} while (size > 0);
+ 	}
+ 
+ 	return ret;
+@@ -222,8 +234,8 @@ long sys_prepare_dma(user_addr_t uaddr, uint32_t size, uint32_t flags,
+ 	long ret;
+ 	vaddr_t vaddr = uaddr;
+ 
+-	LTRACEF("uaddr 0x%x, size 0x%x, flags 0x%x, pmem 0x%x\n",
+-	        uaddr, size, flags, pmem);
++	LTRACEF("uaddr 0x%lx, size 0x%x, flags 0x%x, pmem 0x%lx\n",
++	       uaddr, size, flags, pmem);
+ 
+ 	if (size == 0 || !valid_address(vaddr, size))
+ 		return ERR_INVALID_ARGS;
+@@ -260,7 +272,7 @@ long sys_prepare_dma(user_addr_t uaddr, uint32_t size, uint32_t flags,
+ 
+ long sys_finish_dma(user_addr_t uaddr, uint32_t size, uint32_t flags)
+ {
+-	LTRACEF("uaddr 0x%x, size 0x%x, flags 0x%x\n", uaddr, size, flags);
++	LTRACEF("uaddr 0x%lx, size 0x%x, flags 0x%x\n", uaddr, size, flags);
+ 
+ 	/* check buffer is in task's address space */
+ 	if (!valid_address((vaddr_t)uaddr, size))
+diff --git a/lib/trusty/tipc_dev.c b/lib/trusty/tipc_dev.c
+index 2e60a0c..7060b38 100644
+--- a/lib/trusty/tipc_dev.c
++++ b/lib/trusty/tipc_dev.c
+@@ -103,9 +103,9 @@ struct tipc_dev {
+ struct tipc_hdr {
+ 	uint32_t src;
+ 	uint32_t dst;
+-	uint32_t reserved;
+-	uint16_t len;
++	uint32_t len;
+ 	uint16_t flags;
++	uint16_t reserved;
+ 	uint8_t data[0];
+ } __PACKED;
+ 
+@@ -496,7 +496,7 @@ static int handle_rx_msg(struct tipc_dev *dev, struct vqueue_buf *buf)
+ 
+ 	/* check message size */
+ 	if (buf->in_iovs.iovs[0].len < sizeof(struct tipc_hdr)) {
+-		LTRACEF("msg too short %zu\n", buf->in_iovs.iovs[0].len);
++		LTRACEF("msg too short %u\n", buf->in_iovs.iovs[0].len);
+ 		ret = ERR_INVALID_ARGS;
+ 		goto done;
+ 	}
+@@ -508,7 +508,7 @@ static int handle_rx_msg(struct tipc_dev *dev, struct vqueue_buf *buf)
+ 	dst_addr = ns_hdr->dst;
+ 
+ 	if (ns_data_len + sizeof(struct tipc_hdr) != buf->in_iovs.iovs[0].len) {
+-		LTRACEF("malformed message len %zu msglen %zu\n",
++		LTRACEF("malformed message len %zu msglen %u\n",
+ 			ns_data_len, buf->in_iovs.iovs[0].len);
+ 		ret = ERR_INVALID_ARGS;
+ 		goto done;
+@@ -1069,7 +1069,7 @@ tipc_send_data(struct tipc_dev *dev, uint32_t local, uint32_t remote,
+ 	/* the first iovec should be large enough to hold header */
+ 	if (sizeof(struct tipc_hdr) > buf.out_iovs.iovs[0].len) {
+ 		/* not enough space to even place header */
+-		LTRACEF("buf is too small (%zu < %zu)\n",
++		LTRACEF("buf is too small (%u < %zu)\n",
+ 		         buf.out_iovs.iovs[0].len, ttl_len);
+ 		ret = ERR_NOT_ENOUGH_BUFFER;
+ 		goto done;
+@@ -1091,7 +1091,7 @@ tipc_send_data(struct tipc_dev *dev, uint32_t local, uint32_t remote,
+ 		if (ttl_len > buf.out_iovs.iovs[0].len) {
+ 			/* not enough space to put the whole message
+ 			   so it will be truncated */
+-			LTRACEF("buf is too small (%zu < %zu)\n",
++			LTRACEF("buf is too small (%u < %zu)\n",
+ 			         buf.out_iovs.iovs[0].len, ttl_len);
+ 			data_len = buf.out_iovs.iovs[0].len -
+ 			           sizeof(struct tipc_hdr);
+diff --git a/lib/trusty/tipc_dev_ql.c b/lib/trusty/tipc_dev_ql.c
+index dd63c17..d4fa6e1 100644
+--- a/lib/trusty/tipc_dev_ql.c
++++ b/lib/trusty/tipc_dev_ql.c
+@@ -38,6 +38,9 @@
+ 
+ #include "tipc_dev_ql.h"
+ 
++#ifdef EPT_DEBUG
++#include <platform/vmcall.h>
++#endif
+ #define LOCAL_TRACE 0
+ 
+ /*
+@@ -527,6 +530,7 @@ long ql_tipc_shutdown_device(ns_addr_t buf_pa)
+ long ql_tipc_handle_cmd(ns_addr_t buf_pa, ns_size_t cmd_sz)
+ {
+ 	struct tipc_cmd_hdr cmd_hdr;
++	status_t ret;
+ 
+ 	/* lookup device */
+ 	struct ql_tipc_dev *dev = dev_lookup(buf_pa);
+@@ -541,15 +545,30 @@ long ql_tipc_handle_cmd(ns_addr_t buf_pa, ns_size_t cmd_sz)
+ 		return SM_ERR_INVALID_PARAMETERS;
+ 	}
+ 
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(ADD, dev->ns_pa, sizeof(cmd_hdr));
++#endif
++
+ 	/* copy out command header */
+ 	memcpy(&cmd_hdr, dev->ns_va, sizeof(cmd_hdr));
+ 
+ 	/* check for consistency */
+ 	if (cmd_hdr.payload_len != (cmd_sz - sizeof(cmd_hdr))) {
+ 		LTRACEF("malformed command\n");
++
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(REMOVE, dev->ns_pa, sizeof(cmd_hdr));
++#endif
++
+ 		return SM_ERR_INVALID_PARAMETERS;
+ 	}
+ 
+-	return dev_handle_cmd(dev, &cmd_hdr, dev->ns_va + sizeof(cmd_hdr));
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(REMOVE, dev->ns_pa, sizeof(cmd_hdr));
++#endif
++
++	ret = dev_handle_cmd(dev, &cmd_hdr, dev->ns_va + sizeof(cmd_hdr));
++
++	return ret;
+ }
+ 
+diff --git a/lib/trusty/trusty_app.c b/lib/trusty/trusty_app.c
+index 7073f2c..ef2f6c4 100644
+--- a/lib/trusty/trusty_app.c
++++ b/lib/trusty/trusty_app.c
+@@ -84,6 +84,18 @@ typedef struct trusty_app_manifest {
+ 
+ #define PAGE_MASK               (PAGE_SIZE - 1)
+ 
++#if ARCH_X86_64
++#define Elf_Shdr Elf64_Shdr
++#define Elf_Ehdr Elf64_Ehdr
++#define Elf_Phdr Elf64_Phdr
++#else
++#define Elf_Shdr Elf32_Shdr
++#define Elf_Ehdr Elf32_Ehdr
++#define Elf_Phdr Elf32_Phdr
++#endif
++
++
++
+ static u_int trusty_next_app_id;
+ static struct list_node trusty_app_list = LIST_INITIAL_VALUE(trusty_app_list);
+ 
+@@ -158,7 +170,7 @@ static inline bool address_range_within_img(const void *range_start,
+                                        (const void *)appimg->img_end);
+ }
+ 
+-static bool compare_section_name(Elf32_Shdr *shdr, const char *name,
++static bool compare_section_name(Elf_Shdr *shdr, const char *name,
+                                  char *shstbl, uint32_t shstbl_size)
+ {
+   return shstbl_size - shdr->sh_name > strlen(name) &&
+@@ -279,7 +291,7 @@ err_stack:
+ }
+ 
+ static status_t load_app_config_options(trusty_app_t *trusty_app,
+-                                        Elf32_Shdr *shdr)
++                                        Elf_Shdr *shdr)
+ {
+     char *manifest_data;
+     const char *port_name;
+@@ -292,7 +304,7 @@ static status_t load_app_config_options(trusty_app_t *trusty_app,
+     /* have to at least have a valid UUID */
+     if (shdr->sh_size < sizeof(uuid_t)) {
+         dprintf(CRITICAL, "app %u manifest too small %u\n", trusty_app->app_id,
+-                shdr->sh_size);
++                (uint)shdr->sh_size);
+         return ERR_NOT_VALID;
+     }
+ 
+@@ -431,11 +443,12 @@ static status_t load_app_config_options(trusty_app_t *trusty_app,
+ static status_t init_brk(trusty_app_t *trusty_app, vaddr_t hint)
+ {
+     status_t status;
+-    uint arch_mmu_flags;
++    uint arch_mmu_flags = 0;
+     vaddr_t start_brk;
+     vaddr_t hint_page_end;
+     size_t remaining;
+ 
++#if 0
+     status = arch_mmu_query(&trusty_app->aspace->arch_aspace, hint, NULL,
+                             &arch_mmu_flags);
+     if(status != NO_ERROR) {
+@@ -443,6 +456,7 @@ static status_t init_brk(trusty_app_t *trusty_app, vaddr_t hint)
+                 trusty_app->app_id, status);
+         return ERR_NOT_VALID;
+     }
++#endif
+ 
+     hint_page_end = ROUNDUP(hint, PAGE_SIZE);
+ 
+@@ -481,9 +495,9 @@ static status_t init_brk(trusty_app_t *trusty_app, vaddr_t hint)
+ 
+ static status_t alloc_address_map(trusty_app_t *trusty_app)
+ {
+-    Elf32_Ehdr *elf_hdr = (Elf32_Ehdr *)trusty_app->app_img->img_start;
++    Elf_Ehdr *elf_hdr = (Elf_Ehdr *)trusty_app->app_img->img_start;
+     void *trusty_app_image;
+-    Elf32_Phdr *prg_hdr;
++    Elf_Phdr *prg_hdr;
+     u_int i;
+     status_t ret;
+     vaddr_t start_code = ~0;
+@@ -493,10 +507,10 @@ static status_t alloc_address_map(trusty_app_t *trusty_app)
+     vaddr_t last_mem = 0;
+     trusty_app_image = (void *)trusty_app->app_img->img_start;
+ 
+-    prg_hdr = (Elf32_Phdr *)(trusty_app_image + elf_hdr->e_phoff);
++    prg_hdr = (Elf_Phdr *)(trusty_app_image + elf_hdr->e_phoff);
+ 
+     if (!address_range_within_img(prg_hdr,
+-                                  sizeof(Elf32_Phdr) * elf_hdr->e_phnum,
++                                  sizeof(Elf_Phdr) * elf_hdr->e_phnum,
+                                   trusty_app->app_img)) {
+         dprintf(CRITICAL, "ELF program headers table out of bounds\n");
+         return ERR_NOT_VALID;
+@@ -509,8 +523,8 @@ static status_t alloc_address_map(trusty_app_t *trusty_app)
+ 
+         LTRACEF("trusty_app %d: ELF type 0x%x, vaddr 0x%08x, paddr 0x%08x"
+                 " rsize 0x%08x, msize 0x%08x, flags 0x%08x\n",
+-                trusty_app->app_id, prg_hdr->p_type, prg_hdr->p_vaddr,
+-                prg_hdr->p_paddr, prg_hdr->p_filesz, prg_hdr->p_memsz,
++                trusty_app->app_id, prg_hdr->p_type, (uint)prg_hdr->p_vaddr,
++                (uint)prg_hdr->p_paddr, (uint)prg_hdr->p_filesz, (uint)prg_hdr->p_memsz,
+                 prg_hdr->p_flags);
+ 
+         if (prg_hdr->p_type != PT_LOAD)
+@@ -629,10 +643,10 @@ static status_t alloc_address_map(trusty_app_t *trusty_app)
+                 " rsize 0x%08zx, msize 0x%08x, access r%c%c,"
+                 " flags 0x%x\n",
+                 trusty_app->app_id, vaddr, vaddr_to_paddr((void *)vaddr),
+-                mapping_size, prg_hdr->p_memsz,
++                mapping_size, (uint)prg_hdr->p_memsz,
+                 arch_mmu_flags & ARCH_MMU_FLAG_PERM_RO ? '-' : 'w',
+                 arch_mmu_flags & ARCH_MMU_FLAG_PERM_NO_EXECUTE ? '-' : 'x',
+-                arch_mmu_flags);
++                (uint)arch_mmu_flags);
+ 
+         /* start of code/data */
+         first = prg_hdr->p_vaddr;
+@@ -649,7 +663,7 @@ static status_t alloc_address_map(trusty_app_t *trusty_app)
+             end_data = last;
+ 
+         /* hint for start of brk */
+-        last_mem = MAX(last_mem, prg_hdr->p_vaddr + prg_hdr->p_memsz);
++        last_mem = MAX(last_mem, prg_hdr->p_vaddr + mapping_size);
+     }
+ 
+     ret = init_brk(trusty_app, last_mem);
+@@ -667,7 +681,7 @@ static status_t alloc_address_map(trusty_app_t *trusty_app)
+     dprintf(SPEW, "trusty_app %d: brk:  start 0x%08lx end 0x%08lx\n",
+             trusty_app->app_id, trusty_app->start_brk, trusty_app->end_brk);
+     dprintf(SPEW, "trusty_app %d: entry 0x%08x\n", trusty_app->app_id,
+-            elf_hdr->e_entry);
++            (uint)elf_hdr->e_entry);
+ 
+     return NO_ERROR;
+ }
+@@ -678,9 +692,9 @@ static status_t alloc_address_map(trusty_app_t *trusty_app)
+  */
+ static status_t trusty_app_create(struct trusty_app_img *app_img)
+ {
+-    Elf32_Ehdr *ehdr;
+-    Elf32_Shdr *shdr;
+-    Elf32_Shdr *bss_shdr, *manifest_shdr;
++    Elf_Ehdr *ehdr;
++    Elf_Shdr *shdr;
++    Elf_Shdr *bss_shdr, *manifest_shdr;
+     char *shstbl;
+     uint32_t shstbl_size;
+     trusty_app_t *trusty_app;
+@@ -704,8 +718,8 @@ static status_t trusty_app_create(struct trusty_app_img *app_img)
+         return ERR_NO_MEMORY;
+     }
+ 
+-    ehdr = (Elf32_Ehdr *)app_img->img_start;
+-    if (!address_range_within_img(ehdr, sizeof(Elf32_Ehdr), app_img)) {
++    ehdr = (Elf_Ehdr *)app_img->img_start;
++    if (!address_range_within_img(ehdr, sizeof(Elf_Ehdr), app_img)) {
+         dprintf(CRITICAL, "trusty_app_create: ELF header out of bounds\n");
+         ret = ERR_NOT_VALID;
+         goto err_hdr;
+@@ -717,8 +731,8 @@ static status_t trusty_app_create(struct trusty_app_img *app_img)
+         goto err_hdr;
+     }
+ 
+-    shdr = (Elf32_Shdr *) ((intptr_t)ehdr + ehdr->e_shoff);
+-    if (!address_range_within_img(shdr, sizeof(Elf32_Shdr) * ehdr->e_shnum,
++    shdr = (Elf_Shdr *) ((intptr_t)ehdr + ehdr->e_shoff);
++    if (!address_range_within_img(shdr, sizeof(Elf_Shdr) * ehdr->e_shnum,
+                                   app_img)) {
+         dprintf(CRITICAL, "trusty_app_create: ELF section headers out of bounds\n");
+         ret = ERR_NOT_VALID;
+@@ -747,7 +761,7 @@ static status_t trusty_app_create(struct trusty_app_img *app_img)
+             continue;
+ 
+         LTRACEF("trusty_app: sect %d, off 0x%08x, size 0x%08x, flags 0x%02x, name %s\n",
+-                i, shdr[i].sh_offset, shdr[i].sh_size, shdr[i].sh_flags,
++                i, (uint)shdr[i].sh_offset, (uint)shdr[i].sh_size, (uint)shdr[i].sh_flags,
+                 shstbl + shdr[i].sh_name);
+ 
+         /* track bss and manifest sections */
+@@ -854,7 +868,7 @@ static status_t trusty_app_start(trusty_app_t *trusty_app)
+     char name[32];
+     struct trusty_thread *trusty_thread;
+     struct trusty_app_notifier *n;
+-    Elf32_Ehdr *elf_hdr;
++    Elf_Ehdr *elf_hdr;
+     int ret;
+ 
+     DEBUG_ASSERT(trusty_app->state == APP_STARTING);
+@@ -902,7 +916,7 @@ static status_t trusty_app_start(trusty_app_t *trusty_app)
+         }
+     }
+ 
+-    elf_hdr = (Elf32_Ehdr *)trusty_app->app_img->img_start;
++    elf_hdr = (Elf_Ehdr *)trusty_app->app_img->img_start;
+     trusty_thread = trusty_thread_create(name, elf_hdr->e_entry,
+                                          DEFAULT_PRIORITY,
+                                          TRUSTY_APP_STACK_TOP,
+diff --git a/lib/trusty/trusty_virtio.c b/lib/trusty/trusty_virtio.c
+index f9a6694..4d8f447 100644
+--- a/lib/trusty/trusty_virtio.c
++++ b/lib/trusty/trusty_virtio.c
+@@ -37,6 +37,10 @@
+ #include <remoteproc/remoteproc.h>
+ #include "trusty_virtio.h"
+ 
++#ifdef EPT_DEBUG
++#include <platform/vmcall.h>
++#endif
++
+ #define LOCAL_TRACE  0
+ 
+ /*
+@@ -74,6 +78,8 @@ static struct trusty_virtio_bus _virtio_bus = {
+ static status_t map_descr(ns_paddr_t buf_pa, void **buf_va, ns_size_t sz,
+                           uint buf_mmu_flags)
+ {
++	status_t err;
++
+ 	if (!buf_pa) {
+ 		LTRACEF("invalid descr addr 0x%llx\n", buf_pa);
+ 		return ERR_INVALID_ARGS;
+@@ -92,14 +98,25 @@ static status_t map_descr(ns_paddr_t buf_pa, void **buf_va, ns_size_t sz,
+ #endif
+ 
+ 	/* map resource table into our address space */
+-	return  vmm_alloc_physical(vmm_get_kernel_aspace(), "virtio",
++	err = vmm_alloc_physical(vmm_get_kernel_aspace(), "virtio",
+ 	                           ROUNDUP(sz, PAGE_SIZE),
+ 	                           buf_va, PAGE_SIZE_SHIFT,
+ 	                           (paddr_t) buf_pa, 0, buf_mmu_flags);
++
++#ifdef EPT_DEBUG
++	if (NO_ERROR == err)
++		make_ept_update_vmcall(ADD, buf_pa, sz);
++#endif
++
++	return err;
+ }
+ 
+ static status_t unmap_descr(ns_paddr_t pa, void *va, size_t sz)
+ {
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(REMOVE, pa, sz);
++#endif
++
+ 	return vmm_free_region(vmm_get_kernel_aspace(), (vaddr_t)va);
+ }
+ 
+diff --git a/lib/trusty/uctx.c b/lib/trusty/uctx.c
+index 9c31c22..ff88ba8 100644
+--- a/lib/trusty/uctx.c
++++ b/lib/trusty/uctx.c
+@@ -240,7 +240,7 @@ static int rebuild_hset_all(struct uctx *ctx)
+ 		goto err_already_exists;
+ 	}
+ 
+-	TRACEF("Rebuilding all handles set\n");
++	LTRACEF("Rebuilding all handles set\n");
+ 
+ 	/* create all handle set */
+ 	hset_all = handle_set_create();
+diff --git a/lib/trusty/vqueue.c b/lib/trusty/vqueue.c
+index daa3cbd..d3248d8 100644
+--- a/lib/trusty/vqueue.c
++++ b/lib/trusty/vqueue.c
+@@ -37,6 +37,10 @@
+ #include <virtio/virtio_ring.h>
+ #include "vqueue.h"
+ 
++#ifdef EPT_DEBUG
++#include <platform/vmcall.h>
++#endif
++
+ #define LOCAL_TRACE 0
+ 
+ #define VQ_LOCK_FLAGS SPIN_LOCK_FLAG_INTERRUPTS
+@@ -62,6 +66,10 @@ int vqueue_init(struct vqueue *vq, uint32_t id,
+ 		return (int) ret;
+ 	}
+ 
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(ADD, paddr, vq->vring_sz);
++#endif
++
+ 	vring_init(&vq->vring, num, vptr, align);
+ 
+ 	vq->id = id;
+@@ -80,6 +88,12 @@ void vqueue_destroy(struct vqueue *vq)
+ 	vaddr_t vring_addr;
+ 	spin_lock_saved_state_t state;
+ 
++#ifdef EPT_DEBUG
++	uint64_t pa, size;
++	pa = vaddr_to_paddr((void *)vq->vring_addr);
++	size = vq->vring_sz;
++#endif
++
+ 	DEBUG_ASSERT(vq);
+ 
+ 	spin_lock_save(&vq->slock, &state, VQ_LOCK_FLAGS);
+@@ -89,6 +103,10 @@ void vqueue_destroy(struct vqueue *vq)
+ 	spin_unlock_restore(&vq->slock, state, VQ_LOCK_FLAGS);
+ 
+ 	vmm_free_region(vmm_get_kernel_aspace(), vring_addr);
++
++#ifdef EPT_DEBUG
++	make_ept_update_vmcall(REMOVE, pa, size);
++#endif
+ }
+ 
+ void vqueue_signal_avail(struct vqueue *vq)
+@@ -226,6 +244,10 @@ int vqueue_map_iovs(struct vqueue_iovs *vqiovs, u_int flags)
+ 		                         vqiovs->phys[i], 0, flags);
+ 		if (ret)
+ 			goto err;
++
++#ifdef EPT_DEBUG
++		make_ept_update_vmcall(ADD, vqiovs->phys[i], vqiovs->iovs[i].len);
++#endif
+ 	}
+ 
+ 	return NO_ERROR;
+@@ -234,6 +256,9 @@ err:
+ 	while (i--) {
+ 		vmm_free_region(vmm_get_kernel_aspace(),
+ 		                (vaddr_t)vqiovs->iovs[i].base);
++#ifdef EPT_DEBUG
++		make_ept_update_vmcall(REMOVE, vqiovs->phys[i], vqiovs->iovs[i].len);
++#endif
+ 		vqiovs->iovs[i].base = NULL;
+ 	}
+ 	return ret;
+@@ -251,6 +276,9 @@ void vqueue_unmap_iovs(struct vqueue_iovs *vqiovs)
+ 		DEBUG_ASSERT(vqiovs->iovs[i].base);
+ 		vmm_free_region(vmm_get_kernel_aspace(),
+ 		                (vaddr_t)vqiovs->iovs[i].base);
++#ifdef EPT_DEBUG
++		make_ept_update_vmcall(REMOVE, vqiovs->phys[i], vqiovs->iovs[i].len);
++#endif
+ 		vqiovs->iovs[i].base = NULL;
+ 	}
+ }
+diff --git a/make/xbin.mk b/make/xbin.mk
+index 6a7e5a1..6b40820 100644
+--- a/make/xbin.mk
++++ b/make/xbin.mk
+@@ -89,7 +89,13 @@ ALLOBJS :=
+ # Override tools
+ include arch/$(ARCH)/toolchain.mk
+ 
++ifneq ($(ARCH), x86)
+ XBIN_TOOLCHAIN_PREFIX := $(ARCH_$(ARCH)_TOOLCHAIN_PREFIX)
++else
++XBIN_TOOLCHAIN_PREFIX := $(TOOLCHAIN_PREFIX)
++GLOBAL_COMPILEFLAGS := $(filter-out -msoft-float,$(GLOBAL_COMPILEFLAGS))
++GLOBAL_COMPILEFLAGS += -mstack-alignment=4
++endif
+ 
+ ifeq ($(call TOBOOL,$(CLANGBUILD)), true)
+ XBIN_CC := $(CCACHE) $(CLANG_BINDIR)/clang
+@@ -128,10 +134,10 @@ XBIN_CONFIGHEADER := $(BUILDDIR)/config.h
+ $(BUILDDIR)/%: CC := $(XBIN_CC)
+ $(BUILDDIR)/%: LD := $(XBIN_LD)
+ $(BUILDDIR)/%.o: GLOBAL_OPTFLAGS := $(GLOBAL_OPTFLAGS)
+-$(BUILDDIR)/%.o: GLOBAL_COMPILEFLAGS := $(GLOBAL_COMPILEFLAGS) -include $(XBIN_CONFIGHEADER)
+-$(BUILDDIR)/%.o: GLOBAL_CFLAGS   := $(GLOBAL_CFLAGS)
+-$(BUILDDIR)/%.o: GLOBAL_CPPFLAGS := $(GLOBAL_CPPFLAGS)
+-$(BUILDDIR)/%.o: GLOBAL_ASMFLAGS := $(GLOBAL_ASMFLAGS)
++$(BUILDDIR)/%.o: COMPILEFLAGS := $(GLOBAL_COMPILEFLAGS) -include $(XBIN_CONFIGHEADER)
++$(BUILDDIR)/%.o: GLOBAL_CFLAGS   := $(GLOBAL_CFLAGS) -fPIC -m64
++$(BUILDDIR)/%.o: GLOBAL_CPPFLAGS := $(GLOBAL_CPPFLAGS) -fPIC -m64
++$(BUILDDIR)/%.o: GLOBAL_ASMFLAGS := $(GLOBAL_ASMFLAGS) -c -fPIC -m64
+ $(BUILDDIR)/%.o: GLOBAL_INCLUDES := $(addprefix -I,$(GLOBAL_UAPI_INCLUDES) $(GLOBAL_SHARED_INCLUDES) $(GLOBAL_USER_INCLUDES) $(GLOBAL_INCLUDES))
+ $(BUILDDIR)/%.o: ARCH_COMPILEFLAGS := $(ARCH_$(ARCH)_COMPILEFLAGS)
+ $(BUILDDIR)/%.o: ARCH_CFLAGS := $(ARCH_$(ARCH)_CFLAGS)
+-- 
+2.21.0
+

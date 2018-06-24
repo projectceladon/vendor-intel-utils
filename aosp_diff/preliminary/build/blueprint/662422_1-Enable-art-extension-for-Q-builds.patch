@@ -1,0 +1,215 @@
+From d6001bb6b39fa0b3e77aff34d78400f26d9040c7 Mon Sep 17 00:00:00 2001
+From: Priyanka Bose <priyanka.bose@intel.com>
+Date: Wed, 2 Jan 2019 13:12:12 +0530
+Subject: [PATCH] Enable art-extension for Q builds.
+
+The fix overrides the  bootstrapping and parsing Android.bp files by checking
+which ART version to be built based upon the env variable set (VENDOR_ART_PATH)
+
+Change-Id: Ic839f35ee5d2b892942ff9b816855793b79d3578
+Category: Device Enablement
+Origin: Internal
+Upstream-Candidate: no
+Signed-off-by: Priyanka Bose <priyanka.bose@intel.com>
+---
+ bootstrap.bash        |  8 ++++
+ bootstrap/build.ninja |  2 +-
+ bootstrap/command.go  | 99 ++++++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 106 insertions(+), 3 deletions(-)
+
+diff --git a/bootstrap.bash b/bootstrap.bash
+index 08b85b5..0bb645b 100755
+--- a/bootstrap.bash
++++ b/bootstrap.bash
+@@ -106,10 +106,18 @@ EXTRA_ARGS="${EXTRA_ARGS} -l ${BLUEPRINT_LIST_FILE}"
+ 
+ mkdir -p $BUILDDIR/.minibootstrap
+ 
++if [ -z "$VENDOR_ART_PATH" ] || [ "$VENDOR_ART_PATH" == "art" ] ; then
++    EXCLUDE_ART="art-extension/"
++
++else
++    EXCLUDE_ART="art/"
++fi
++
+ echo "bootstrapBuildDir = $BUILDDIR" > $BUILDDIR/.minibootstrap/build.ninja
+ echo "topFile = $SRCDIR/$TOPNAME" >> $BUILDDIR/.minibootstrap/build.ninja
+ echo "extraArgs = $EXTRA_ARGS" >> $BUILDDIR/.minibootstrap/build.ninja
+ echo "builddir = $NINJA_BUILDDIR" >> $BUILDDIR/.minibootstrap/build.ninja
++echo "excludeArt = $EXCLUDE_ART" >> $BUILDDIR/.minibootstrap/build.ninja
+ echo "include $BLUEPRINTDIR/bootstrap/build.ninja" >> $BUILDDIR/.minibootstrap/build.ninja
+ 
+ if [ ! -f "$BUILDDIR/.minibootstrap/build-globs.ninja" ]; then
+diff --git a/bootstrap/build.ninja b/bootstrap/build.ninja
+index 5787c72..def9429 100644
+--- a/bootstrap/build.ninja
++++ b/bootstrap/build.ninja
+@@ -11,7 +11,7 @@ myGlobs = ${bootstrapBuildDir}/.minibootstrap/build-globs.ninja
+ subninja ${myGlobs}
+ 
+ rule build.ninja
+-    command = ${builder} ${extraArgs} -b ${bootstrapBuildDir} -n ${builddir} -d ${out}.d -globFile ${myGlobs} -o ${out} ${in}
++    command = ${builder} ${extraArgs} -b ${bootstrapBuildDir} -n ${builddir} -d ${out}.d -globFile ${myGlobs} -o ${out} -e ${excludeArt} ${in}
+     deps = gcc
+     depfile = ${out}.d
+     description = ${builder} ${out}
+diff --git a/bootstrap/command.go b/bootstrap/command.go
+index bf6bbe9..0e58d52 100644
+--- a/bootstrap/command.go
++++ b/bootstrap/command.go
+@@ -26,7 +26,9 @@ import (
+ 	"runtime/debug"
+ 	"runtime/pprof"
+ 	"runtime/trace"
+-
++        "bytes"
++	"log"
++	"strings"
+ 	"github.com/google/blueprint"
+ 	"github.com/google/blueprint/deptools"
+ )
+@@ -43,13 +45,14 @@ var (
+ 	noGC           bool
+ 	moduleListFile string
+ 	emptyNinjaFile bool
+-
+ 	BuildDir      string
+ 	NinjaBuildDir string
+ 	SrcDir        string
++	excludeArt    string
+ )
+ 
+ func init() {
++
+ 	flag.StringVar(&outFile, "o", "build.ninja", "the Ninja file to output")
+ 	flag.StringVar(&globFile, "globFile", "build-globs.ninja", "the Ninja file of globs to output")
+ 	flag.StringVar(&BuildDir, "b", ".", "the build output directory")
+@@ -63,6 +66,7 @@ func init() {
+ 	flag.BoolVar(&runGoTests, "t", false, "build and run go tests during bootstrap")
+ 	flag.StringVar(&moduleListFile, "l", "", "file that lists filepaths to parse")
+ 	flag.BoolVar(&emptyNinjaFile, "empty-ninja-file", false, "write out a 0-byte ninja file")
++	flag.StringVar(&excludeArt, "e", "", "exclude art env string")
+ }
+ 
+ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...string) {
+@@ -100,8 +104,12 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
+ 		fatalf("no Blueprints file specified")
+ 	}
+ 
++
+ 	SrcDir = filepath.Dir(flag.Arg(0))
+ 	if moduleListFile != "" {
++		if excludeArt != "" {
++		   checkForVendorArt(moduleListFile,excludeArt)
++		}
+ 		ctx.SetModuleListFile(moduleListFile)
+ 		extraNinjaFileDeps = append(extraNinjaFileDeps, moduleListFile)
+ 	} else {
+@@ -116,6 +124,7 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
+ 		NinjaBuildDir = BuildDir
+ 	}
+ 
++
+ 	stage := StageMain
+ 	if c, ok := config.(ConfigInterface); ok {
+ 		if c.GeneratingPrimaryBuilder() {
+@@ -123,6 +132,8 @@ func Main(ctx *blueprint.Context, config interface{}, extraNinjaFileDeps ...stri
+ 		}
+ 	}
+ 
++
++
+ 	bootstrapConfig := &Config{
+ 		stage: stage,
+ 
+@@ -268,3 +279,87 @@ func fatalErrors(errs []error) {
+ 	}
+ 	os.Exit(1)
+ }
++func checkForVendorArt(filepath string,exclude string) {
++    var f *os.File
++    f, err := os.OpenFile(filepath,
++                         os.O_RDWR,
++                         0666)
++    if err != nil {
++        log.Fatal(err)
++    }
++    defer f.Close()
++    if len(exclude) != 0 {
++       scanner := bufio.NewScanner(f)
++       nr := 1
++       count := 0
++       tmp:= 0
++       for scanner.Scan() {
++          if strings.Contains(scanner.Text(),exclude) {
++             if tmp == 0 {
++               tmp = nr
++             }
++            count++
++          }
++          nr++
++       }
++       if err := scanner.Err(); err != nil {
++          // Handle the error
++          log.Fatal(err)
++       }
++       if count != 0 {
++          if err := removeLines(filepath, tmp, count); err != nil {
++            log.Fatal(err)
++          }
++       }
++    }
++    return
++}
++
++func removeLines(filepath string, start, n int) (err error) {
++    var f *os.File
++    if f, err = os.OpenFile(filepath, os.O_RDWR, 0); err != nil {
++        return
++    }
++    defer func() {
++        if cErr := f.Close(); err == nil {
++            err = cErr
++        }
++    }()
++    var b []byte
++    if b, err = ioutil.ReadAll(f); err != nil {
++        return
++    }
++    cut, ok := skip(b, start-1)
++    if !ok {
++        return fmt.Errorf("less than %d lines", start)
++    }
++    if n == 0 {
++        return nil
++    }
++    tail, ok := skip(cut, n)
++    t := int64(len(b) - len(cut))
++    if err = f.Truncate(t); err != nil {
++        log.Fatal(err)
++    }
++    if len(tail) > 0 {
++        _, err = f.WriteAt(tail, t)
++    }
++    return
++}
++
++func skip(b []byte, n int) ([]byte, bool) {
++    for ; n > 0; n-- {
++       if len(b) == 0 {
++          return nil, false
++       }
++       x := bytes.IndexByte(b, '\n')
++       if x < 0 {
++          x = len(b)
++       } else {
++          x++
++       }
++       b = b[x:]
++    }
++    return b, true
++}
++
+-- 
+2.21.0
+
