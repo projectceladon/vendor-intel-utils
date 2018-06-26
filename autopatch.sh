@@ -1,9 +1,9 @@
 #!/bin/bash
 # -*- coding: utf-8; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*-
 
-# autopatch.py: script to manage patches on top of repo
-# Copyright (c) 2015, Intel Corporation.
-# Author: Falempe Jocelyn <jocelyn.falempe@intel.com>
+# autopatch.sh: script to manage patches on top of repo
+# Copyright (c) 2018, Intel Corporation.
+# Author: sgnanase <sundar.gnanasekaran@intel.com>
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
