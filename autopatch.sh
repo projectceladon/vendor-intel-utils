@@ -18,16 +18,15 @@ top_dir=`pwd`
 utils_dir="$top_dir/vendor/intel/utils"
 patch_dir="$utils_dir/android_o/google_diff/$TARGET_PRODUCT"
 
-echo "TOP DIR : $top_dir"
-echo "Utils : $utils_dir"
-echo "PATCH DIR : $patch_dir"
-
 #STEP 1: Generate Patch list and dir list
 cd $patch_dir
 patch_list=`find * -iname "*.patch" | sort -u`
 
 current_project=""
 previous_project=""
+
+echo ""
+echo "Applying Patches"
 
 for i in $patch_list
 do
@@ -40,20 +39,32 @@ do
   previous_project=$current_project
 
   cd $top_dir/$current_project
+  remote=`git remote -v | grep "https://android.googlesource.com/"`
+  if [[ -z "$remote" ]]; then
+    default_revision="remotes/m/master"
+  else
+    if [[ -f "$top_dir/.repo/manifest.xml" ]]; then
+      default_revision=`grep default $top_dir/.repo/manifest.xml | grep -o 'revision="[^"]\+"' | cut -d'=' -f2 | sed 's/\"//g'`
+    else
+      echo "Please make sure .repo/manifest.xml"
+      exit 1
+    fi
+  fi
+
+  cd $top_dir/$current_project
   a=`grep "Date: " $patch_dir/$i`
   b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD remotes/m/master..HEAD | grep "$b"`
+  c=`git log --pretty=format:%aD $default_revision..HEAD | grep "$b"`
 
   if [[ "$c" == "" ]] ; then
     git am $patch_dir/$i >& /dev/null
     if [[ $? == 0 ]]; then
       echo "        Applying          $i"
     else
-      echo "        Conflict          $i"
+      echo "        Conflicts          $i"
       git am --abort >& /dev/null
     fi
   else
     echo "        Already applied         $i"
-    #echo "$i        Not Applied [Resolve Conflicts]"
   fi
 done
