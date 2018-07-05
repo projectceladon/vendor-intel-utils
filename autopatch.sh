@@ -24,6 +24,8 @@ patch_list=`find * -iname "*.patch" | sort -u`
 
 current_project=""
 previous_project=""
+conflict=""
+conflict_list=""
 
 echo ""
 echo "Applying Patches"
@@ -63,8 +65,24 @@ do
     else
       echo "        Conflicts          $i"
       git am --abort >& /dev/null
+      conflict="y"
+      conflict_list="$current_project $conflict_list"
     fi
   else
     echo "        Already applied         $i"
   fi
 done
+
+echo ""
+if [[ "$conflict" == "y" ]]; then
+  echo "==========================================================================="
+  echo "           ALERT : Conflicts Observed while patch application !!           "
+  echo "==========================================================================="
+  for i in $conflict_list ; do echo $i; done | sort -u
+  echo "==========================================================================="
+  echo -e "Error: Please resolve Conflict(s) and re-run lunch..."
+else
+  echo "==========================================================================="
+  echo "           INFO : All patches applied fine !!                              "
+  echo "==========================================================================="
+fi
