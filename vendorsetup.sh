@@ -15,3 +15,4 @@
 #
 
 add_lunch_combo cel_kbl_acrn-userdebug
+add_lunch_combo cel_apl-eng

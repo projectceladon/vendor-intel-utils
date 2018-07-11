@@ -16,3 +16,6 @@
 
 PRODUCT_MAKEFILES := \
     $(LOCAL_DIR)/cel_kbl_acrn/cel_kbl_acrn.mk
+
+PRODUCT_MAKEFILES += \
+    $(LOCAL_DIR)/cel_apl/cel_apl.mk
