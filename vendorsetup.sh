@@ -23,3 +23,9 @@ if [ -f device/intel/mixins/mixin-update ]; then
         echo '+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++'
     fi
 fi
+
+function get_make_command()
+{
+    echo command make
+}
+
