@@ -35,7 +35,6 @@ TARGET_RELEASETOOLS_EXTENSIONS ?= $(INTEL_PATH_HARDWARE)/bootctrl/recovery
 # Adds edify commands swap_entries and copy_partition for robust
 # update of the EFI system partition
 #TARGET_RECOVERY_UPDATER_LIBS := libupdater_esp
-
 # Extra libraries needed to be rolled into recovery updater
 # libgpt_static and libefivar are needed by libupdater_esp
 #TARGET_RECOVERY_UPDATER_EXTRA_LIBS := libcommon_recovery libgpt_static libefivar

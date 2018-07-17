@@ -140,8 +140,6 @@ INSTALLED_RADIOIMAGE_TARGET += $(bootloader_zip) $(bootloader_info)
 bootloader_bin := $(PRODUCT_OUT)/bootloader
 $(bootloader_bin): \
 		$(bootloader_zip) \
-		$(MKDOSFS) \
-		$(MCOPY) \
 		$(IMG2SIMG) \
 		$(BOOTLOADER_ADDITIONAL_DEPS) \
 		$(INTEL_PATH_BUILD)/bootloader_from_zip \
