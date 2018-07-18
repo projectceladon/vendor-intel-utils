@@ -28,12 +28,12 @@ if [ -a "$1/md5sum.md5" ];then
 				if [ $count -gt 20 ];then
 					echo "network exception, download $img failed!"
 					exit 1
-				else
-					echo "$img: md5 check successfully!"
 				fi
 			fi
 		done
 	done
+	echo "ACRN SOS Images: md5sum check PASS!"
 else
 	echo "ERROR: md5sum.md5 file NOT FOUND!"
+	echo "$1: $(ls -l $1)"
 fi
