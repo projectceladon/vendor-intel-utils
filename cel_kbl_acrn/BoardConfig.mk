@@ -414,6 +414,11 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/memtrack
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug_agent
 ##############################################################
+# Source: device/intel/mixins/groups/acrn-guest/true/BoardConfig.mk
+##############################################################
+# can't use := here, as PRODUCT_OUT is not defined yet
+ACRN_GPTIMAGE_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT).img
+##############################################################
 # Source: device/intel/mixins/groups/thermal/default/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal
@@ -425,11 +430,6 @@ BOARD_KERNEL_CMDLINE += thermal.off=1
 ifeq (none,cbc)
 IOC_USE_CBC := true
 endif
-##############################################################
-# Source: device/intel/mixins/groups/acrn-guest/true/BoardConfig.mk
-##############################################################
-# can't use := here, as PRODUCT_OUT is not defined yet
-ACRN_GPTIMAGE_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT).img
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/BoardConfig.mk
 ##############################################################
