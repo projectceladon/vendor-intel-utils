@@ -452,8 +452,8 @@ TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=gordon_peak_acrn
 #for trusty lk
 TRUSTY_ENV_VAR += BUILDROOT=$(TRUSTY_BUILDROOT)
 TRUSTY_ENV_VAR += PATH=$$PATH:$(LKBUILD_X86_TOOLCHAIN):$(LKBUILD_X64_TOOLCHAIN)
-TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/prebuilts/clang/host/linux-x86/clang-4053586/bin
-TRUSTY_ENV_VAR += ARCH_x86_64_TOOLCHAIN_PREFIX=${PWD}/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-4.9/bin/x86_64-linux-android-
+TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/$(LLVM_PREBUILTS_PATH)
+TRUSTY_ENV_VAR += ARCH_x86_64_TOOLCHAIN_PREFIX=${PWD}/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-${TARGET_GCC_VERSION}/bin/x86_64-linux-android-
 
 #for trusty vmm
 # use same toolchain as android kernel
