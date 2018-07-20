@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 check_sum_imgs=(flash_AaaG.json sos_boot.img sos_rootfs.img partition_desc.bin)
 
