@@ -13,7 +13,8 @@ INTEL_HWC_ALWAYS_BUILD := false
 
 DEVICE_MANIFEST_FILE := $(INTEL_PATH_DEVICE)/cel_apl/manifest.xml
 
-
+# Disable ota
+TARGET_SKIP_OTA_PACKAGE := true
 ##############################################################
 # Source: device/intel/mixins/groups/disk-bus/auto/BoardConfig.mk
 ##############################################################
