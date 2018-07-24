@@ -64,6 +64,7 @@ debug-coredump: true
 debug-phonedoctor: true
 pstore: ram_dummy(record_size=0x4000,console_size=0x200000,ftrace_size=0x2000,dump_oops=1)
 fota: true
+trusty: true(enable_hw_sec=false, ref_target=project-celadon_64)
 factory-scripts: true
 charger: false
 telephony: none
