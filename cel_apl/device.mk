@@ -393,8 +393,7 @@ PRODUCT_COPY_FILES += $(INTEL_PATH_COMMON)/rfkill/rfkill-init.sh:vendor/bin/rfki
 
 # Early audio
 PRODUCT_PACKAGES += early_audio_alsa.sh \
-                    early_audio_alsa_avb.sh \
-                    early_audio_opensl
+                    early_audio_alsa_avb.sh
 
 # Required by dirana config
 PRODUCT_PACKAGES += dirana_cfg
