@@ -1,0 +1,180 @@
+From 207c4bae5fafdd2e21f548d79aec015e260ed562 Mon Sep 17 00:00:00 2001
+From: Jocelyn Bohr <bohr@google.com>
+Date: Thu, 6 Jul 2017 16:24:01 -0700
+Subject: [PATCH 13/16] Enable non-secure side to receive messages > 4K
+
+AttestKeyResponse may be larger than 4K (always less than 8K) when
+attesting an RSA key. This change allows the non-secure side to read a
+response that may be larger than 4K by adding an additional bit
+indicating the end of a response. If a message command has the
+KEYMASTER_STOP_BIT set, then the non-secure side knows that the response
+has been fully read.
+
+Jira: None
+
+Test: android.keystore.cts.KeyAttestationTest#testRsaAttestation passes
+      with production attestation key and chain, when AttestKeyResponse is
+      larger than 4K.
+
+      Tested with other CTS tests when keymaster messages are smaller
+      than 4K, still passes.
+
+      Manual test to verify that a tipc error due to large message size is
+      handled correctly.
+Bug: 63335726
+
+Change-Id: Ic4a98c876ab4679647d144b27182752835e16ead
+Signed-off-by: Yan, Shaopu <shaopu.yan@intel.com>
+---
+ trusty/keymaster/keymaster_ipc.h             |  3 +-
+ trusty/keymaster/trusty_keymaster_device.cpp |  9 +++--
+ trusty/keymaster/trusty_keymaster_ipc.cpp    | 58 +++++++++++++++++-----------
+ 3 files changed, 44 insertions(+), 26 deletions(-)
+
+diff --git a/trusty/keymaster/keymaster_ipc.h b/trusty/keymaster/keymaster_ipc.h
+index b38eb05..d63757b 100644
+--- a/trusty/keymaster/keymaster_ipc.h
++++ b/trusty/keymaster/keymaster_ipc.h
+@@ -24,7 +24,8 @@
+ // Commands
+ enum keymaster_command : uint32_t {
+     KEYMASTER_RESP_BIT              = 1,
+-    KEYMASTER_REQ_SHIFT             = 1,
++    KEYMASTER_STOP_BIT              = 2,
++    KEYMASTER_REQ_SHIFT             = 2,
+ 
+     KM_GENERATE_KEY                 = (0 << KEYMASTER_REQ_SHIFT),
+     KM_BEGIN_OPERATION              = (1 << KEYMASTER_REQ_SHIFT),
+diff --git a/trusty/keymaster/trusty_keymaster_device.cpp b/trusty/keymaster/trusty_keymaster_device.cpp
+index 5f16fd0..e2342f3 100644
+--- a/trusty/keymaster/trusty_keymaster_device.cpp
++++ b/trusty/keymaster/trusty_keymaster_device.cpp
+@@ -36,7 +36,8 @@
+ #include "trusty_keymaster_device.h"
+ #include "trusty_keymaster_ipc.h"
+ 
+-const uint32_t RECV_BUF_SIZE = PAGE_SIZE;
++// Maximum size of message from Trusty is 8K (for RSA attestation key and chain)
++const uint32_t RECV_BUF_SIZE = 2*PAGE_SIZE;
+ const uint32_t SEND_BUF_SIZE = (PAGE_SIZE - sizeof(struct keymaster_message) - 16 /* tipc header */);
+ 
+ const size_t kMaximumAttestationChallengeLength = 128;
+@@ -768,6 +769,9 @@ keymaster_error_t TrustyKeymasterDevice::Send(uint32_t command, const Serializab
+     ALOGV("Sending %d byte request\n", (int)req.SerializedSize());
+     int rc = trusty_keymaster_call(command, send_buf, req_size, recv_buf, &rsp_size);
+     if (rc < 0) {
++        // Reset the connection on tipc error
++        trusty_keymaster_disconnect();
++        trusty_keymaster_connect();
+         ALOGE("tipc error: %d\n", rc);
+         // TODO(swillden): Distinguish permanent from transient errors and set error_ appropriately.
+         return translate_error(rc);
+@@ -775,8 +779,7 @@ keymaster_error_t TrustyKeymasterDevice::Send(uint32_t command, const Serializab
+         ALOGV("Received %d byte response\n", rsp_size);
+     }
+ 
+-    const keymaster_message* msg = (keymaster_message*)recv_buf;
+-    const uint8_t* p = msg->payload;
++    const uint8_t* p = recv_buf;
+     if (!rsp->Deserialize(&p, p + rsp_size)) {
+         ALOGE("Error deserializing response of size %d\n", (int)rsp_size);
+         return KM_ERROR_UNKNOWN_ERROR;
+diff --git a/trusty/keymaster/trusty_keymaster_ipc.cpp b/trusty/keymaster/trusty_keymaster_ipc.cpp
+index cdc2778..c5ee1a5 100644
+--- a/trusty/keymaster/trusty_keymaster_ipc.cpp
++++ b/trusty/keymaster/trusty_keymaster_ipc.cpp
+@@ -22,6 +22,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <sys/uio.h>
++
++#include <algorithm>
+ 
+ #include <log/log.h>
+ #include <trusty/tipc.h>
+@@ -31,7 +34,7 @@
+ 
+ #define TRUSTY_DEVICE_NAME "/dev/trusty-ipc-dev0"
+ 
+-static int handle_ = 0;
++static int handle_ = -1;
+ 
+ int trusty_keymaster_connect() {
+     int rc = tipc_connect(TRUSTY_DEVICE_NAME, KEYMASTER_PORT);
+@@ -45,7 +48,7 @@ int trusty_keymaster_connect() {
+ 
+ int trusty_keymaster_call(uint32_t cmd, void* in, uint32_t in_size, uint8_t* out,
+                           uint32_t* out_size) {
+-    if (handle_ == 0) {
++    if (handle_ < 0) {
+         ALOGE("not connected\n");
+         return -EINVAL;
+     }
+@@ -62,32 +65,43 @@ int trusty_keymaster_call(uint32_t cmd, void* in, uint32_t in_size, uint8_t* out
+         ALOGE("failed to send cmd (%d) to %s: %s\n", cmd, KEYMASTER_PORT, strerror(errno));
+         return -errno;
+     }
+-
+-    rc = read(handle_, out, *out_size);
+-    if (rc < 0) {
+-        ALOGE("failed to retrieve response for cmd (%d) to %s: %s\n", cmd, KEYMASTER_PORT,
+-              strerror(errno));
+-        return -errno;
+-    }
+-
+-    if ((size_t)rc < sizeof(struct keymaster_message)) {
+-        ALOGE("invalid response size (%d)\n", (int)rc);
+-        return -EINVAL;
+-    }
+-
+-    msg = (struct keymaster_message*)out;
+-
+-    if ((cmd | KEYMASTER_RESP_BIT) != msg->cmd) {
+-        ALOGE("invalid command (%d)", msg->cmd);
+-        return -EINVAL;
++    size_t out_max_size = *out_size;
++    *out_size = 0;
++    struct iovec iov[2];
++    struct keymaster_message header;
++    iov[0] = {.iov_base = &header, .iov_len = sizeof(struct keymaster_message)};
++    while (true) {
++        iov[1] = {
++            .iov_base = out + *out_size,
++            .iov_len = std::min<uint32_t>(KEYMASTER_MAX_BUFFER_LENGTH, out_max_size - *out_size)};
++        rc = readv(handle_, iov, 2);
++        if (rc < 0) {
++            ALOGE("failed to retrieve response for cmd (%d) to %s: %s\n", cmd, KEYMASTER_PORT,
++                  strerror(errno));
++            return -errno;
++        }
++
++        if ((size_t)rc < sizeof(struct keymaster_message)) {
++            ALOGE("invalid response size (%d)\n", (int)rc);
++            return -EINVAL;
++        }
++
++        if ((cmd | KEYMASTER_RESP_BIT) != (header.cmd & ~(KEYMASTER_STOP_BIT))) {
++            ALOGE("invalid command (%d)", header.cmd);
++            return -EINVAL;
++        }
++        *out_size += ((size_t)rc - sizeof(struct keymaster_message));
++        if (header.cmd & KEYMASTER_STOP_BIT) {
++            break;
++        }
+     }
+ 
+-    *out_size = ((size_t)rc) - sizeof(struct keymaster_message);
+     return rc;
+ }
+ 
+ void trusty_keymaster_disconnect() {
+-    if (handle_ != 0) {
++    if (handle_ >= 0) {
+         tipc_close(handle_);
+     }
++    handle_ = -1;
+ }
+-- 
+1.9.1
+
