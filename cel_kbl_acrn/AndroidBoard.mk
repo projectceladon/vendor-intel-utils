@@ -666,8 +666,6 @@ img_download:
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e ">>> Path: $(LOCAL_SOS_PATH)" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR)
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ioc/$(ACRN_IOC_FW_D) $(ACRN_TMP_DIR)
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ioc/$(ACRN_IOC_FW_E) $(ACRN_TMP_DIR)
 	@$(ACP) $(LOCAL_SOS_PATH) $(ACRN_TMP_DIR)
 	$(hide) cp $(ACRN_TMP_DIR)/acrnversion.txt $(PRODUCT_OUT)/
 	echo ">>> $@ is successful !!!"
@@ -682,8 +680,6 @@ img_download:
 	$(call load-image,$(ACRN_FLASH_JSON),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_MD5SUM_MD5),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR)
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ioc/$(ACRN_IOC_FW_D) $(ACRN_TMP_DIR)
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ioc/$(ACRN_IOC_FW_E) $(ACRN_TMP_DIR)
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "* SoS_Version: $(SOS_VERSION_CFG) " >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
