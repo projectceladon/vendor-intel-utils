@@ -203,10 +203,11 @@ PRODUCT_PACKAGES += com.google.widevine.software.drm.xml \
     libWVStreamControlAPI_L3 \
     libwvdrm_L3
 
-PRODUCT_PACKAGES += android.hardware.drm@1.0-service.widevine \
+PRODUCT_PACKAGES += android.hardware.drm@1.1-service.widevine \
                     android.hardware.drm@1.0-service \
                     android.hardware.drm@1.0-impl \
-                    libwvhidl
+                    libwvhidl \
+                    android.hardware.drm@1.1-service.clearkey
 
 PRODUCT_PACKAGES_ENG += ExoPlayerDemo
 
