@@ -9,7 +9,7 @@ product.mk: device.mk
 [groups]
 kernel: gmin64(useprebuilt=false,src_path=kernel/4.14, loglevel=7, interactive_governor=false, relative_sleepstates=false, modules_in_bootimg=false, external_modules=,debug_modules=, use_bcmdhd=false, use_iwlwifi=false, extmod_platform=bxt, iwl_defconfig=, cfg_path=kernel/config-lts/v4.14/kbl/android)
 boot-arch: efi(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,data_encryption=true,target=cel_apl)
-graphics: mesa(gralloc1=true,gen9+=false,hwc2=true,vulkan=false,drmhwc=false,minigbm=true)
+graphics: mesa(gralloc1=true,gen9+=true,hwc2=true,vulkan=false,drmhwc=false,minigbm=true)
 cpu-arch: slm
 #thermal: dptf_configurable(intel_modem=true,thermal_lite=true,platform=kbl)
 thermal: none
@@ -17,16 +17,15 @@ serialport: ttyS1
 gptbuild: false
 #gptbuild: true(size=7G)
 flashfiles: ini(fast_flashfiles=false, oemvars=false,installer=true,flash_dnx_os=false,blank_no_fw=true)
-storage: sdcard-mmcblk1-4xUSB-sda-emulated(adoptablesd=true,adoptableusb=false)
+storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=false)
 slot-ab: false
 avb: false
 trusty: false
 sepolicy: permissive
 widevine: L3_Gen
 touch: galax7200
-display-density: high
+display-density: default
 media: mesa(add_sw_msdk=false)
-#media: none
 public-libraries: true
 device-specific: cel_apl
 hdcpd: true
@@ -38,7 +37,7 @@ wlan: iwlwifi(iwl_sub_folder=dev,firmware=iwl-fw-kbl,iwl_defconfig=kbl,iwl_platf
 bluetooth: btusb(firmware=bt_fw_wsp)
 variants: false
 disk-bus: auto
-vendor-partition: true(partition_name=vendor)
+vendor-partition: true
 config-partition: true
 dexpreopt: enabled
 dalvik-heap: tablet-7in-hdpi-1024
@@ -58,7 +57,7 @@ device-type: car
 gms: default
 debug-tools: true
 debug-logs: true
-debug-crashlogd: true(binder=true, ssram_crashlog=broxton, ramdump=icelake)
+debug-crashlogd: true
 debug-coredump: true
 debug-phonedoctor: true
 pstore: ram_dummy(record_size=0x4000,console_size=0x200000,ftrace_size=0x2000,dump_oops=1)
@@ -69,3 +68,7 @@ charger: false
 telephony: none
 memtrack: true
 security: cse
+debugfs: default
+lights: true
+factory-partition: true
+midi: true
