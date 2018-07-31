@@ -47,8 +47,7 @@ bugreport: default
 ethernet: dhcp
 rfkill: true(force_disable=)
 gps: none
-#audio: none
-audio: bxtp-mrb(log=true, broadcast_radio=true)
+audio: project-celadon
 media-audio: none
 camera: none
 sensors: none
