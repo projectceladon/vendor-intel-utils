@@ -185,6 +185,9 @@ PRODUCT_PACKAGES += \
      toybox_static \
      toybox_vendor \
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/true/product.mk
+##############################################################
+##############################################################
 # Source: device/intel/mixins/groups/widevine/L3_Gen/product.mk
 ##############################################################
 #enable Widevine drm

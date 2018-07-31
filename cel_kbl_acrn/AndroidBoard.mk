@@ -500,6 +500,8 @@ MAKE_EXT4FS_ACRN = $(TARGET_DEVICE_DIR)/make_ext4fs
 raw_config := none
 raw_factory := none
 tos_bin := none
+raw_product := none
+raw_odm := none
 
 .PHONY: none
 none: ;
@@ -520,11 +522,16 @@ ifdef INSTALLED_FACTORYIMAGE_TARGET
 raw_factory := $(INSTALLED_FACTORYIMAGE_TARGET).raw
 endif
 
+ifdef INSTALLED_PRODUCTIMAGE_TARGET
+raw_product := $(INSTALLED_PRODUCTIMAGE_TARGET).raw
+endif
+
 .PHONY: $(ACRN_GPTIMAGE_BIN)
 ifeq ($(strip $(TARGET_USE_TRUSTY)),true)
 $(ACRN_GPTIMAGE_BIN): tosimage
 tos_bin = $(INSTALLED_TOS_IMAGE_TARGET)
 endif
+
 
 $(ACRN_GPTIMAGE_BIN): \
 	bootloader \

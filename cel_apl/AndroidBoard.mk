@@ -384,6 +384,25 @@ LOCAL_MODULE := vendor-partition
 LOCAL_REQUIRED_MODULES := toybox_static
 include $(BUILD_PHONY_PACKAGE)
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/true/AndroidBoard.mk
+##############################################################
+.PHONY: lk evmm tosimage multiboot
+
+LOCAL_MAKE := make
+
+lk:
+	@echo "making lk.elf.."
+	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
+
+evmm: yoctotoolchain
+	@echo "making evmm.."
+	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
+
+# include sub-makefile according to boot_arch
+include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_efi.mk
+
+LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
+##############################################################
 # Source: device/intel/mixins/groups/flashfiles/ini/AndroidBoard.mk
 ##############################################################
 ff_intermediates := $(call intermediates-dir-for,PACKAGING,flashfiles)
