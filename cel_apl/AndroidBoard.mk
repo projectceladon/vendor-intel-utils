@@ -496,57 +496,11 @@ selinux_fc :=
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/ethernet/load_eth_modules.in
 ##############################################################
-# Source: device/intel/mixins/groups/audio/bxtp-mrb/AndroidBoard.mk.1
+# Source: device/intel/mixins/groups/audio/project-celadon/AndroidBoard.mk
 ##############################################################
-# parameter-framework audio files
-include $(TARGET_DEVICE_DIR)/audio/parameter-framework/AndroidBoard.mk
-
-# Audio DFW (Dynamic Firmware)
-include $(TARGET_DEVICE_DIR)/audio/libfwdt/AndroidBoard.mk
-
-##################################################
-# Audio policy files
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := meta.audio_policy_configuration.default
-LOCAL_MODULE_TAGS := optional
-LOCAL_REQUIRED_MODULES := \
-    audio_policy_volumes.xml \
-    default_volume_tables.xml \
-    r_submix_audio_policy_configuration.xml \
-    usb_audio_policy_configuration.xml \
-    a2dp_audio_policy_configuration.xml
-include $(BUILD_PHONY_PACKAGE)
-
-##################################################
-# The audio meta package
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := meta.package.audio
-LOCAL_MODULE_TAGS := optional
-
-LOCAL_REQUIRED_MODULES := \
-    audio_hal_configurable \
-    meta.audio_policy_configuration.default \
-    parameter-framework.audio.broxton \
-    parameter-framework.route.broxton \
-    audio.r_submix.default \
-    audio.usb.default \
-    dsp_fw_bxtp_release.bin \
-    dsp_fw_bxtp_release_k44.bin \
-    dsp_lib_fdk_amp.bin \
-    dfw_sst_bxtp.bin \
-    sspGpMrbAmp4ch.blob \
-    sspGpMrbTuner.blob \
-    sspGpMrbModem.blob \
-    dirana_config.sh \
-    sspGpMrbBtHfp.blob \
-    LIBASRC.bin \
-    5a98-INTEL-NHLT-GPA-3-tplg.bin
-
-include $(BUILD_PHONY_PACKAGE)
-
-LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/audio/load_audio_modules.in
+pfw_rebuild_settings := true
+# Target specific audio configuration files
+include $(TARGET_DEVICE_DIR)/audio/AndroidBoard.mk
 
 ##############################################################
 # Source: device/intel/mixins/groups/device-type/car/AndroidBoard.mk

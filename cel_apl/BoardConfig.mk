@@ -404,33 +404,25 @@ WITH_DEXPREOPT := true
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/rfkill
 ##############################################################
-# Source: device/intel/mixins/groups/audio/bxtp-mrb/BoardConfig.mk.1
+# Source: device/intel/mixins/groups/audio/project-celadon/BoardConfig.mk
 ##############################################################
-BOARD_SEPOLICY_DIRS += \
-    $(INTEL_PATH_SEPOLICY)/audio/dirana \
-    $(INTEL_PATH_SEPOLICY)/audio/early_audio
-
-##############################################################
-# Source: device/intel/mixins/groups/audio/bxtp-mrb/BoardConfig.mk
-##############################################################
-DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/audio/overlay
-
-#Enable SOF
-SOF_AUDIO := true
-
-# Enable configurable audio policy
-USE_CONFIGURABLE_AUDIO_POLICY := 1
+BOARD_USES_ALSA_AUDIO := true
+BOARD_USES_TINY_ALSA_AUDIO := true
+BOARD_USES_GENERIC_AUDIO ?= false
+USE_CUSTOM_PARAMETER_FRAMEWORK := false
+ifneq ($(BOARD_USES_GENERIC_AUDIO), true)
+# Audio HAL selection Flag default setting.
+#  INTEL_AUDIO_HAL:= audio     -> baseline HAL
+#  INTEL_AUDIO_HAL:= audio_pfw -> PFW-based HAL
+INTEL_AUDIO_HAL := audio
+else
+INTEL_AUDIO_HAL := stub
+endif
 
 # Use XML audio policy configuration file
-USE_XML_AUDIO_POLICY_CONF := 1
-
-# Use Intel's custom PFW
-USE_CUSTOM_PARAMETER_FRAMEWORK := true
-
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/audio/coe-common
-
-# Do not use audio HAL directly w/o hwbinder middleware
-USE_LEGACY_LOCAL_AUDIO_HAL := false
+USE_XML_AUDIO_POLICY_CONF ?= 1
+# Use configurable audio policy
+USE_CONFIGURABLE_AUDIO_POLICY ?= 1
 ##############################################################
 # Source: device/intel/mixins/groups/usb-gadget/configfs/BoardConfig.mk
 ##############################################################

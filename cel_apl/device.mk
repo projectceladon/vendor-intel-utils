@@ -392,56 +392,28 @@ PRODUCT_COPY_FILES += \
 ##############################################################
 PRODUCT_COPY_FILES += $(INTEL_PATH_COMMON)/rfkill/rfkill-init.sh:vendor/bin/rfkill-init.sh
 ##############################################################
-# Source: device/intel/mixins/groups/audio/bxtp-mrb/product.mk.1
-##############################################################
-
-# Early audio
-PRODUCT_PACKAGES += early_audio_alsa.sh \
-                    early_audio_alsa_avb.sh
-
-# Required by dirana config
-PRODUCT_PACKAGES += dirana_cfg
-
-PRODUCT_PACKAGES += android.hardware.broadcastradio@intel-service
-
-PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/extra_files/audio/asound.conf:vendor/etc/asound.conf \
-    $(LOCAL_PATH)/extra_files/audio/dirana_config.sh:vendor/bin/dirana_config.sh \
-    $(LOCAL_PATH)/extra_files/audio/audio_policy_configuration.xml:vendor/etc/audio_policy_configuration.xml \
-    $(LOCAL_PATH)/extra_files/audio/audio_policy_criteria.conf:vendor/etc/audio_policy_criteria.conf \
-    $(LOCAL_PATH)/extra_files/audio/route_criteria.conf:vendor/etc/route_criteria.conf \
-##############################################################
-# Source: device/intel/mixins/groups/audio/bxtp-mrb/product.mk
+# Source: device/intel/mixins/groups/audio/project-celadon/product.mk
 ##############################################################
 # Tinyalsa
 PRODUCT_PACKAGES_DEBUG += \
-    tinymix \
-    tinyplay \
-    tinycap \
-    tinypcminfo \
-    tinyprobe
+         tinymix \
+         tinyplay \
+         tinycap
 
-# PFW Client Simulator
-PRODUCT_PACKAGES_DEBUG += \
-    audio_correlation_tool \
-    test-platform
-
-# Audio HALs
-PRODUCT_PACKAGES += meta.package.audio
-
-
-
+# Extended Audio HALs
 PRODUCT_PACKAGES += \
-    android.hardware.audio@2.0-impl \
-    android.hardware.audio@2.0-service \
-    android.hardware.audio.effect@2.0-impl \
-    android.hardware.soundtrigger@2.0-impl \
-    android.hardware.broadcastradio@1.0-impl
+    audio.r_submix.default \
+    audio.usb.default \
+    audio_policy.default.so \
+    audio_configuration_files
 
-PFW_CONFIGURATION_FOLDER := /vendor/etc/parameter-framework/
+# Audio HAL
+PRODUCT_PACKAGES += \
+    android.hardware.audio.effect@2.0-impl \
+    android.hardware.audio@2.0-impl \
+    android.hardware.audio@2.0-service
 
 PRODUCT_PROPERTY_OVERRIDES += audio.safemedia.bypass=true
-
 ##############################################################
 # Source: device/intel/mixins/groups/usb/host+acc/product.mk
 ##############################################################
