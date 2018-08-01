@@ -681,11 +681,11 @@ img_download:
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
 	echo "Start to download SoS files from: $(ACRN_LINK) ..."
+	$(call load-image,$(ACRN_MD5SUM_MD5),$(ACRN_LINK),$(ACRN_TMP_DIR))
+	$(call load-image,$(ACRN_FLASH_JSON),$(ACRN_LINK),$(ACRN_TMP_DIR))
+	$(call load-image,$(ACRN_PARTITION_DESC_BIN),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_SOS_BOOT_IMAGE),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_SOS_ROOTFS_IMAGE),$(ACRN_LINK),$(ACRN_TMP_DIR))
-	$(call load-image,$(ACRN_PARTITION_DESC_BIN),$(ACRN_LINK),$(ACRN_TMP_DIR))
-	$(call load-image,$(ACRN_FLASH_JSON),$(ACRN_LINK),$(ACRN_TMP_DIR))
-	$(call load-image,$(ACRN_MD5SUM_MD5),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR)
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "* SoS_Version: $(SOS_VERSION_CFG) " >> $(ACRN_TMP_DIR)/acrnversion.txt

@@ -13,7 +13,7 @@ if [ -a "$1/md5sum.md5" ];then
 				md5_img=`md5sum $1/$img | awk '{print $1}'`
 
 				count=1
-				while [ $count -le 20 ];
+				while [ $count -le 30 ];
 				do
 					if [ "$md5_img" != "$md5_val" ]; then
 						echo "file $img download is continue ......"
