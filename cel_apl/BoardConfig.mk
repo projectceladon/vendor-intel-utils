@@ -469,6 +469,16 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/memtrack
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/security
 ##############################################################
+# Source: device/intel/mixins/groups/debugfs/default/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
+##############################################################
+# Source: device/intel/mixins/groups/factory-partition/true/BoardConfig.mk
+##############################################################
+BOARD_FACTORYIMAGE_PARTITION_SIZE := 10485760
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/factory-partition
+BOARD_SEPOLICY_M4DEFS += module_factory_partition=true
+##############################################################
 # Source: device/intel/mixins/groups/aosp_carrier-config/default/BoardConfig.mk
 ##############################################################
 DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/ims/carrier/res_ims
@@ -480,10 +490,6 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/autodetect/false
 # Source: device/intel/mixins/groups/cpuset/default/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/config_cpuset
-##############################################################
-# Source: device/intel/mixins/groups/debugfs/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
 ##############################################################
 # Source: device/intel/mixins/groups/embms/default/BoardConfig.mk
 ##############################################################

@@ -165,11 +165,14 @@ PRODUCT_PACKAGES += \
     gralloc.$(TARGET_BOARD_PLATFORM)
 
 
-# GLES version. We cannot enable Android
-# 3.2 support for Gen9+ devices.
-PRODUCT_PROPERTY_OVERRIDES += \
-   ro.opengles.version=196609
 
+# Mesa
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.opengles.aep.xml:vendor/etc/permissions/android.hardware.opengles.aep.xml
+
+# GLES version
+PRODUCT_PROPERTY_OVERRIDES += \
+   ro.opengles.version=196610
 
 
 
@@ -187,6 +190,11 @@ PRODUCT_PACKAGES += \
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/product.mk
 ##############################################################
+##############################################################
+# Source: device/intel/mixins/groups/storage/sdcard-mmc0-usb-sd/product.mk
+##############################################################
+
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += support.sdcardfs.mode=y
 ##############################################################
 # Source: device/intel/mixins/groups/widevine/L3_Gen/product.mk
 ##############################################################
@@ -222,11 +230,12 @@ PRODUCT_COPY_FILES += \
         frameworks/native/data/etc/android.hardware.touchscreen.multitouch.jazzhand.xml:vendor/etc/permissions/android.hardware.touchscreen.multitouch.jazzhand.xml\
         $(INTEL_PATH_COMMON)/touch/Vendor_0eef_Product_7200.idc:system/usr/idc/Vendor_0eef_Product_7200.idc
 ##############################################################
-# Source: device/intel/mixins/groups/display-density/high/product.mk
+# Source: device/intel/mixins/groups/display-density/default/product.mk
 ##############################################################
 PRODUCT_AAPT_CONFIG := normal
-PRODUCT_AAPT_PREF_CONFIG := hdpi
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.sf.lcd_density=240
+PRODUCT_AAPT_PREF_CONFIG := mdpi
+
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.sf.lcd_density=160
 ##############################################################
 # Source: device/intel/mixins/groups/media/mesa/product.mk
 ##############################################################
@@ -501,10 +510,7 @@ CRASHLOGD_LOGS_PATH := "/data/logs"
 CRASHLOGD_APLOG := true
 CRASHLOGD_FULL_REPORT := true
 CRASHLOGD_MODULE_MODEM ?= true
-CRASHLOGD_MODULE_BINDER := true
 CRASHLOGD_USE_SD := false
-CRASHLOGD_SSRAM_CRASHLOG := broxton
-CRASHLOGD_RAMDUMP := icelake
 endif
 ##############################################################
 # Source: device/intel/mixins/groups/debug-coredump/true/product.mk
@@ -563,6 +569,23 @@ PRODUCT_PACKAGES += \
         memtrack.$(TARGET_BOARD_PLATFORM) \
 	android.hardware.memtrack@1.0-service \
 	android.hardware.memtrack@1.0-impl
+##############################################################
+# Source: device/intel/mixins/groups/lights/true/product.mk
+##############################################################
+# Lights HAL
+BOARD_SEPOLICY_DIRS += \
+    $(INTEL_PATH_SEPOLICY)/light
+
+PRODUCT_PACKAGES += lights.$(TARGET_BOARD_PLATFORM) \
+    android.hardware.light@2.0-service \
+    android.hardware.light@2.0-impl
+
+##############################################################
+# Source: device/intel/mixins/groups/midi/true/product.mk
+##############################################################
+# MIDI support
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.software.midi.xml:vendor/etc/permissions/android.software.midi.xml
 ##############################################################
 # Source: device/intel/mixins/groups/aosp_carrier-config/default/product.mk
 ##############################################################

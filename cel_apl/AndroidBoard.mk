@@ -376,6 +376,19 @@ include $(BUILD_PHONY_PACKAGE)
 ##############################################################
 # Source: device/intel/mixins/groups/graphics/mesa/AndroidBoard.mk
 ##############################################################
+ifneq ($(TARGET_BOARD_PLATFORM),kabylake)
+I915_FW_PATH := ./$(INTEL_PATH_VENDOR)/ufo/gen9_dev/x86_64_media/vendor/firmware/i915
+else
+I915_FW_PATH := ./$(INTEL_PATH_VENDOR)/ufo/gen9_dev/x86_64_media_kbl/vendor/firmware/i915
+endif
+#list of i915/huc_xxx.bin i915/dmc_xxx.bin i915/guc_xxx.bin
+$(foreach t, $(patsubst $(I915_FW_PATH)/%,%,$(wildcard $(I915_FW_PATH)/*)) ,$(eval I915_FW += i915/$(t)))
+
+_EXTRA_FW_ += $(I915_FW)
+
+#kernel will find i915 firmware in out/target/.../vendor/firmware/
+#so build ufo_prebuilts before kernel.
+$(LOCAL_KERNEL) : ufo_prebuilts
 ##############################################################
 # Source: device/intel/mixins/groups/vendor-partition/true/AndroidBoard.mk
 ##############################################################
@@ -512,6 +525,30 @@ KERNEL_DIFFCONFIG += $(KERNEL_CAR_DIFFCONFIG)
 # Source: device/intel/mixins/groups/security/cse/AndroidBoard.mk
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/security/load_mei_modules.in
+##############################################################
+# Source: device/intel/mixins/groups/factory-partition/true/AndroidBoard.mk
+##############################################################
+INSTALLED_FACTORYIMAGE_TARGET := $(PRODUCT_OUT)/factory.img
+selinux_fc := $(TARGET_ROOT_OUT)/file_contexts.bin
+
+$(INSTALLED_FACTORYIMAGE_TARGET) : PRIVATE_SELINUX_FC := $(selinux_fc)
+$(INSTALLED_FACTORYIMAGE_TARGET) : $(MKEXTUSERIMG) $(MAKE_EXT4FS) $(E2FSCK) $(selinux_fc)
+	$(call pretty,"Target factory fs image: $(INSTALLED_FACTORYIMAGE_TARGET)")
+	@mkdir -p $(PRODUCT_OUT)/factory
+	$(hide)	$(MKEXTUSERIMG) -s \
+		$(PRODUCT_OUT)/factory \
+		$(PRODUCT_OUT)/factory.img \
+		ext4 \
+		factory \
+		$(BOARD_FACTORYIMAGE_PARTITION_SIZE) \
+		$(PRIVATE_SELINUX_FC)
+
+INSTALLED_RADIOIMAGE_TARGET += $(INSTALLED_FACTORYIMAGE_TARGET)
+
+selinux_fc :=
+
+.PHONY: factoryimage
+factoryimage: $(INSTALLED_FACTORYIMAGE_TARGET)
 ##############################################################
 # Source: device/intel/mixins/groups/load_modules/default/AndroidBoard.mk
 ##############################################################
