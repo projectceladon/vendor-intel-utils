@@ -206,6 +206,7 @@ PRODUCT_PACKAGES += \
 
 # Open source media_driver
 PRODUCT_PACKAGES += i965_drv_video
+PRODUCT_PACKAGES += libigfxcmrt
 
 ifeq ($(BOARD_USE_64BIT_USERSPACE),true)
 PRODUCT_PACKAGES += \
