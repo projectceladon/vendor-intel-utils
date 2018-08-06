@@ -582,6 +582,10 @@ KERNEL_DIFFCONFIG += $(KERNEL_ACRN_GUEST_DIFFCONFIG)
 ######################################################################
 ACRN_FLASH_JSON := flash_AaaG.json
 ACRN_IFWI_FW := ifwi.bin
+ACRN_IFWI_DNX := ifwi_dnx.bin
+ACRN_IFWI_DNXP := dnxp_0x1.bin
+ACRN_IFWI_FV := capsule.fv
+ACRN_FW_VERSION := fwversion.txt
 ACRN_IOC_FW_D := ioc_firmware_gp_mrb_fab_d.ias_ioc
 ACRN_IOC_FW_E := ioc_firmware_gp_mrb_fab_e.ias_ioc
 ACRN_SOS_BOOT_IMAGE := sos_boot.img
@@ -647,6 +651,15 @@ define load-image
 	echo "Error: Mandatory Images failed!" && exit 1)
 endef
 
+define load-fw
+	echo "Begin to load firmware...";
+	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR);
+	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FV) $(ACRN_TMP_DIR);
+	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_DNX) $(ACRN_TMP_DIR);
+	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_DNXP) $(ACRN_TMP_DIR);
+	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/$(ACRN_FW_VERSION) $(ACRN_TMP_DIR);
+endef
+
 ######################################################################
 # Generate ACRN AaaG Image
 ######################################################################
@@ -668,11 +681,11 @@ ifeq ($(strip $(SOS_VERSION)),local)
 img_download:
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
+	$(call load-fw)
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "* SoS_Version: Local Images" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e ">>> Path: $(LOCAL_SOS_PATH)" >> $(ACRN_TMP_DIR)/acrnversion.txt
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR)
 	@$(ACP) $(LOCAL_SOS_PATH) $(ACRN_TMP_DIR)
 	$(hide) cp $(ACRN_TMP_DIR)/acrnversion.txt $(PRODUCT_OUT)/
 	echo ">>> $@ is successful !!!"
@@ -680,13 +693,13 @@ else
 img_download:
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
+	$(call load-fw)
 	echo "Start to download SoS files from: $(ACRN_LINK) ..."
 	$(call load-image,$(ACRN_MD5SUM_MD5),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_FLASH_JSON),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_PARTITION_DESC_BIN),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_SOS_BOOT_IMAGE),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_SOS_ROOTFS_IMAGE),$(ACRN_LINK),$(ACRN_TMP_DIR))
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR)
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "* SoS_Version: $(SOS_VERSION_CFG) " >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
