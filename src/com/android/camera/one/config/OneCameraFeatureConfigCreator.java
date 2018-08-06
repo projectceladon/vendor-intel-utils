@@ -131,8 +131,12 @@ public class OneCameraFeatureConfigCreator {
     }
 
     private static boolean supportsReprocessing(CameraCharacteristics characteristics) {
-        int maxNumInputStreams = characteristics.get(
+        Integer maxNumInputStreams = characteristics.get(
                 CameraCharacteristics.REQUEST_MAX_NUM_INPUT_STREAMS);
+        if (maxNumInputStreams == null) {
+            Log.e(TAG, "Camera does not have maximum number of input streams.");
+            return false;
+        }
         if (maxNumInputStreams == 0) {
             return false;
         }
