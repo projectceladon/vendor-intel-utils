@@ -60,7 +60,7 @@ public class FirstRunDialog {
     /** The hardware manager. */
     private final OneCameraManager mOneCameraManager;
 
-    /** The app context. */
+    /** The activity context. */
     private final Context mContext;
 
     /** The resolution settings. */
@@ -81,13 +81,13 @@ public class FirstRunDialog {
      */
     public FirstRunDialog(
           AppController appController,
-          Context androidContext,
+          Context activityContext,
           ResolutionSetting resolutionSetting,
           SettingsManager settingManager,
           OneCameraManager hardwareManager,
           FirstRunDialogListener listener) {
         mAppController = appController;
-        mContext = androidContext;
+        mContext = activityContext;
         mResolutionSetting = resolutionSetting;
         mSettingsManager = settingManager;
         mOneCameraManager = hardwareManager;
