@@ -35,7 +35,7 @@ usb-audio-init: true
 debug-npk: true(default_cfg=none, console_master_range="57 60", console_channel_range="1 4", user_master_range="72 126", user_channel_range="1 127", platform=icl)
 debug-dvc_desc: npk
 wlan: iwlwifi(iwl_sub_folder=dev,firmware=iwl-fw-celadon,iwl_defconfig=kbl,iwl_platform=celadon)
-bluetooth: btusb(firmware=bt_fw_wsp)
+bluetooth: btusb(firmware=bt_fw_cel,ivi=true)
 variants: false
 disk-bus: auto
 vendor-partition: true
