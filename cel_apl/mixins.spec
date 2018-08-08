@@ -9,7 +9,7 @@ product.mk: device.mk
 
 [groups]
 kernel: gmin64(useprebuilt=false,src_path=kernel/4.14, loglevel=7, interactive_governor=false, relative_sleepstates=false, modules_in_bootimg=false, external_modules=,debug_modules=, use_bcmdhd=false, use_iwlwifi=false, extmod_platform=bxt, iwl_defconfig=, cfg_path=kernel/config-lts/v4.14/kbl/android)
-boot-arch: efi(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,data_encryption=true,target=cel_apl)
+boot-arch: efi(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,data_encryption=true,target=cel_apl,rpmb_simulate=true)
 graphics: mesa(gralloc1=true,gen9+=true,hwc2=true,vulkan=false,drmhwc=false,minigbm=true)
 cpu-arch: slm
 #thermal: dptf_configurable(intel_modem=true,thermal_lite=true,platform=kbl)
@@ -21,7 +21,6 @@ flashfiles: ini(fast_flashfiles=false, oemvars=false,installer=true,flash_dnx_os
 storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=false)
 slot-ab: false
 avb: false
-trusty: false
 sepolicy: permissive
 widevine: L3_Gen
 touch: galax7200
@@ -63,7 +62,7 @@ debug-coredump: true
 debug-phonedoctor: true
 pstore: ram_dummy(record_size=0x4000,console_size=0x200000,ftrace_size=0x2000,dump_oops=1)
 fota: true
-trusty: true(enable_hw_sec=false, ref_target=project-celadon_64)
+trusty: true(enable_hw_sec=true, enable_storage_proxyd=true, ref_target=project-celadon_64)
 factory-scripts: true
 charger: false
 telephony: none
