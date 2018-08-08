@@ -99,7 +99,10 @@ BOARD_KERNEL_CMDLINE += gpt
 DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_HARDWARE)/bootctrl/boot/overlay
 
 
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/abl
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/generic
+# no need to add $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/xbl
+# because we do not have postinstall step with AaaG/vSBL
 
 TARGET_BOOTLOADER_BOARD_NAME := $(TARGET_DEVICE)
 

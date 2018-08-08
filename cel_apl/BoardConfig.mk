@@ -94,7 +94,7 @@ BOARD_FLASHFILES += $(INTEL_PATH_HARDWARE)/bootctrl/boot/startup.nsh
 
 
 
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/efi
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
 
 
 ##############################################################
