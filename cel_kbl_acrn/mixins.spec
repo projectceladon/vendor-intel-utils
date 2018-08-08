@@ -1,6 +1,7 @@
 [main]
-mixinsdir: device/intel/mixins/groups
+mixinsdir: device/intel/project-celadon/mixins/groups
 mixinsctl: true
+mixinsrel: true
 
 [mapping]
 product.mk: device.mk
