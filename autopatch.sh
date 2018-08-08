@@ -16,7 +16,7 @@
 
 top_dir=`pwd`
 utils_dir="$top_dir/vendor/intel/utils"
-patch_dir="$utils_dir/android_o/google_diff/$TARGET_PRODUCT"
+patch_dir="$utils_dir/android_p/google_diff/$TARGET_PRODUCT"
 
 #STEP 1: Generate Patch list and dir list
 cd $patch_dir
