@@ -281,6 +281,9 @@ BOARD_USES_GRALLOC1 := true
 BOARD_CURSOR_WA := true
 
 
+BOARD_THREEDIS_UNDERRUN_WA := true
+
+
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/graphics/mesa
 
 ##############################################################
