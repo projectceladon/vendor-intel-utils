@@ -1,0 +1,4 @@
+ifneq ($(TARGET_BUILD_VARIANT),user)
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/dvc_desc
+endif
+

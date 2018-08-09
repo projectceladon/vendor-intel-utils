@@ -1,0 +1,2 @@
+[mixinfo]
+deps = usb-gadget

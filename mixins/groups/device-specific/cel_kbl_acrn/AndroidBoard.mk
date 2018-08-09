@@ -1,0 +1,7 @@
+# Specify /dev/mmcblk0 size here
+BOARD_MMC_SIZE = 15335424K
+
+ifeq ($(PLATFORM_VERSION), OMR1)
+TARGET_PREBUILT_BOOTLOADER := $(TARGET_DEVICE_DIR)/bootloader.img
+PREBUILT_MULTIBOOT := $(TARGET_DEVICE_DIR)/multiboot.img
+endif

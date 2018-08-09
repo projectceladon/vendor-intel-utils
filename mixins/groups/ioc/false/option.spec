@@ -1,0 +1,2 @@
+[defaults]
+fastboot = none

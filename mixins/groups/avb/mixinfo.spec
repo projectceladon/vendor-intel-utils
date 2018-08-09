@@ -1,0 +1,2 @@
+[mixinfo]
+deps = slot-ab
