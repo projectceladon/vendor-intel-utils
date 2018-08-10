@@ -309,7 +309,6 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/navigationbar/overlay
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/device-type/car/BoardConfig.mk
 ##############################################################
-
 BOARD_SEPOLICY_DIRS += \
     packages/services/Car/car_product/sepolicy \
     device/generic/car/common/sepolicy \

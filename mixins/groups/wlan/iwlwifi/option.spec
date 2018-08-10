@@ -9,3 +9,4 @@ iwl_sub_folder = dev
 libwifi-hal = false
 firmware = iwl-fw
 nvm = true
+iwl_upstream_drv = true

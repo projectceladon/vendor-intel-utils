@@ -80,7 +80,7 @@ PRODUCT_PACKAGES += \
 
 # FW and PNVM
 PRODUCT_PACKAGES += \
-    iwl-fw-kbl \
+    iwl-fw-celadon \
     iwl-nvm
 
 # iwlwifi USC
@@ -377,10 +377,11 @@ PRODUCT_COPY_FILES += \
 PRODUCT_PROPERTY_OVERRIDES += bluetooth.rfkill=1
 
 PRODUCT_PACKAGES += \
-    android.hardware.bluetooth@1.0-impl \
     android.hardware.bluetooth@1.0-service.vbt \
     libbt-vendor \
-    bt_fw_wsp
+    bt_fw_cel
+
+PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-car-disablehfp
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/dalvik-heap/tablet-7in-hdpi-1024/product.mk
 ##############################################################

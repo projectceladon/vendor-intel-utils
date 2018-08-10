@@ -108,7 +108,7 @@ WPA_SUPPLICANT_VERSION := VER_2_1_DEVEL
 # Enabling iwlwifi
 BOARD_USING_INTEL_IWL := true
 INTEL_IWL_MODULE_SUB_FOLDER := dev
-INTEL_IWL_PLATFORM := kbl
+INTEL_IWL_PLATFORM := celadon
 INTEL_IWL_BOARD_CONFIG := kbl
 INTEL_IWL_PNVM_HW := DEFAULT
 INTEL_IWL_USE_COMPAT_INSTALL := y
@@ -386,7 +386,7 @@ endif
 ##############################################################
 BOARD_HAVE_BLUETOOTH := true
 #BOARD_HAVE_BLUETOOTH_LINUX := true
-#BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := $(INTEL_PATH_COMMON)/bluetooth/default/
+BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := $(INTEL_PATH_COMMON)/bluetooth/intel/car/
 DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-bt-pan
 BOARD_HAVE_BLUETOOTH_INTEL_ICNV := true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/bluetooth/common
@@ -438,7 +438,6 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/navigationbar/overlay
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/device-type/car/BoardConfig.mk
 ##############################################################
-
 BOARD_SEPOLICY_DIRS += \
     packages/services/Car/car_product/sepolicy \
     device/generic/car/common/sepolicy \

@@ -3,7 +3,6 @@ manifest.xml:
 
 [devicefiles]
 audio:
-bdroid_buildcfg.h:
 bldr_utils.img:
 bootloader.img:
 multiboot.img:

@@ -163,10 +163,7 @@ $(call dist-for-goals,droidcore,$(INTEL_PATH_BUILD)/testkeys/unlock.txt:efi_unlo
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/wlan/iwlwifi/AndroidBoard.mk
 ##############################################################
-LOCAL_KERNEL_PATH := $(abspath $(PRODUCT_OUT)/obj/kernel) is not defined yet
-$(abspath $(PRODUCT_OUT)/obj/kernel)/copy_modules: iwlwifi
-
-LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/wlan/load_iwlwifi.in
+LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/wlan/load_legacy_iwlwifi.in
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/kernel/gmin64/AndroidBoard.mk
 ##############################################################
