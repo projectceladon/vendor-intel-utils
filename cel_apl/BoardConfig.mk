@@ -97,6 +97,7 @@ BOARD_FLASHFILES += $(INTEL_PATH_HARDWARE)/bootctrl/boot/startup.nsh
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
 
 
+KERNELFLINGER_USE_RPMB_SIMULATE := true
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################
@@ -284,6 +285,8 @@ ifneq (, $(filter abl sbl, efi))
 TARGET_USE_MULTIBOOT := true
 endif
 
+BOARD_USES_TRUSTY := true
+BOARD_USES_KEYMASTER1 := true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty
 BOARD_SEPOLICY_M4DEFS += module_trusty=true
 
