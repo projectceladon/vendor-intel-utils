@@ -580,7 +580,6 @@ KERNEL_DIFFCONFIG += $(KERNEL_ACRN_GUEST_DIFFCONFIG)
 ######################################################################
 # Acrn Flashfiles Contains Below Image Files
 ######################################################################
-ACRN_FLASH_JSON := flash_AaaG.json
 ACRN_IFWI_FW := ifwi.bin
 ACRN_IFWI_DNX := ifwi_dnx.bin
 ACRN_IFWI_DNXP := dnxp_0x1.bin
@@ -696,7 +695,6 @@ img_download:
 	$(call load-fw)
 	echo "Start to download SoS files from: $(ACRN_LINK) ..."
 	$(call load-image,$(ACRN_MD5SUM_MD5),$(ACRN_LINK),$(ACRN_TMP_DIR))
-	$(call load-image,$(ACRN_FLASH_JSON),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_PARTITION_DESC_BIN),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_SOS_BOOT_IMAGE),$(ACRN_LINK),$(ACRN_TMP_DIR))
 	$(call load-image,$(ACRN_SOS_ROOTFS_IMAGE),$(ACRN_LINK),$(ACRN_TMP_DIR))
@@ -707,7 +705,6 @@ img_download:
 	echo -e "    - $(ACRN_SOS_BOOT_IMAGE)" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "    - $(ACRN_SOS_ROOTFS_IMAGE)" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "    - $(ACRN_PARTITION_DESC_BIN)" >> $(ACRN_TMP_DIR)/acrnversion.txt
-	echo -e "    - $(ACRN_FLASH_JSON)" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	$(hide) cp $(ACRN_TMP_DIR)/acrnversion.txt $(PRODUCT_OUT)/
 	echo ">>> $@ is successfull !!!"
 endif
@@ -731,6 +728,7 @@ acrn_image: acrn_ext4_bin
 acrn_flashfiles: acrn_ext4_bin
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
 	$(hide) cp $(ACRN_EXT4_BIN) $(ACRN_TMP_DIR)
+	$(hide) cp $(TARGET_DEVICE_DIR)/flash_AaaG.json $(ACRN_TMP_DIR)
 	$(hide) mkdir -p $(PUBLISH_DEST)
 	$(TARGET_DEVICE_DIR)/extra_files/acrn-guest/md5_check.sh $(ACRN_TMP_DIR)
 	$(hide) zip -qrjX $(ACRN_FLASHFILES) $(ACRN_TMP_DIR)

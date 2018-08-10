@@ -1,6 +1,6 @@
 #!/bin/bash
 
-check_sum_imgs=(flash_AaaG.json sos_boot.img sos_rootfs.img partition_desc.bin)
+check_sum_imgs=(sos_boot.img sos_rootfs.img partition_desc.bin)
 
 if [ -a "$1/md5sum.md5" ];then
 	cat $1/md5sum.md5 | while read line

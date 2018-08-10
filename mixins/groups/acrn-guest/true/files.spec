@@ -6,3 +6,5 @@ aria2c: "SOS Download tool"
 flash.json: "Flash file by PFT"
 bootloader_gr_mrb_b1: "Pre-build bootloader"
 gpt_gr_mrb_b1.bin: "Pre-build GPT"
+[devicefiles]
+flash_AaaG.json: "Flash file by PFT"
