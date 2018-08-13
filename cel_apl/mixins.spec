@@ -13,14 +13,10 @@ boot-arch: efi(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=t
 graphics: mesa(gralloc1=true,gen9+=true,hwc2=true,vulkan=false,drmhwc=false,minigbm=true)
 cpu-arch: slm
 #thermal: dptf_configurable(intel_modem=true,thermal_lite=true,platform=kbl)
-thermal: none
 serialport: ttyS1
-gptbuild: false
 #gptbuild: true(size=7G)
 flashfiles: ini(fast_flashfiles=false, oemvars=false,installer=true,flash_dnx_os=false,blank_no_fw=true)
 storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=false)
-slot-ab: false
-avb: false
 sepolicy: permissive
 widevine: L3_Gen
 touch: galax7200
@@ -35,22 +31,16 @@ debug-npk: true(default_cfg=none, console_master_range="57 60", console_channel_
 debug-dvc_desc: npk
 wlan: iwlwifi(iwl_sub_folder=dev,firmware=iwl-fw-celadon,iwl_defconfig=kbl,iwl_platform=celadon)
 bluetooth: btusb(firmware=bt_fw_cel,ivi=true)
-variants: false
 disk-bus: auto
 vendor-partition: true
 config-partition: true
 dexpreopt: enabled
 dalvik-heap: tablet-7in-hdpi-1024
-houdini: false
 bugreport: default
 ethernet: dhcp
 rfkill: true(force_disable=)
-gps: none
 audio: project-celadon
-media-audio: none
-camera: none
 camera-ext: ext-camera-only
-sensors: none
 usb: host+acc
 usb-gadget: configfs(mtp_adb_pid=0x0a5f,ptp_adb_pid=0x0a61,rndis_pid=0x0a62,rndis_adb_pid=0x0a63,bcdDevice=0x0,bcdUSB=0x200,controller=dwc3.0.auto,f_acm=false,f_dvc_trace=false)
 navigationbar: true
@@ -65,8 +55,6 @@ pstore: ram_dummy(address=0x50000000,size=0x400000,record_size=0x4000,console_si
 fota: true
 trusty: true(enable_hw_sec=true, enable_storage_proxyd=true, ref_target=project-celadon_64)
 factory-scripts: true
-charger: false
-telephony: none
 memtrack: true
 security: cse
 debugfs: default
