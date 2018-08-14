@@ -24,8 +24,3 @@ if [ -f device/intel/mixins/mixin-update ]; then
     fi
 fi
 
-function get_make_command()
-{
-    echo command make
-}
-
