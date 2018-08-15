@@ -56,7 +56,7 @@ do
   cd $top_dir/$current_project
   a=`grep "Date: " $patch_dir/$i`
   b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD $default_revision..HEAD | grep "$b"`
+  c=`git log --pretty=format:%aD | grep "$b"`
 
   if [[ "$c" == "" ]] ; then
     git am $patch_dir/$i >& /dev/null
