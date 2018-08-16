@@ -590,6 +590,7 @@ $(ACRN_GPTIMAGE_BIN): \
 ######################################################################
 # Define Specific Kernel Config for ACRN
 ######################################################################
+
 KERNEL_ACRN_GUEST_DIFFCONFIG = $(wildcard $(KERNEL_CONFIG_PATH)/acrn_guest_diffconfig)
 KERNEL_DIFFCONFIG += $(KERNEL_ACRN_GUEST_DIFFCONFIG)
 
@@ -614,19 +615,14 @@ ACRN_MD5SUM_MD5 = md5sum.md5
 ACRN_TMP_DIR := $(PRODUCT_OUT)/acrn_fls
 ACRN_GETLINK_SCRIPT := $(TARGET_DEVICE_DIR)/extra_files/acrn-guest/getlink.py
 ACRN_VERSION_CONFIG := $(TARGET_DEVICE_DIR)/extra_files/acrn-guest/acrnversion.cfg
-FLASH_JSON_CONFIG := $(TARGET_DEVICE_DIR)/extra_files/acrn-guest/flash.json
-PRE_BUILD_BLD := $(TARGET_DEVICE_DIR)/extra_files/acrn-guest/bootloader_gr_mrb_b1
-PRE_BUILD_GPT := $(TARGET_DEVICE_DIR)/extra_files/acrn-guest/gpt_gr_mrb_b1.bin
 LOCAL_SOS_PATH = $(TARGET_DEVICE_DIR)/acrn_sos
 ACRN_EXT4_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT)_AaaG.img
 ACRN_EXT4_BIN_ZIP = $(PRODUCT_OUT)/$(TARGET_PRODUCT)_AaaG.zip
 PUBLISH_DEST := $(TOP)/pub/$(TARGET_PRODUCT)/$(TARGET_BUILD_VARIANT)
 ifeq ($(strip $(BUILD_NUMBER)),)
 ACRN_FLASHFILES = $(PRODUCT_OUT)/$(TARGET_PRODUCT)-flashfiles.zip
-GUEST_FLASHFILES = $(PRODUCT_OUT)/$(TARGET_PRODUCT)-guest.zip
 else
 ACRN_FLASHFILES = $(PRODUCT_OUT)/$(TARGET_PRODUCT)-flashfiles-$(BUILD_NUMBER).zip
-GUEST_FLASHFILES = $(PRODUCT_OUT)/$(TARGET_PRODUCT)-guest-$(BUILD_NUMBER).zip
 endif
 
 ######################################################################
@@ -648,7 +644,7 @@ else
 endif
 
 ######################################################################
-# Download files from the link, $2 was the link, $1 was
+# Download files from the link to point dir, $2 was the link, $1 was
 # the download file, $3 was the dir
 ######################################################################
 ARIA2C := $(TARGET_DEVICE_DIR)/extra_files/acrn-guest/aria2c
@@ -676,7 +672,7 @@ define load-fw
 endef
 
 ######################################################################
-# Generate ACRN AaaG Image
+# Generate ACRN AaaG Extra4 Image
 ######################################################################
 .PHONY: acrn_ext4_bin
 acrn_ext4_bin: $(ACRN_GPTIMAGE_BIN)
@@ -694,7 +690,6 @@ acrn_ext4_bin: $(ACRN_GPTIMAGE_BIN)
 .PHONY: img_download
 ifeq ($(strip $(SOS_VERSION)),local)
 img_download:
-	$(hide) rm -rf $(ACRN_TMP_DIR)
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
 	$(call load-fw)
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
@@ -741,7 +736,7 @@ acrn_image: acrn_ext4_bin
 # Generate ACRN E2E flashfiles *.zip
 ######################################################################
 .PHONY: acrn_flashfiles
-acrn_flashfiles: acrn_ext4_bin
+acrn_flashfiles: acrn_ext4_bin flashfiles
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
 	$(hide) cp $(ACRN_EXT4_BIN) $(ACRN_TMP_DIR)
 	$(hide) cp $(TARGET_DEVICE_DIR)/flash_AaaG.json $(ACRN_TMP_DIR)
@@ -752,27 +747,7 @@ acrn_flashfiles: acrn_ext4_bin
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	echo ">>> $@ is generated successfully"
 
-######################################################################
-# Generate ACRN Guest flashfiles *.zip
-######################################################################
-.PHONY: acrn_guest
-acrn_guest: acrn_ext4_bin
-	$(hide) mkdir -p $(PUBLISH_DEST)
-	@$(ACP) $(PRE_BUILD_BLD) $(PRODUCT_OUT)
-	@$(ACP) $(PRE_BUILD_GPT) $(PRODUCT_OUT)
-	@$(ACP) $(FLASH_JSON_CONFIG) $(PRODUCT_OUT)
-	$(hide) zip -qrjX $(GUEST_FLASHFILES) \
-	$(PRODUCT_OUT)/flash.json \
-	$(PRODUCT_OUT)/gpt.img \
-	$(PRODUCT_OUT)/gpt_gr_mrb_b1.bin \
-	$(PRODUCT_OUT)/bootloader_gr_mrb_b1 \
-	$(PRODUCT_OUT)/boot.img \
-	$(PRODUCT_OUT)/tos.img \
-	$(PRODUCT_OUT)/vbmeta.img \
-	$(PRODUCT_OUT)/vendor.img \
-	$(PRODUCT_OUT)/system.img
-	@$(ACP) $(GUEST_FLASHFILES) $(PUBLISH_DEST)
-	echo ">>> $@ is generated successfully"
+droid: acrn_flashfiles
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
 ##############################################################
