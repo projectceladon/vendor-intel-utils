@@ -43,7 +43,7 @@ do
   cd $top_dir/$current_project
   remote=`git remote -v | grep "https://android.googlesource.com/"`
   if [[ -z "$remote" ]]; then
-    default_revision="remotes/m/master"
+    default_revision="remotes/m/omr1"
   else
     if [[ -f "$top_dir/.repo/manifest.xml" ]]; then
       default_revision=`grep default $top_dir/.repo/manifest.xml | grep -o 'revision="[^"]\+"' | cut -d'=' -f2 | sed 's/\"//g'`
