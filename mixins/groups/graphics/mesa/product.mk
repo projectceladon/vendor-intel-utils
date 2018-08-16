@@ -34,7 +34,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
 
 INTEL_HWC_CONFIG := $(INTEL_PATH_VENDOR)/external/hwcomposer-intel
 
-ifeq ($(TARGET_PRODUCT),gordon_peak_acrn)
+ifeq ($(findstring _acrn,$(TARGET_PRODUCT)),_acrn)
 PRODUCT_COPY_FILES += $(INTEL_HWC_CONFIG)/hwc_display_virt.ini:$(TARGET_COPY_OUT_VENDOR)/etc/hwc_display.ini
 else
 PRODUCT_COPY_FILES += $(INTEL_HWC_CONFIG)/hwc_display.ini:$(TARGET_COPY_OUT_VENDOR)/etc/hwc_display.ini
