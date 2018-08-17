@@ -187,6 +187,13 @@ ifeq ($(DEV_BKC_KERNEL), true)
   KERNEL_CONFIG_PATH := 
   EXT_MODULES := 
   DEBUG_MODULES := 
+
+else ifeq ($(LTS2018_KERNEL), true)
+  LOCAL_KERNEL_SRC := 
+  KERNEL_CONFIG_PATH := 
+  EXT_MODULES := 
+  DEBUG_MODULES := 
+
 else
   LOCAL_KERNEL_SRC := kernel/4.14
   EXT_MODULES := 

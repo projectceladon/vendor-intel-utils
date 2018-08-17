@@ -24,6 +24,13 @@ ifeq ($(DEV_BKC_KERNEL), true)
   KERNEL_CONFIG_PATH := {{dev_bkc_cfg_path}}
   EXT_MODULES := {{{dev_bkc_external_modules}}}
   DEBUG_MODULES := {{{dev_bkc_debug_modules}}}
+
+else ifeq ($(LTS2018_KERNEL), true)
+  LOCAL_KERNEL_SRC := {{{lts2018_src_path}}}
+  KERNEL_CONFIG_PATH := {{{lts2018_cfg_path}}}
+  EXT_MODULES := {{{lts2018_external_modules}}}
+  DEBUG_MODULES := {{{lts2018_debug_modules}}}
+
 else
   LOCAL_KERNEL_SRC := {{{src_path}}}
   EXT_MODULES := {{{external_modules}}}
