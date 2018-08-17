@@ -257,7 +257,7 @@ KERNEL_DEPS := $(shell find $(LOCAL_KERNEL_SRC) \( -name *.git -prune \) -o -pri
 # and stop kernel build.
 # If a .config is already present, save it before processing
 # the check and restore it at the end
-$(CHECK_CONFIG_LOG): $(KERNEL_DEFCONFIG) $(KERNEL_DEPS)
+$(CHECK_CONFIG_LOG): $(KERNEL_DEFCONFIG) $(KERNEL_DEPS) | yoctotoolchain
 	$(hide) mkdir -p $(@D)
 	-$(hide) [[ -e $(KERNEL_CONFIG) ]] && mv -f $(KERNEL_CONFIG) $(KERNEL_CONFIG).save
 	$(hide) cat $< > $(KERNEL_CONFIG)
