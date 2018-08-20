@@ -193,6 +193,8 @@ $(bootloader_bin): bootloader
 ##############################################################
 KERNEL_MARVELL_DIFFCONFIG += $(wildcard $(LOCAL_KERNEL_SRC)/arch/x86/configs/cfg80211_diffconfig)
 KERNEL_DIFFCONFIG += $(KERNEL_MARVELL_DIFFCONFIG)
+
+LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/wlan/load_mwifiex.in
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/kernel/gmin64/AndroidBoard.mk
 ##############################################################
