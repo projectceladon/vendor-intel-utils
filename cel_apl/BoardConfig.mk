@@ -366,6 +366,10 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/pstore
 # Source: device/intel/project-celadon/mixins/groups/pstore/ram_dummy/BoardConfig.mk
 ##############################################################
 BOARD_KERNEL_CMDLINE += \
+	memmap=0x400000\$$0x50000000 \
+	ramoops.mem_address=0x50000000 \
+	ramoops.mem_size=0x400000
+BOARD_KERNEL_CMDLINE += \
 	ramoops.record_size=0x4000
 
 BOARD_KERNEL_CMDLINE += \

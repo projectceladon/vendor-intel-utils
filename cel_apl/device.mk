@@ -132,7 +132,8 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += \
     libdrm \
     libdrm_intel \
-    libsync
+    libsync \
+    libmd
 
 PRODUCT_PACKAGES += ufo_prebuilts
 
