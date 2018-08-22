@@ -72,7 +72,7 @@ ifeq (False,true)
 TARGET_USERIMAGES_USE_F2FS := true
 BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := f2fs
 INTERNAL_USERIMAGES_EXT_VARIANT := f2fs
-BOARD_USERDATAIMAGE_PARTITION_SIZE ?= 2621440000
+BOARD_USERDATAIMAGE_PARTITION_SIZE ?= 3774873600
 else
 TARGET_USERIMAGES_USE_EXT4 := true
 BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
@@ -175,7 +175,6 @@ TARGET_COPY_OUT_VENDOR := vendor
 BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
 BOARD_VENDORIMAGE_PARTITION_SIZE := $(shell echo 800*1048576 | bc)
 AB_OTA_PARTITIONS += vendor
-BOARD_VENDORIMAGE_PARTITION_SIZE := 838860800
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/config-partition/true/BoardConfig.mk
 ##############################################################
