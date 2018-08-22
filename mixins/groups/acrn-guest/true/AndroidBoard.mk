@@ -153,7 +153,7 @@ acrn_image: acrn_ext4_bin
 # Generate ACRN E2E flashfiles *.zip
 ######################################################################
 .PHONY: acrn_flashfiles
-acrn_flashfiles: acrn_ext4_bin flashfiles
+acrn_flashfiles: acrn_ext4_bin flashfiles publish_otapackage publish_ota_targetfiles
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
 	$(hide) cp $(ACRN_EXT4_BIN) $(ACRN_TMP_DIR)
 	$(hide) cp $(TARGET_DEVICE_DIR)/flash_AaaG.json $(ACRN_TMP_DIR)
