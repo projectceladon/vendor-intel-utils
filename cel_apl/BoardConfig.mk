@@ -49,6 +49,7 @@ TARGET_RECOVERY_PIXEL_FORMAT := "BGRA_8888"
 #
 
 # NOTE: These values must be kept in sync with BOARD_GPT_INI
+BOARD_BOOTIMAGE_PARTITION_SIZE ?= 31457280
 BOARD_SYSTEMIMAGE_PARTITION_SIZE ?= 3221225472
 BOARD_TOSIMAGE_PARTITION_SIZE := 10485760
 BOARD_BOOTLOADER_PARTITION_SIZE ?= $$((33 * 1024 * 1024))
@@ -98,6 +99,8 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
 
 
 KERNELFLINGER_USE_RPMB_SIMULATE := true
+
+
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################
