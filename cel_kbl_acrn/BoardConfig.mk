@@ -324,12 +324,6 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/gms/overlay
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/security
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/debug-logs/true/BoardConfig.mk
-##############################################################
-ifeq ($(TARGET_BUILD_VARIANT),userdebug)
-BOARD_KERNEL_CMDLINE += nokaslr
-endif
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-crashlogd/true/BoardConfig.mk
 ##############################################################
 ifeq ($(MIXIN_DEBUG_LOGS),true)

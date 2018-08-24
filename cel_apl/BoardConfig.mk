@@ -352,12 +352,6 @@ USE_MEDIASDK := true
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/hdcpd
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/debug-logs/true/BoardConfig.mk
-##############################################################
-ifeq ($(TARGET_BUILD_VARIANT),userdebug)
-BOARD_KERNEL_CMDLINE += nokaslr
-endif
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/pstore/ram_dummy/BoardConfig.mk.1
 ##############################################################
 BOARD_KERNEL_CMDLINE += pstore.backend=ramoops
