@@ -30,6 +30,7 @@ LOCAL_SOS_PATH = $(TARGET_DEVICE_DIR)/acrn_sos
 ACRN_EXT4_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT)_AaaG.img
 ACRN_EXT4_BIN_ZIP = $(PRODUCT_OUT)/$(TARGET_PRODUCT)_AaaG.zip
 PUBLISH_DEST := $(TOP)/pub/$(TARGET_PRODUCT)/$(TARGET_BUILD_VARIANT)
+GUEST_FLASHFILES = $(PRODUCT_OUT)/$(TARGET_PRODUCT)-guest-flashfiles*.zip
 ifeq ($(strip $(BUILD_NUMBER)),)
 ACRN_FLASHFILES = $(PRODUCT_OUT)/$(TARGET_PRODUCT)-flashfiles.zip
 else
@@ -163,6 +164,7 @@ acrn_flashfiles: acrn_ext4_bin flashfiles publish_otapackage publish_ota_targetf
 	{{/md5_check}}
 	$(hide) zip -qrjX $(ACRN_FLASHFILES) $(ACRN_TMP_DIR)
 	@$(ACP) $(ACRN_FLASHFILES) $(PUBLISH_DEST)
+	@$(ACP) $(GUEST_FLASHFILES) $(PUBLISH_DEST)
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	echo ">>> $@ is generated successfully"
 
