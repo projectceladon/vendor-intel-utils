@@ -24,3 +24,6 @@ this option is used to add avb support
     --- code dir
         - external/avb/
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

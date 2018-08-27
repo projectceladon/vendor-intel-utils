@@ -11,3 +11,9 @@ only one target is generated, one provdata, one ota package.
 
 --- true
 enable variants feature.
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+It links false option.
+
+

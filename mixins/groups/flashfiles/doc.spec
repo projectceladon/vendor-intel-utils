@@ -36,3 +36,6 @@ this option is used to use ini configure for flash
     --- extra files
         - flashfiles.ini: "define the flash procedure for phoneflashtool and installer.efi"
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

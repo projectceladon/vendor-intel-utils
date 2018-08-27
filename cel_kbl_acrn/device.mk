@@ -296,10 +296,6 @@ PRODUCT_COPY_FILES += \
 ##############################################################
 PRODUCT_COPY_FILES += $(INTEL_PATH_COMMON)/rfkill/rfkill-init.sh:vendor/bin/rfkill-init.sh
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/bluetooth/none/product.mk
-##############################################################
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += config.disable_bluetooth=true
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/codecs/configurable/product.mk
 ##############################################################
 # Audio/video codec support.
@@ -414,19 +410,6 @@ AFOTAAPP_EULA_PATH :=
 AFOTAAPP_LOG_LEVEL := DEBUG
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/fota
 endif
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/telephony/none/product.mk
-##############################################################
-# product.mk common to Telephony disabled platforms
-PRODUCT_COPY_FILES += \
-    $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/all/apns-conf.xml:system/etc/old-apns-conf.xml
-
-# Inherit from common Open Source Telephony product configuration
-$(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
-
-DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/overlay_none
-PRODUCT_PROPERTY_OVERRIDES += \
-    ro.radio.noril=true
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-logs/true/product.mk
 ##############################################################
@@ -559,13 +542,6 @@ PRODUCT_PACKAGES += power.$(TARGET_BOARD_PLATFORM) \
 # Source: device/intel/project-celadon/mixins/groups/mediaserver-radio/true/product.mk
 ##############################################################
 PRODUCT_PACKAGES += mediaserver-radio
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/hdcpd/true/product.mk
-##############################################################
-# Enable media content protection services
-
-# HDCP Daemon
-PRODUCT_PACKAGES += hdcpd
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-usb-config/true/product.mk
 ##############################################################
@@ -749,13 +725,12 @@ PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/audio/libfwdt/reef-apl.ri:vendor/firmware/intel/reef-apl.ri \
     $(LOCAL_PATH)/audio/libfwdt/reef-apl.tplg:vendor/firmware/intel/reef-apl.tplg
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
+# Source: device/intel/project-celadon/mixins/groups/hdcpd/true/product.mk
 ##############################################################
-# Default
-# Thermal Hal
-PRODUCT_PACKAGES += thermal.default \
-                    android.hardware.thermal@1.0-service \
-                    android.hardware.thermal@1.0-impl
+# Enable media content protection services
+
+# HDCP Daemon
+PRODUCT_PACKAGES += hdcpd
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
 ##############################################################
@@ -801,12 +776,33 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.stacks_timeout=1500
 
 endif
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/telephony/default/product.mk
+##############################################################
+# product.mk common to Telephony disabled platforms
+PRODUCT_COPY_FILES += \
+    $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/all/apns-conf.xml:system/etc/old-apns-conf.xml
+
+# Inherit from common Open Source Telephony product configuration
+$(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
+
+DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/overlay_none
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.radio.noril=true
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/filesystem_config/default/product.mk
 ##############################################################
 PRODUCT_PACKAGES += \
 	fs_config_files \
 	fs_config_dirs
 
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
+##############################################################
+# Default
+# Thermal Hal
+PRODUCT_PACKAGES += thermal.default \
+                    android.hardware.thermal@1.0-service \
+                    android.hardware.thermal@1.0-impl
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jack/default/product.mk
 ##############################################################

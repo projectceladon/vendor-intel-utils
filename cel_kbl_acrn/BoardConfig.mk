@@ -345,14 +345,6 @@ POWER_THROTTLE := true
 BOARD_SEPOLICY_M4DEFS += module_power=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/power
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/hdcpd/true/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/hdcpd
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/autodetect/false/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/autodetect/false
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-dvc_desc/npk/BoardConfig.mk
 ##############################################################
 ifneq ($(TARGET_BUILD_VARIANT),user)
@@ -412,22 +404,14 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/memtrack
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug_agent
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/hdcpd/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/hdcpd
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/acrn-guest/true/BoardConfig.mk
 ##############################################################
 # can't use := here, as PRODUCT_OUT is not defined yet
 ACRN_GPTIMAGE_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT).img
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/thermal/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal/default
-BOARD_KERNEL_CMDLINE += thermal.off=1
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/ioc/false/BoardConfig.mk
-##############################################################
-ifeq (none,cbc)
-IOC_USE_CBC := true
-endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/BoardConfig.mk
 ##############################################################
@@ -490,6 +474,10 @@ ALLOW_MISSING_DEPENDENCIES := true
 ##############################################################
 DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/ims/carrier/res_ims
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/autodetect/default/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/autodetect/false
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debugfs/default/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
@@ -499,9 +487,27 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
 #setting for embms dep in framework
 TARGET_HAS_EMBMS_ENABLE := false
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/factory-scripts/default/BoardConfig.mk
+##############################################################
+# Include factory archive in 'make dist' output
+TARGET_BUILD_INTEL_FACTORY_SCRIPTS := true
+
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/filesystem_config/default/BoardConfig.mk
 ##############################################################
 TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/thermal/default/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal/default
+BOARD_KERNEL_CMDLINE += thermal.off=1
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/ioc/default/BoardConfig.mk
+##############################################################
+ifeq (none,cbc)
+IOC_USE_CBC := true
+endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jpeg-turbo/default/BoardConfig.mk
 ##############################################################

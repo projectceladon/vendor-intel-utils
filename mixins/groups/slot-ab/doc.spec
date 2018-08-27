@@ -21,3 +21,6 @@ this option is used to add slotab support
         - nb_slot: number of slots
 
     --- code dir
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

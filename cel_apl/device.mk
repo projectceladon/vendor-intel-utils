@@ -178,52 +178,6 @@ PRODUCT_PROPERTY_OVERRIDES += \
 
 
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
-##############################################################
-
-KM_VERSION := 2
-
-ifeq ($(KM_VERSION),2)
-PRODUCT_PACKAGES += \
-	keystore.trusty
-PRODUCT_PROPERTY_OVERRIDES += \
-	ro.hardware.keystore=trusty
-endif
-
-ifeq ($(KM_VERSION),1)
-PRODUCT_PACKAGES += \
-	keystore.${TARGET_BOARD_PLATFORM}
-endif
-
-PRODUCT_PACKAGES += \
-	libtrusty \
-	intelstorageproxyd \
-	libinteltrustystorage \
-	libinteltrustystorageinterface \
-	gatekeeper.trusty \
-	android.hardware.gatekeeper@1.0-impl \
-	android.hardware.gatekeeper@1.0-service \
-
-PRODUCT_PACKAGES_DEBUG += \
-	intel-secure-storage-unit-test \
-	gatekeeper-unit-tests \
-	libscrypt_static \
-	scrypt_test \
-
-PRODUCT_PROPERTY_OVERRIDES += \
-	ro.hardware.gatekeeper=trusty \
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/product.mk
-##############################################################
-PRODUCT_VENDOR_VERITY_PARTITION := /dev/block/by-name/vendor
-
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/sh_recovery:recovery/root/vendor/bin/sh
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/mkshrc_recovery:recovery/root/vendor/etc/mkshrc
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/toolbox_recovery:recovery/root/vendor/bin/toolbox_static
-PRODUCT_PACKAGES += \
-     toybox_static \
-     toybox_vendor \
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/storage/sdcard-mmc0-usb-sd/product.mk
 ##############################################################
 
@@ -416,6 +370,17 @@ PRODUCT_PACKAGES += \
 
 PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-car-disablehfp
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/product.mk
+##############################################################
+PRODUCT_VENDOR_VERITY_PARTITION := /dev/block/by-name/vendor
+
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/sh_recovery:recovery/root/vendor/bin/sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/mkshrc_recovery:recovery/root/vendor/etc/mkshrc
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/toolbox_recovery:recovery/root/vendor/bin/toolbox_static
+PRODUCT_PACKAGES += \
+     toybox_static \
+     toybox_vendor \
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/dalvik-heap/tablet-7in-hdpi-1024/product.mk
 ##############################################################
 #include frameworks/native/build/tablet-7in-hdpi-1024-dalvik-heap.mk
@@ -600,18 +565,40 @@ AFOTAAPP_LOG_LEVEL := DEBUG
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/fota
 endif
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/telephony/none/product.mk
+# Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
 ##############################################################
-# product.mk common to Telephony disabled platforms
-PRODUCT_COPY_FILES += \
-    $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/all/apns-conf.xml:system/etc/old-apns-conf.xml
 
-# Inherit from common Open Source Telephony product configuration
-$(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
+KM_VERSION := 2
 
-DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/overlay_none
+ifeq ($(KM_VERSION),2)
+PRODUCT_PACKAGES += \
+	keystore.trusty
 PRODUCT_PROPERTY_OVERRIDES += \
-    ro.radio.noril=true
+	ro.hardware.keystore=trusty
+endif
+
+ifeq ($(KM_VERSION),1)
+PRODUCT_PACKAGES += \
+	keystore.${TARGET_BOARD_PLATFORM}
+endif
+
+PRODUCT_PACKAGES += \
+	libtrusty \
+	intelstorageproxyd \
+	libinteltrustystorage \
+	libinteltrustystorageinterface \
+	gatekeeper.trusty \
+	android.hardware.gatekeeper@1.0-impl \
+	android.hardware.gatekeeper@1.0-service \
+
+PRODUCT_PACKAGES_DEBUG += \
+	intel-secure-storage-unit-test \
+	gatekeeper-unit-tests \
+	libscrypt_static \
+	scrypt_test \
+
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.hardware.gatekeeper=trusty \
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/memtrack/true/product.mk
 ##############################################################
@@ -631,6 +618,19 @@ PRODUCT_PACKAGES += lights.$(TARGET_BOARD_PLATFORM) \
     android.hardware.light@2.0-service \
     android.hardware.light@2.0-impl
 
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/telephony/default/product.mk
+##############################################################
+# product.mk common to Telephony disabled platforms
+PRODUCT_COPY_FILES += \
+    $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/all/apns-conf.xml:system/etc/old-apns-conf.xml
+
+# Inherit from common Open Source Telephony product configuration
+$(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
+
+DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/overlay_none
+PRODUCT_PROPERTY_OVERRIDES += \
+    ro.radio.noril=true
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/midi/true/product.mk
 ##############################################################
@@ -693,6 +693,14 @@ PRODUCT_PACKAGES += \
 	fs_config_files \
 	fs_config_dirs
 
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
+##############################################################
+# Default
+# Thermal Hal
+PRODUCT_PACKAGES += thermal.default \
+                    android.hardware.thermal@1.0-service \
+                    android.hardware.thermal@1.0-impl
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jack/default/product.mk
 ##############################################################
