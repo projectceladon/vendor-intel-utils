@@ -1,2 +1,2 @@
 [mixinfo]
-deps = boot-arch vendor-partition bluetooth product-partition odm-partition
+deps = boot-arch vendor-partition bluetooth product-partition odm-partition acpi-partition acpio-partition

@@ -527,6 +527,8 @@ raw_factory := none
 tos_bin := none
 raw_product := none
 raw_odm := none
+raw_acpi := none
+raw_acpio := none
 
 .PHONY: none
 none: ;
@@ -556,6 +558,8 @@ ifeq ($(strip $(TARGET_USE_TRUSTY)),true)
 $(ACRN_GPTIMAGE_BIN): tosimage
 tos_bin = $(INSTALLED_TOS_IMAGE_TARGET)
 endif
+
+
 
 
 $(ACRN_GPTIMAGE_BIN): \

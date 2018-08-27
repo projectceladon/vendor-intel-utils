@@ -18,7 +18,7 @@ PRODUCT_PACKAGES += \
     VmsSubscriberClientSample \
 
 PRODUCT_PACKAGES += android.hardware.automotive.vehicle.intel@2.0-service \
-    android.hardware.automotive.audiocontrol@1.0-service
+    android.hardware.automotive.audiocontrol@1.0-service.intel
 
 VEHICLE_HAL_PROTO_TYPE := {{vhal-proto-type}}
 {{#ioc}}

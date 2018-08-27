@@ -272,14 +272,6 @@ ifneq ($(TARGET_BUILD_VARIANT),user)
 BOARD_KERNEL_CMDLINE += console=ttyS1,115200n8
 endif
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/BoardConfig.mk
-##############################################################
-# Those 3 lines are required to enable vendor image generation.
-# Remove them if vendor partition is not used.
-TARGET_COPY_OUT_VENDOR := vendor
-BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_VENDORIMAGE_PARTITION_SIZE := $(shell echo 700*1048576 | bc)
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/BoardConfig.mk
 ##############################################################
 TARGET_USE_TRUSTY := true
@@ -326,6 +318,14 @@ BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
 
 #TOS_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/tos.img
 #EVMM_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/multiboot.img
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/BoardConfig.mk
+##############################################################
+# Those 3 lines are required to enable vendor image generation.
+# Remove them if vendor partition is not used.
+TARGET_COPY_OUT_VENDOR := vendor
+BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
+BOARD_VENDORIMAGE_PARTITION_SIZE := $(shell echo 700*1048576 | bc)
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/flashfiles/ini/BoardConfig.mk
 ##############################################################

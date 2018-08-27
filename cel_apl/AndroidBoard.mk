@@ -394,6 +394,25 @@ _EXTRA_FW_ += $(I915_FW)
 #so build ufo_prebuilts before kernel.
 $(LOCAL_KERNEL) : ufo_prebuilts
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
+##############################################################
+.PHONY: lk evmm tosimage multiboot
+
+LOCAL_MAKE := make
+
+lk:
+	@echo "making lk.elf.."
+	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
+
+evmm: yoctotoolchain
+	@echo "making evmm.."
+	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
+
+# include sub-makefile according to boot_arch
+include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_efi.mk
+
+LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/AndroidBoard.mk
 ##############################################################
 include $(CLEAR_VARS)
@@ -416,25 +435,6 @@ $(RECOVERY_VENDOR_LINKS):
 	$(hide) ln -sf $(PRV_TARGET) $@
 
 ALL_DEFAULT_INSTALLED_MODULES += $(RECOVERY_VENDOR_LINKS)
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
-##############################################################
-.PHONY: lk evmm tosimage multiboot
-
-LOCAL_MAKE := make
-
-lk:
-	@echo "making lk.elf.."
-	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
-
-evmm: yoctotoolchain
-	@echo "making evmm.."
-	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
-
-# include sub-makefile according to boot_arch
-include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_efi.mk
-
-LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/flashfiles/ini/AndroidBoard.mk
 ##############################################################

@@ -178,17 +178,6 @@ PRODUCT_PROPERTY_OVERRIDES += \
 
 
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/product.mk
-##############################################################
-PRODUCT_VENDOR_VERITY_PARTITION := /dev/block/by-name/vendor
-
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/sh_recovery:recovery/root/vendor/bin/sh
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/mkshrc_recovery:recovery/root/vendor/etc/mkshrc
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/toolbox_recovery:recovery/root/vendor/bin/toolbox_static
-PRODUCT_PACKAGES += \
-     toybox_static \
-     toybox_vendor \
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
 ##############################################################
 
@@ -223,6 +212,17 @@ PRODUCT_PACKAGES_DEBUG += \
 
 PRODUCT_PROPERTY_OVERRIDES += \
 	ro.hardware.gatekeeper=trusty \
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/product.mk
+##############################################################
+PRODUCT_VENDOR_VERITY_PARTITION := /dev/block/by-name/vendor
+
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/sh_recovery:recovery/root/vendor/bin/sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/mkshrc_recovery:recovery/root/vendor/etc/mkshrc
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/vendor-partition/toolbox_recovery:recovery/root/vendor/bin/toolbox_static
+PRODUCT_PACKAGES += \
+     toybox_static \
+     toybox_vendor \
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/storage/sdcard-mmc0-usb-sd/product.mk
 ##############################################################
@@ -529,7 +529,7 @@ PRODUCT_PACKAGES += \
     VmsSubscriberClientSample \
 
 PRODUCT_PACKAGES += android.hardware.automotive.vehicle.intel@2.0-service \
-    android.hardware.automotive.audiocontrol@1.0-service
+    android.hardware.automotive.audiocontrol@1.0-service.intel
 
 VEHICLE_HAL_PROTO_TYPE := google-emulator
 ##############################################################
