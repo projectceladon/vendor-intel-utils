@@ -1,8 +1,12 @@
+[mapping]
+audio/AndroidBoard.mk: audio/AndroidBoard.mk
+audio/audio_policy_configuration.xml: audio/audio_policy_configuration.xml
 [extrafiles]
 manifest.xml:
 
 [devicefiles]
-audio:
+audio/AndroidBoard.mk:
+audio/audio_policy_configuration.xml:
 bldr_utils.img:
 bootloader.img:
 multiboot.img:

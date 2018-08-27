@@ -457,6 +457,11 @@ USB_CONFIG := mtp
 ifeq ($(TARGET_BUILD_VARIANT),user)
 # Enable Secure Debugging
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.adb.secure=1
+
+ifeq ($(USB_CONFIG), adb)
+USB_CONFIG := mtp
+endif
+
 ifeq ($(BUILD_FOR_CTS_AUTOMATION),true)
 # Build for automated CTS
 ifneq ($(USB_CONFIG), adb)
