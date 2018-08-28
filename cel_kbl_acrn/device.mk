@@ -737,6 +737,10 @@ PRODUCT_COPY_FILES += \
 # HDCP Daemon
 PRODUCT_PACKAGES += hdcpd
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/bluetooth/default/product.mk
+##############################################################
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += config.disable_bluetooth=true
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
 ##############################################################
 ##############################################################
