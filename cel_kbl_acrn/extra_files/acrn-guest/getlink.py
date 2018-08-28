@@ -45,9 +45,9 @@ def main():
         v = num.version[-5]
         v = v[:-1]
         acrnversion = "sos_version_" + sos_date_version + "_" + v
-        acrnlink = acrnlink + "/" + v + "/pub"
+        acrnlink = acrnlink + "/" + v + "/gordonpeak/virtualization"
     else:
-        acrnlink = sos_link + "/" + sos_date_version + "/pub"
+        acrnlink = sos_link + "/" + sos_date_version + "/gordonpeak/virtualization"
         acrnversion = "sos_version" + "_" + sos_date_version
 
     try:

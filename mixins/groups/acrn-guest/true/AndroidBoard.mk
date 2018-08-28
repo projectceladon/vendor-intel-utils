@@ -48,7 +48,7 @@ ifeq ($(strip $(SOS_VERSION)),)
     ifeq ($(strip $(SOS_VERSION_CFG)), 'latest')
         ACRN_LINK := $(word 2,$(strip $(shell python $(ACRN_GETLINK_SCRIPT) $(ACRN_VERSION_CONFIG) $(SOS_VERSION))))
     else
-        ACRN_LINK := $(SOS_LINK_CFG)/$(SOS_VERSION_CFG)/pub
+        ACRN_LINK := $(SOS_LINK_CFG)/$(SOS_VERSION_CFG)/gordonpeak/virtualization
     endif
 else
     SOS_VERSION_CFG := $(SOS_VERSION)
