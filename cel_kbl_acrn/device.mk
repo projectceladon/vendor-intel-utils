@@ -539,8 +539,8 @@ PRODUCT_PACKAGES += lights.$(TARGET_BOARD_PLATFORM) \
 ##############################################################
 # Power HAL
 PRODUCT_PACKAGES += power.$(TARGET_BOARD_PLATFORM) \
-                    android.hardware.power@1.1-service \
-                    android.hardware.power@1.1-impl \
+                    android.hardware.power@1.2-service \
+                    android.hardware.power@1.2-impl \
                     power_hal_helper
 
 ##############################################################
