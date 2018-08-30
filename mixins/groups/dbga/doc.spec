@@ -15,3 +15,7 @@ use this option to enable DebugAgent
 		- vendor/intel/tools/dbga
 		- device/intel/sepolicy/debug_agent
 
+
+--- false
+use this option to disable DebugAgent
+

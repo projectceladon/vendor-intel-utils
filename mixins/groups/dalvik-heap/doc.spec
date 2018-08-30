@@ -10,3 +10,6 @@ dalvik-heap is used to set Java heap property settings based on device type.
 
 --- tablet-7in-400dpi-4096
 7 inch table 400 dpi settings.
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

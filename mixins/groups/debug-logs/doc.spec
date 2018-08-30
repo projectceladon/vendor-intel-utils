@@ -24,3 +24,9 @@ this option will enable android build logs
     --- extra files
         - init.logs.rc: "Debug specific init scripts"
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+--- false
+this option will disable all android platform logs to specific folder.

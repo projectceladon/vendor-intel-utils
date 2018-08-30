@@ -8,3 +8,8 @@ touch group is used to configure touch controller.
 eGalax 7200 touch controller configuration.
 
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+

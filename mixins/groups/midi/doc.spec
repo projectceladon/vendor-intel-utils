@@ -11,3 +11,11 @@ and other time-oriented media. See [1] for MIDI support in Android.
 --- true
 enable midi feature.
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+
+
+--- false
+empty dir.

@@ -25,3 +25,6 @@ this option is used to enable support for external camera in build. There is no 
         - hardware/interface/camera/device/3.4/default/ExternalCamera*
         - hardware/interface/camera/device/3.4/default/include/ext_device_v3_4_impl/ExternalCamera*
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

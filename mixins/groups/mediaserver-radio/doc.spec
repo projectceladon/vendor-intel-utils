@@ -12,3 +12,9 @@ This group is needed in order to:
 --- true
 Add the "radio" group permission to the media server service.
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+It's empty dir.
+
+

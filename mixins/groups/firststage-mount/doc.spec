@@ -9,3 +9,6 @@ when not explicitly selected in mixin spec file, the default option will be used
 
 
 
+
+--- false
+Disable First-Stage Mount feature.

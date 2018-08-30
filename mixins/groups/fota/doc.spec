@@ -16,3 +16,13 @@ this option is used to add fota support
     --- code dir
         - vendor/intel/apps/fota/
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+--- false
+this option is used to not add fota support
+
+    --- parameters
+
+    --- code dir

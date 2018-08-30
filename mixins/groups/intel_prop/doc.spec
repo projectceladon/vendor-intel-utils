@@ -21,3 +21,6 @@ Add rule to build intel_prop tool and related service.
 
     --- code dir
         - vendor/intel/tools/log_capture/intel_prop
+
+--- false
+Disable intel_prop tool.

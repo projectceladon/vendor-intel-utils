@@ -18,3 +18,6 @@ This option will enable GMS or GAS.
     --- code dir
         - vendor/google/gms
         - vendor/google/gas
+
+--- false
+This option will disable GMS and GAS.

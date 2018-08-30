@@ -17,3 +17,9 @@ this option will enable peeknpoke lspci etc into android build.
         - external/pciutils
         - vendor/intel/tools/peeknpoke
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+--- false
+this option will disable above tools into android build.

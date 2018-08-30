@@ -8,3 +8,12 @@ configurations go to right mixins group.
 
 --- cel_apl
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+it links to false option.
+
+
+
+--- false
+empty dir.

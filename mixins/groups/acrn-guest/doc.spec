@@ -17,3 +17,6 @@ this option will disable to get and generate acrn sos uos and guest imgs.
 
 --- true
 this option is used to get and generate acrn sos uos and guest imgs.
+
+--- false
+this option will disable to get and generate acrn sos uos and guest imgs.

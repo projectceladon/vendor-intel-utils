@@ -35,3 +35,9 @@ this option will enable VMM based TEE.
         - hardware/intel/kernelflinger/libqltipc
         - kernel/bxt/drivers/trusty
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+--- false
+this option will disable VMM based TEE.

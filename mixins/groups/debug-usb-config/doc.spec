@@ -18,3 +18,6 @@ this option enable usb deug class capability.
 
     --- parameters
         - protocol: this defines which type usb dvc debug protocol is used.
+
+--- false
+this option turn off usb debug class capability.

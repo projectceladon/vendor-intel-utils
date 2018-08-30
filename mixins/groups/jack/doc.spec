@@ -13,3 +13,6 @@ It links false option will disabe jack default.
 
 
 
+
+--- false
+Disable jack.

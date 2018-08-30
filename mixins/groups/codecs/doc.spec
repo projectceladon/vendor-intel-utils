@@ -23,3 +23,6 @@ this option is used to select the platform and supported codec list
         - hw_vd_h264:   select hw accelerated h.264 decoder
         - hw_vd_h264_secure:    select hw accelerated h.264 secure decoder
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

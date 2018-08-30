@@ -12,3 +12,6 @@ debug-unresponsive is used for collection of stacks and binder transactions when
 --- default
 when not explicitly selected in mixin spec file, the default option will be used.
 
+
+--- false
+this option will disable unresponsive logs into specific folder.

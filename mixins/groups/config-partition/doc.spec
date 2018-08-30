@@ -11,3 +11,13 @@ this option is used to configure of adding config partition
 
     --- code dir
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+--- false
+this option is used to configure of no need config partition
+
+    --- parameters
+
+    --- code dir

@@ -10,3 +10,9 @@ enable readahead optimization feature.
     --- parameters
         - size: readahead size
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+It's empty dir.
+
+

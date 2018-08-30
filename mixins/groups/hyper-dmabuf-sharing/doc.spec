@@ -13,3 +13,6 @@ this option is used to add buffer sharing feature in build
     --- code dir
 		- vendor/intel/external/hwcomposer-intel
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

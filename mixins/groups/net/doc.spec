@@ -8,3 +8,9 @@ In order to not override net core parameters, net group is created.
 --- common
 common net configurations.
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+It links none option.
+
+

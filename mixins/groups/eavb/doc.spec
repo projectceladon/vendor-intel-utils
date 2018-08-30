@@ -28,3 +28,6 @@ use this to enable eAVB
 		- hardware/intel/audio/coe/primary/parameter_framework_plugin/smartx : parameter_framework smartx plugin.
 
 
+
+--- false
+disable eAVB

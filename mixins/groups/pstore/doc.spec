@@ -24,3 +24,6 @@ passed as cmdline parameters, then store logs in RAm buffer
     --- code dir
         - fs/pstore/ram.c
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.

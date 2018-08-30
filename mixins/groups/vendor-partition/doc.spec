@@ -17,3 +17,11 @@ add vendor partition.
         - partition_size: specify partition size
         - partition_name: specify partition name
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+
+
+--- false
+empty dir.

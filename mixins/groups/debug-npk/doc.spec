@@ -22,3 +22,9 @@ this option will enable npk driver log output
     --- extra files
         - init.npk.rc: "Debug specific init scripts"
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+--- false
+this option will disable npk log output.

@@ -28,3 +28,9 @@ this option will enable crashlogd in android build
     --- extra files
         - init.crashlogd.rc: "Debug specific init scripts"
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+
+--- false
+this option will disable crashlogd in android build

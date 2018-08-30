@@ -10,3 +10,9 @@ This group is used to configure ethernet.
 --- dhcp
 Define dhcp related service.
 
+
+--- default
+when not explicitly selected in mixin spec file, the default option will be used.
+It links none option.
+
+
