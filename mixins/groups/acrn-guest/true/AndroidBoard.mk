@@ -164,7 +164,9 @@ acrn_flashfiles: acrn_ext4_bin flashfiles publish_otapackage publish_ota_targetf
 	{{/md5_check}}
 	$(hide) zip -qrjX $(ACRN_FLASHFILES) $(ACRN_TMP_DIR)
 	@$(ACP) $(ACRN_FLASHFILES) $(PUBLISH_DEST)
+	{{#flashfiles}}
 	@$(ACP) $(GUEST_FLASHFILES) $(PUBLISH_DEST)
+	{{/flashfiles}}
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	echo ">>> $@ is generated successfully"
 

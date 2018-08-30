@@ -678,11 +678,6 @@ endef
 
 define load-fw
 	echo "Begin to load firmware...";
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR);
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_FV) $(ACRN_TMP_DIR);
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_DNX) $(ACRN_TMP_DIR);
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/release/ifwi/$(ACRN_IFWI_DNXP) $(ACRN_TMP_DIR);
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/gordon_peak_acrn/$(ACRN_FW_VERSION) $(ACRN_TMP_DIR);
 endef
 
 ######################################################################
@@ -758,7 +753,6 @@ acrn_flashfiles: acrn_ext4_bin flashfiles publish_otapackage publish_ota_targetf
 	$(TARGET_DEVICE_DIR)/extra_files/acrn-guest/md5_check.sh $(ACRN_TMP_DIR)
 	$(hide) zip -qrjX $(ACRN_FLASHFILES) $(ACRN_TMP_DIR)
 	@$(ACP) $(ACRN_FLASHFILES) $(PUBLISH_DEST)
-	@$(ACP) $(GUEST_FLASHFILES) $(PUBLISH_DEST)
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	echo ">>> $@ is generated successfully"
 

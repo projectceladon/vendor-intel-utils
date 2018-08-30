@@ -1,4 +1,4 @@
-DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_DEVICE)/cel_kbl_acrn/overlay
+DEVICE_PACKAGE_OVERLAYS += $(TARGET_DEVICE_DIR)/overlay
 
 BOARD_KERNEL_CMDLINE += \
 	no_timer_check \

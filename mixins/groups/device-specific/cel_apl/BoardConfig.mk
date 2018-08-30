@@ -6,7 +6,7 @@ BOARD_KERNEL_CMDLINE += lpj=1600000 reboot_panic=p,w
 
 INTEL_HWC_ALWAYS_BUILD := false
 
-DEVICE_MANIFEST_FILE := $(INTEL_PATH_DEVICE)/cel_apl/manifest.xml
+DEVICE_MANIFEST_FILE := $(TARGET_DEVICE_DIR)/manifest.xml
 
 # Disable ota
 TARGET_SKIP_OTA_PACKAGE := true

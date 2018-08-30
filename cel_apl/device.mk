@@ -643,6 +643,14 @@ PRODUCT_PROPERTY_OVERRIDES += \
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.software.midi.xml:vendor/etc/permissions/android.software.midi.xml
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
+##############################################################
+# Default
+# Thermal Hal
+PRODUCT_PACKAGES += thermal.default \
+                    android.hardware.thermal@1.0-service \
+                    android.hardware.thermal@1.0-impl
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/aosp_carrier-config/default/product.mk
 ##############################################################
 EXT_IMS_PACKAGES_SRC_FILES_PATH ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/imsstub/packages/apps/Settings/src
@@ -698,14 +706,6 @@ PRODUCT_PACKAGES += \
 	fs_config_files \
 	fs_config_dirs
 
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
-##############################################################
-# Default
-# Thermal Hal
-PRODUCT_PACKAGES += thermal.default \
-                    android.hardware.thermal@1.0-service \
-                    android.hardware.thermal@1.0-impl
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jack/default/product.mk
 ##############################################################

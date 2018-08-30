@@ -2,6 +2,5 @@
 
 [defaults]
 md5_check = true
-ifwi = true
-ioc = true
+ifwi = false
 target = gordon_peak_acrn

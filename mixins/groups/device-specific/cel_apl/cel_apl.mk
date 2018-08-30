@@ -30,8 +30,8 @@ TARGET_DEVICE := $(shell basename $(TARGET_DEVICE_DIR))
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
 $(call inherit-product, $(TARGET_DEVICE_DIR)/device.mk)
 
-PRODUCT_NAME := cel_apl
-PRODUCT_DEVICE := cel_apl
+PRODUCT_NAME := {{target}}
+PRODUCT_DEVICE := {{target}}
 PRODUCT_BRAND := intel
 PRODUCT_MODEL := AOSP on Intel Platform
 PRODUCT_MANUFACTURER := Intel

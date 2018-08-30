@@ -31,8 +31,8 @@ TARGET_DEVICE := $(shell basename $(TARGET_DEVICE_DIR))
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
 $(call inherit-product, $(TARGET_DEVICE_DIR)/device.mk)
 
-PRODUCT_NAME := cel_kbl_acrn
-PRODUCT_DEVICE := cel_kbl_acrn
+PRODUCT_NAME := {{target}}
+PRODUCT_DEVICE := {{target}}
 PRODUCT_BRAND := intel
 PRODUCT_MODEL := AOSP on broxton Platform
 PRODUCT_MANUFACTURER := intel

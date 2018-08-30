@@ -741,6 +741,14 @@ PRODUCT_PACKAGES += hdcpd
 ##############################################################
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += config.disable_bluetooth=true
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
+##############################################################
+# Default
+# Thermal Hal
+PRODUCT_PACKAGES += thermal.default \
+                    android.hardware.thermal@1.0-service \
+                    android.hardware.thermal@1.0-impl
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
 ##############################################################
 ##############################################################
@@ -804,14 +812,6 @@ PRODUCT_PACKAGES += \
 	fs_config_files \
 	fs_config_dirs
 
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
-##############################################################
-# Default
-# Thermal Hal
-PRODUCT_PACKAGES += thermal.default \
-                    android.hardware.thermal@1.0-service \
-                    android.hardware.thermal@1.0-impl
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jack/default/product.mk
 ##############################################################

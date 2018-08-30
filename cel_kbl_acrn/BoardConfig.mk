@@ -3,7 +3,7 @@
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/device-specific/cel_kbl_acrn/BoardConfig.mk
 ##############################################################
-DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_DEVICE)/cel_kbl_acrn/overlay
+DEVICE_PACKAGE_OVERLAYS += $(TARGET_DEVICE_DIR)/overlay
 
 BOARD_KERNEL_CMDLINE += \
 	no_timer_check \
@@ -408,6 +408,18 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug_agent
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/hdcpd
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/thermal/default/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal/default
+BOARD_KERNEL_CMDLINE += thermal.off=1
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/ioc/default/BoardConfig.mk
+##############################################################
+ifeq (none,cbc)
+IOC_USE_CBC := true
+endif
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/acrn-guest/true/BoardConfig.mk
 ##############################################################
 # can't use := here, as PRODUCT_OUT is not defined yet
@@ -496,18 +508,6 @@ TARGET_BUILD_INTEL_FACTORY_SCRIPTS := true
 # Source: device/intel/project-celadon/mixins/groups/filesystem_config/default/BoardConfig.mk
 ##############################################################
 TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/thermal/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/thermal/default
-BOARD_KERNEL_CMDLINE += thermal.off=1
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/ioc/default/BoardConfig.mk
-##############################################################
-ifeq (none,cbc)
-IOC_USE_CBC := true
-endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jpeg-turbo/default/BoardConfig.mk
 ##############################################################
