@@ -473,9 +473,9 @@ BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
 # Source: device/intel/project-celadon/mixins/groups/hyper-dmabuf-sharing/true/BoardConfig.mk
 ##############################################################
 # Enable NESTED DISPLAY SUPPORT IN HWC
-ENABLE_NESTED_DISPLAY_SUPPORT := true
+ENABLE_HYPER_DMABUF_SHARING := true
 
-# sepolicy to access hyper_dmabuf device and tcp socket
+# sepolicy to access hyper_dmabuf device
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/hyper-dmabuf-sharing
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/allow-missing-dependencies/true/BoardConfig.mk
