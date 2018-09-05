@@ -14,3 +14,6 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/{{_extra_dir}}/media_codecs_performance_{{platform}}_xen.xml:vendor/etc/media_codecs_performance.xml
 {{/codec_perf_xen}}
+
+PRODUCT_PACKAGES += \
+    libasfextractor

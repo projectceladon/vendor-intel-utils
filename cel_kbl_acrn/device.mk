@@ -308,6 +308,9 @@ PRODUCT_COPY_FILES += \
 
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/extra_files/codecs/media_codecs_performance_bxt.xml:vendor/etc/media_codecs_performance.xml
+
+PRODUCT_PACKAGES += \
+    libasfextractor
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/usb/host/product.mk
 ##############################################################
