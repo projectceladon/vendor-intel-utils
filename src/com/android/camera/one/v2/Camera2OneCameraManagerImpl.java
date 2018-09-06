@@ -34,6 +34,8 @@ import com.android.camera.util.AndroidServices;
 import com.android.camera.util.ApiHelper;
 import com.google.common.base.Optional;
 
+import java.util.Hashtable;
+
 import javax.annotation.Nonnull;
 
 /**
@@ -62,9 +64,19 @@ public class Camera2OneCameraManagerImpl implements OneCameraManager {
     }
 
     private final CameraManager mCameraManager;
+    private Hashtable<Facing, String> mCameraFacingCache = new Hashtable<Facing, String>();
 
     public Camera2OneCameraManagerImpl(CameraManager cameraManger) {
         mCameraManager = cameraManger;
+
+        //Camera facing queries depending on camera implementation can be
+        //expensive and involve additional IPC with side effects. Cache front&
+        //back camera ids as early as possible.
+        if (mCameraManager != null) {
+            mCameraFacingCache.clear();
+            findFirstCameraFacing(Facing.BACK);
+            findFirstCameraFacing(Facing.FRONT);
+        }
     }
 
     @Override
@@ -122,11 +134,19 @@ public class Camera2OneCameraManagerImpl implements OneCameraManager {
 
     /** Returns the ID of the first camera facing the given direction. */
     private String findCameraId(Facing facing) {
-        if (facing == Facing.FRONT) {
-            return findFirstFrontCameraId();
-        } else {
-            return findFirstBackCameraId();
+        String id = mCameraFacingCache.get(facing);
+        if (id != null) {
+            return id;
         }
+
+        if (facing == Facing.FRONT) {
+            id = findFirstFrontCameraId();
+        } else {
+            id = findFirstBackCameraId();
+        }
+
+        mCameraFacingCache.put(facing, id);
+        return id;
     }
 
     /** Returns the ID of the first back-facing camera. */
