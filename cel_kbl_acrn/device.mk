@@ -347,8 +347,8 @@ endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/usb-otg-switch/true/product.mk
 ##############################################################
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/usb-otg-switch/usb_otg_switch.sh:vendor/bin/usb_otg_switch.sh
 
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/usb-otg-switch/usb_otg_switch.sh:vendor/bin/usb_otg_switch.sh
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/midi/true/product.mk
 ##############################################################

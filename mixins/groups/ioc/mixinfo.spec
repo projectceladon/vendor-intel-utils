@@ -1,2 +1,2 @@
 [mixinfo]
-deps = device-type thermal firststage-mount device-specific
+deps = device-type thermal firststage-mount device-specific usb-otg-switch
