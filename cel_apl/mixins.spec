@@ -61,3 +61,4 @@ debugfs: default
 lights: true
 factory-partition: true
 midi: true
+art-config: true

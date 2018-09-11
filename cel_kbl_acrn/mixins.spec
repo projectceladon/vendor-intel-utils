@@ -69,4 +69,4 @@ hyper-dmabuf-sharing: true
 avb: true
 slot-ab: true
 allow-missing-dependencies: true
-art-config: default
+art-config: true
