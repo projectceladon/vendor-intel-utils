@@ -708,7 +708,7 @@ img_download:
 	echo -e "* SoS_Version: Local Images" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
 	echo -e ">>> Path: $(LOCAL_SOS_PATH)" >> $(ACRN_TMP_DIR)/acrnversion.txt
-	@$(ACP) $(LOCAL_SOS_PATH) $(ACRN_TMP_DIR)
+	@$(ACP) $(LOCAL_SOS_PATH)/* $(ACRN_TMP_DIR)
 	$(hide) cp $(ACRN_TMP_DIR)/acrnversion.txt $(PRODUCT_OUT)/
 	echo ">>> $@ is successful !!!"
 else
