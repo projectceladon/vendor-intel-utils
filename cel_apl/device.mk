@@ -646,6 +646,17 @@ PRODUCT_PROPERTY_OVERRIDES += \
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.software.midi.xml:vendor/etc/permissions/android.software.midi.xml
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/art-config/true/product.mk
+##############################################################
+# This is needed to enable silver art optimizer.
+VENDOR_ART_PATH ?= $(INTEL_PATH_VENDOR)/art-extension
+
+PRODUCT_PACKAGES_TESTS += \
+    art-run-tests \
+    libarttest \
+    libnativebridgetest \
+    libart-gtest
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
 ##############################################################
 # Default
@@ -662,17 +673,6 @@ INTEL_FEATURE_CONTACTS ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrie
 INTEL_FEATURE_CONTACTSCOMMON ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedContactsCommon/src
 INTEL_FEATURE_CONTACTSPROVIDER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedContactsProvider/src
 INTEL_FEATURE_ENHANCEDDIALER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedDialer/src
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/art-config/default/product.mk
-##############################################################
-# This is needed to enable silver art optimizer.
-VENDOR_ART_PATH ?= $(INTEL_PATH_VENDOR)/art-extension
-
-PRODUCT_PACKAGES_TESTS += \
-    art-run-tests \
-    libarttest \
-    libnativebridgetest \
-    libart-gtest
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/cpuset/default/product.mk
 ##############################################################

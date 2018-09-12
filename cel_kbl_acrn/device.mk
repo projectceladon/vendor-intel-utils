@@ -755,7 +755,7 @@ PRODUCT_PACKAGES += thermal.default \
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
 ##############################################################
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/art-config/default/product.mk
+# Source: device/intel/project-celadon/mixins/groups/art-config/true/product.mk
 ##############################################################
 # This is needed to enable silver art optimizer.
 VENDOR_ART_PATH ?= $(INTEL_PATH_VENDOR)/art-extension
