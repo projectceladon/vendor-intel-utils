@@ -17,61 +17,79 @@
 top_dir=`pwd`
 utils_dir="$top_dir/vendor/intel/utils"
 patch_dir="$utils_dir/android_p/google_diff/$TARGET_PRODUCT"
-
-#STEP 1: Generate Patch list and dir list
-cd $patch_dir
-patch_list=`find * -iname "*.patch" | sort -u`
+private_utils_dir="$top_dir/vendor/intel/PRIVATE/utils"
+private_patch_dir="$private_utils_dir/android_p/google_diff/$TARGET_PRODUCT"
 
 current_project=""
 previous_project=""
 conflict=""
 conflict_list=""
 
-echo ""
-echo "Applying Patches"
+apply_patch() {
 
-for i in $patch_list
-do
-  current_project=`dirname $i`
-  if [[ $current_project != $previous_project ]]; then
-    echo ""
-    echo ""
-    echo "Project $current_project"
-  fi
-  previous_project=$current_project
+  pl=$1
+  pd=$2
 
-  cd $top_dir/$current_project
-  remote=`git remote -v | grep "https://android.googlesource.com/"`
-  if [[ -z "$remote" ]]; then
-    default_revision="remotes/m/master"
-  else
-    if [[ -f "$top_dir/.repo/manifest.xml" ]]; then
-      default_revision=`grep default $top_dir/.repo/manifest.xml | grep -o 'revision="[^"]\+"' | cut -d'=' -f2 | sed 's/\"//g'`
-    else
-      echo "Please make sure .repo/manifest.xml"
-      exit 1
+  echo ""
+  echo "Applying Patches"
+
+  for i in $pl
+  do
+    current_project=`dirname $i`
+    if [[ $current_project != $previous_project ]]; then
+      echo ""
+      echo ""
+      echo "Project $current_project"
     fi
-  fi
+    previous_project=$current_project
 
-  cd $top_dir/$current_project
-  a=`grep "Date: " $patch_dir/$i`
-  b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD | grep "$b"`
-
-  if [[ "$c" == "" ]] ; then
-    git am $patch_dir/$i >& /dev/null
-    if [[ $? == 0 ]]; then
-      echo "        Applying          $i"
+    cd $top_dir/$current_project
+    remote=`git remote -v | grep "https://android.googlesource.com/"`
+    if [[ -z "$remote" ]]; then
+      default_revision="remotes/m/master"
     else
-      echo "        Conflicts          $i"
-      git am --abort >& /dev/null
-      conflict="y"
-      conflict_list="$current_project $conflict_list"
+      if [[ -f "$top_dir/.repo/manifest.xml" ]]; then
+        default_revision=`grep default $top_dir/.repo/manifest.xml | grep -o 'revision="[^"]\+"' | cut -d'=' -f2 | sed 's/\"//g'`
+      else
+        echo "Please make sure .repo/manifest.xml"
+        exit 1
+      fi
     fi
-  else
-    echo "        Already applied         $i"
-  fi
-done
+
+    cd $top_dir/$current_project
+    a=`grep "Date: " $pd/$i`
+    b=`echo ${a#"Date: "}`
+    c=`git log --pretty=format:%aD | grep "$b"`
+
+    if [[ "$c" == "" ]] ; then
+      git am $pd/$i >& /dev/null
+      if [[ $? == 0 ]]; then
+        echo "        Applying          $i"
+      else
+        echo "        Conflicts          $i"
+        git am --abort >& /dev/null
+        conflict="y"
+        conflict_list="$current_project $conflict_list"
+      fi
+    else
+      echo "        Already applied         $i"
+    fi
+  done
+}
+
+#Apply common patches
+cd $patch_dir
+patch_list=`find * -iname "*.patch" | sort -u`
+apply_patch "$patch_list" "$patch_dir"
+
+#Apply Embargoed patches if exist
+if [[ -d "$private_patch_dir" ]]; then
+    echo ""
+    echo "Embargoed Patches Found"
+    cd $private_patch_dir
+    private_patch_list=`find * -iname "*.patch" | sort -u`
+    apply_patch "$private_patch_list" "$private_patch_dir"
+fi
 
 echo ""
 if [[ "$conflict" == "y" ]]; then
