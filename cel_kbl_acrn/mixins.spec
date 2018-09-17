@@ -16,9 +16,9 @@ config-partition: true
 display-density: medium
 dalvik-heap: tablet-7in-400dpi-4096
 cpu-arch: slm
-dexpreopt: enabled
+dexpreopt: true
 pstore: ram_dummy(address=0x50000000,size=0x400000,record_size=0x4000,console_size=0x200000,ftrace_size=0x2000,dump_oops=1)
-bugreport: default
+bugreport: true
 media: mesa
 graphics: mesa(gen9+=true,hwc2=true,vulkan=false,drmhwc=false,minigbm=true,gralloc1=true,cursor_wa=true)
 storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=false)
@@ -70,3 +70,10 @@ avb: true
 slot-ab: true
 allow-missing-dependencies: true
 art-config: true
+debugfs: true
+disk-encryption: true
+factory-scripts: true
+filesystem_config: common
+load_modules: true
+mixin-check: true
+widevine: true

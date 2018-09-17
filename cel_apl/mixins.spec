@@ -20,7 +20,7 @@ storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=false)
 sepolicy: permissive
 widevine: L3_Gen
 touch: galax7200
-display-density: default
+display-density: medium
 media: mesa(add_sw_msdk=false)
 public-libraries: true
 device-specific: cel_apl
@@ -34,9 +34,9 @@ bluetooth: btusb(firmware=bt_fw_cel,ivi=true)
 disk-bus: auto
 vendor-partition: true
 config-partition: true
-dexpreopt: enabled
+dexpreopt: true
 dalvik-heap: tablet-7in-hdpi-1024
-bugreport: default
+bugreport: true
 ethernet: dhcp
 rfkill: true(force_disable=)
 audio: project-celadon
@@ -57,8 +57,13 @@ trusty: true(enable_hw_sec=true, enable_storage_proxyd=true, ref_target=project-
 factory-scripts: true
 memtrack: true
 security: cse
-debugfs: default
+debugfs: true
 lights: true
 factory-partition: true
 midi: true
 art-config: true
+cpuset: autocores
+disk-encryption: true
+filesystem_config: common
+load_modules: true
+mixin-check: true
