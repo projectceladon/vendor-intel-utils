@@ -702,6 +702,7 @@ acrn_ext4_bin: $(ACRN_GPTIMAGE_BIN)
 .PHONY: img_download
 ifeq ($(strip $(SOS_VERSION)),local)
 img_download:
+	$(hide) rm -rf $(ACRN_TMP_DIR)
 	$(hide) mkdir -p $(ACRN_TMP_DIR)
 	$(call load-fw)
 	echo -e "**********************************" >> $(ACRN_TMP_DIR)/acrnversion.txt
@@ -732,8 +733,6 @@ img_download:
 	echo ">>> $@ is successfull !!!"
 endif
 
-droid: img_download
-
 ######################################################################
 # Generate ACRN AaaG *.zip
 ######################################################################
@@ -748,8 +747,7 @@ acrn_image: acrn_ext4_bin
 # Generate ACRN E2E flashfiles *.zip
 ######################################################################
 .PHONY: acrn_flashfiles
-acrn_flashfiles: acrn_ext4_bin flashfiles publish_otapackage publish_ota_targetfiles
-	$(hide) mkdir -p $(ACRN_TMP_DIR)
+acrn_flashfiles: acrn_ext4_bin flashfiles img_download publish_otapackage publish_ota_targetfiles
 	$(hide) cp $(ACRN_EXT4_BIN) $(ACRN_TMP_DIR)
 	$(hide) cp $(TARGET_DEVICE_DIR)/flash_AaaG.json $(ACRN_TMP_DIR)
 	$(hide) mkdir -p $(PUBLISH_DEST)
@@ -758,8 +756,6 @@ acrn_flashfiles: acrn_ext4_bin flashfiles publish_otapackage publish_ota_targetf
 	@$(ACP) $(ACRN_FLASHFILES) $(PUBLISH_DEST)
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	echo ">>> $@ is generated successfully"
-
-droid: acrn_flashfiles
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
 ##############################################################
