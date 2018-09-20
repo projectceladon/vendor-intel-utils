@@ -18,7 +18,7 @@ ACRN_IOC_FW_E := ioc_firmware_gp_mrb_fab_e.ias_ioc
 ACRN_SOS_BOOT_IMAGE := sos_boot.img
 ACRN_SOS_ROOTFS_IMAGE := sos_rootfs.img
 ACRN_PARTITION_DESC_BIN := partition_desc.bin
-ACRN_MD5SUM_MD5 = md5sum.md5
+ACRN_MD5SUM_MD5 = md5sum.txt
 
 ######################################################################
 # Define The Script Path and ACRN Related Files
@@ -59,7 +59,7 @@ endif
 # Download files from the link to point dir, $2 was the link, $1 was
 # the download file, $3 was the dir
 ######################################################################
-ARIA2C := $(TARGET_DEVICE_DIR)/{{_extra_dir}}/aria2c
+ARIA2C := aria2c
 
 define load-image
 	retry=1; while [ $$retry -le 5 ]; \

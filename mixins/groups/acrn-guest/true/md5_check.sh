@@ -1,9 +1,10 @@
 #!/bin/bash
 
+md5_file=md5sum.txt
 check_sum_imgs=(sos_boot.img sos_rootfs.img partition_desc.bin)
 
-if [ -a "$1/md5sum.md5" ];then
-	cat $1/md5sum.md5 | while read line
+if [ -a "$1/$md5_file" ];then
+	cat $1/$md5_file | while read line
 	do
 		var_name=`echo $line | awk '{print $2}'`
 
