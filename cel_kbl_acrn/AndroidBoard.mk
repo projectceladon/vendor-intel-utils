@@ -521,6 +521,8 @@ gptimage_size ?= 9840M
 
 ACRN_DATA_DIR = $(PRODUCT_OUT)/data_partition
 ACRN_AND_DIR = $(ACRN_DATA_DIR)/android
+ACRN_GUEST_DIR = $(PRODUCT_OUT)/acrn_guest
+ACRN_GUEST_IMAGES_DIR = $(PRODUCT_OUT)/acrn_guest/IMAGES
 ACRN_GPT_BIN = $(ACRN_AND_DIR)/android.img
 ACRN_DATA_SIZE ?= 10320M
 MAKE_EXT4FS_ACRN = $(TARGET_DEVICE_DIR)/make_ext4fs
@@ -558,32 +560,30 @@ endif
 
 .PHONY: $(ACRN_GPTIMAGE_BIN)
 ifeq ($(strip $(TARGET_USE_TRUSTY)),true)
-$(ACRN_GPTIMAGE_BIN): tosimage
-tos_bin = $(INSTALLED_TOS_IMAGE_TARGET)
+tos_bin = $(ACRN_GUEST_IMAGES_DIR)/tos.img
 endif
 
 
 
 
 $(ACRN_GPTIMAGE_BIN): \
-	bootloader \
-	bootimage \
-	systemimage \
-	vbmetaimage \
-	vendorimage \
+	target-files-package \
 	$(SIMG2IMG) \
 	$(raw_config) \
 	$(raw_factory)
 
-	$(hide) rm -f $(INSTALLED_SYSTEMIMAGE).raw
+	rm -rf $(ACRN_GUEST_DIR)
+	mkdir $(ACRN_GUEST_DIR)
+	unzip $(BUILT_TARGET_FILES_PACKAGE) IMAGES/* -d $(ACRN_GUEST_DIR)
+	$(hide) rm -f $(ACRN_GUEST_IMAGES_DIR)/system.img.raw
 	$(hide) rm -f $(INSTALLED_USERDATAIMAGE_TARGET).raw
 
 	$(MAKE_EXT4FS_ACRN) \
 		-l $(BOARD_USERDATAIMAGE_PARTITION_SIZE) -L data \
 		$(PRODUCT_OUT)/userdata.dummy
 
-	$(SIMG2IMG) $(INSTALLED_SYSTEMIMAGE) $(INSTALLED_SYSTEMIMAGE).raw
-	$(SIMG2IMG) $(INSTALLED_VENDORIMAGE_TARGET) $(INSTALLED_VENDORIMAGE_TARGET).raw
+	$(SIMG2IMG) $(ACRN_GUEST_IMAGES_DIR)/system.img $(ACRN_GUEST_IMAGES_DIR)/system.img.raw
+	$(SIMG2IMG) $(ACRN_GUEST_IMAGES_DIR)/vendor.img $(ACRN_GUEST_IMAGES_DIR)/vendor.img.raw
 
 	$(INTEL_PATH_BUILD)/create_gpt_image.py \
 		--create $@ \
@@ -593,10 +593,10 @@ $(ACRN_GPTIMAGE_BIN): \
 		--bootloader $(bootloader_bin) \
 		--bootloader2 $(bootloader_bin) \
 		--tos $(tos_bin) \
-		--boot $(INSTALLED_BOOTIMAGE_TARGET) \
-		--vbmeta $(INSTALLED_VBMETAIMAGE_TARGET) \
-		--system $(INSTALLED_SYSTEMIMAGE).raw \
-		--vendor $(INSTALLED_VENDORIMAGE_TARGET).raw \
+		--boot $(ACRN_GUEST_IMAGES_DIR)/boot.img \
+		--vbmeta $(ACRN_GUEST_IMAGES_DIR)/vbmeta.img \
+		--system $(ACRN_GUEST_IMAGES_DIR)/system.img.raw \
+		--vendor $(ACRN_GUEST_IMAGES_DIR)/vendor.img.raw \
 		--data $(PRODUCT_OUT)/userdata.dummy \
 		--config $(raw_config) \
 		--factory $(raw_factory)
