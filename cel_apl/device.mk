@@ -217,7 +217,7 @@ PRODUCT_COPY_FILES += \
         frameworks/native/data/etc/android.hardware.touchscreen.multitouch.jazzhand.xml:vendor/etc/permissions/android.hardware.touchscreen.multitouch.jazzhand.xml\
         $(INTEL_PATH_COMMON)/touch/Vendor_0eef_Product_7200.idc:system/usr/idc/Vendor_0eef_Product_7200.idc
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/display-density/default/product.mk
+# Source: device/intel/project-celadon/mixins/groups/display-density/medium/product.mk
 ##############################################################
 PRODUCT_AAPT_CONFIG := normal
 PRODUCT_AAPT_PREF_CONFIG := mdpi
@@ -657,6 +657,25 @@ PRODUCT_PACKAGES_TESTS += \
     libnativebridgetest \
     libart-gtest
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/cpuset/autocores/product.mk
+##############################################################
+PRODUCT_PACKAGES += \
+    config_cpuset.sh
+
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/extra_files/cpuset/config_cpuset.sh:vendor/bin/config_cpuset.sh
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/filesystem_config/common/product.mk
+##############################################################
+PRODUCT_PACKAGES += \
+	fs_config_files \
+	fs_config_dirs
+
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/load_modules/true/product.mk
+##############################################################
+PRODUCT_PACKAGES += load_modules.sh
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
 ##############################################################
 # Default
@@ -673,14 +692,6 @@ INTEL_FEATURE_CONTACTS ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrie
 INTEL_FEATURE_CONTACTSCOMMON ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedContactsCommon/src
 INTEL_FEATURE_CONTACTSPROVIDER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedContactsProvider/src
 INTEL_FEATURE_ENHANCEDDIALER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedDialer/src
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/cpuset/default/product.mk
-##############################################################
-PRODUCT_PACKAGES += \
-    config_cpuset.sh
-
-PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/extra_files/cpuset/config_cpuset.sh:vendor/bin/config_cpuset.sh
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-kernel/default/product.mk
 ##############################################################
@@ -703,18 +714,7 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.stacks_timeout=1500
 
 endif
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/filesystem_config/default/product.mk
-##############################################################
-PRODUCT_PACKAGES += \
-	fs_config_files \
-	fs_config_dirs
-
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jack/default/product.mk
 ##############################################################
 ANDROID_COMPILE_WITH_JACK := false
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/load_modules/default/product.mk
-##############################################################
-PRODUCT_PACKAGES += load_modules.sh
 # ------------------ END MIX-IN DEFINITIONS ------------------

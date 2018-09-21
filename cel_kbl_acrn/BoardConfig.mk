@@ -205,7 +205,7 @@ TARGET_CPU_ABI_LIST_32_BIT := x86
 TARGET_ARCH_VARIANT := silvermont
 TARGET_CPU_SMP := true
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/dexpreopt/enabled/BoardConfig.mk
+# Source: device/intel/project-celadon/mixins/groups/dexpreopt/true/BoardConfig.mk
 ##############################################################
 # enable dex-preoptimization.
 WITH_DEXPREOPT := true
@@ -482,6 +482,31 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/hyper-dmabuf-sharing
 ##############################################################
 ALLOW_MISSING_DEPENDENCIES := true
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/debugfs/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/factory-scripts/true/BoardConfig.mk
+##############################################################
+# Include factory archive in 'make dist' output
+TARGET_BUILD_INTEL_FACTORY_SCRIPTS := true
+
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/filesystem_config/common/BoardConfig.mk
+##############################################################
+TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/load_modules/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS +=  $(INTEL_PATH_SEPOLICY)/load_modules
+
+TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/load_modules/filesystem_config/config.fs
+
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/widevine/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/drm-default
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/aosp_carrier-config/default/BoardConfig.mk
 ##############################################################
 DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/ims/carrier/res_ims
@@ -490,37 +515,12 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/ims/carrier/res_ims
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/autodetect/false
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/debugfs/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/embms/default/BoardConfig.mk
 ##############################################################
 #setting for embms dep in framework
 TARGET_HAS_EMBMS_ENABLE := false
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/factory-scripts/default/BoardConfig.mk
-##############################################################
-# Include factory archive in 'make dist' output
-TARGET_BUILD_INTEL_FACTORY_SCRIPTS := true
-
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/filesystem_config/default/BoardConfig.mk
-##############################################################
-TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jpeg-turbo/default/BoardConfig.mk
 ##############################################################
 USE_JPEG_TURBO := no
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/load_modules/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS +=  $(INTEL_PATH_SEPOLICY)/load_modules
-
-TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/load_modules/filesystem_config/config.fs
-
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/widevine/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/drm-default
 # ------------------ END MIX-IN DEFINITIONS ------------------

@@ -359,7 +359,7 @@ BOARD_CONFIGIMAGE_PARTITION_SIZE := 8388608
 BOARD_SEPOLICY_M4DEFS += module_config_partition=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/config-partition
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/dexpreopt/enabled/BoardConfig.mk
+# Source: device/intel/project-celadon/mixins/groups/dexpreopt/true/BoardConfig.mk
 ##############################################################
 # enable dex-preoptimization.
 WITH_DEXPREOPT := true
@@ -479,7 +479,7 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/memtrack
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/security
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/debugfs/default/BoardConfig.mk
+# Source: device/intel/project-celadon/mixins/groups/debugfs/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
 ##############################################################
@@ -488,6 +488,21 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
 BOARD_FACTORYIMAGE_PARTITION_SIZE := 10485760
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/factory-partition
 BOARD_SEPOLICY_M4DEFS += module_factory_partition=true
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/cpuset/autocores/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/config_cpuset
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/filesystem_config/common/BoardConfig.mk
+##############################################################
+TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/load_modules/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS +=  $(INTEL_PATH_SEPOLICY)/load_modules
+
+TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/load_modules/filesystem_config/config.fs
+
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/thermal/default/BoardConfig.mk
 ##############################################################
@@ -509,27 +524,12 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/ims/carrier/res_ims
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/autodetect/false
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/cpuset/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/config_cpuset
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/embms/default/BoardConfig.mk
 ##############################################################
 #setting for embms dep in framework
 TARGET_HAS_EMBMS_ENABLE := false
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/filesystem_config/default/BoardConfig.mk
-##############################################################
-TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jpeg-turbo/default/BoardConfig.mk
 ##############################################################
 USE_JPEG_TURBO := no
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/load_modules/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS +=  $(INTEL_PATH_SEPOLICY)/load_modules
-
-TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/load_modules/filesystem_config/config.fs
-
 # ------------------ END MIX-IN DEFINITIONS ------------------

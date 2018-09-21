@@ -14,3 +14,6 @@ when not explicitly selected in mixin spec file, the default option will be used
 
 --- false
 empty dir.
+
+--- true
+enable mixin-check.

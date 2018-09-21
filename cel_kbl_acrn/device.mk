@@ -766,6 +766,28 @@ PRODUCT_PACKAGES_TESTS += \
     libnativebridgetest \
     libart-gtest
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/filesystem_config/common/product.mk
+##############################################################
+PRODUCT_PACKAGES += \
+	fs_config_files \
+	fs_config_dirs
+
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/load_modules/true/product.mk
+##############################################################
+PRODUCT_PACKAGES += load_modules.sh
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/widevine/true/product.mk
+##############################################################
+#enable Widevine drm
+PRODUCT_PROPERTY_OVERRIDES += drm.service.enabled=true
+
+#only enable default drm service
+PRODUCT_PACKAGES += android.hardware.drm@1.0-service \
+                    android.hardware.drm@1.0-impl \
+                    android.hardware.drm@1.1-service.clearkey
+
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/aosp_carrier-config/default/product.mk
 ##############################################################
 EXT_IMS_PACKAGES_SRC_FILES_PATH ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/imsstub/packages/apps/Settings/src
@@ -809,29 +831,7 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/overl
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.radio.noril=true
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/filesystem_config/default/product.mk
-##############################################################
-PRODUCT_PACKAGES += \
-	fs_config_files \
-	fs_config_dirs
-
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/jack/default/product.mk
 ##############################################################
 ANDROID_COMPILE_WITH_JACK := false
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/load_modules/default/product.mk
-##############################################################
-PRODUCT_PACKAGES += load_modules.sh
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/widevine/default/product.mk
-##############################################################
-#enable Widevine drm
-PRODUCT_PROPERTY_OVERRIDES += drm.service.enabled=true
-
-#only enable default drm service
-PRODUCT_PACKAGES += android.hardware.drm@1.0-service \
-                    android.hardware.drm@1.0-impl \
-                    android.hardware.drm@1.1-service.clearkey
-
 # ------------------ END MIX-IN DEFINITIONS ------------------

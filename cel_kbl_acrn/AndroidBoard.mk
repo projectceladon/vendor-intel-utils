@@ -776,7 +776,7 @@ include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_vsbl.mk
 
 LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/load_modules/default/AndroidBoard.mk
+# Source: device/intel/project-celadon/mixins/groups/load_modules/true/AndroidBoard.mk
 ##############################################################
 include $(CLEAR_VARS)
 LOCAL_MODULE := load_modules.sh
@@ -794,7 +794,7 @@ $(LOCAL_BUILT_MODULE): $(LOCAL_SRC)
 	echo wait >> $@
 	cat $(LOAD_MODULES_IN) >> $@
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/mixin-check/default/AndroidBoard.mk
+# Source: device/intel/project-celadon/mixins/groups/mixin-check/true/AndroidBoard.mk
 ##############################################################
 mixin_update := $(wildcard device/intel/mixins/mixin-update)
 

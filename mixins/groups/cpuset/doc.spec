@@ -13,3 +13,6 @@ And it links autocores option.
 
 --- 2cores
 specify 2cores.
+
+--- autocores
+this option will use script to specify shared cpu number at runtime based on system cpu numbers.
