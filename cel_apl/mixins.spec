@@ -67,3 +67,4 @@ disk-encryption: true
 filesystem_config: common
 load_modules: true
 mixin-check: true
+debug-kernel: true

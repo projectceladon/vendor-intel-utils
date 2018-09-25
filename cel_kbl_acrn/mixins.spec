@@ -77,3 +77,4 @@ filesystem_config: common
 load_modules: true
 mixin-check: true
 widevine: true
+debug-kernel: true
