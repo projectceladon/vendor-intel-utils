@@ -578,10 +578,6 @@ $(ACRN_GPTIMAGE_BIN): \
 	$(hide) rm -f $(ACRN_GUEST_IMAGES_DIR)/system.img.raw
 	$(hide) rm -f $(INSTALLED_USERDATAIMAGE_TARGET).raw
 
-	$(MAKE_EXT4FS_ACRN) \
-		-l $(BOARD_USERDATAIMAGE_PARTITION_SIZE) -L data \
-		$(PRODUCT_OUT)/userdata.dummy
-
 	$(SIMG2IMG) $(ACRN_GUEST_IMAGES_DIR)/system.img $(ACRN_GUEST_IMAGES_DIR)/system.img.raw
 	$(SIMG2IMG) $(ACRN_GUEST_IMAGES_DIR)/vendor.img $(ACRN_GUEST_IMAGES_DIR)/vendor.img.raw
 
@@ -597,7 +593,6 @@ $(ACRN_GPTIMAGE_BIN): \
 		--vbmeta $(ACRN_GUEST_IMAGES_DIR)/vbmeta.img \
 		--system $(ACRN_GUEST_IMAGES_DIR)/system.img.raw \
 		--vendor $(ACRN_GUEST_IMAGES_DIR)/vendor.img.raw \
-		--data $(PRODUCT_OUT)/userdata.dummy \
 		--config $(raw_config) \
 		--factory $(raw_factory)
 ##############################################################
