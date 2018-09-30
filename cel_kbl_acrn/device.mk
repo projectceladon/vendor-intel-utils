@@ -568,9 +568,12 @@ endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/intel_prop/true/product.mk
 ##############################################################
+
+ifeq ($(TARGET_BUILD_VARIANT),userdebug)
 PRODUCT_PACKAGES += intel_prop
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/intel_prop/intel_prop.cfg:$(TARGET_COPY_OUT_VENDOR)/etc/intel_prop.cfg
+endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-lct/true/product.mk
 ##############################################################
