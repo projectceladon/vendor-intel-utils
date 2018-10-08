@@ -13,3 +13,6 @@ This option will disable SELinux enforcing mode. IE setenforce 0.
 --- default
 when not explicitly selected in mixin spec file, the default option of
 "permissive" will be used.
+
+--- false
+This option is nothing to do.
