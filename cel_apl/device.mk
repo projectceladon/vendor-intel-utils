@@ -676,6 +676,12 @@ PRODUCT_PACKAGES += \
 ##############################################################
 PRODUCT_PACKAGES += load_modules.sh
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/debug-kernel/true/product.mk
+##############################################################
+ifneq ($(TARGET_BUILD_VARIANT),user)
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/debug-kernel/init.kernel.rc:root/init.kernel.rc
+endif
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/thermal/default/product.mk
 ##############################################################
 # Default
@@ -692,12 +698,6 @@ INTEL_FEATURE_CONTACTS ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrie
 INTEL_FEATURE_CONTACTSCOMMON ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedContactsCommon/src
 INTEL_FEATURE_CONTACTSPROVIDER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedContactsProvider/src
 INTEL_FEATURE_ENHANCEDDIALER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/EnhancedDialer/src
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/debug-kernel/default/product.mk
-##############################################################
-ifneq ($(TARGET_BUILD_VARIANT),user)
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/debug-kernel/init.kernel.rc:root/init.kernel.rc
-endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-unresponsive/default/product.mk
 ##############################################################
