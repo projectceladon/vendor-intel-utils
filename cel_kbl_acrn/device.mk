@@ -626,6 +626,7 @@ PRODUCT_PACKAGES_DEBUG += \
 
 PRODUCT_PACKAGES += \
     daemon_cl \
+    libias-media_transport-avb_streamhandler \
     avb_streamhandler_app \
     avb_streamhandler_client_app \
     pluginias-media_transport-avb_configuration_gp_mrb \
