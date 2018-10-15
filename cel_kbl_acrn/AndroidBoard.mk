@@ -70,10 +70,6 @@ make_ramdisk_dir:
 
 $(PRODUCT_OUT)/ramdisk.img: make_ramdisk_dir
 
-make_vendor_dir:
-	@mkdir -p $(PRODUCT_OUT)/vendor/oem_config
-
-$(PRODUCT_OUT)/vendor.img: make_vendor_dir
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/boot-arch/vsbl/AndroidBoard.mk
 ##############################################################
@@ -448,8 +444,14 @@ INSTALLED_CONFIGIMAGE_TARGET := $(PRODUCT_OUT)/config.img
 
 selinux_fc := $(TARGET_ROOT_OUT)/file_contexts.bin
 
+make_oem_config_dir:
+	@mkdir -p $(PRODUCT_OUT)/root/mnt/vendor
+	@mkdir -p $(PRODUCT_OUT)/root/mnt/vendor/oem_config
+	@mkdir -p $(PRODUCT_OUT)/recovery/root/mnt/vendor
+	@mkdir -p $(PRODUCT_OUT)/recovery/root/mnt/vendor/oem_config
+
 $(INSTALLED_CONFIGIMAGE_TARGET) : PRIVATE_SELINUX_FC := $(selinux_fc)
-$(INSTALLED_CONFIGIMAGE_TARGET) : $(MKEXTUSERIMG) $(MAKE_EXT4FS) $(E2FSCK) $(selinux_fc)
+$(INSTALLED_CONFIGIMAGE_TARGET) : $(MKEXTUSERIMG) $(MAKE_EXT4FS) $(E2FSCK) $(selinux_fc) bootimage make_oem_config_dir
 	$(call pretty,"Target config fs image: $(INSTALLED_CONFIGIMAGE_TARGET)")
 	@mkdir -p $(PRODUCT_OUT)/config
 	$(hide)	PATH=$(HOST_OUT_EXECUTABLES):$$PATH \
