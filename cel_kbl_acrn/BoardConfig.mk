@@ -314,6 +314,7 @@ BOARD_SEPOLICY_DIRS += \
     $(INTEL_PATH_SEPOLICY)/car
 
 TARGET_USES_CAR_FUTURE_FEATURES := true
+BOARD_SEPOLICY_M4DEFS += module_carservice_app=true
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/gms/true/BoardConfig.mk
 ##############################################################
