@@ -165,7 +165,7 @@ cp $(BOARD_BOOTLOADER_VAR_IMG) $(bootloader_bin)
 echo "Bootloader image successfully generated $(BOARD_BOOTLOADER_VAR_IMG)"
 endef
 
-sbl_fastboot_image: fb4abl-$(TARGET_BUILD_VARIANT)
+fastboot_image: fb4abl-$(TARGET_BUILD_VARIANT)
 bootloader: $(BOARD_BOOTLOADER_DIR) mkext2img kf4abl-$(TARGET_BUILD_VARIANT)
 	$(call generate_bootloader_var,$(config))
 else
