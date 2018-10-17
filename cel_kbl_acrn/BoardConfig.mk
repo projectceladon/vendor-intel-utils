@@ -123,6 +123,9 @@ BOARD_WPA_SUPPLICANT_DRIVER := NL80211
 BOARD_WLAN_DEVICE := mrvl
 BOARD_WPA_SUPPLICANT_PRIVATE_LIB ?= mrvl_private_lib_driver_cmd
 WPA_SUPPLICANT_VERSION := VER_2_1_DEVEL
+
+BOARD_SEPOLICY_DIRS += \
+    $(INTEL_PATH_SEPOLICY)/wlan/common
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/kernel/gmin64/BoardConfig.mk.1
 ##############################################################
