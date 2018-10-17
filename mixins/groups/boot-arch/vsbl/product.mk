@@ -42,7 +42,7 @@ KERNELFLINGER_SECURITY_PLATFORM := vsbl
 KERNELFLINGER_DISABLE_DEBUG_PRINT := true
 KERNELFLINGER_DISABLE_EFI_MEMMAP := true
 
-ABL_OS_KERNEL_KEY := $(INTEL_PATH_BUILD)/testkeys/slimboot
+ABL_OS_KERNEL_KEY ?= $(INTEL_PATH_BUILD)/testkeys/xbl_default
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.frp.pst=/dev/block/by-name/persistent
 
 # Kernelflinger will set IOC_USE_SLCAN variable
