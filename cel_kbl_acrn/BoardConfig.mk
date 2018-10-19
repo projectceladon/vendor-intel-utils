@@ -35,6 +35,10 @@ BOARD_SYSTEMIMAGE_PARTITION_SIZE := 2684354560
 PRODUCT_STATIC_BOOT_CONTROL_HAL := bootctrl.intel.static
 BOARD_KERNEL_CMDLINE += rootfstype=ext4
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/disk-bus/pci/BoardConfig.mk
+##############################################################
+BOARD_DISK_BUS = 03.0
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/avb/true/BoardConfig.mk
 ##############################################################
 BOARD_AVB_ENABLE := true
