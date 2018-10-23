@@ -435,11 +435,11 @@ PRODUCT_PACKAGES += \
 endif
 
 ifeq ($(MIXIN_DEBUG_LOGS),true)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.service.default_logfs=apklogfs
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.intel.logger=/system/bin/logcat
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += logd.kernel.raw_message=False
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.intel.logger.rot_cnt=20
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.intel.logger.rot_size=5000
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.service.default_logfs=apklogfs
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.intel.logger=/system/bin/logcat
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.logd.kernel.raw_message=False
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.intel.logger.rot_cnt=20
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.intel.logger.rot_size=5000
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug-logs
 BOARD_SEPOLICY_M4DEFS += module_debug_logs=true
 endif
@@ -470,7 +470,7 @@ ifeq ($(PSTORE_CONFIG),PRAM)
 
 # Default configuration for dumps to pstore
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
-    persist.npk.cfg=none
+    persist.vendor.npk.cfg=none
 
 # Increase pstore dump size to fit MSC buffers
 BOARD_KERNEL_CMDLINE += \
@@ -493,7 +493,7 @@ PRODUCT_PACKAGES += crashlogd \
 endif
 
 ifeq ($(MIXIN_DEBUG_LOGS),true)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.crashlogd.data_quota=50
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.crashlogd.data_quota=50
 
 CRASHLOGD_LOGS_PATH := "/data/logs"
 CRASHLOGD_APLOG := true
@@ -515,9 +515,9 @@ ifeq ($(MIXIN_DEBUG_LOGS),true)
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/coredump
 # Enable core dump for eng builds
 ifeq ($(TARGET_BUILD_VARIANT),eng)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.core.enabled=1
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.core.enabled=1
 else
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.core.enabled=0
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.core.enabled=0
 endif
 CRASHLOGD_COREDUMP := true
 endif

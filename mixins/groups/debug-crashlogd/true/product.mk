@@ -13,7 +13,7 @@ PRODUCT_PACKAGES += crashlogd \
 endif
 
 ifeq ($(MIXIN_DEBUG_LOGS),true)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.crashlogd.data_quota=50
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.crashlogd.data_quota=50
 
 CRASHLOGD_LOGS_PATH := "/data/logs"
 CRASHLOGD_APLOG := true

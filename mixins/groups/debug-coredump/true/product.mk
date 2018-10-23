@@ -11,9 +11,9 @@ ifeq ($(MIXIN_DEBUG_LOGS),true)
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/coredump
 # Enable core dump for eng builds
 ifeq ($(TARGET_BUILD_VARIANT),eng)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.core.enabled=1
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.core.enabled=1
 else
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.core.enabled=0
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.core.enabled=0
 endif
 CRASHLOGD_COREDUMP := true
 endif
