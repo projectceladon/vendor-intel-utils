@@ -1,0 +1,350 @@
+From e42a4ceb1736a8eec8d889f20605e47982ad72b0 Mon Sep 17 00:00:00 2001
+From: Chen Qi <qix.chen@intel.com>
+Date: Tue, 15 Aug 2017 09:58:51 +0800
+Subject: [PATCH] [Google diff] Support ota update from udisk.
+
+Add udisk entry in recovery menu and support ota from udisk.
+
+Change-Id: Iaf7f978d2df0b2c28ae24ba62bfa6a764e71e0e2
+Tracked-On:
+Signed-off-by: qichen1x <qix.chen@intel.com>
+Signed-off-by: biyilix <biyix.li@intel.com>
+Reviewed-on: https://android.intel.com:443/596896
+---
+ Android.mk              |   1 +
+ device.cpp              |   2 +
+ device.h                |   1 +
+ fuse_udisk_provider.cpp |  81 +++++++++++++++++++++++++++++++++++
+ fuse_udisk_provider.h   |  22 ++++++++++
+ recovery.cpp            | 109 +++++++++++++++++++++++++++++++++++++++++++++---
+ 6 files changed, 211 insertions(+), 5 deletions(-)
+ create mode 100644 fuse_udisk_provider.cpp
+ create mode 100644 fuse_udisk_provider.h
+
+diff --git a/Android.mk b/Android.mk
+index 7e0ad12..012249e 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -73,6 +73,7 @@ LOCAL_SRC_FILES := \
+     adb_install.cpp \
+     device.cpp \
+     fuse_sdcard_provider.cpp \
++    fuse_udisk_provider.cpp \
+     recovery.cpp \
+     roots.cpp \
+     rotate_logs.cpp \
+diff --git a/device.cpp b/device.cpp
+index f881daf..551f7a0 100644
+--- a/device.cpp
++++ b/device.cpp
+@@ -21,6 +21,7 @@ static const char* MENU_ITEMS[] = {
+   "Reboot to bootloader",
+   "Apply update from ADB",
+   "Apply update from SD card",
++  "Apply update from udisk",
+   "Wipe data/factory reset",
+ #ifndef AB_OTA_UPDATER
+   "Wipe cache partition",
+@@ -38,6 +39,7 @@ static const Device::BuiltinAction MENU_ACTIONS[] = {
+   Device::REBOOT_BOOTLOADER,
+   Device::APPLY_ADB_SIDELOAD,
+   Device::APPLY_SDCARD,
++  Device::APPLY_UDISK,
+   Device::WIPE_DATA,
+ #ifndef AB_OTA_UPDATER
+   Device::WIPE_CACHE,
+diff --git a/device.h b/device.h
+index 74745b3..7d3bff0 100644
+--- a/device.h
++++ b/device.h
+@@ -67,6 +67,7 @@ class Device {
+     MOUNT_SYSTEM = 10,
+     RUN_GRAPHICS_TEST = 11,
+     RUN_LOCALE_TEST = 12,
++    APPLY_UDISK = 13,
+   };
+ 
+   // Return the list of menu items (an array of strings, NULL-terminated). The menu_position passed
+diff --git a/fuse_udisk_provider.cpp b/fuse_udisk_provider.cpp
+new file mode 100644
+index 0000000..1d88a7c
+--- /dev/null
++++ b/fuse_udisk_provider.cpp
+@@ -0,0 +1,81 @@
++/*
++ * Copyright (C) 2014 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <stdlib.h>
++#include <stdio.h>
++#include <string.h>
++#include <errno.h>
++#include <sys/mount.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <fcntl.h>
++
++#include <android-base/file.h>
++
++#include "fuse_sideload.h"
++
++struct file_data {
++    int fd;  // the underlying sdcard file
++
++    uint64_t file_size;
++    uint32_t block_size;
++};
++
++static int read_block_file(const file_data& fd, uint32_t block, uint8_t* buffer,
++                           uint32_t fetch_size) {
++    off64_t offset = static_cast<off64_t>(block) * fd.block_size;
++    if (TEMP_FAILURE_RETRY(lseek64(fd.fd, offset, SEEK_SET)) == -1) {
++        fprintf(stderr, "seek on sdcard failed: %s\n", strerror(errno));
++        return -EIO;
++    }
++
++    if (!android::base::ReadFully(fd.fd, buffer, fetch_size)) {
++        fprintf(stderr, "read on sdcard failed: %s\n", strerror(errno));
++        return -EIO;
++    }
++
++    return 0;
++}
++
++bool start_udisk_fuse(const char* path) {
++    struct stat sb;
++    if (stat(path, &sb) == -1) {
++        fprintf(stderr, "failed to stat %s: %s\n", path, strerror(errno));
++        return false;
++    }
++
++    file_data fd;
++    fd.fd = open(path, O_RDONLY);
++    if (fd.fd == -1) {
++        fprintf(stderr, "failed to open %s: %s\n", path, strerror(errno));
++        return false;
++    }
++    fd.file_size = sb.st_size;
++    fd.block_size = 65536;
++
++    provider_vtab vtab;
++    vtab.read_block = std::bind(&read_block_file, fd, std::placeholders::_1, std::placeholders::_2,
++                              std::placeholders::_3);
++    vtab.close = [&fd]() { close(fd.fd); };
++
++    // The installation process expects to find the udisk unmounted.
++    // Unmount it with MNT_DETACH so that our open file continues to
++    // work but new references see it as unmounted.
++    umount2("/udiska", MNT_DETACH);
++    umount2("/udiskb", MNT_DETACH);
++
++    return run_fuse_sideload(vtab, fd.file_size, fd.block_size) == 0;
++}
+diff --git a/fuse_udisk_provider.h b/fuse_udisk_provider.h
+new file mode 100644
+index 0000000..ecdac73
+--- /dev/null
++++ b/fuse_udisk_provider.h
+@@ -0,0 +1,22 @@
++/*
++ * Copyright (C) 2014 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef __FUSE_UDISK_PROVIDER_H
++#define __FUSE_UDISK_PROVIDER_H
++
++bool start_udisk_fuse(const char* path);
++
++#endif
+diff --git a/recovery.cpp b/recovery.cpp
+index 07ec5cf..c292ac0 100644
+--- a/recovery.cpp
++++ b/recovery.cpp
+@@ -62,6 +62,7 @@
+ #include "common.h"
+ #include "device.h"
+ #include "fuse_sdcard_provider.h"
++#include "fuse_udisk_provider.h"
+ #include "fuse_sideload.h"
+ #include "install.h"
+ #include "minadbd/minadbd.h"
+@@ -110,6 +111,8 @@ static const char *CACHE_ROOT = "/cache";
+ static const char *DATA_ROOT = "/data";
+ static const char* METADATA_ROOT = "/metadata";
+ static const char *SDCARD_ROOT = "/sdcard";
++static const char *UDISK_ROOT_A = "/udiska";
++static const char *UDISK_ROOT_B = "/udiskb";
+ static const char *TEMPORARY_LOG_FILE = "/tmp/recovery.log";
+ static const char *TEMPORARY_INSTALL_FILE = "/tmp/last_install";
+ static const char *LAST_KMSG_FILE = "/cache/recovery/last_kmsg";
+@@ -390,6 +393,14 @@ static void set_sdcard_update_bootloader_message() {
+   }
+ }
+ 
++static void set_udisk_update_bootloader_message() {
++  std::vector<std::string> options;
++  std::string err;
++  if (!update_bootloader_message(options, &err)) {
++    LOG(ERROR) << "Failed to set BCB message: " << err;
++  }
++}
++
+ // Read from kernel log into buffer and write out to file.
+ static void save_kernel_log(const char* destination) {
+     int klog_buf_len = klogctl(KLOG_SIZE_BUFFER, 0, 0);
+@@ -1037,6 +1048,7 @@ static void run_graphics_test() {
+ // How long (in seconds) we wait for the fuse-provided package file to
+ // appear, before timing out.
+ #define SDCARD_INSTALL_TIMEOUT 10
++#define UDISK_INSTALL_TIMEOUT 10
+ 
+ static int apply_from_sdcard(Device* device, bool* wipe_cache) {
+     modified_flash = true;
+@@ -1113,6 +1125,87 @@ static int apply_from_sdcard(Device* device, bool* wipe_cache) {
+     return result;
+ }
+ 
++static int apply_from_udisk(Device* device, bool* wipe_cache) {
++    const char* udisk_root;
++
++    modified_flash = true;
++    udisk_root = UDISK_ROOT_A;
++    if (ensure_path_mounted(udisk_root) != 0) {
++        ui->Print("\n-- Couldn't mount %s.\n", udisk_root);
++        udisk_root = UDISK_ROOT_B;
++        if (ensure_path_mounted(udisk_root) != 0) {
++           ui->Print("\n-- Couldn't mount %s.\n", udisk_root);
++           return INSTALL_ERROR;
++        }
++    }
++
++    std::string path = browse_directory(udisk_root, device);
++    if (path.empty()) {
++        ui->Print("\n-- No package file selected.\n");
++        ensure_path_unmounted(udisk_root);
++        return INSTALL_ERROR;
++    }
++
++    ui->Print("\n-- Install %s ...\n", path.c_str());
++    set_udisk_update_bootloader_message();
++
++    // We used to use fuse in a thread as opposed to a process. Since accessing
++    // through fuse involves going from kernel to userspace to kernel, it leads
++    // to deadlock when a page fault occurs. (Bug: 26313124)
++    pid_t child;
++    if ((child = fork()) == 0) {
++        bool status = start_udisk_fuse(path.c_str());
++
++        _exit(status ? EXIT_SUCCESS : EXIT_FAILURE);
++    }
++
++    // FUSE_SIDELOAD_HOST_PATHNAME will start to exist once the fuse in child
++    // process is ready.
++    int result = INSTALL_ERROR;
++    int status;
++    bool waited = false;
++    for (int i = 0; i < UDISK_INSTALL_TIMEOUT; ++i) {
++        if (waitpid(child, &status, WNOHANG) == -1) {
++            result = INSTALL_ERROR;
++            waited = true;
++            break;
++        }
++
++        struct stat sb;
++        if (stat(FUSE_SIDELOAD_HOST_PATHNAME, &sb) == -1) {
++            if (errno == ENOENT && i < UDISK_INSTALL_TIMEOUT-1) {
++                sleep(1);
++                continue;
++            } else {
++                LOG(ERROR) << "Timed out waiting for the fuse-provided package.";
++                result = INSTALL_ERROR;
++                kill(child, SIGKILL);
++                break;
++            }
++        }
++
++        result = install_package(FUSE_SIDELOAD_HOST_PATHNAME, wipe_cache,
++                                 TEMPORARY_INSTALL_FILE, false, 0/*retry_count*/);
++        break;
++    }
++
++    if (!waited) {
++        // Calling stat() on this magic filename signals the fuse
++        // filesystem to shut down.
++        struct stat sb;
++        stat(FUSE_SIDELOAD_HOST_EXIT_PATHNAME, &sb);
++
++        waitpid(child, &status, 0);
++    }
++
++    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
++        LOG(ERROR) << "Error exit from the fuse process: " << WEXITSTATUS(status);
++    }
++
++    ensure_path_unmounted(udisk_root);
++    return result;
++}
++
+ // Returns REBOOT, SHUTDOWN, or REBOOT_BOOTLOADER. Returning NO_ACTION means to take the default,
+ // which is to reboot or shutdown depending on if the --shutdown_after flag was passed to recovery.
+ static Device::BuiltinAction prompt_and_wait(Device* device, int status) {
+@@ -1166,13 +1259,14 @@ static Device::BuiltinAction prompt_and_wait(Device* device, int status) {
+ 
+       case Device::APPLY_ADB_SIDELOAD:
+       case Device::APPLY_SDCARD:
++      case Device::APPLY_UDISK:
+         {
+-          bool adb = (chosen_action == Device::APPLY_ADB_SIDELOAD);
+-          if (adb) {
++          if (chosen_action == Device::APPLY_ADB_SIDELOAD)
+             status = apply_from_adb(&should_wipe_cache, TEMPORARY_INSTALL_FILE);
+-          } else {
++          else if (chosen_action == Device::APPLY_SDCARD)
+             status = apply_from_sdcard(device, &should_wipe_cache);
+-          }
++          else if (chosen_action == Device::APPLY_UDISK)
++            status = apply_from_udisk(device, &should_wipe_cache);
+ 
+           if (status == INSTALL_SUCCESS && should_wipe_cache) {
+             if (!wipe_cache(false, device)) {
+@@ -1187,7 +1281,12 @@ static Device::BuiltinAction prompt_and_wait(Device* device, int status) {
+           } else if (!ui->IsTextVisible()) {
+             return Device::NO_ACTION;  // reboot if logs aren't visible
+           } else {
+-            ui->Print("\nInstall from %s complete.\n", adb ? "ADB" : "SD card");
++            if (chosen_action == Device::APPLY_ADB_SIDELOAD)
++              ui->Print("\nInstall from %s complete.\n", "ADB");
++            else if (chosen_action == Device::APPLY_SDCARD)
++              ui->Print("\nInstall from %s complete.\n", "SD card");
++            else if (chosen_action == Device::APPLY_UDISK)
++              ui->Print("\nInstall from %s complete.\n", "udisk");
+           }
+         }
+         break;
+-- 
+2.7.4
+
