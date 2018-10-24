@@ -415,6 +415,25 @@ LOCAL_POST_INSTALL_CMD := $(INTEL_PATH_SEPOLICY)/tools/capchecker $(LOCAL_USER_O
 
 include $(BUILD_PHONY_PACKAGE)
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
+##############################################################
+.PHONY: lk evmm tosimage multiboot
+
+LOCAL_MAKE := make
+
+lk:
+	@echo "making lk.elf.."
+	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
+
+evmm: yoctotoolchain
+	@echo "making evmm.."
+	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
+
+# include sub-makefile according to boot_arch
+include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_vsbl.mk
+
+LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/AndroidBoard.mk
 ##############################################################
 include $(CLEAR_VARS)
@@ -753,25 +772,6 @@ acrn_flashfiles: acrn_ext4_bin flashfiles img_download publish_otapackage publis
 	@$(ACP) $(ACRN_FLASHFILES) $(PUBLISH_DEST)
 	$(hide) rm -rf $(ACRN_TMP_DIR)
 	echo ">>> $@ is generated successfully"
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
-##############################################################
-.PHONY: lk evmm tosimage multiboot
-
-LOCAL_MAKE := make
-
-lk:
-	@echo "making lk.elf.."
-	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
-
-evmm: yoctotoolchain
-	@echo "making evmm.."
-	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
-
-# include sub-makefile according to boot_arch
-include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_vsbl.mk
-
-LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/load_modules/true/AndroidBoard.mk
 ##############################################################

@@ -12,11 +12,6 @@ TARGET_RELEASETOOLS_EXTENSIONS ?= $(INTEL_PATH_HARDWARE)/bootctrl/recovery/bootl
 # By default recovery minui expects RGBA framebuffer
 TARGET_RECOVERY_PIXEL_FORMAT := "BGRA_8888"
 
-{{^slot-ab}}
-# Needed for ABL firmware update
-TARGET_RECOVERY_UPDATER_LIBS := libabl_recovery
-{{/slot-ab}}
-
 #
 # FILESYSTEMS
 #
@@ -27,11 +22,6 @@ BOARD_SYSTEMIMAGE_PARTITION_SIZE ?= 3221225472
 BOARD_TOSIMAGE_PARTITION_SIZE ?= 10485760
 BOARD_BOOTLOADER_PARTITION_SIZE ?= $$(({{bootloader_len}} * 1024 * 1024))
 BOARD_BOOTLOADER_BLOCK_SIZE := {{{bootloader_block_size}}}
-{{^slot-ab}}
-BOARD_RECOVERYIMAGE_PARTITION_SIZE ?= 31457280
-BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_CACHEIMAGE_PARTITION_SIZE ?= 104857600
-{{/slot-ab}}
 BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := {{system_fs}}
 
 ifeq ({{data_use_f2fs}},true)
@@ -69,11 +59,6 @@ BOARD_KERNEL_CMDLINE += iTCO_wdt.stop_on_shutdown=0
 {{/run_tco_on_shutdown}}
 
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
-{{#slot-ab}}
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/generic
-# no need to add $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/xbl
-# because we do not have postinstall step with AaaG/vSBL
-{{/slot-ab}}
 
 TARGET_BOOTLOADER_BOARD_NAME := $(TARGET_DEVICE)
 

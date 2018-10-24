@@ -1,2 +1,2 @@
 [mixinfo]
-deps = boot-arch disk-bus
+deps = boot-arch disk-bus trusty

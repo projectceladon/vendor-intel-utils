@@ -9,18 +9,6 @@ TARGET_RECOVERY_FSTAB ?= $(TARGET_DEVICE_DIR)/fstab.recovery
 # to the OTA updater scripts
 TARGET_RELEASETOOLS_EXTENSIONS ?= $(INTEL_PATH_HARDWARE)/bootctrl/recovery
 
-{{^slot-ab}}
-# Adds edify commands swap_entries and copy_partition for robust
-# update of the EFI system partition
-TARGET_RECOVERY_UPDATER_LIBS := libupdater_esp
-# Extra libraries needed to be rolled into recovery updater
-# libgpt_static and libefivar are needed by libupdater_esp
-TARGET_RECOVERY_UPDATER_EXTRA_LIBS := libcommon_recovery libgpt_static
-ifeq ($(TARGET_SUPPORT_BOOT_OPTION),true)
-TARGET_RECOVERY_UPDATER_EXTRA_LIBS += libefivar
-endif
-{{/slot-ab}}
-
 # By default recovery minui expects RGBA framebuffer
 TARGET_RECOVERY_PIXEL_FORMAT := "BGRA_8888"
 
@@ -35,11 +23,6 @@ BOARD_SYSTEMIMAGE_PARTITION_SIZE ?= 3221225472
 BOARD_TOSIMAGE_PARTITION_SIZE := 10485760
 BOARD_BOOTLOADER_PARTITION_SIZE ?= $$(({{bootloader_len}} * 1024 * 1024))
 BOARD_BOOTLOADER_BLOCK_SIZE := {{{bootloader_block_size}}}
-{{^slot-ab}}
-BOARD_RECOVERYIMAGE_PARTITION_SIZE ?= 31457280
-BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_CACHEIMAGE_PARTITION_SIZE ?= 104857600
-{{/slot-ab}}
 BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := {{system_fs}}
 
 TARGET_USERIMAGES_USE_EXT4 := true
@@ -92,10 +75,6 @@ BOARD_KERNEL_CMDLINE += iTCO_wdt.stop_on_shutdown=0
 {{/run_tco_on_shutdown}}
 
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
-{{#slot-ab}}
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/generic
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/efi
-{{/slot-ab}}
 
 {{#rpmb}}
 KERNELFLINGER_USE_RPMB := true

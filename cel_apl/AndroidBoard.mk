@@ -463,6 +463,25 @@ LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/usb-audio-init/load_usbaudio
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/bluetooth/load_bt.in
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
+##############################################################
+.PHONY: lk evmm tosimage multiboot
+
+LOCAL_MAKE := make
+
+lk:
+	@echo "making lk.elf.."
+	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
+
+evmm: yoctotoolchain
+	@echo "making evmm.."
+	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
+
+# include sub-makefile according to boot_arch
+include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_efi.mk
+
+LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/AndroidBoard.mk
 ##############################################################
 include $(CLEAR_VARS)
@@ -529,25 +548,6 @@ include $(TARGET_DEVICE_DIR)/audio/AndroidBoard.mk
 # Car device required kernel diff config
 KERNEL_CAR_DIFFCONFIG = $(wildcard $(KERNEL_CONFIG_PATH)/car_diffconfig)
 KERNEL_DIFFCONFIG += $(KERNEL_CAR_DIFFCONFIG)
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/trusty/true/AndroidBoard.mk
-##############################################################
-.PHONY: lk evmm tosimage multiboot
-
-LOCAL_MAKE := make
-
-lk:
-	@echo "making lk.elf.."
-	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
-
-evmm: yoctotoolchain
-	@echo "making evmm.."
-	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
-
-# include sub-makefile according to boot_arch
-include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_efi.mk
-
-LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/security/cse/AndroidBoard.mk
 ##############################################################

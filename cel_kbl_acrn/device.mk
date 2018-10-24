@@ -62,6 +62,48 @@ PRODUCT_PACKAGES += \
 
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.hardware.bootctrl=intel
+
+ifeq (False,False)
+ifeq (False,true)
+
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/update_ifwi_ab.sh:vendor/bin/update_ifwi_ab
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/update_ifwi_ab.sh:recovery/root/vendor/bin/update_ifwi_ab
+
+ifeq (vsbl,abl)
+PRODUCT_PACKAGES += \
+    abl-user-cmd_vendor \
+    abl-user-cmd_static
+endif
+
+ifeq (vsbl,sbl)
+PRODUCT_PACKAGES += \
+    sbl-user-cmd_vendor \
+    sbl-user-cmd_static
+endif
+
+endif
+
+
+ifeq (False,true)
+
+#only support abl
+ifeq (vsbl,abl)
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/update_ifwi_boot.sh:vendor/bin/fw_update.sh
+endif
+
+ifeq (False,False)
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/update_ifwi_ab.sh:vendor/bin/update_ifwi_ab
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/update_ifwi_ab.sh:recovery/root/vendor/bin/update_ifwi_ab
+
+ifeq (vsbl,abl)
+PRODUCT_PACKAGES += \
+    abl-user-cmd_vendor \
+    abl-user-cmd_static
+endif
+endif
+
+endif
+endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/boot-arch/vsbl/product.mk
 ##############################################################
@@ -153,6 +195,9 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.boot.moduleslocation=/$(KERNEL_MODULES_
 # Source: device/intel/project-celadon/mixins/groups/sepolicy/permissive/product.mk
 ##############################################################
 PRODUCT_PACKAGES += sepolicy-areq-checker
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
+##############################################################
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/product.mk
 ##############################################################
@@ -756,9 +801,6 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += config.disable_bluetooth=true
 PRODUCT_PACKAGES += thermal.default \
                     android.hardware.thermal@1.0-service \
                     android.hardware.thermal@1.0-impl
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/trusty/true/product.mk
-##############################################################
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/art-config/true/product.mk
 ##############################################################

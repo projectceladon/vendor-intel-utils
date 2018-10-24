@@ -34,6 +34,35 @@ BOARD_SLOT_AB_ENABLE := true
 BOARD_SYSTEMIMAGE_PARTITION_SIZE := 2684354560
 PRODUCT_STATIC_BOOT_CONTROL_HAL := bootctrl.intel.static
 BOARD_KERNEL_CMDLINE += rootfstype=ext4
+
+ifeq (False,False)
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/slot-ab/generic
+
+ifeq (vsbl,efi)
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/slot-ab/efi
+endif
+
+ifeq (False,true)
+AB_OTA_POSTINSTALL_CONFIG += \
+    RUN_POSTINSTALL_vendor=true \
+    POSTINSTALL_PATH_vendor=bin/update_ifwi_ab \
+    FILESYSTEM_TYPE_vendor=ext4 \
+    POSTINSTALL_OPTIONAL_vendor=true
+
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/slot-ab/xbl
+
+endif
+
+ifeq (False,true)
+
+ifeq (False,False)
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/slot-ab/xbl
+endif
+
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/slot-ab/fw_update
+
+endif
+endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/disk-bus/pci/BoardConfig.mk
 ##############################################################
@@ -58,7 +87,6 @@ TARGET_RELEASETOOLS_EXTENSIONS ?= $(INTEL_PATH_HARDWARE)/bootctrl/recovery/bootl
 
 # By default recovery minui expects RGBA framebuffer
 TARGET_RECOVERY_PIXEL_FORMAT := "BGRA_8888"
-
 
 #
 # FILESYSTEMS
@@ -104,9 +132,6 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_HARDWARE)/bootctrl/boot/overlay
 
 
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/generic
-# no need to add $(INTEL_PATH_SEPOLICY)/boot-arch/slotab_ota/xbl
-# because we do not have postinstall step with AaaG/vSBL
 
 TARGET_BOOTLOADER_BOARD_NAME := $(TARGET_DEVICE)
 
@@ -173,6 +198,51 @@ BOARD_KERNEL_CMDLINE += enforcing=0 androidboot.selinux=permissive
 # SELinux Policy
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)
 
+##############################################################
+# Source: device/intel/project-celadon/mixins/groups/trusty/true/BoardConfig.mk
+##############################################################
+TARGET_USE_TRUSTY := true
+
+ifneq (, $(filter abl sbl, vsbl))
+TARGET_USE_MULTIBOOT := true
+endif
+
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty
+BOARD_SEPOLICY_M4DEFS += module_trusty=true
+
+LKBUILD_TOOLCHAIN_ROOT = $(PWD)/$(INTEL_PATH_VENDOR)/external/prebuilts/elf/
+LKBUILD_X86_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)i386-elf-4.9.1-Linux-x86_64/bin
+LKBUILD_X64_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)x86_64-elf-4.9.1-Linux-x86_64/bin
+TRUSTY_BUILDROOT = $(PWD)/$(PRODUCT_OUT)/obj/trusty/
+
+TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=gordon_peak_acrn
+
+#for trusty lk
+TRUSTY_ENV_VAR += BUILDROOT=$(TRUSTY_BUILDROOT)
+TRUSTY_ENV_VAR += PATH=$$PATH:$(LKBUILD_X86_TOOLCHAIN):$(LKBUILD_X64_TOOLCHAIN)
+TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/$(LLVM_PREBUILTS_PATH)
+TRUSTY_ENV_VAR += ARCH_x86_64_TOOLCHAIN_PREFIX=${PWD}/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-${TARGET_GCC_VERSION}/bin/x86_64-linux-android-
+
+#for trusty vmm
+# use same toolchain as android kernel
+TRUSTY_ENV_VAR += COMPILE_TOOLCHAIN=$(YOCTO_CROSSCOMPILE)
+TRUSTY_ENV_VAR += TARGET_BUILD_VARIANT=$(TARGET_BUILD_VARIANT)
+TRUSTY_ENV_VAR += BOOT_ARCH=vsbl
+
+# output build dir to android out folder
+TRUSTY_ENV_VAR += BUILD_DIR=$(TRUSTY_BUILDROOT)
+TRUSTY_ENV_VAR += LKBIN_DIR=$(TRUSTY_BUILDROOT)/build-sand-x86-64/
+
+#Fix the cpu hotplug fail due to the trusty.
+#Trusty will introduce some delay for cpu_up().
+#Experiment show need wait at least 60us after
+#apic_icr_write(APIC_DM_STARTUP | (start_eip >> 12), phys_apicid);
+#So here override the cpu_init_udelay to have the cpu wait for 300us
+#to guarantee the cpu_up success.
+BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
+
+#TOS_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/tos.img
+#EVMM_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/multiboot.img
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/BoardConfig.mk
 ##############################################################
@@ -432,51 +502,6 @@ endif
 ##############################################################
 # can't use := here, as PRODUCT_OUT is not defined yet
 ACRN_GPTIMAGE_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT).img
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/trusty/true/BoardConfig.mk
-##############################################################
-TARGET_USE_TRUSTY := true
-
-ifneq (, $(filter abl sbl, vsbl))
-TARGET_USE_MULTIBOOT := true
-endif
-
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty
-BOARD_SEPOLICY_M4DEFS += module_trusty=true
-
-LKBUILD_TOOLCHAIN_ROOT = $(PWD)/$(INTEL_PATH_VENDOR)/external/prebuilts/elf/
-LKBUILD_X86_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)i386-elf-4.9.1-Linux-x86_64/bin
-LKBUILD_X64_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)x86_64-elf-4.9.1-Linux-x86_64/bin
-TRUSTY_BUILDROOT = $(PWD)/$(PRODUCT_OUT)/obj/trusty/
-
-TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=gordon_peak_acrn
-
-#for trusty lk
-TRUSTY_ENV_VAR += BUILDROOT=$(TRUSTY_BUILDROOT)
-TRUSTY_ENV_VAR += PATH=$$PATH:$(LKBUILD_X86_TOOLCHAIN):$(LKBUILD_X64_TOOLCHAIN)
-TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/$(LLVM_PREBUILTS_PATH)
-TRUSTY_ENV_VAR += ARCH_x86_64_TOOLCHAIN_PREFIX=${PWD}/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-${TARGET_GCC_VERSION}/bin/x86_64-linux-android-
-
-#for trusty vmm
-# use same toolchain as android kernel
-TRUSTY_ENV_VAR += COMPILE_TOOLCHAIN=$(YOCTO_CROSSCOMPILE)
-TRUSTY_ENV_VAR += TARGET_BUILD_VARIANT=$(TARGET_BUILD_VARIANT)
-TRUSTY_ENV_VAR += BOOT_ARCH=vsbl
-
-# output build dir to android out folder
-TRUSTY_ENV_VAR += BUILD_DIR=$(TRUSTY_BUILDROOT)
-TRUSTY_ENV_VAR += LKBIN_DIR=$(TRUSTY_BUILDROOT)/build-sand-x86-64/
-
-#Fix the cpu hotplug fail due to the trusty.
-#Trusty will introduce some delay for cpu_up().
-#Experiment show need wait at least 60us after
-#apic_icr_write(APIC_DM_STARTUP | (start_eip >> 12), phys_apicid);
-#So here override the cpu_init_udelay to have the cpu wait for 300us
-#to guarantee the cpu_up success.
-BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
-
-#TOS_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/tos.img
-#EVMM_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/multiboot.img
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/hyper-dmabuf-sharing/true/BoardConfig.mk
 ##############################################################

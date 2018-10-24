@@ -16,6 +16,29 @@ DEVICE_MANIFEST_FILE := $(TARGET_DEVICE_DIR)/manifest.xml
 # Disable ota
 TARGET_SKIP_OTA_PACKAGE := true
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/slot-ab/default/BoardConfig.mk
+##############################################################
+ifeq (efi,efi)
+# Adds edify commands swap_entries and copy_partition for robust
+# update of the EFI system partition
+TARGET_RECOVERY_UPDATER_LIBS := libupdater_esp
+# Extra libraries needed to be rolled into recovery updater
+# libgpt_static and libefivar are needed by libupdater_esp
+TARGET_RECOVERY_UPDATER_EXTRA_LIBS := libcommon_recovery libgpt_static
+ifeq ($(TARGET_SUPPORT_BOOT_OPTION),true)
+TARGET_RECOVERY_UPDATER_EXTRA_LIBS += libefivar
+endif
+endif
+
+ifeq (efi,abl)
+#Need for ABL firmware update
+TARGET_RECOVERY_UPDATER_LIBS := libabl_recovery
+endif
+
+BOARD_RECOVERYIMAGE_PARTITION_SIZE ?= 31457280
+BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
+BOARD_CACHEIMAGE_PARTITION_SIZE ?= 104857600
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/disk-bus/auto/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/set_storage
@@ -33,16 +56,6 @@ TARGET_RECOVERY_FSTAB ?= $(TARGET_DEVICE_DIR)/fstab.recovery
 # to the OTA updater scripts
 TARGET_RELEASETOOLS_EXTENSIONS ?= $(INTEL_PATH_HARDWARE)/bootctrl/recovery
 
-# Adds edify commands swap_entries and copy_partition for robust
-# update of the EFI system partition
-TARGET_RECOVERY_UPDATER_LIBS := libupdater_esp
-# Extra libraries needed to be rolled into recovery updater
-# libgpt_static and libefivar are needed by libupdater_esp
-TARGET_RECOVERY_UPDATER_EXTRA_LIBS := libcommon_recovery libgpt_static
-ifeq ($(TARGET_SUPPORT_BOOT_OPTION),true)
-TARGET_RECOVERY_UPDATER_EXTRA_LIBS += libefivar
-endif
-
 # By default recovery minui expects RGBA framebuffer
 TARGET_RECOVERY_PIXEL_FORMAT := "BGRA_8888"
 
@@ -57,9 +70,6 @@ BOARD_SYSTEMIMAGE_PARTITION_SIZE ?= 3221225472
 BOARD_TOSIMAGE_PARTITION_SIZE := 10485760
 BOARD_BOOTLOADER_PARTITION_SIZE ?= $$((33 * 1024 * 1024))
 BOARD_BOOTLOADER_BLOCK_SIZE := 4096
-BOARD_RECOVERYIMAGE_PARTITION_SIZE ?= 31457280
-BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
-BOARD_CACHEIMAGE_PARTITION_SIZE ?= 104857600
 BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := ext4
 
 TARGET_USERIMAGES_USE_EXT4 := true
@@ -345,6 +355,53 @@ BOARD_HAVE_BLUETOOTH_INTEL_ICNV := true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/bluetooth/common
 
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/trusty/true/BoardConfig.mk
+##############################################################
+TARGET_USE_TRUSTY := true
+
+ifneq (, $(filter abl sbl, efi))
+TARGET_USE_MULTIBOOT := true
+endif
+
+BOARD_USES_TRUSTY := true
+BOARD_USES_KEYMASTER1 := true
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty
+BOARD_SEPOLICY_M4DEFS += module_trusty=true
+
+LKBUILD_TOOLCHAIN_ROOT = $(PWD)/$(INTEL_PATH_VENDOR)/external/prebuilts/elf/
+LKBUILD_X86_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)i386-elf-4.9.1-Linux-x86_64/bin
+LKBUILD_X64_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)x86_64-elf-4.9.1-Linux-x86_64/bin
+TRUSTY_BUILDROOT = $(PWD)/$(PRODUCT_OUT)/obj/trusty/
+
+TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=project-celadon_64
+
+#for trusty lk
+TRUSTY_ENV_VAR += BUILDROOT=$(TRUSTY_BUILDROOT)
+TRUSTY_ENV_VAR += PATH=$$PATH:$(LKBUILD_X86_TOOLCHAIN):$(LKBUILD_X64_TOOLCHAIN)
+TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/$(LLVM_PREBUILTS_PATH)
+TRUSTY_ENV_VAR += ARCH_x86_64_TOOLCHAIN_PREFIX=${PWD}/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-${TARGET_GCC_VERSION}/bin/x86_64-linux-android-
+
+#for trusty vmm
+# use same toolchain as android kernel
+TRUSTY_ENV_VAR += COMPILE_TOOLCHAIN=$(YOCTO_CROSSCOMPILE)
+TRUSTY_ENV_VAR += TARGET_BUILD_VARIANT=$(TARGET_BUILD_VARIANT)
+TRUSTY_ENV_VAR += BOOT_ARCH=efi
+
+# output build dir to android out folder
+TRUSTY_ENV_VAR += BUILD_DIR=$(TRUSTY_BUILDROOT)
+TRUSTY_ENV_VAR += LKBIN_DIR=$(TRUSTY_BUILDROOT)/build-sand-x86-64/
+
+#Fix the cpu hotplug fail due to the trusty.
+#Trusty will introduce some delay for cpu_up().
+#Experiment show need wait at least 60us after
+#apic_icr_write(APIC_DM_STARTUP | (start_eip >> 12), phys_apicid);
+#So here override the cpu_init_udelay to have the cpu wait for 300us
+#to guarantee the cpu_up success.
+BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
+
+#TOS_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/tos.img
+#EVMM_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/multiboot.img
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/vendor-partition/true/BoardConfig.mk
 ##############################################################
 # Those 3 lines are required to enable vendor image generation.
@@ -418,53 +475,6 @@ endif
 ##############################################################
 BOARD_SEPOLICY_M4DEFS += module_debug_phonedoctor=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug-phonedoctor
-##############################################################
-# Source: device/intel/project-celadon/mixins/groups/trusty/true/BoardConfig.mk
-##############################################################
-TARGET_USE_TRUSTY := true
-
-ifneq (, $(filter abl sbl, efi))
-TARGET_USE_MULTIBOOT := true
-endif
-
-BOARD_USES_TRUSTY := true
-BOARD_USES_KEYMASTER1 := true
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty
-BOARD_SEPOLICY_M4DEFS += module_trusty=true
-
-LKBUILD_TOOLCHAIN_ROOT = $(PWD)/$(INTEL_PATH_VENDOR)/external/prebuilts/elf/
-LKBUILD_X86_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)i386-elf-4.9.1-Linux-x86_64/bin
-LKBUILD_X64_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)x86_64-elf-4.9.1-Linux-x86_64/bin
-TRUSTY_BUILDROOT = $(PWD)/$(PRODUCT_OUT)/obj/trusty/
-
-TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=project-celadon_64
-
-#for trusty lk
-TRUSTY_ENV_VAR += BUILDROOT=$(TRUSTY_BUILDROOT)
-TRUSTY_ENV_VAR += PATH=$$PATH:$(LKBUILD_X86_TOOLCHAIN):$(LKBUILD_X64_TOOLCHAIN)
-TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/$(LLVM_PREBUILTS_PATH)
-TRUSTY_ENV_VAR += ARCH_x86_64_TOOLCHAIN_PREFIX=${PWD}/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-${TARGET_GCC_VERSION}/bin/x86_64-linux-android-
-
-#for trusty vmm
-# use same toolchain as android kernel
-TRUSTY_ENV_VAR += COMPILE_TOOLCHAIN=$(YOCTO_CROSSCOMPILE)
-TRUSTY_ENV_VAR += TARGET_BUILD_VARIANT=$(TARGET_BUILD_VARIANT)
-TRUSTY_ENV_VAR += BOOT_ARCH=efi
-
-# output build dir to android out folder
-TRUSTY_ENV_VAR += BUILD_DIR=$(TRUSTY_BUILDROOT)
-TRUSTY_ENV_VAR += LKBIN_DIR=$(TRUSTY_BUILDROOT)/build-sand-x86-64/
-
-#Fix the cpu hotplug fail due to the trusty.
-#Trusty will introduce some delay for cpu_up().
-#Experiment show need wait at least 60us after
-#apic_icr_write(APIC_DM_STARTUP | (start_eip >> 12), phys_apicid);
-#So here override the cpu_init_udelay to have the cpu wait for 300us
-#to guarantee the cpu_up success.
-BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
-
-#TOS_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/tos.img
-#EVMM_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/multiboot.img
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/factory-scripts/true/BoardConfig.mk
 ##############################################################
