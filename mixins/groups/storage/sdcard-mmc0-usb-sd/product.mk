@@ -1,2 +1,2 @@
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += support.sdcardfs.mode=y
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.support.sdcardfs.mode=y

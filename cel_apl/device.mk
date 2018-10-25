@@ -115,7 +115,7 @@ TARGET_KERNEL_ARCH := x86_64
 
 KERNEL_MODULES_ROOT_PATH ?= vendor/lib/modules
 KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
 
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/sepolicy/permissive/product.mk
@@ -181,7 +181,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
 # Source: device/intel/project-celadon/mixins/groups/storage/sdcard-mmc0-usb-sd/product.mk
 ##############################################################
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += support.sdcardfs.mode=y
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.support.sdcardfs.mode=y
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/widevine/L3_Gen/product.mk
 ##############################################################
@@ -602,7 +602,7 @@ endif
 PRODUCT_PACKAGES_DEBUG += AFotaApp
 
 ifneq ($(TARGET_BUILD_VARIANT),user)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.fota.ota_stream=disabled
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.fota.ota_stream=disabled
 
 AFOTAAPP_EULA_PATH := 
 AFOTAAPP_LOG_LEVEL := DEBUG
@@ -704,14 +704,14 @@ INTEL_FEATURE_ENHANCEDDIALER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/
 ##############################################################
 ifneq ($(TARGET_BUILD_VARIANT),user)
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dropbox.max_size_kb=4096
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dropbox.max_size_kb=4096
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.binder_stats.uiwdt=1
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.binder_stats.anr=1
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.binder_stats.uiwdt=1
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.binder_stats.anr=1
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.peer_depth=3
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.peer_depth=3
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.stacks_timeout=1500
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.stacks_timeout=1500
 
 endif
 ##############################################################

@@ -71,7 +71,7 @@ endif # $(TARGET_PREBUILT_KERNEL)
 
 KERNEL_MODULES_ROOT_PATH ?= vendor/lib/modules
 KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
 
 {{#useprebuilt}}
 # Copy kernel into place and modules

@@ -786,7 +786,7 @@ include $(BUILD_SYSTEM)/base_rules.mk
 $(LOCAL_BUILT_MODULE): $(LOCAL_SRC)
 	$(hide) mkdir -p "$(dir $@)"
 	echo "#!/system/bin/sh" > $@
-	echo "modules=\`getprop ro.boot.moduleslocation\`" >> $@
+	echo "modules=\`getprop ro.vendor.boot.moduleslocation\`" >> $@
 	cat $(LOAD_MODULES_H_IN) >> $@
 	echo wait >> $@
 	cat $(LOAD_MODULES_IN) >> $@

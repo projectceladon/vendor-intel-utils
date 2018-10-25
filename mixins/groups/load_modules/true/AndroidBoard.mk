@@ -14,7 +14,7 @@ $(LOCAL_BUILT_MODULE): $(LOCAL_SRC)
 {{#treble}}
 	echo "#!/vendor/bin/sh" > $@
 {{/treble}}
-	echo "modules=\`getprop ro.boot.moduleslocation\`" >> $@
+	echo "modules=\`getprop ro.vendor.boot.moduleslocation\`" >> $@
 	cat $(LOAD_MODULES_H_IN) >> $@
 	echo wait >> $@
 	cat $(LOAD_MODULES_IN) >> $@

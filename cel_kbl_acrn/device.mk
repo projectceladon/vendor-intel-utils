@@ -189,7 +189,7 @@ TARGET_KERNEL_ARCH := x86_64
 
 KERNEL_MODULES_ROOT_PATH ?= vendor/lib/modules
 KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
 
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/sepolicy/permissive/product.mk
@@ -330,7 +330,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
 # Source: device/intel/project-celadon/mixins/groups/storage/sdcard-mmc0-usb-sd/product.mk
 ##############################################################
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += support.sdcardfs.mode=y
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.support.sdcardfs.mode=y
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/ethernet/dhcp/product.mk
 ##############################################################
@@ -458,7 +458,7 @@ PRODUCT_PACKAGES_DEBUG += \
 PRODUCT_PACKAGES_DEBUG += AFotaApp
 
 ifneq ($(TARGET_BUILD_VARIANT),user)
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.fota.ota_stream=disabled
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.fota.ota_stream=disabled
 
 AFOTAAPP_EULA_PATH := 
 AFOTAAPP_LOG_LEVEL := DEBUG
@@ -599,8 +599,8 @@ PRODUCT_PACKAGES += mediaserver-radio
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-usb-config/true/product.mk
 ##############################################################
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.debug.dvc.protocol=0
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.debug.dvc.source_dev=dvcith-0-msc0
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.debug.dvc.protocol=0
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.debug.dvc.source_dev=dvcith-0-msc0
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-dvc_desc/npk/product.mk
 ##############################################################
@@ -690,22 +690,22 @@ PRODUCT_PACKAGES += \
 AUDIOSERVER_MULTILIB := 64
 
 # for AVB and GPTP services
-PRODUCT_PROPERTY_OVERRIDES += persist.eavb.mode=m
+PRODUCT_PROPERTY_OVERRIDES += persist.vendor.eavb.mode=m
 
 # for gPTP service in automotive profile or not
-PRODUCT_PROPERTY_OVERRIDES += persist.gptp.automotive_profile=y
+PRODUCT_PROPERTY_OVERRIDES += persist.vendor.gptp.automotive_profile=y
 
 # for AVB service in D6 mode or not
-PRODUCT_PROPERTY_OVERRIDES += persist.d6.mode=n
+PRODUCT_PROPERTY_OVERRIDES += persist.vendor.d6.mode=n
 
 # SmartX module Properties
 smxelements := CFG SMX EVT RZN AHD MDL SXC SHM SMW RB DP DBG TST SMJ
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    $(foreach item, $(smxelements), persist.media.smartx.$(item)log=3)
+    $(foreach item, $(smxelements), persist.vendor.smartx.$(item)log=3)
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    persist.audio.audioConf=AudioParameterFramework-tdf8532-eavb-master.xml
+    persist.vendor.audio.audioConf=AudioParameterFramework-tdf8532-eavb-master.xml
 
 PRODUCT_PROPERTY_OVERRIDES += \
     persist.avb.target.name=GrMrb \
@@ -738,7 +738,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
     $(foreach item,$(avbelements),persist.avb.debug.loglevel.$(item)=4)
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    init.svc.earlyavbaudio=uninitialized
+    init.svc.vendor.earlyavbaudio=uninitialized
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/memtrack/true/product.mk
 ##############################################################
@@ -854,14 +854,14 @@ INTEL_FEATURE_ENHANCEDDIALER ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/
 ##############################################################
 ifneq ($(TARGET_BUILD_VARIANT),user)
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dropbox.max_size_kb=4096
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dropbox.max_size_kb=4096
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.binder_stats.uiwdt=1
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.binder_stats.anr=1
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.binder_stats.uiwdt=1
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.binder_stats.anr=1
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.peer_depth=3
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.peer_depth=3
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += sys.dump.stacks_timeout=1500
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.sys.dump.stacks_timeout=1500
 
 endif
 ##############################################################

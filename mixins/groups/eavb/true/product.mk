@@ -48,22 +48,22 @@ PRODUCT_PACKAGES += \
 AUDIOSERVER_MULTILIB := 64
 
 # for AVB and GPTP services
-PRODUCT_PROPERTY_OVERRIDES += persist.eavb.mode=m
+PRODUCT_PROPERTY_OVERRIDES += persist.vendor.eavb.mode=m
 
 # for gPTP service in automotive profile or not
-PRODUCT_PROPERTY_OVERRIDES += persist.gptp.automotive_profile={{automotive_profile}}
+PRODUCT_PROPERTY_OVERRIDES += persist.vendor.gptp.automotive_profile={{automotive_profile}}
 
 # for AVB service in D6 mode or not
-PRODUCT_PROPERTY_OVERRIDES += persist.d6.mode=n
+PRODUCT_PROPERTY_OVERRIDES += persist.vendor.d6.mode=n
 
 # SmartX module Properties
 smxelements := CFG SMX EVT RZN AHD MDL SXC SHM SMW RB DP DBG TST SMJ
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    $(foreach item, $(smxelements), persist.media.smartx.$(item)log=3)
+    $(foreach item, $(smxelements), persist.vendor.smartx.$(item)log=3)
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    persist.audio.audioConf=AudioParameterFramework-tdf8532-eavb-master.xml
+    persist.vendor.audio.audioConf=AudioParameterFramework-tdf8532-eavb-master.xml
 
 PRODUCT_PROPERTY_OVERRIDES += \
     persist.avb.target.name=GrMrb \
@@ -96,4 +96,4 @@ PRODUCT_PROPERTY_OVERRIDES += \
     $(foreach item,$(avbelements),persist.avb.debug.loglevel.$(item)=4)
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    init.svc.earlyavbaudio=uninitialized
+    init.svc.vendor.earlyavbaudio=uninitialized
