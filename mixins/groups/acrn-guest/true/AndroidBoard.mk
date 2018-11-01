@@ -100,13 +100,13 @@ endef
 # Generate ACRN AaaG Extra4 Image
 ######################################################################
 .PHONY: acrn_ext4_bin
-acrn_ext4_bin: $(ACRN_GPTIMAGE_BIN)
+acrn_ext4_bin: $(ACRN_GPTIMAGE_BIN) $(IMG2SIMG) mkuserimg_mke2fs.sh
 	$(hide) mkdir -p $(ACRN_DATA_DIR)
 	$(hide) mkdir -p $(ACRN_AND_DIR)
 	$(hide) rm -f $(ACRN_GPT_BIN)
 	$(hide) cp $(ACRN_GPTIMAGE_BIN) $(ACRN_GPT_BIN)
 	$(hide) echo "Try making $@"
-	$(MAKE_EXT4FS_ACRN) -s -l $(ACRN_DATA_SIZE) $(ACRN_EXT4_BIN) $(ACRN_DATA_DIR)
+	mkuserimg_mke2fs.sh -s $(ACRN_DATA_DIR) $(ACRN_EXT4_BIN) ext4 dummy $(ACRN_DATA_SIZE)
 	echo ">>> $@ is generated successfully"
 
 ######################################################################
