@@ -686,6 +686,7 @@ PRODUCT_PACKAGES += \
     alsa_amixer \
     alsa_loop \
     asound.conf \
+    eth_check
 
 AUDIOSERVER_MULTILIB := 64
 
@@ -708,34 +709,34 @@ PRODUCT_PROPERTY_OVERRIDES += \
     persist.vendor.audio.audioConf=AudioParameterFramework-tdf8532-eavb-master.xml
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    persist.avb.target.name=GrMrb \
-    persist.avb.profile.name=MRB_Master_Audio \
-    persist.avb.audio.rx.srclass=low \
-    persist.avb.video.rx.srclass=low \
-    persist.avb.ifname=eth0 \
-    persist.avb.pcibus=2 \
-    persist.avb.ptp.pdelaycount=0 \
-    persist.avb.ptp.synccount=0 \
-    persist.avb.ptp.loopcount=0 \
-    persist.avb.tx.window.width=6000000 \
-    persist.avb.tx.window.pitch=4000000 \
-    persist.avb.lalsa.baseperiod=384 \
-    persist.avb.lalsa.ringbuffer=12288 \
-    persist.avb.ptime.offset.low=2100000 \
-    persist.avb.ptime.offset.high=2100000 \
-    persist.avb.audio.tstamp.buffer=1 \
-    persist.avb.compatibility.audio="" \
-    persist.avb.alsa.groupname=audio \
-    persist.avb.alsa.smartx.switch=0 \
-    persist.avb.igb.to.cnt=5 \
-    persist.avb.android.boottime=0 \
-    persist.avb.clock.raw=n
+    persist.vendor.avb.target.name=GrMrb \
+    persist.vendor.avb.profile.name=MRB_Master_Audio \
+    persist.vendor.avb.audio.rx.srclass=low \
+    persist.vendor.avb.video.rx.srclass=low \
+    persist.vendor.avb.ifname=eth0 \
+    persist.vendor.avb.pcibus=2 \
+    persist.vendor.avb.ptp.pdelaycount=0 \
+    persist.vendor.avb.ptp.synccount=0 \
+    persist.vendor.avb.ptp.loopcount=0 \
+    persist.vendor.avb.tx.window.width=6000000 \
+    persist.vendor.avb.tx.window.pitch=4000000 \
+    persist.vendor.avb.lalsa.baseperiod=384 \
+    persist.vendor.avb.lalsa.ringbuffer=12288 \
+    persist.vendor.avb.ptime.offset.low=2100000 \
+    persist.vendor.avb.ptime.offset.high=2100000 \
+    persist.vendor.avb.audio.tstamp.buffer=1 \
+    persist.vendor.avb.compatibility.audio="" \
+    persist.vendor.avb.alsa.groupname=audio \
+    persist.vendor.avb.alsa.smartx.switch=0 \
+    persist.vendor.avb.igb.to.cnt=5 \
+    persist.vendor.avb.android.boottime=0 \
+    persist.vendor.avb.clock.raw=n
 
 # AVB Properties
 avbelements := _AMN _ASH _ENV _DMY _RXE _TXE _TX1 _TX2 _AAS _ACS _AVS _LAB _LVB _AJI _AEN _PTP _SCD _HCD _RCD _PCD _MCD _ACC _COC _AUI _SHM
 
 PRODUCT_PROPERTY_OVERRIDES += \
-    $(foreach item,$(avbelements),persist.avb.debug.loglevel.$(item)=4)
+    $(foreach item,$(avbelements),persist.vendor.avb.debug.loglevel.$(item)=4)
 
 PRODUCT_PROPERTY_OVERRIDES += \
     init.svc.vendor.earlyavbaudio=uninitialized
