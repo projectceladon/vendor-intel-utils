@@ -107,4 +107,8 @@ KERNELFLINGER_OS_SECURE_BOOT := true
 # bootloader policy
 KERNELFLINGER_SSL_LIBRARY := openssl
 
+{{#self_usb_device_mode_protocol}}
+KERNELFLINGER_SUPPORT_SELF_USB_DEVICE_MODE_PROTOCOL := {{self_usb_device_mode_protocol}}
+{{/self_usb_device_mode_protocol}}
+
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.frp.pst=/dev/block/by-name/persistent

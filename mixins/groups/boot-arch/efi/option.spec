@@ -30,3 +30,4 @@ verity_mode = true
 verity_warning = true
 watchdog_parameters = false
 target =
+self_usb_device_mode_protocol = false

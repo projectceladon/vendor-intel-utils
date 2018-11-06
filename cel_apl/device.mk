@@ -64,6 +64,7 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
 # bootloader policy
 KERNELFLINGER_SSL_LIBRARY := openssl
 
+
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.frp.pst=/dev/block/by-name/persistent
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/wlan/iwlwifi/product.mk
