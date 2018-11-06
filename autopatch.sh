@@ -83,7 +83,7 @@ patch_list=`find * -iname "*.patch" | sort -u`
 apply_patch "$patch_list" "$patch_dir"
 
 #Apply Embargoed patches if exist
-if (( 0 )) ; then
+if [[ -d "$private_patch_dir" ]]; then
     echo ""
     echo "Embargoed Patches Found"
     cd $private_patch_dir
