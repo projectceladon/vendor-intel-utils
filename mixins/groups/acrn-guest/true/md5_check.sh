@@ -7,6 +7,7 @@ if [ -a "$1/$md5_file" ];then
 	cat $1/$md5_file | while read line
 	do
 		var_name=`echo $line | awk '{print $2}'`
+		var_name=${var_name##*/}
 
 		for img in ${check_sum_imgs[@]}; do
 			if [ "$img" = "$var_name" ]; then
@@ -14,7 +15,7 @@ if [ -a "$1/$md5_file" ];then
 				md5_img=`md5sum $1/$img | awk '{print $1}'`
 
 				count=1
-				while [ $count -le 30 ];
+				while [ $count -le 3 ];
 				do
 					if [ "$md5_img" != "$md5_val" ]; then
 						echo "file $img download is continue ......"
@@ -26,7 +27,7 @@ if [ -a "$1/$md5_file" ];then
 					fi
 				done
 
-				if [ $count -gt 20 ];then
+				if [ $count -gt 2 ];then
 					echo "network exception, download $img failed!"
 					exit 1
 				else
@@ -36,5 +37,5 @@ if [ -a "$1/$md5_file" ];then
 		done
 	done
 else
-	echo "ERROR: md5sum.md5 file NOT FOUND!"
+	echo "ERROR: $md5_file File NOT FOUND!"
 fi
