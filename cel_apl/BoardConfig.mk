@@ -42,6 +42,7 @@ BOARD_CACHEIMAGE_PARTITION_SIZE ?= 104857600
 # Source: device/intel/project-celadon/mixins/groups/disk-bus/auto/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/set_storage
+BOARD_DISK_BUS = ff.ff
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/boot-arch/efi/BoardConfig.mk
 ##############################################################

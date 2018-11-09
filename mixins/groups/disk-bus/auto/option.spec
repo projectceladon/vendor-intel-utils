@@ -1,0 +1,2 @@
+[defaults]
+diskbus = ff.ff

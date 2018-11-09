@@ -1,1 +1,2 @@
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/set_storage
+BOARD_DISK_BUS = {{diskbus}}
