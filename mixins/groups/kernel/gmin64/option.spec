@@ -17,6 +17,7 @@ kdefconfig =
 camera_cos_hack = false
 binary_name = bzImage
 interactive_governor=false
+schedutil=true
 intel_pstate=true
 loglevel = 5
 user_loglevel = 2

@@ -199,6 +199,9 @@ BOARD_KERNEL_CMDLINE += \
         firmware_class.path=/vendor/firmware
 
 
+BOARD_KERNEL_CMDLINE += \
+       intel_pstate=passive
+
 BOARD_SEPOLICY_M4DEFS += module_kernel=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/kernel
 ##############################################################
