@@ -327,11 +327,6 @@ PRODUCT_PROPERTY_OVERRIDES += \
 
 
 ##############################################################
-# Source: device/intel/project-celadon/mixins/groups/storage/sdcard-mmc0-usb-sd/product.mk
-##############################################################
-
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.support.sdcardfs.mode=y
-##############################################################
 # Source: device/intel/project-celadon/mixins/groups/ethernet/dhcp/product.mk
 ##############################################################
 PRODUCT_COPY_FILES += \
