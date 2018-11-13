@@ -17,6 +17,7 @@ endif
 PRODUCT_PACKAGES += \
 	libtrusty \
 	intelstorageproxyd \
+	cp_ss \
 	libinteltrustystorage \
 	libinteltrustystorageinterface \
 	gatekeeper.trusty \
