@@ -14,14 +14,17 @@ if [ -a "$1/$md5_file" ];then
 				md5_val=`echo $line | awk '{print $1}'`
 				md5_img=`md5sum $1/$img | awk '{print $1}'`
 
+				echo "$line in $md5_file"
+				echo "md5sum $img $md5_img"
 				count=1
 				while [ $count -le 3 ];
 				do
 					if [ "$md5_img" != "$md5_val" ]; then
-						echo "file $img download is continue ......"
+						echo "file $img checksum is failed, try again"
 						sleep 60
 						count=$((count + 1))
 						md5_img=`md5sum $1/$img | awk '{print $1}'`
+						echo "md5sum $img $md5_img"
 					else
 						break
 					fi

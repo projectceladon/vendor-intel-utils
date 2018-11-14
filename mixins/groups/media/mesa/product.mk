@@ -12,6 +12,10 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += i965_drv_video
 PRODUCT_PACKAGES += libigfxcmrt
 
+# Open source hdcp
+PRODUCT_PACKAGES += libhdcpsdk
+PRODUCT_PACKAGES += lihdcpcommon
+
 ifeq ($(BOARD_USE_64BIT_USERSPACE),true)
 PRODUCT_PACKAGES += \
     libmfxhw64
