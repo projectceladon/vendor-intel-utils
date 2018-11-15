@@ -20,7 +20,6 @@ PRODUCT_PACKAGES += \
     hwcomposer.drm
 
 PRODUCT_PROPERTY_OVERRIDES += \
-   hwc.drm.use_overlay_planes=1 \
    ro.hardware.hwcomposer=drm
 {{/drmhwc}}
 
@@ -30,7 +29,6 @@ PRODUCT_PACKAGES += \
     hwcomposer.$(TARGET_BOARD_PLATFORM)
 
 PRODUCT_PROPERTY_OVERRIDES += \
-   hwc.drm.use_overlay_planes=1 \
    ro.hardware.hwcomposer=$(TARGET_BOARD_PLATFORM)
 
 INTEL_HWC_CONFIG := $(INTEL_PATH_VENDOR)/external/hwcomposer-intel
