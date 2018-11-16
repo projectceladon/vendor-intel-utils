@@ -24,6 +24,7 @@ current_project=""
 previous_project=""
 conflict=""
 conflict_list=""
+applied_already=""
 
 apply_patch() {
 
@@ -73,6 +74,7 @@ apply_patch() {
       fi
     else
       echo "        Already applied         $i"
+      applied_already="y"
     fi
   done
 }
@@ -99,8 +101,15 @@ if [[ "$conflict" == "y" ]]; then
   for i in $conflict_list ; do echo $i; done | sort -u
   echo "==========================================================================="
   echo -e "Error: Please resolve Conflict(s) and re-run lunch..."
+  echo '$(error "Conflicts seen while applying lunch patches !! Resolve and re-trigger")' > $top_dir/vendor/intel/utils/Android.mk
 else
   echo "==========================================================================="
-  echo "           INFO : All patches applied fine !!                              "
+  echo "           SUCCESS : All patches applied fine !!                           "
   echo "==========================================================================="
+  if [[ "$applied_already" == "y" ]]; then
+    echo "==========================================================================="
+    echo "           INFO : SOME PATCHES ARE APPLIED ALREADY  !!                     "
+    echo "==========================================================================="
+  fi
+  sed -i '/^/d' $top_dir/vendor/intel/utils/Android.mk
 fi
