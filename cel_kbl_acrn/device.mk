@@ -523,6 +523,7 @@ BOARD_KERNEL_CMDLINE += \
 endif # PSTORE_CONFIG == PRAM
 
 endif #MIXIN_DEBUG_LOGS
+
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/debug-crashlogd/true/product.mk
 ##############################################################

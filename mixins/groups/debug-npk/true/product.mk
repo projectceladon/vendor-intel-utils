@@ -37,3 +37,12 @@ BOARD_KERNEL_CMDLINE += \
 endif # PSTORE_CONFIG == PRAM
 
 endif #MIXIN_DEBUG_LOGS
+
+{{#tcf_conf}}
+ifeq ($(MIXIN_DEBUG_LOGS),true)
+BOARD_SEPOLICY_DIRS += \
+    $(INTEL_PATH_SEPOLICY)/debug-npk/tcf
+
+PRODUCT_PACKAGES += npk_tcf_services
+endif #MIXIN_DEBUG_LOGS
+{{/tcf_conf}}
