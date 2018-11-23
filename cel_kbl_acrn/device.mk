@@ -802,6 +802,10 @@ PRODUCT_PACKAGES += thermal.default \
                     android.hardware.thermal@1.0-service \
                     android.hardware.thermal@1.0-impl
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/acrn-guest/true/product.mk
+##############################################################
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += debug.sf.nobootanimation=1
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/art-config/true/product.mk
 ##############################################################
 # This is needed to enable silver art optimizer.
