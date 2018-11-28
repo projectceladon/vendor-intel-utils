@@ -14,5 +14,5 @@
 dmap = {
         "__version__" : 1,
         "gr_mrb" : ("intel", "broxton_p", "bxtp_abl", "r0_bxtp_abl", "bxtp_abl", "gr_mrb"),
-        "gr_mrb_b1" : ("intel", "broxton_p", "bxtp_abl", "r0_bxtp_abl", "bxtp_abl", "gr_mrb_b1"),
+        "gr_mrb_b1" : ("intel", "broxton_p", "bxtp_abl", "r0_bxtp_abl", "bxtp_abl", "gr_mrb_b1")
 }
