@@ -40,7 +40,7 @@ public class MainActivity extends Activity {
   private Semaphore mCameraOpenCloseLock = new Semaphore(1);
   private int vwidth;
   private int vheight;
-
+  private static final int PERMISSIONS_REQUEST_CAMERA = 1;
   private Size jpegSizes[] = null;
 
   private TextureView textureView,textureView1,textureView2,textureView3;
@@ -88,6 +88,20 @@ public class MainActivity extends Activity {
         textureView1.setLayoutParams(params);
         textureView2.setLayoutParams(params);
 		    textureView3.setLayoutParams(params);
+
+    }
+
+    
+    @Override
+    public void onRequestPermissionsResult (int requestCode, String[] permissions,
+            int[] grantResults) {
+        if (requestCode == PERMISSIONS_REQUEST_CAMERA) {
+            if (grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                openCamera();
+            } else {
+                finish();
+            }
+        } 
 
     }
 
@@ -220,6 +234,7 @@ public class MainActivity extends Activity {
                     //                                          int[] grantResults)
                     // to handle the case where the user grants the permission. See the documentation
                     // for Activity#requestPermissions for more details.
+                    requestPermissions(new String[] {Manifest.permission.CAMERA}, PERMISSIONS_REQUEST_CAMERA);
                     return;
                 }
                 /*
@@ -251,6 +266,7 @@ public class MainActivity extends Activity {
                     //                                          int[] grantResults)
                     // to handle the case where the user grants the permission. See the documentation
                     // for Activity#requestPermissions for more details.
+                    //requestPermissions(new String[] {Manifest.permission.CAMERA}, PERMISSIONS_REQUEST_CAMERA);
                     return;
                 }
                 manager.openCamera(camerId, stateCallback1, null);
@@ -278,6 +294,7 @@ public class MainActivity extends Activity {
                     //                                          int[] grantResults)
                     // to handle the case where the user grants the permission. See the documentation
                     // for Activity#requestPermissions for more details.
+                    //requestPermissions(new String[] {Manifest.permission.CAMERA}, PERMISSIONS_REQUEST_CAMERA);
                     return;
                 }
                 manager.openCamera(camerId, stateCallback2, null);
@@ -305,6 +322,7 @@ public class MainActivity extends Activity {
                     //                                          int[] grantResults)
                     // to handle the case where the user grants the permission. See the documentation
                     // for Activity#requestPermissions for more details.
+                    //requestPermissions(new String[] {Manifest.permission.CAMERA}, PERMISSIONS_REQUEST_CAMERA);
                     return;
                 }
                 manager.openCamera(camerId, stateCallback3, null);
