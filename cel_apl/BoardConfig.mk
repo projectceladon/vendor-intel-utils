@@ -116,6 +116,7 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic
 KERNELFLINGER_USE_RPMB_SIMULATE := true
 
 
+
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################

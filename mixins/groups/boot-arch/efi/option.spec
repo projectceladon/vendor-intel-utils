@@ -23,6 +23,7 @@ rpmb_simulate = false
 run_tco_on_shutdown = false
 txe_bind_root_of_trust = false
 uefi_arch = x86_64
+usb_storage = false
 use_charging_applet = false
 use_power_button = false
 vendor-partition = false
