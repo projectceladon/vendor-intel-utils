@@ -112,3 +112,7 @@ KERNELFLINGER_SUPPORT_SELF_USB_DEVICE_MODE_PROTOCOL := {{self_usb_device_mode_pr
 {{/self_usb_device_mode_protocol}}
 
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.frp.pst=/dev/block/by-name/persistent
+
+{{#slot-ab}}
+PRODUCT_PACKAGES += updater_ab_esp
+{{/slot-ab}}

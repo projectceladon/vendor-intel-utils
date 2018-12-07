@@ -84,6 +84,14 @@ KERNELFLINGER_USE_RPMB := true
 KERNELFLINGER_USE_RPMB_SIMULATE := true
 {{/rpmb_simulate}}
 
+{{#slot-ab}}
+AB_OTA_POSTINSTALL_CONFIG += \
+    RUN_POSTINSTALL_vendor=true \
+    POSTINSTALL_PATH_vendor=bin/updater_ab_esp \
+    FILESYSTEM_TYPE_vendor={{system_fs}} \
+    POSTINSTALL_OPTIONAL_vendor=false
+{{/slot-ab}}
+
 {{#avb}}
 BOARD_AVB_ENABLE := true
 KERNELFLINGER_AVB_CMDLINE := true

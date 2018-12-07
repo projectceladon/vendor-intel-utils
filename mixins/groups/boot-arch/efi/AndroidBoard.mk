@@ -158,3 +158,15 @@ $(BOOTLOADER_POLICY_OEMVARS):
 endif
 {{/blpolicy_use_efi_var}}
 {{/bootloader_policy}}
+
+{{#slot-ab}}
+# Used by updater_ab_esp
+$(PRODUCT_OUT)/vendor.img: $(PRODUCT_OUT)/vendor/firmware/kernelflinger.efi
+$(PRODUCT_OUT)/vendor/firmware/kernelflinger.efi: $(PRODUCT_OUT)/efi/kernelflinger.efi
+	$(ACP) $(PRODUCT_OUT)/efi/kernelflinger.efi $@
+
+make_bootloader_dir:
+	@mkdir -p $(PRODUCT_OUT)/root/bootloader
+
+$(PRODUCT_OUT)/ramdisk.img: make_bootloader_dir
+{{/slot-ab}}
