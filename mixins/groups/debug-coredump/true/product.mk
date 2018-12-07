@@ -9,6 +9,9 @@ endif
 
 ifeq ($(MIXIN_DEBUG_LOGS),true)
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/coredump
+{{#data_dump}}
+BOARD_SEPOLICY_M4DEFS += module_debug_coredump=true
+{{/data_dump}}
 # Enable core dump for eng builds
 ifneq ($(TARGET_BUILD_VARIANT),user)
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.core.enabled=1
