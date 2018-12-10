@@ -231,6 +231,9 @@ ART_DEFAULT_GC_TYPE?=CC
 ifeq ($(ART_DEFAULT_GC_TYPE),GENCOPYING)
     PRODUCT_PROPERTY_OVERRIDES += dalvik.vm.heap.bpssize=128m
 endif
+
+
+ENABLE_LARGE_REGION_SIZE?=false
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/pstore/ram_dummy/product.mk
 ##############################################################

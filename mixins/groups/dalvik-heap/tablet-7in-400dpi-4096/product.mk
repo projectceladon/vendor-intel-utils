@@ -11,3 +11,11 @@ ART_DEFAULT_GC_TYPE?=CC
 ifeq ($(ART_DEFAULT_GC_TYPE),GENCOPYING)
     PRODUCT_PROPERTY_OVERRIDES += dalvik.vm.heap.bpssize=128m
 endif
+
+{{#large-region-size}}
+ENABLE_LARGE_REGION_SIZE?=true
+{{/large-region-size}}
+
+{{^large-region-size}}
+ENABLE_LARGE_REGION_SIZE?=false
+{{/large-region-size}}
