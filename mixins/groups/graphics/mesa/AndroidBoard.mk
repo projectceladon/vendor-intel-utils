@@ -10,11 +10,8 @@ I915_FW_PATH := ./$(INTEL_PATH_VENDOR)/ufo/gen9_dev/x86_64_media_kbl/vendor/firm
 endif
 {{/minigbm}}
 #list of i915/huc_xxx.bin i915/dmc_xxx.bin i915/guc_xxx.bin
-$(foreach t, $(patsubst $(I915_FW_PATH)/%,%,$(wildcard $(I915_FW_PATH)/*)) ,$(eval I915_FW += i915/$(t)))
+$(foreach t, $(patsubst $(I915_FW_PATH)/%,%,$(wildcard $(I915_FW_PATH)/*)) ,$(eval I915_FW += i915/$(t)) $(eval $(LOCAL_KERNEL) : $(PRODUCT_OUT)/vendor/firmware/i915/$(t)))
 
 _EXTRA_FW_ += $(I915_FW)
 
-#kernel will find i915 firmware in out/target/.../vendor/firmware/
-#so build ufo_prebuilts before kernel.
-$(LOCAL_KERNEL) : ufo_prebuilts
 {{/gen9+}}

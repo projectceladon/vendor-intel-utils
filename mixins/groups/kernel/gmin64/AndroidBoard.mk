@@ -80,12 +80,6 @@ KERNEL_MAKE_OPTIONS += \
     EXTRA_FW_DIR="$(abspath $(PRODUCT_OUT)/vendor/firmware)"
 
 KERNEL_CONFIG_DEPS = $(strip $(KERNEL_DEFCONFIG) $(KERNEL_DIFFCONFIG))
-KERNEL_CONFIG_MK := $(LOCAL_KERNEL_PATH)/config.mk
--include $(KERNEL_CONFIG_MK)
-
-ifneq ($(KERNEL_CONFIG_DEPS),$(KERNEL_CONFIG_PREV_DEPS))
-.PHONY: $(KERNEL_CONFIG)
-endif
 
 CHECK_CONFIG_SCRIPT := $(LOCAL_KERNEL_SRC)/scripts/diffconfig
 CHECK_CONFIG_LOG :=  $(LOCAL_KERNEL_PATH)/.config.check
@@ -125,7 +119,6 @@ menuconfig xconfig gconfig: $(CHECK_CONFIG_LOG)
 	@echo ===========
 
 $(KERNEL_CONFIG): $(KERNEL_CONFIG_DEPS) | yoctotoolchain $(CHECK_CONFIG_LOG)
-	$(hide) echo "KERNEL_CONFIG_PREV_DEPS := $(KERNEL_CONFIG_DEPS)" > $(KERNEL_CONFIG_MK)
 	$(hide) cat $(KERNEL_CONFIG_DEPS) > $@
 	@echo "Generating Kernel configuration, using $(KERNEL_CONFIG_DEPS)"
 	$(hide) $(MAKE) $(KERNEL_MAKE_OPTIONS) olddefconfig </dev/null

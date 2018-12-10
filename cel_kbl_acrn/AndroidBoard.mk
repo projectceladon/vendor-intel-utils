@@ -265,12 +265,6 @@ KERNEL_MAKE_OPTIONS += \
     EXTRA_FW_DIR="$(abspath $(PRODUCT_OUT)/vendor/firmware)"
 
 KERNEL_CONFIG_DEPS = $(strip $(KERNEL_DEFCONFIG) $(KERNEL_DIFFCONFIG))
-KERNEL_CONFIG_MK := $(LOCAL_KERNEL_PATH)/config.mk
--include $(KERNEL_CONFIG_MK)
-
-ifneq ($(KERNEL_CONFIG_DEPS),$(KERNEL_CONFIG_PREV_DEPS))
-.PHONY: $(KERNEL_CONFIG)
-endif
 
 CHECK_CONFIG_SCRIPT := $(LOCAL_KERNEL_SRC)/scripts/diffconfig
 CHECK_CONFIG_LOG :=  $(LOCAL_KERNEL_PATH)/.config.check
@@ -310,7 +304,6 @@ menuconfig xconfig gconfig: $(CHECK_CONFIG_LOG)
 	@echo ===========
 
 $(KERNEL_CONFIG): $(KERNEL_CONFIG_DEPS) | yoctotoolchain $(CHECK_CONFIG_LOG)
-	$(hide) echo "KERNEL_CONFIG_PREV_DEPS := $(KERNEL_CONFIG_DEPS)" > $(KERNEL_CONFIG_MK)
 	$(hide) cat $(KERNEL_CONFIG_DEPS) > $@
 	@echo "Generating Kernel configuration, using $(KERNEL_CONFIG_DEPS)"
 	$(hide) $(MAKE) $(KERNEL_MAKE_OPTIONS) olddefconfig </dev/null
@@ -494,13 +487,10 @@ else
 I915_FW_PATH := ./$(INTEL_PATH_VENDOR)/ufo/gen9_dev/x86_64_media_kbl/vendor/firmware/i915
 endif
 #list of i915/huc_xxx.bin i915/dmc_xxx.bin i915/guc_xxx.bin
-$(foreach t, $(patsubst $(I915_FW_PATH)/%,%,$(wildcard $(I915_FW_PATH)/*)) ,$(eval I915_FW += i915/$(t)))
+$(foreach t, $(patsubst $(I915_FW_PATH)/%,%,$(wildcard $(I915_FW_PATH)/*)) ,$(eval I915_FW += i915/$(t)) $(eval $(LOCAL_KERNEL) : $(PRODUCT_OUT)/vendor/firmware/i915/$(t)))
 
 _EXTRA_FW_ += $(I915_FW)
 
-#kernel will find i915 firmware in out/target/.../vendor/firmware/
-#so build ufo_prebuilts before kernel.
-$(LOCAL_KERNEL) : ufo_prebuilts
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/ethernet/dhcp/AndroidBoard.mk
 ##############################################################

@@ -99,6 +99,15 @@ BOARD_VBMETAIMAGE_PARTITION_SIZE := 2097152
 BOARD_FLASHFILES += $(PRODUCT_OUT)/vbmeta.img
 {{/avb}}
 
+{{#slot-ab}}
+{{#avb}}
+AB_OTA_PARTITIONS += vbmeta
+{{#trusty}}
+AB_OTA_PARTITIONS += tos
+{{/trusty}}
+{{/avb}}
+{{/slot-ab}}
+
 {{#usb_storage}}
 KERNELFLINGER_SUPPORT_USB_STORAGE := true
 {{/usb_storage}}
