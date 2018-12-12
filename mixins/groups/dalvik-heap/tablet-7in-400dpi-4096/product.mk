@@ -7,7 +7,7 @@ PRODUCT_PROPERTY_OVERRIDES += \
     dalvik.vm.heapmaxfree=8m
 
 #We want to use default GC as GENCOPYING,with bpssize=128m for large heaps
-ART_DEFAULT_GC_TYPE?=CC
+ART_DEFAULT_GC_TYPE?=GENCOPYING
 ifeq ($(ART_DEFAULT_GC_TYPE),GENCOPYING)
     PRODUCT_PROPERTY_OVERRIDES += dalvik.vm.heap.bpssize=128m
 endif
