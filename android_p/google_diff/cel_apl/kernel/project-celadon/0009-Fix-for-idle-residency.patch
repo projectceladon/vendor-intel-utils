@@ -1,0 +1,159 @@
+From aa4c039d5e554d48cc3eed9655eea135b2148fd6 Mon Sep 17 00:00:00 2001
+From: Divya Lingaiah <divya.lingaiah@intel.com>
+Date: Thu, 19 Jul 2018 17:08:55 +0530
+Subject: [PATCH 09/11] Fix for idle residency
+
+This fix is to improve the idle residency
+by handling the spurious audio dma interrupts.
+The interrupt is specific to hdac controller
+and its handled by threaded_irq.
+
+Change-Id: I7e88fd500564e736200d6af82a89f5ba54432a37
+Tracked-On: https://jira01.devtools.intel.com/browse/OAM-66699
+Signed-off-by: Divya Lingaiah <divya.lingaiah@intel.com>
+Signed-off-by: Aravindan Muthukumar <aravindan.muthukumar@intel.com>
+---
+ sound/pci/hda/hda_controller.c | 75 +++++++++++++++++++++++++++---------------
+ sound/pci/hda/hda_controller.h |  1 +
+ sound/pci/hda/hda_intel.c      |  4 +--
+ 3 files changed, 52 insertions(+), 28 deletions(-)
+
+diff --git a/sound/pci/hda/hda_controller.c b/sound/pci/hda/hda_controller.c
+index a12e594..b5e5f03 100644
+--- a/sound/pci/hda/hda_controller.c
++++ b/sound/pci/hda/hda_controller.c
+@@ -1126,9 +1126,7 @@ static void stream_update(struct hdac_bus *bus, struct hdac_stream *s)
+ 	/* check whether this IRQ is really acceptable */
+ 	if (!chip->ops->position_check ||
+ 	    chip->ops->position_check(chip, azx_dev)) {
+-		spin_unlock(&bus->reg_lock);
+ 		snd_pcm_period_elapsed(azx_stream(azx_dev)->substream);
+-		spin_lock(&bus->reg_lock);
+ 	}
+ }
+ 
+@@ -1137,8 +1135,8 @@ irqreturn_t azx_interrupt(int irq, void *dev_id)
+ 	struct azx *chip = dev_id;
+ 	struct hdac_bus *bus = azx_bus(chip);
+ 	u32 status;
+-	bool active, handled = false;
+-	int repeat = 0; /* count for avoiding endless loop */
++	u32 mask, int_enable;
++	int ret = IRQ_NONE;
+ 
+ #ifdef CONFIG_PM
+ 	if (azx_has_pm_runtime(chip))
+@@ -1151,36 +1149,61 @@ irqreturn_t azx_interrupt(int irq, void *dev_id)
+ 	if (chip->disabled)
+ 		goto unlock;
+ 
+-	do {
+-		status = azx_readl(chip, INTSTS);
+-		if (status == 0 || status == 0xffffffff)
+-			break;
++	status = azx_readl(chip, INTSTS);
++	if (status == 0 || status == 0xffffffff) {
++		spin_unlock(&bus->reg_lock);
++		return ret;
++	}
+ 
+-		handled = true;
+-		active = false;
+-		if (snd_hdac_bus_handle_stream_irq(bus, status, stream_update))
+-			active = true;
+-
+-		/* clear rirb int */
+-		status = azx_readb(chip, RIRBSTS);
+-		if (status & RIRB_INT_MASK) {
+-			active = true;
+-			if (status & RIRB_INT_RESPONSE) {
+-				if (chip->driver_caps & AZX_DCAPS_CTX_WORKAROUND)
+-					udelay(80);
+-				snd_hdac_bus_update_rirb(bus);
+-			}
+-			azx_writeb(chip, RIRBSTS, RIRB_INT_MASK);
+-		}
+-	} while (active && ++repeat < 10);
++	/* clear rirb int */
++	status = azx_readb(chip, RIRBSTS);
++	if (status & RIRB_INT_MASK) {
++		if (status & RIRB_INT_RESPONSE)
++			snd_hdac_bus_update_rirb(bus);
++		azx_writeb(chip, RIRBSTS, RIRB_INT_MASK);
++	}
++
++	mask = (0x1 << chip->num_streams) - 1;
++
++	status = azx_readl(chip, INTSTS);
++	status &= mask;
++	if (status) {
++		/* Disable stream interrupts; Re-enable in bottom half */
++		int_enable = azx_readl(chip, INTCTL);
++		azx_writel(chip, INTCTL, (int_enable & (~mask)));
++		ret = IRQ_WAKE_THREAD;
++	} else
++		ret = IRQ_HANDLED;
+ 
+  unlock:
+ 	spin_unlock(&bus->reg_lock);
+ 
+-	return IRQ_RETVAL(handled);
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(azx_interrupt);
+ 
++irqreturn_t azx_threaded_handler(int irq, void *dev_id)
++{
++	struct azx *chip = dev_id;
++	struct hdac_bus *bus = azx_bus(chip);
++	u32 status;
++	u32 int_enable;
++	u32 mask;
++	unsigned long flags;
++
++	status = azx_readl(chip, INTSTS);
++	snd_hdac_bus_handle_stream_irq(bus, status, stream_update);
++
++	/* Re-enable stream interrupts */
++	mask = (0x1 << chip->num_streams) - 1;
++	spin_lock_irqsave(&bus->reg_lock, flags);
++	int_enable = azx_readl(chip, INTCTL);
++	azx_writel(chip, INTCTL, (int_enable | mask));
++	spin_unlock_irqrestore(&bus->reg_lock, flags);
++	return IRQ_HANDLED;
++}
++EXPORT_SYMBOL_GPL(azx_threaded_handler);
++
+ /*
+  * Codec initerface
+  */
+diff --git a/sound/pci/hda/hda_controller.h b/sound/pci/hda/hda_controller.h
+index a68e75b..e149b1b 100644
+--- a/sound/pci/hda/hda_controller.h
++++ b/sound/pci/hda/hda_controller.h
+@@ -225,6 +225,7 @@ static inline struct azx_dev *get_azx_dev(struct snd_pcm_substream *substream)
+ #define azx_enter_link_reset(chip) \
+ 	snd_hdac_bus_enter_link_reset(azx_bus(chip))
+ irqreturn_t azx_interrupt(int irq, void *dev_id);
++irqreturn_t azx_threaded_handler(int irq, void *dev_id);
+ 
+ /* Codec interface */
+ int azx_bus_init(struct azx *chip, const char *model,
+diff --git a/sound/pci/hda/hda_intel.c b/sound/pci/hda/hda_intel.c
+index 22c13ad..ffc1ef7 100644
+--- a/sound/pci/hda/hda_intel.c
++++ b/sound/pci/hda/hda_intel.c
+@@ -844,8 +844,8 @@ static int azx_acquire_irq(struct azx *chip, int do_disconnect)
+ {
+ 	struct hdac_bus *bus = azx_bus(chip);
+ 
+-	if (request_irq(chip->pci->irq, azx_interrupt,
+-			chip->msi ? 0 : IRQF_SHARED,
++	if (request_threaded_irq(chip->pci->irq, azx_interrupt,
++			azx_threaded_handler, chip->msi ? 0 : IRQF_SHARED,
+ 			chip->card->irq_descr, chip)) {
+ 		dev_err(chip->card->dev,
+ 			"unable to grab IRQ %d, disabling device\n",
+-- 
+1.9.1
+
