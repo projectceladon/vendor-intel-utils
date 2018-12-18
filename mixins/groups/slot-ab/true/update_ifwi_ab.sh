@@ -11,7 +11,7 @@ fi
 IOC_FLASH_TOOL=/vendor/bin/ioc_flash_server
 
 if [ -f ${IOC_FLASH_TOOL} ]; then
-    cp -r /postinstall/firmware/ioc /mnt
+    cp -rp /postinstall/firmware/ioc /mnt
     setprop vendor.ioc.update run
     sleep 30
 fi
