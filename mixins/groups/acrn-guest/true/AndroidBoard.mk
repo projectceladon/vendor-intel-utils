@@ -81,7 +81,7 @@ define load-fw
 	@$(ACP) $(ABL_BUILD_OUT)/$(ABL_BUILD_FV) $(ACRN_TMP_DIR)/$(ACRN_IFWI_FV);
 	@$(ACP) $(ABL_BUILD_OUT)/$(ABL_BUILD_DNX) $(ACRN_TMP_DIR)/$(ACRN_IFWI_DNX);
 	@$(ACP) $(ABL_BUILD_OUT)/$(ABL_BUILD_DNXP) $(ACRN_TMP_DIR)/$(ACRN_IFWI_DNXP);
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/{{target}}/$(ACRN_FW_VERSION) $(ACRN_TMP_DIR);
+	@$(ACP) $(TARGET_DEVICE_DIR)/extra_files/device-specific/$(ACRN_FW_VERSION) $(ACRN_TMP_DIR);
 	{{/sos-ifwi}}
 	{{#pre_ifwi}}
 	@$(ACP) $(TOP)/hardware/intel/fw_capsules/{{target}}/release/ifwi/$(ACRN_IFWI_FW) $(ACRN_TMP_DIR);
@@ -91,8 +91,8 @@ define load-fw
 	@$(ACP) $(TOP)/hardware/intel/fw_capsules/{{target}}/$(ACRN_FW_VERSION) $(ACRN_TMP_DIR);
 	{{/pre_ifwi}}
 	{{#ioc}}
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/{{target}}/release/ioc/$(ACRN_IOC_FW_D) $(ACRN_TMP_DIR);
-	@$(ACP) $(TOP)/hardware/intel/fw_capsules/{{target}}/release/ioc/$(ACRN_IOC_FW_E) $(ACRN_TMP_DIR);
+	$(ACP) $(TARGET_DEVICE_DIR)/extra_files/ioc/{{target}}/ioc_fw/external/$(ACRN_IOC_FW_D) $(ACRN_TMP_DIR);
+	$(ACP) $(TARGET_DEVICE_DIR)/extra_files/ioc/{{target}}/ioc_fw/external/$(ACRN_IOC_FW_E) $(ACRN_TMP_DIR);
 	{{/ioc}}
 endef
 
