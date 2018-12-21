@@ -760,6 +760,23 @@ PRODUCT_PACKAGES_DEBUG += \
     functionalTestsDatafiles
 endif
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/audio/gordon_peak_acrn/product.mk.1
+##############################################################
+
+# Early audio
+PRODUCT_PACKAGES += early_audio_alsa.sh \
+                    early_audio_alsa_avb.sh
+
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/extra_files/audio/asound.conf:vendor/etc/asound.conf \
+    $(LOCAL_PATH)/extra_files/audio/audio_policy_configuration.xml:vendor/etc/audio_policy_configuration.xml \
+    $(LOCAL_PATH)/extra_files/audio/audio_policy_criteria.conf:vendor/etc/audio_policy_criteria.conf \
+    $(LOCAL_PATH)/extra_files/audio/audio_effects.xml:vendor/etc/audio_effects.xml \
+    $(LOCAL_PATH)/extra_files/audio/route_criteria.conf:vendor/etc/route_criteria.conf \
+    $(LOCAL_PATH)/extra_files/audio/early_audio_alsa.sh:vendor/bin/early_audio_alsa.sh \
+    $(LOCAL_PATH)/extra_files/audio/early_audio_alsa_avb.sh:vendor/bin/early_audio_alsa_avb.sh \
+    $(LOCAL_PATH)/extra_files/audio/boot.wav:vendor/media/boot.wav \
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/audio/gordon_peak_acrn/product.mk
 ##############################################################
 # Tinyalsa
@@ -770,9 +787,26 @@ PRODUCT_PACKAGES_DEBUG += \
     tinypcminfo \
     tinyprobe
 
-PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/audio/libfwdt/reef-apl.ri:vendor/firmware/intel/reef-apl.ri \
-    $(LOCAL_PATH)/audio/libfwdt/reef-apl.tplg:vendor/firmware/intel/reef-apl.tplg
+# PFW Client Simulator
+PRODUCT_PACKAGES_DEBUG += \
+    audio_correlation_tool \
+    test-platform
+
+# Audio HALs
+PRODUCT_PACKAGES += meta.package.audio
+
+
+
+PRODUCT_PACKAGES += \
+    android.hardware.audio@4.0-impl \
+    android.hardware.audio.intel@2.0-service \
+    android.hardware.audio.effect@4.0-impl \
+    android.hardware.soundtrigger@2.0-impl \
+    android.hardware.broadcastradio@1.0-impl
+
+PFW_CONFIGURATION_FOLDER := /vendor/etc/parameter-framework/
+
+PRODUCT_PROPERTY_OVERRIDES += audio.safemedia.bypass=true
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/hdcpd/true/product.mk
 ##############################################################
