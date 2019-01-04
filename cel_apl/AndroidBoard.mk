@@ -166,6 +166,10 @@ $(call dist-for-goals,droidcore,$(INTEL_PATH_BUILD)/testkeys/unlock.txt:efi_unlo
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/wlan/load_legacy_iwlwifi.in
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/kernel/gmin64/AndroidBoard.mk.1
+##############################################################
+LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/kernel/load_kernel_modules.in
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/kernel/gmin64/AndroidBoard.mk
 ##############################################################
 ifeq ($(TARGET_PREBUILT_KERNEL),)
