@@ -28,7 +28,7 @@ PLATFORM_PFW_CONFIG_PATH := $(call my-dir)
 #    - configure mapping field of PFW plugings automatically at compile time
 #    - use the specific device/codec structure/settings files.
 #
-AUDIO_PATTERNS_2 := @SOUND_CARD_NAME@=broxtontdf8532
+AUDIO_PATTERNS_2 := @SOUND_CARD_NAME@=sklvirtiocard
 AVB_PROFILE := eavb-slave
 AUDIO_AVB_PATTERNS := @AVB_PROFILE@=$(AVB_PROFILE)
 
