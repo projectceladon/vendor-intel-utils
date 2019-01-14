@@ -8,6 +8,7 @@ product.mk: device.mk
 
 
 [groups]
+device-specific: cel_apl
 kernel: gmin64(useprebuilt=false,src_path=kernel/4.14, loglevel=7, interactive_governor=false, relative_sleepstates=false, modules_in_bootimg=false, external_modules=,debug_modules=, use_bcmdhd=false, use_iwlwifi=false, extmod_platform=bxt, iwl_defconfig=, cfg_path=kernel/config-lts/v4.14/kbl/android)
 boot-arch: efi(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,data_encryption=true,target=cel_apl,rpmb_simulate=true)
 graphics: mesa(gralloc1=true,gen9+=true,hwc2=true,vulkan=false,drmhwc=false,minigbm=true)
@@ -23,7 +24,6 @@ touch: galax7200
 display-density: medium
 media: mesa(add_sw_msdk=false)
 public-libraries: true
-device-specific: cel_apl
 hdcpd: true
 codecs: configurable(hw_vd_vp9=true, hw_vd_mp2=true, hw_vd_vc1=true, platform=icl)
 usb-audio-init: true

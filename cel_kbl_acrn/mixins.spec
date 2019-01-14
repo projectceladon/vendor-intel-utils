@@ -7,6 +7,7 @@ mixinsrel: true
 product.mk: device.mk
 
 [groups]
+device-specific: cel_kbl_acrn(gk_force_passthrough=true)
 kernel: gmin64(useprebuilt=false, src_path=kernel/4.14, loglevel=4, interactive_governor=false, relative_sleepstates=true, modules_in_bootimg=false, external_modules=marvell/wifi, use_bcmdhd=false, extmod_platform=bxt, firmware_path = /vendor/firmware, disable_cpuidle_on_boot=true, cfg_path=kernel/config-lts/v4.14/bxt/android)
 disk-bus: pci
 boot-arch: vsbl(target=gordon_peak_acrn, rpmb=false, x64=true, use_ec_uart=true, mountfstab-flag=true, watchdog_parameters=10 30,target=gordon_peak_acrn)
@@ -61,7 +62,6 @@ dbga: true(func_test=true, mock_dev=true)
 cpuset: 2cores
 power: true(power_throttle=true)
 audio: gordon_peak_acrn
-device-specific: cel_kbl_acrn(gk_force_passthrough=true)
 hdcpd: true
 acrn-guest: true(size=9840M,data_size=10320M)
 trusty: true(enable_hw_sec=false, enable_storage_proxyd=false, keymaster_version=1, ref_target=gordon_peak_acrn)
