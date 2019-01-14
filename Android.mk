@@ -36,6 +36,8 @@ LOCAL_PACKAGE_NAME := Camera2
 
 LOCAL_SDK_VERSION := current
 
+LOCAL_PRODUCT_MODULE := true
+
 LOCAL_PROGUARD_FLAG_FILES := proguard.flags
 
 # Guava uses deprecated org.apache.http.legacy classes.
