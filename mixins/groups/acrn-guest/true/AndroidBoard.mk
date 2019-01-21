@@ -113,6 +113,8 @@ acrn_ext4_bin: $(ACRN_GPTIMAGE_BIN) $(IMG2SIMG) mkuserimg_mke2fs.sh
 # Download Extra ACRN Images
 ######################################################################
 .PHONY: img_download
+img_download: .KATI_NINJA_POOL := console
+
 ifeq ($(strip $(SOS_VERSION)),local)
 img_download:
 	$(hide) rm -rf $(ACRN_TMP_DIR)
