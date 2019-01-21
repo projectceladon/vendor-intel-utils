@@ -1,2 +1,2 @@
 [mixinfo]
-deps = variants slot-ab testos
+deps = variants slot-ab mfgos

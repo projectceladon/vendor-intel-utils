@@ -1,2 +1,2 @@
 [mixinfo]
-deps = sepolicy boot-arch device-specific testos
+deps = sepolicy boot-arch device-specific mfgos
