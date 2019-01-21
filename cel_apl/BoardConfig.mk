@@ -30,10 +30,6 @@ TARGET_RECOVERY_UPDATER_EXTRA_LIBS += libefivar
 endif
 endif
 
-ifeq (efi,abl)
-#Need for ABL firmware update
-TARGET_RECOVERY_UPDATER_LIBS := libabl_recovery
-endif
 
 BOARD_RECOVERYIMAGE_PARTITION_SIZE ?= 31457280
 BOARD_CACHEIMAGE_FILE_SYSTEM_TYPE := ext4
