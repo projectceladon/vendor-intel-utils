@@ -449,6 +449,14 @@ USE_XML_AUDIO_POLICY_CONF ?= 1
 # Use configurable audio policy
 USE_CONFIGURABLE_AUDIO_POLICY ?= 1
 ##############################################################
+# Source: device/intel/project-celadon/mixins/groups/camera-ext/ext-camera-only/BoardConfig.mk
+##############################################################
+# Enable only USB camera and disable all CSI Cameras
+BOARD_CAMERA_USB_STANDALONE = true
+
+# SELinux support for USB camera
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/camera-ext/ext-camera-only
+##############################################################
 # Source: device/intel/project-celadon/mixins/groups/usb-gadget/configfs/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/usb-gadget/configfs
