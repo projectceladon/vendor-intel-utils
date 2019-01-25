@@ -51,7 +51,7 @@ TARGET_RECOVERY_FSTAB ?= $(TARGET_DEVICE_DIR)/fstab.recovery
 
 # Used by ota_from_target_files to add platform-specific directives
 # to the OTA updater scripts
-TARGET_RELEASETOOLS_EXTENSIONS ?= $(INTEL_PATH_HARDWARE)/bootctrl/recovery
+TARGET_RELEASETOOLS_EXTENSIONS ?= $(INTEL_PATH_BUILD)/test
 
 # By default recovery minui expects RGBA framebuffer
 TARGET_RECOVERY_PIXEL_FORMAT := "BGRA_8888"
