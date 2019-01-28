@@ -25,7 +25,7 @@ intermediate_img := $(call intermediates-dir-for,PACKAGING,flashfiles)/gpt.img
 
 $(BOARD_GPT_IMG): $(BOARD_GPT_INI)
 	$(hide) mkdir -p $(dir $(intermediate_img))
-	$(hide) $(GPT_INI2IMG) --create --table $< --size $(BOARD_MMC_SIZE) $(intermediate_img)
+	$(hide) $(GPT_INI2IMG) --create --table $< --size $(gptimage_size) $(intermediate_img)
 	$(hide) dd if=$(intermediate_img) of=$@ bs=512 count=34
 	$(hide) echo GEN $(notdir $@)
 
