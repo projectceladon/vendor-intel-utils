@@ -16,7 +16,7 @@ ACRN_FW_VERSION := fwversion.txt
 ACRN_IOC_FW_D := ioc_firmware_gp_mrb_fab_d.ias_ioc
 ACRN_IOC_FW_E := ioc_firmware_gp_mrb_fab_e.ias_ioc
 ACRN_SOS_BOOT_IMAGE := sos_boot.img
-ACRN_SOS_ROOTFS_IMAGE := sos_rootfs.img
+ACRN_SOS_ROOTFS_IMAGE := sos_rootfs.img.xz
 ACRN_PARTITION_DESC_BIN := partition_desc.bin
 ACRN_MD5SUM_MD5 = md5sum.txt
 
@@ -169,6 +169,7 @@ acrn_flashfiles: acrn_ext4_bin flashfiles img_download publish_otapackage publis
 	{{#md5_check}}
 	$(TARGET_DEVICE_DIR)/{{_extra_dir}}/md5_check.sh $(ACRN_TMP_DIR)
 	{{/md5_check}}
+	$(hide) unxz $(ACRN_TMP_DIR)/sos_rootfs.img.xz
 	$(hide) zip -qrjX $(ACRN_FLASHFILES) $(ACRN_TMP_DIR)
 	@$(ACP) $(ACRN_FLASHFILES) $(PUBLISH_DEST)
 	{{#flashfiles}}
