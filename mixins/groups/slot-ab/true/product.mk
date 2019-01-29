@@ -54,4 +54,18 @@ endif
 endif
 
 endif
+#ota-upgrade=true
+else
+ifeq ({{boot-arch}},abl)
+
+ifeq ({{upgrade_version}},o)
+PRODUCT_PACKAGES += \
+    abl-user-cmd_vendor \
+    abl-user-cmd_static
+
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/{{_extra_dir}}/upgrade_o/updater_ab.sh:vendor/bin/updater_ab
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/{{_extra_dir}}/upgrade_o/fw_update.sh:vendor/bin/fw_update.sh
+endif
+
+endif
 endif

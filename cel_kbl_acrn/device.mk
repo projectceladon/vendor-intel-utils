@@ -103,6 +103,20 @@ endif
 endif
 
 endif
+#ota-upgrade=true
+else
+ifeq (vsbl,abl)
+
+ifeq (p,o)
+PRODUCT_PACKAGES += \
+    abl-user-cmd_vendor \
+    abl-user-cmd_static
+
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/upgrade_o/updater_ab.sh:vendor/bin/updater_ab
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/upgrade_o/fw_update.sh:vendor/bin/fw_update.sh
+endif
+
+endif
 endif
 ##############################################################
 # Source: device/intel/project-celadon/mixins/groups/boot-arch/vsbl/product.mk
