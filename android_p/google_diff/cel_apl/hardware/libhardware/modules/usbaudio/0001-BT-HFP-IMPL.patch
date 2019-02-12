@@ -1,0 +1,1488 @@
+From 380a7554e50515a0fb97ca539a2dfee5bfadc0c0 Mon Sep 17 00:00:00 2001
+From: karanpat <karan.patidar@intel.com>
+Date: Tue, 12 Feb 2019 03:34:39 +0530
+Subject: [PATCH] [BT-HFP] IMPL
+
+Basic loopback functionality enabled with supporting upsampling and downsampling
+No AudioProcessing is yet being used.
+
+Change-Id: Ic2cc7592c1d8f787502de730910e776f453180b6
+Tracked-On:
+Signed-off-by: karanpat <karan.patidar@intel.com>
+---
+ modules/usbaudio/Android.bp         |   22 +-
+ modules/usbaudio/audio_hal.c        | 1077 ++++++++++++++++++++++++++-
+ modules/usbaudio/webrtc_wrapper.cpp |  119 +++
+ modules/usbaudio/webrtc_wrapper.h   |   40 +
+ 4 files changed, 1244 insertions(+), 14 deletions(-)
+ create mode 100644 modules/usbaudio/webrtc_wrapper.cpp
+ create mode 100644 modules/usbaudio/webrtc_wrapper.h
+
+diff --git a/modules/usbaudio/Android.bp b/modules/usbaudio/Android.bp
+index c7d403f5..a9bfa098 100644
+--- a/modules/usbaudio/Android.bp
++++ b/modules/usbaudio/Android.bp
+@@ -16,14 +16,30 @@ cc_library_shared {
+     name: "audio.usb.default",
+     relative_install_path: "hw",
+     vendor: true,
+-    srcs: ["audio_hal.c"],
++    srcs: [
++        "audio_hal.c", 
++        "webrtc_wrapper.cpp",
++    ],
+     shared_libs: [
+         "liblog",
+         "libcutils",
+         "libtinyalsa",
+         "libaudioutils",
+         "libalsautils",
++        "libwebrtc_audio_preprocessing",
++    ],
++
++    cflags: [
++        "-Wno-unused-parameter",
++        "-DWEBRTC_POSIX",
++        "-DWEBRTC_LINUX",
++        "-DWEBRTC_THREAD_RR",
++        "-DWEBRTC_CLOCK_TYPE_REALTIME",
++        "-DWEBRTC_ANDROID",
++    ],
++
++    header_libs: [
++        "libhardware_headers",
++        "libwebrtc_headers",
+     ],
+-    cflags: ["-Wno-unused-parameter"],
+-    header_libs: ["libhardware_headers"],
+ }
+diff --git a/modules/usbaudio/audio_hal.c b/modules/usbaudio/audio_hal.c
+index 81c9fd61..6a6fc411 100644
+--- a/modules/usbaudio/audio_hal.c
++++ b/modules/usbaudio/audio_hal.c
+@@ -14,8 +14,8 @@
+  * limitations under the License.
+  */
+ 
+-#define LOG_TAG "modules.usbaudio.audio_hal"
+-/*#define LOG_NDEBUG 0*/
++#define LOG_TAG "modules.usbaudio.audio_hal_kp"
++#define LOG_NDEBUG 0
+ 
+ #include <errno.h>
+ #include <inttypes.h>
+@@ -38,12 +38,90 @@
+ 
+ #include <tinyalsa/asoundlib.h>
+ 
++// [KP Changes]
++//#include "webrtc_wrapper.h"
++
+ #include <audio_utils/channels.h>
+ 
++// [KP Changes]
++#include <audio_utils/resampler.h>
++
+ #include "alsa_device_profile.h"
+ #include "alsa_device_proxy.h"
+ #include "alsa_logging.h"
+ 
++// [KP Changes]
++#define AUDIO_PARAMETER_HFP_ENABLE            "hfp_enable"
++#define AUDIO_PARAMETER_HFP_SET_SAMPLING_RATE "hfp_set_sampling_rate"
++#define AUDIO_PARAMETER_KEY_HFP_VOLUME        "hfp_volume"
++#define AUDIO_PARAMETER_HFP_VOL_MIXER_CTL     "hfp_vol_mixer_ctl"
++#define AUDIO_PARAMATER_HFP_VALUE_MAX          128
++#define AUDIO_PARAMETER_KEY_HFP_MIC_VOLUME    "hfp_mic_volume"
++
++#define AUDIO_PARAMETER_CARD "card"
++#define AUDIO_PARAMETER_TEST_BT_CARD "test_bt_card"
++#define AUDIO_PARAMETER_TEST_USB_CARD "test_usb_card"
++#define AUDIO_PARAMETER_LOOPBACK_USB_IN_BT_OUT "loopback1"
++#define AUDIO_PARAMETER_LOOPBACK_BT_IN_USB_OUT "loopback2"
++
++
++#define AUDIO_PARAMETER_LINEIN "line_in_ctl"
++
++#define DEFAULT_INPUT_BUFFER_SIZE_MS 20
++
++#define DEBUG_PCM_DUMP 1
++#define DEBUG_DEVICE_INFO 1
++
++/* TODO
++ * For multi-channel audio (> 2 channels)...
++ * 
++ * This USB device is going to be (as far as Android is concerned) configured as a STEREO
++ * (2-channel) device, but could physically be connected to as many as 8 (7.1) speakers.
++ *
++ * When connecting to more than 2 speakers, the relationships between all the speakers
++ * has to be managed manually, that means interleaving the multiple streams via duplication
++ * and possibly performing operations on those individual streams.
++ *
++ * For instance, when we receive a STEREO stream, it will be interleaved as LRLRLRLRLR
++ * or 0101010101. When we play a DUAL STEREO 4-channel stream, it will be interleaved
++ * as 0123012301230123 where for each sample, 2==0 and 3==1. We have to copy the stream
++ * manually. If our speaker topology includes CENTER and/or BASE, those two channels
++ * will be MONO-blends of L and R, and in the case of BASE, also LPF.
++ *
++ * The USB ALSA mixer controls provide individual volume controls for all 8 output
++ * channels, and all input channels. It also is able to playback input source directly to
++ * output without having to transfer it up the USB and back, and is able to configure
++ * playback channel mappings. This means that FM radio playback can be done as simply as
++ * setting "Line Playback Switch" to 1.
++ *
++ *  # tinymix -D 1 -a
++ *  Mixer name: 'USB Sound Device'
++ *  Number of controls: 16
++ *  ctl    type    num    name                                     value
++ *      range/values
++ *  0    INT    8    Playback Channel Map                     0 0 0 0 0 0 0 0 (dsrange 0->36)
++ *  1    INT    2    Capture Channel Map                      0 0 (dsrange 0->36)
++ *  2    BOOL    1    Mic Playback Switch                      On
++ *  3    INT    2    Mic Playback Volume                      8065 8065 (dsrange 0->8065)
++ *  4    BOOL    1    Line Playback Switch                     On
++ *  5    INT    2    Line Playback Volume                     6144 6144 (dsrange 0->8065)
++ *  6    BOOL    1    Speaker Playback Switch                  On
++ *  7    INT    8    Speaker Playback Volume                  197 100 100 100 0 0 0 0 (dsrange 0->197)
++ *  8    BOOL    1    Mic Capture Switch                       On
++ *  9    INT    2    Mic Capture Volume                       4096 4096 (dsrange 0->6928)
++ *  10    BOOL    1    Line Capture Switch                      Off
++ *  11    INT    2    Line Capture Volume                      4096 4096 (dsrange 0->6928)
++ *  12    BOOL    1    IEC958 In Capture Switch                 Off
++ *  13    BOOL    1    PCM Capture Switch                       On
++ *  14    INT    2    PCM Capture Volume                       4096 4096 (dsrange 0->6928)
++ *  15    ENUM    1    PCM Capture Source                       >Mic Line IEC958 In Mixer
++ *
++ * We can use AudioManager.setParameters() to feed configurations to this HAL, and either
++ * some form of persistent storage (persistent system property? Or load on boot from
++ * a boot completed receiver?)
++ */
++// KP Changes ]
++
+ /* Lock play & record samples rates at or above this threshold */
+ #define RATELOCK_THRESHOLD 96000
+ 
+@@ -65,10 +143,40 @@ struct audio_device {
+     uint32_t device_sample_rate;
+ 
+     bool mic_muted;
++// [KP Changes]
++    bool line_in;
+ 
+     bool standby;
+ 
++// [KP Change]
++    int usbcard;
++    int btcard;
++
++    pthread_t sco_thread;
++    pthread_mutex_t sco_thread_lock;
++    
++    pthread_t usb_thread;
++    pthread_mutex_t usb_thread_lock;
++    
++    int32_t sco_thread_active;
++    int32_t usb_thread_active;
++    int32_t input_source;
++
++    struct pcm *sco_pcm_bt_in;
++    struct pcm *sco_pcm_bt_out;
++    struct pcm *sco_pcm_usb_in;
++    struct pcm *sco_pcm_usb_out;
++
++    int sco_samplerate;
++
++    bool terminate_sco;
++    bool terminate_usb_loopback;
++
+     int32_t inputs_open; /* number of input streams currently open. */
++// [KP Changes]
++    struct mixer *hw_mixer;
++    float *vol_balance;
++    float master_volume;
+ };
+ 
+ struct stream_lock {
+@@ -149,6 +257,61 @@ struct stream_in {
+     size_t conversion_buffer_size;      /* in bytes */
+ };
+ 
++struct pcm_config bt_hfp_config = {
++    .channels = 2, //channels
++    .rate = 8000, //rate
++    .period_size = 224, //KP-FIXME : should we set this value to some thing logical ?
++    .period_count = 2,
++    /* Values to use for the ALSA start, stop and silence thresholds, and
++     * silence size.  Setting any one of these values to 0 will cause the
++     * default tinyalsa values to be used instead.
++     * Tinyalsa defaults are as follows.
++     *
++     * start_threshold   : period_count * period_size
++     * stop_threshold    : period_count * period_size
++     * silence_threshold : 0
++     * silence_size      : 0
++     */
++
++    .start_threshold = 0,
++    .stop_threshold = 0,
++    .silence_threshold = 0,
++    .silence_size = 0,
++    .avail_min = 0
++
++    /* Minimum number of frames available before pcm_mmap_write() will actually
++     * write into the kernel buffer. Only used if the stream is opened in mmap mode
++     * (pcm_open() called with PCM_MMAP flag set).   Use 0 for default.
++     */
++};
++
++struct pcm_config usb_hfp_config = {
++    .channels = 2, //channels
++    .rate = 48000, //rate
++    .period_size = 224, //KP-FIXME : should we set this value to some thing logical ?
++    .period_count = 2,
++    /* Values to use for the ALSA start, stop and silence thresholds, and
++     * silence size.  Setting any one of these values to 0 will cause the
++     * default tinyalsa values to be used instead.
++     * Tinyalsa defaults are as follows.
++     *
++     * start_threshold   : period_count * period_size
++     * stop_threshold    : period_count * period_size
++     * silence_threshold : 0
++     * silence_size      : 0
++     */
++
++    .start_threshold = 0,
++    .stop_threshold = 0,
++    .silence_threshold = 0,
++    .silence_size = 0,
++    .avail_min = 0
++    /* Minimum number of frames available before pcm_mmap_write() will actually
++     * write into the kernel buffer. Only used if the stream is opened in mmap mode
++     * (pcm_open() called with PCM_MMAP flag set).   Use 0 for default.
++     */
++};
++
+ /*
+  * Locking Helpers
+  */
+@@ -285,6 +448,84 @@ static char *device_get_parameters(const alsa_device_profile *profile, const cha
+     return result_str;
+ }
+ 
++/*
++ * KP : api
++ */
++
++static void get_config_based_on_profile(alsa_device_profile* profile, struct pcm_config* default_config, struct pcm_config* config) {
++    ALOGV("%s",__func__);
++    // Here verify if the current profile supports default_config, if so, we will use default_config in config.
++    // Incase it doesnt config is set to profile's default values and than based on the difference between default_config & config we need to make resampler, channel converter.
++
++    //Additionally at this point default condig of USB has already been assigned on config.
++    ALOGV("%s default rate %d channels %d",__func__, default_config->rate, default_config->channels);
++
++    //Rates
++    for(int i = 0; i < MAX_PROFILE_SAMPLE_RATES - 1; i++){
++        //ALOGV("%s profile rate %d. %d",__func__, i, profile->sample_rates[i]);
++        if(default_config->rate == profile->sample_rates[i]) {
++            //Found a common rate. Accept it.
++            config->rate = default_config->rate;
++            break;
++        }
++    }
++
++    //Channels
++    for(int i = 0; i < MAX_PROFILE_CHANNEL_COUNTS - 1; i++){
++        //ALOGV("%s profile channel %d. %d",__func__, i, profile->channel_counts[i]);
++        if(default_config->channels == profile->channel_counts[i]) {
++            //Found a common rate. Accept it.
++            config->channels = default_config->channels;
++            break;
++        }
++    }
++
++    ALOGV("%s : selected rate : %d channels : %d",__func__, config->rate, config->channels);
++}
++
++static void get_device_info(struct audio_device* adev, alsa_device_profile* profile, struct pcm_config* config, int card, int device, int direction) {
++
++    //Profile
++    profile->card = card;
++    profile->device = device;
++    profile->direction = direction;
++
++    // Read profile's default config
++    profile_read_device_info(profile);
++
++    ALOGD("TestLog : profile is valid : %d",profile->is_valid);
++
++#ifdef DEBUG_DEVICE_INFO    
++    if(profile->is_valid) {
++        //Rates
++        for(int i = 0; i < MAX_PROFILE_SAMPLE_RATES - 1; i++){
++            ALOGD("TestLog : profile sample rate from hw_params : %d",profile->sample_rates[i]);
++        }
++
++        //Channel Counts
++        for(int i = 0; i < MAX_PROFILE_CHANNEL_COUNTS - 1; i++){
++            ALOGD("TestLog : profile channel count from hw_params : %d",profile->channel_counts[i]);
++        }
++
++        //Formats
++        for(int i = 0; i < MAX_PROFILE_FORMATS - 1; i++){
++            ALOGD("TestLog : profile format from hw_params : %d",profile->formats[i]);
++        }
++    }
++#endif
++
++    //Fill up config by defaults
++    config->rate = DEFAULT_SAMPLE_RATE; // is 44100 //profile_get_default_sample_rate(profile);
++    config->format = DEFAULT_SAMPLE_FORMAT; // is PCM_FORMAT_S16_LE //profile_get_default_format(profile);
++    config->channels = DEFAULT_CHANNEL_COUNT; // is 2 //profile_get_default_channel_count(profile);
++
++    if(card == adev->btcard) {
++        get_config_based_on_profile(profile, &bt_hfp_config, config);
++    } else if(card == adev->usbcard) {
++        get_config_based_on_profile(profile, &usb_hfp_config, config);
++    }
++}
++
+ /*
+  * HAl Functions
+  */
+@@ -345,7 +586,8 @@ static int out_standby(struct audio_stream *stream)
+     stream_lock(&out->lock);
+     if (!out->standby) {
+         device_lock(out->adev);
+-        proxy_close(&out->proxy);
++        if(out->adev->sco_thread == NULL)
++            proxy_close(&out->proxy);
+         device_unlock(out->adev);
+         out->standby = true;
+     }
+@@ -373,7 +615,7 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
+ 
+     struct stream_out *out = (struct stream_out *)stream;
+ 
+-    int ret_value = 0;
++    int ret_value = 0, val = 0;
+     int card = -1;
+     int device = -1;
+ 
+@@ -393,6 +635,7 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
+         else {
+             int saved_card = out->profile->card;
+             int saved_device = out->profile->device;
++// KP not changing 
+             out->adev->out_profile.card = card;
+             out->adev->out_profile.device = device;
+             ret_value = profile_read_device_info(&out->adev->out_profile) ? 0 : -EINVAL;
+@@ -447,6 +690,12 @@ static ssize_t out_write(struct audio_stream_out *stream, const void* buffer, si
+     struct stream_out *out = (struct stream_out *)stream;
+ 
+     stream_lock(&out->lock);
++// [KP Changes] : this wont allow anything to write with normal playback if sco loopback is ON.
++    if (out->adev->sco_thread_active != 0){
++        ALOGD("TestLog : orginal usb hal out_write called during sco_thread, skip and return.");        
++        stream_unlock(&out->lock);
++        return bytes;
++    }
+     if (out->standby) {
+         device_lock(out->adev);
+         ret = start_output_stream(out);
+@@ -580,11 +829,15 @@ static int adev_open_output_stream(struct audio_hw_device *hw_dev,
+     struct pcm_config proxy_config;
+     memset(&proxy_config, 0, sizeof(proxy_config));
+ 
+-    /* Pull out the card/device pair */
++    /* Pull out the card/device pair */ 
++// KP not changing
++    ALOGD("TestLog : card : %d , device : %d , address : %s ",out->adev->out_profile.card,out->adev->out_profile.device,address);
+     parse_card_device_params(address, &out->adev->out_profile.card, &out->adev->out_profile.device);
+ 
+     profile_read_device_info(&out->adev->out_profile);
+ 
++    ALOGD("TestLog : after parse_card_device_params() : card : %d , device : %d",out->adev->out_profile.card,out->adev->out_profile.device);
++
+     int ret = 0;
+ 
+     /* Rate */
+@@ -648,7 +901,10 @@ static int adev_open_output_stream(struct audio_hw_device *hw_dev,
+     // if they differ, choose the "actual" number of channels *closest* to the "logical".
+     // and store THAT in proxy_config.channels
+     proxy_config.channels = profile_get_closest_channel_count(out->profile, out->hal_channel_count);
++    
+     proxy_prepare(&out->proxy, out->profile, &proxy_config);
++    
++    ALOGD("pcm : out->proxy->pcm : %p",out->proxy.pcm);
+ 
+     /* TODO The retry mechanism isn't implemented in AudioPolicyManager/AudioFlinger
+      * So clear any errors that may have occurred above.
+@@ -747,7 +1003,8 @@ static int in_standby(struct audio_stream *stream)
+     stream_lock(&in->lock);
+     if (!in->standby) {
+         device_lock(in->adev);
+-        proxy_close(&in->proxy);
++        if(in->adev->sco_thread_active == NULL)
++            proxy_close(&in->proxy);
+         device_unlock(in->adev);
+         in->standby = true;
+     }
+@@ -780,6 +1037,16 @@ static int in_set_parameters(struct audio_stream *stream, const char *kvpairs)
+     int ret_value = 0;
+     int card = -1;
+     int device = -1;
++    struct str_parms * parms = str_parms_create_str(kvpairs);
++    char value[32];
++    int param_val;
++
++    // KP-change Added to track and block hotword forcefully
++    param_val = str_parms_get_str(parms, "input_source", value, sizeof(value));
++    if (param_val >= 0) {
++        in->adev->input_source = atoi(value);
++        ALOGD("TestLog : INPUT_SOURCE : %d",in->adev->input_source);
++    }
+ 
+     if (!parse_card_device_params(kvpairs, &card, &device)) {
+         // nothing to do
+@@ -796,6 +1063,7 @@ static int in_set_parameters(struct audio_stream *stream, const char *kvpairs)
+         else {
+             int saved_card = in->profile->card;
+             int saved_device = in->profile->device;
++// KP not changing adev->in_profile
+             in->adev->in_profile.card = card;
+             in->adev->in_profile.device = device;
+             ret_value = profile_read_device_info(&in->adev->in_profile) ? 0 : -EINVAL;
+@@ -847,6 +1115,13 @@ static int start_input_stream(struct stream_in *in)
+ {
+     ALOGV("start_input_stream(card:%d device:%d)", in->profile->card, in->profile->device);
+ 
++    struct audio_device *adev = in->adev;
++    
++    if(adev->input_source == 6){
++        ALOGD("TestLog : block hotword input :p ");
++        return -EINVAL;
++    }
++
+     return proxy_open(&in->proxy);
+ }
+ 
+@@ -861,6 +1136,12 @@ static ssize_t in_read(struct audio_stream_in *stream, void* buffer, size_t byte
+     struct stream_in * in = (struct stream_in *)stream;
+ 
+     stream_lock(&in->lock);
++// [KP Changes] : this wont allow to read from normal input if SCO loopback is ON.
++    if (in->adev->sco_thread != 0){
++        ALOGD("TestLog : orginal usb hal in_read called during sco_thread, skip and return.");
++        stream_unlock(&in->lock);
++        return bytes;
++    }
+     if (in->standby) {
+         device_lock(in->adev);
+         ret = start_input_stream(in);
+@@ -1007,6 +1288,8 @@ static int adev_open_input_stream(struct audio_hw_device *hw_dev,
+         return ret;
+     }
+ 
++    ALOGD("TestLog : adev_open_input_stream() : card : %d device : %d direction : %d",
++        in->adev->in_profile.card,in->adev->in_profile.device,in->adev->in_profile.direction);
+     /* Rate */
+     if (config->sample_rate == 0) {
+         config->sample_rate = profile_get_default_sample_rate(in->profile);
+@@ -1139,11 +1422,776 @@ static void adev_close_input_stream(struct audio_hw_device *hw_dev,
+     free(stream);
+ }
+ 
++// KP Changes >> will use if we need to set some mixer control for enabling the bt card switch
++void set_line_in(struct audio_hw_device *hw_dev){
++    struct audio_device * adev = (struct audio_device *)hw_dev;
++
++    if (adev->hw_mixer == 0) {
++        ALOGD("%s : No hw_mixer, try opening hw_mixer for usbcard",__func__);
++        adev->hw_mixer = mixer_open(adev->usbcard);
++    }
++    if (adev->hw_mixer == 0) {
++        ALOGE("TestLog : Failed to open hw_mixer for usbcard.");
++        return;
++    }
++
++    struct mixer_ctl *line_in_ctl = mixer_get_ctl_by_name(adev->hw_mixer, "Line Playback Switch");
++
++    if (adev->line_in && adev->sco_thread == 0){
++        mixer_ctl_set_value(line_in_ctl, 0, 1);
++    } else {
++        mixer_ctl_set_value(line_in_ctl, 0, 0);
++    }
++}
++
++/* KP-FIXME NOT NEEDED REMOVE.
++//KP change
++void stereo_to_mono(int16_t *stereo, int16_t *mono, size_t samples){
++    // Converts interleaved stereo into mono by discarding second channel
++    int i;
++    for (i = 0; i < samples; i++)
++        mono[i] = stereo[2*i];
++}
++*/
++
++// [KP Change : function running sco loopback]
++void* run_bt_usb_loopback(void * args) {
++
++    ALOGD("%s : run_bt_usb_loopback", __func__);
++
++    struct audio_device * adev = (struct audio_device *)args;
++    struct resampler_itfe *upsampler = NULL; //upsampler
++
++    adev->sco_samplerate = 8000;
++    
++    //KP FIXME : AudioProcessing: Initialize, not yet using these...
++    //struct audioproc *apm = audioproc_create();
++    //struct audioframe *frame = audioframe_create(1, 48000/*adev->sco_samplerate*/, /*adev->sco_samplerate*/ 48000/ 100); // KP TODO    
++
++#ifdef DEBUG_PCM_DUMP    
++    ALOGV("%s: Opening PCM logs", __func__);
++    // KP FIXME : needed to mkdir dump folder in /vendor path before creating files there.
++
++    FILE *loopback2_read = fopen("/vendor/dump/loopback2_read.pcm", "a");
++    FILE *loopback2_remapped = fopen("/vendor/dump/loopback2_remapped.pcm", "a");
++    FILE *loopback2_upsampled_write = fopen("/vendor/dump/loopback2_upsampled_write.pcm", "a");
++
++    if(!loopback2_read || !loopback2_remapped || !loopback2_upsampled_write){
++        ALOGE("%s : Failure in fopen calls for dumps", __func__);
++    }
++#endif
++
++    ALOGD("%s: USBCARD: %d, BTCARD: %d", __func__, adev->usbcard, adev->btcard);
++
++    // Put all existing streams into standby (closed). Note that when sco thread is running
++    // out_write and in_read functions will bail immediately while pretending to work and
++    // not opening the pcm's.
++    struct listnode* node;
++
++    list_for_each(node, &adev->output_stream_list) {
++        struct audio_stream* stream = (struct audio_stream *)node_to_item(node, struct stream_out, list_node);
++        out_standby((struct audio_stream_out *)stream);
++    }
++
++    list_for_each(node, &adev->input_stream_list) {
++        struct audio_stream* stream = (struct audio_stream *)node_to_item(node, struct stream_in, list_node);
++        in_standby((struct audio_stream_in *)stream);
++    }
++
++// enable sco_thread_active to avoid any further in_standby
++    adev->sco_thread_active = 1;
++
++// [BT IN]
++    alsa_device_profile bt_in_profile, usb_out_profile;
++    alsa_device_proxy bt_in_proxy, usb_out_proxy;
++    struct pcm_config config_bt;
++    struct pcm_config config_usb;
++    bool need_resampler = false; // Use speex resampler
++    bool need_remapper = false; // Use audio_utils/channels.c : adjust_channels()
++
++    //Initialize .
++    memset(&bt_in_profile, 0, sizeof(bt_in_profile));
++    memset(&bt_in_proxy, 0, sizeof(bt_in_proxy));
++    memset(&config_bt, 0, sizeof(config_bt));
++    memset(&usb_out_profile, 0, sizeof(usb_out_profile));
++    memset(&usb_out_proxy, 0, sizeof(usb_out_proxy));
++    memset(&config_usb, 0, sizeof(config_usb));
++
++    get_device_info(adev, &bt_in_profile, &config_bt, adev->btcard, 0, PCM_IN);
++
++    ALOGD("%s : config_bt in rate %d channels %d format %d",__func__, config_bt.rate, config_bt.channels, config_bt.format);
++
++    int proxy_ret = proxy_prepare(&bt_in_proxy, &bt_in_profile, &config_bt);
++
++    if(proxy_ret != 0) {
++        ALOGE("%s : bt_sco in proxy_prepare done : Error : %d",__func__, proxy_ret);
++    }
++
++    proxy_ret = proxy_open(&bt_in_proxy);
++
++    if(proxy_ret == 0) {
++        adev->sco_pcm_bt_in = bt_in_proxy.pcm;
++    } else {
++        ALOGE("%s : bt_sco IN failure : Error : %d",__func__, proxy_ret);
++    }
++
++// USB_OUT
++    proxy_ret = -1;
++
++    get_device_info(adev, &usb_out_profile, &config_usb, adev->usbcard, 0, PCM_OUT);
++    ALOGD("%s : config_usb out rate %d channels %d format %d",__func__, config_usb.rate, config_usb.channels, config_usb.format);
++
++    proxy_ret = proxy_prepare(&usb_out_proxy, &usb_out_profile, &config_usb);
++
++    if(proxy_ret != 0) {
++        ALOGE("%s : usb_out proxy_prepare failed : Error : %d",__func__, proxy_ret);
++    }
++
++    proxy_ret = proxy_open(&usb_out_proxy);
++
++    if(proxy_ret == 0) {
++        adev->sco_pcm_usb_out = usb_out_proxy.pcm;
++    } else {
++        ALOGE("%s : usb out failure : Error : %d",__func__, proxy_ret);
++        //KP-FIXME : close previous pcm incase of failure in opening this one.
++    }
++
++    if(config_bt.rate != config_usb.rate)
++        need_resampler = true;
++
++    if(config_bt.channels != config_usb.channels)
++        need_remapper = true;
++
++    /* Bytes per sec == channel_count * sample_size_in_bytes * sample_rate
++     * e.g. bytes = 2 * 2 * 8000 ==> 32000
++     * If our device has period_us as 10ms, than frames that can be consumed in one cycle is : 32000 / 100 ==> 320
++    */
++
++/*
++    KP : FIXME : remove this if not needed.
++    ALOGD("Karan : bt : min_period_size %zu max_period_size %zu",bt_in_profile.min_period_size, bt_in_profile.max_period_size);
++    size_t bt_period_size = profile_calc_min_period_size(&bt_in_profile, config_bt.rate);
++
++    ALOGD("Karan : usb : min_period_size %zu max_period_size %zu",usb_out_profile.min_period_size, usb_out_profile.max_period_size);
++    size_t usb_period_size = profile_calc_min_period_size(&usb_out_profile, config_usb.rate);
++    
++    ALOGD("Karan : calculated period size bt %zu usb %zu",bt_period_size, usb_period_size);
++
++    size_t frames_usb = 240; //config_usb.rate / 100;
++    size_t frames_bt = 40; //config_bt.rate / 100;
++    //FIXME
++    size_t buf_size_remapped = (buf_size_bt * config_usb.channels) / config_bt.channels;
++*/
++
++    size_t sample_size_in_bytes = 2; //16 bit format by default
++    size_t frames_usb = (config_usb.rate * 5) / 1000;
++    size_t frames_bt = (config_bt.rate * 5) / 1000;
++    size_t buf_size_usb = config_usb.channels * frames_usb * sample_size_in_bytes;
++    size_t buf_size_bt = config_bt.channels * frames_bt * sample_size_in_bytes;
++    //using bt channels as here we will be MONO -> STEREO, if used.
++    size_t buf_size_remapped = config_usb.channels * frames_bt * sample_size_in_bytes;
++
++    ALOGV("%s : size_usb %zu size_bt %zu size_remapped %zu", __func__, buf_size_usb, buf_size_bt, buf_size_remapped);
++
++    int16_t *buf_usb = (int16_t *) malloc (buf_size_usb);
++    int16_t *buf_bt = (int16_t *) malloc (buf_size_bt);
++    int16_t *buf_remapped = (int16_t *) malloc (buf_size_remapped);
++
++    int32_t read_err = 0;
++    int32_t write_err = 0;
++    size_t adjusted_bytes = 0;
++
++    if(buf_size_bt != buf_size_usb) {
++        /* Create only required solutions.
++            As BT is restricted to {8000 : MONO} config (or {16000 : STEREO} in future), this inequality between USB and BT can only 
++                occur when current USB card config is more than BT's either in Channels or SampleRate.
++                    So, we will only need Upsampler or Mono-Stereo converter in this case.
++            */
++
++        if(need_resampler) {
++            int ret = create_resampler(config_bt.rate /*src rate*/, config_usb.rate /*dst rate*/, config_bt.channels /*channels*/,
++                        RESAMPLER_QUALITY_DEFAULT, NULL, &upsampler);
++            if (ret != 0) {
++                upsampler = NULL;
++                //KP FIXME : use proxy_close.. also add code to disable / and clear variables at end.
++                ALOGE("%s: failure to create upsampler %d", __func__, ret);
++                pcm_close(adev->sco_pcm_usb_out);
++                pcm_close(adev->sco_pcm_bt_in);
++                return NULL;
++            }
++        }
++
++        //start loopback
++        while(!adev->terminate_sco){
++            memset(buf_bt, 0 ,buf_size_bt);
++            memset(buf_usb, 0, buf_size_usb);
++            memset(buf_remapped, 0, buf_size_remapped);
++
++            read_err = proxy_read(&bt_in_proxy, buf_bt, buf_size_bt);
++
++            if(read_err != 0) {
++                ALOGE("%s : proxy_read failure %d", __func__, read_err);
++            } else {
++                ALOGV("%s : read %zu from bt_in",__func__, buf_size_bt);
++            }
++
++#ifdef DEBUG_PCM_DUMP
++            if(loopback2_read != NULL) {
++                fwrite(buf_bt, 1, buf_size_bt, loopback2_read);
++            }
++#endif
++
++//KP-FIXME : NOT VERIFIED //Check if remapping is required. As of now no such card that supports mono, waiting for actual BT ALSA Card with MONO
++            if(need_remapper) {
++                adjusted_bytes = adjust_channels(buf_bt, config_bt.channels, buf_remapped, config_usb.channels, 
++                                        2 /*sample_size_in_bytes 16bit format*/, buf_size_remapped);
++                ALOGV("%s : remapping [%d -> %d], adjusted bytes : %zu",__func__, config_bt.channels, config_usb.channels, adjusted_bytes);
++            } else {
++                //Just copy content of buf_remapped as no channel adjustment is required.
++                ALOGV("%s : no remapping required.",__func__);
++                memcpy(buf_remapped, buf_bt, buf_size_remapped);
++            }
++
++#ifdef DEBUG_PCM_DUMP
++            if(loopback2_remapped != NULL) {
++                fwrite(buf_remapped, 1, buf_size_remapped, loopback2_remapped);
++            }
++#endif
++
++            //Check if resampling is required.
++            if(upsampler != NULL) {
++                upsampler->resample_from_input(upsampler, (int16_t *)buf_remapped, (size_t *)&frames_bt, (int16_t *) buf_usb, (size_t *)&frames_usb);
++                ALOGV("%s : upsampling [%d -> %d]",__func__, config_bt.rate, config_usb.rate);
++            } else {
++                ALOGV("%s : no resampling required.",__func__);
++                memcpy(buf_usb, buf_remapped, buf_size_usb);
++            }
++
++#ifdef DEBUG_PCM_DUMP
++            if(loopback2_upsampled_write != NULL) {
++                fwrite(buf_usb, 1, buf_size_usb, loopback2_upsampled_write);
++            }
++#endif
++
++            //Write to usb now.
++            write_err = proxy_write(&usb_out_proxy, buf_usb, buf_size_usb);
++
++            if(write_err != 0) {
++                ALOGE("%s : proxy_write failure %d", __func__, write_err);
++            } else {
++                ALOGV("%s : written %zu to usb_out",__func__, buf_size_usb);
++            }
++        }
++    } else {
++        //No conversion required, read from bt_in and directly write to usb_out
++        while(!adev->terminate_sco){
++            memset(buf_bt, 0 ,buf_size_bt);
++            memset(buf_usb, 0, buf_size_usb);
++
++            read_err = proxy_read(&bt_in_proxy, buf_bt, buf_size_bt);
++
++            if(read_err != 0) {
++                ALOGE("%s : proxy_read failure %d", __func__, read_err);
++            } else {
++                ALOGV("%s : read %zu from usb_in",__func__, buf_size_usb);
++            }
++
++            memcpy(buf_usb, buf_bt, buf_size_bt);
++
++            write_err = proxy_write(&usb_out_proxy, buf_usb, buf_size_usb);
++
++            if(write_err != 0) {
++                ALOGE("%s : proxy_write failure %d", __func__, write_err);
++            } else {
++                ALOGV("%s : written %zu to usb_out",__func__, buf_size_usb);
++            }
++
++        }
++    }
++
++    ALOGD("%s: run_bt_usb_loopback terminated", __func__);
++
++    // AudioProcessing: Done
++    //audioproc_destroy(apm);
++
++    // We're done, close the PCM's and return.
++    pcm_close(adev->sco_pcm_usb_out);
++    pcm_close(adev->sco_pcm_bt_in);
++
++    adev->sco_pcm_usb_out = 0;
++    adev->sco_pcm_bt_in = 0;
++
++    adev->sco_thread = 0;
++    adev->sco_thread_active = 0;
++    return NULL;
++}
++
++void* run_usb_bt_loopback(void * args) {
++
++    ALOGD("%s : run_usb_bt_loopback",__func__);
++
++    struct audio_device * adev = (struct audio_device *)args;
++    struct resampler_itfe *downsampler = NULL; //downsampler
++
++// KP : FIXME : remove if not needed
++    adev->sco_samplerate = 8000;
++
++    //KP FIXME : AudioProcessing: Initialize, not yet using these...
++    //struct audioproc *apm = audioproc_create();
++    //struct audioframe *frame = audioframe_create(1, 48000/*adev->sco_samplerate*/, /*adev->sco_samplerate*/ 48000/ 100); // KP TODO
++
++#ifdef DEBUG_PCM_DUMP
++    ALOGV("%s: Opening PCM logs", __func__);
++    // KP FIXME : needed to make dump folder in /vendor path to make it create files there.
++
++    FILE *loopback1_read = fopen("/vendor/dump/loopback1_read.pcm", "a");
++    FILE *loopback1_remapped = fopen("/vendor/dump/loopback1_remapped.pcm", "a");
++    FILE *loopback1_downsampled_write = fopen("/vendor/dump/loopback1_downsampled_write.pcm", "a");
++
++    if(!loopback1_read || !loopback1_remapped || !loopback1_downsampled_write){
++        ALOGD("%s : Failure in fopen calls for dumps",__func__);
++    }
++#endif
++
++    ALOGD("%s: USBCARD: %d, BTCARD: %d", __func__, adev->usbcard, adev->btcard);
++
++    // Put all existing streams into standby (closed). Note that when sco thread is running
++    // out_write and in_read functions will bail immediately while pretending to work and
++    // not opening the pcm's.
++    struct listnode* node;
++
++    list_for_each(node, &adev->output_stream_list) {
++        struct audio_stream* stream = (struct audio_stream *)node_to_item(node, struct stream_out, list_node);
++        out_standby((struct audio_stream_out *)stream);
++    }
++
++    list_for_each(node, &adev->input_stream_list) {
++        struct audio_stream* stream = (struct audio_stream *)node_to_item(node, struct stream_in, list_node);
++        in_standby((struct audio_stream_in *)stream);
++    }
++
++// enable sco_thread_active to avoid any further in_standby
++    adev->usb_thread_active = 1;
++
++// [BT OUT]
++    alsa_device_profile bt_out_profile, usb_in_profile;
++    alsa_device_proxy bt_out_proxy, usb_in_proxy;
++    struct pcm_config config_bt;
++    struct pcm_config config_usb;
++    bool need_resampler = false; // Use speex resampler
++    bool need_remapper = false; // Use audio_utils/channels.c : adjust_channels()
++
++    //Initialize to 0/NULL .
++    memset(&bt_out_profile, 0, sizeof(bt_out_profile));
++    memset(&bt_out_proxy, 0, sizeof(bt_out_proxy));
++    memset(&config_bt, 0, sizeof(config_bt));
++    memset(&usb_in_profile, 0, sizeof(usb_in_profile));
++    memset(&usb_in_proxy, 0, sizeof(usb_in_proxy));
++    memset(&config_usb, 0, sizeof(config_usb));
++
++    get_device_info(adev, &bt_out_profile, &config_bt, adev->btcard, 0, PCM_OUT);
++    ALOGV("%s : config_bt out rate %d channels %d format %d", __func__, config_bt.rate, config_bt.channels, config_bt.format);
++
++    int proxy_ret = proxy_prepare(&bt_out_proxy, &bt_out_profile, &config_bt);
++
++    if(proxy_ret != 0) {
++        ALOGE("%s : bt_sco out proxy_prepare failure : Error : %d", __func__, proxy_ret);
++    }
++
++    proxy_ret = proxy_open(&bt_out_proxy); // KP check for already opened case primary pcm.
++    
++    if(proxy_ret == 0) {
++        adev->sco_pcm_bt_out = bt_out_proxy.pcm;
++    } else {
++        ALOGE("%s : bt_sco out failure : Error : %d", __func__, proxy_ret);
++        //close previous pcm incase of failure in opening this one.
++    }
++
++// [USB IN]
++    proxy_ret = -1;
++
++    get_device_info(adev, &usb_in_profile, &config_usb, adev->usbcard, 0, PCM_IN);
++    ALOGV("%s : config_usb in rate %d channels %d format %d", __func__, config_usb.rate, config_usb.channels, config_usb.format);
++
++    proxy_ret = proxy_prepare(&usb_in_proxy, &usb_in_profile, &config_usb);
++
++    if(proxy_ret != 0) {
++        ALOGV("%s : usb in proxy_prepare failure : Error : %d", __func__, proxy_ret);
++    }
++
++    proxy_ret = proxy_open(&usb_in_proxy);
++
++    if(proxy_ret == 0) {
++        adev->sco_pcm_usb_in = usb_in_proxy.pcm;
++    } else {
++        ALOGE("%s : usb in failure : Error : %d", __func__, proxy_ret);
++        //KP-FIXME : close previous pcm incase of failure in opening this one.
++    }
++
++    if(config_usb.rate != config_bt.rate)
++        need_resampler = true;
++
++    if(config_usb.channels != config_bt.channels)
++        need_remapper = true;
++
++    /* Bytes per sec == channel_count * sample_size_in_bytes * sample_rate
++     * e.g. bytes = 2 * 2 * 8000 ==> 32000
++     * If our device has period_us as 10ms, than frames that can be consumed in one cycle is : 32000 / 100 ==> 320
++    */
++
++    size_t frames_usb = (config_usb.rate * 5) / 1000; //based on period_us = 5000
++    size_t frames_bt = (config_bt.rate * 5) / 1000;
++
++    size_t sample_size_in_bytes = 2; // 16 bit format by default
++
++    size_t buf_size_usb = config_usb.channels * frames_usb * sample_size_in_bytes;
++    size_t buf_size_bt = config_bt.channels * frames_bt * sample_size_in_bytes;
++    //using bt channels as here we will be STEREO -> MONO, if used.
++    size_t buf_size_remapped = config_bt.channels * frames_usb * sample_size_in_bytes;
++
++    ALOGV("%s : size_usb %zu size_bt %zu size_remapped %zu", __func__, buf_size_usb, buf_size_bt, buf_size_remapped);
++
++    int16_t *buf_usb = (int16_t *) malloc (buf_size_usb);
++    int16_t *buf_bt = (int16_t *) malloc (buf_size_bt);
++    int16_t *buf_remapped = (int16_t *) malloc (buf_size_remapped);
++
++    int32_t read_err = 0;
++    int32_t write_err = 0;
++    size_t adjusted_bytes = 0;
++
++    if(buf_size_usb != buf_size_bt) {
++        /* Create only required solutions.
++            As BT is restricted to {8000 : MONO} config (or {16000 : STEREO} in future), this inequality between USB and BT can only 
++                occur when current USB card config is more than BT's either in Channels or SampleRate.
++                    So, we will only need Downsampler or Stereo-Mono converter in this case.
++            */
++
++        if(need_resampler) {
++            int ret = create_resampler(config_usb.rate /*src rate*/, config_bt.rate /*dst rate*/, config_usb.channels /*src channels*/,
++                        RESAMPLER_QUALITY_DEFAULT, NULL, &downsampler);
++            if(ret != 0) {
++                downsampler = NULL;
++                //KP FIXME : use proxy_close
++                ALOGE("%s : Failure to create downsampler %d", __func__, ret);
++                pcm_close(adev->sco_pcm_usb_in);
++                pcm_close(adev->sco_pcm_bt_out);
++                return NULL;
++            }
++        }
++
++        //start loopback
++        while(!adev->terminate_usb_loopback) {
++            memset(buf_usb, 0, buf_size_usb);
++            memset(buf_bt, 0, buf_size_bt);
++            memset(buf_remapped, 0, buf_size_remapped);
++
++            read_err = proxy_read(&usb_in_proxy, buf_usb, buf_size_usb);
++
++            if(read_err != 0) {
++                ALOGE("%s : proxy_read failure %d", __func__, read_err);
++            } else {
++                ALOGV("%s : read %zu from usb_in", __func__, buf_size_usb);
++            }
++
++#ifdef DEBUG_PCM_DUMP
++            if(loopback1_read != NULL) {
++                fwrite(buf_usb, 1, buf_size_usb, loopback1_read);
++            }
++#endif
++
++            //KP-FIXME : NOT VERIFIED
++            //Check if remapping is required.
++            if(need_remapper) {
++                adjusted_bytes = adjust_channels(buf_usb, config_usb.channels, buf_remapped, config_bt.channels,
++                                        2 /*sample_size_in_bytes*/, buf_size_remapped);
++                ALOGV("%s : remapping [%d -> %d], adjusted_bytes %zu", __func__, config_usb.channels, config_bt.channels, adjusted_bytes);
++            } else {
++                ALOGV("%s : no remapping required", __func__);
++                memcpy(buf_remapped, buf_usb, buf_size_remapped);
++            }
++
++#ifdef DEBUG_PCM_DUMP
++            if(loopback1_remapped != NULL) {
++                fwrite(buf_remapped, 1, buf_size_remapped, loopback1_remapped);
++            }
++#endif
++
++            //Check if resampling is needed.
++            if(downsampler != NULL) {
++                downsampler->resample_from_input(downsampler, (int16_t *)buf_remapped, (size_t *)&frames_usb, (int16_t *)buf_bt, (size_t *)&frames_bt);
++                ALOGV("%s : downsampling [%d -> %d]", __func__, config_usb.rate, config_bt.rate);
++            } else {
++                ALOGV("%s : No resampling required.", __func__);
++                memcpy(buf_bt, buf_remapped, buf_size_bt);
++            }
++
++#ifdef DEBUG_PCM_DUMP
++            if(loopback1_downsampled_write != 0) {
++                fwrite(buf_bt, 1, buf_size_bt, loopback1_downsampled_write);
++            }
++#endif
++
++            write_err = proxy_write(&bt_out_proxy, buf_bt, buf_size_bt);
++
++            if(write_err != 0) {
++                ALOGE("%s : proxy_write failure %d", __func__, write_err);
++            } else {
++                ALOGV("%s : written %zu to bt_out", __func__, buf_size_bt);
++            }
++        }
++    } else {
++        //No conversions required.
++        while(!adev->terminate_usb_loopback) {
++            memset(buf_usb, 0, buf_size_usb);
++            memset(buf_bt, 0, buf_size_bt);
++
++            read_err = proxy_read(&usb_in_proxy, buf_usb, buf_size_usb);
++
++            if(read_err != 0) {
++                ALOGE("%s : proxy_read failure %d", __func__, read_err);
++            } else {
++                ALOGV("%s : read %zu from usb_in", __func__, buf_size_usb);
++            }
++
++            memcpy(buf_bt, buf_usb, buf_size_usb);
++
++            write_err = proxy_write(&bt_out_proxy, buf_bt, buf_size_bt);
++
++            if(write_err != 0) {
++                ALOGE("%s : proxy_write failure %d", __func__, write_err);
++            } else {
++                ALOGV("%s : written %zu to bt_out", __func__, buf_size_bt);
++            }
++        }
++    }
++
++    ALOGD("%s: run_usb_bt_loopback terminated", __func__);
++
++    // AudioProcessing: Done
++    //audioproc_destroy(apm);
++
++    // We're done, close the PCM's and return.
++    pcm_close(adev->sco_pcm_usb_in);
++    pcm_close(adev->sco_pcm_bt_out);
++
++    adev->sco_pcm_usb_in = 0;
++    adev->sco_pcm_bt_out = 0;
++
++    adev->usb_thread = 0;
++    adev->usb_thread_active = 0;
++    return NULL;
++}
++
++
++void set_hfp_volume(struct audio_hw_device *hw_dev, int volume)
++{
++    // value of volume will be between 1 and 15 inclusive
++
++    struct audio_device * adev = (struct audio_device *)hw_dev;
++    if (adev->hw_mixer == 0) {
++        ALOGD("%s : no existing hw_mixer. Try opening.",__func__);
++        adev->hw_mixer = mixer_open(adev->usbcard);
++    }
++    if (adev->hw_mixer == 0) {
++        ALOGE("%s : Failure in mixer_open().",__func__);
++        return;
++    }
++    struct mixer_ctl *vol_ctl = mixer_get_ctl_by_name(adev->hw_mixer, "Speaker Playback Volume");
++    int max = mixer_ctl_get_range_max(vol_ctl);
++    int size = mixer_ctl_get_num_values(vol_ctl);
++    int i;
++
++    for (i = 0; i < size; i++){
++        if (i < 2)
++            mixer_ctl_set_value(vol_ctl, i, (int)((float) max * ((float)volume / 15.0)));
++        else
++            mixer_ctl_set_value(vol_ctl, i, 0);
++    }
++}
++
+ /*
+  * ADEV Functions
+  */
++static int adev_set_master_volume(struct audio_hw_device *hw_dev, float volume)
++{
++    // value of volume will be between 0.0 and 1.0 inclusive
++
++    struct audio_device *adev = (struct audio_device *)hw_dev;
++    if (adev->hw_mixer == 0) {
++        ALOGD("%s : No existing hw_mixer, Opening hw_mixer for usbcard",__func__);
++        adev->hw_mixer = mixer_open(adev->usbcard);
++    }
++    if (adev->hw_mixer == 0) {
++        ALOGE("%s : Failure in mixer_open().",__func__);
++        return 0;
++    }
++    struct mixer_ctl *vol_ctl = mixer_get_ctl_by_name(adev->hw_mixer, "Speaker Playback Volume");
++    int max = mixer_ctl_get_range_max(vol_ctl);
++    int size = mixer_ctl_get_num_values(vol_ctl);
++    int i;
++
++    adev->master_volume = volume;
++    if (adev->vol_balance == 0){ // setup default volume balance if not already set
++        adev->vol_balance = malloc(size * sizeof(float));
++        for (i = 0; i < size; i++){
++            if (i < 2)
++                adev->vol_balance[i] = 1.0;
++            else if (i < 4)
++                adev->vol_balance[i] = 0.75;
++            else
++                adev->vol_balance[i] = 0.0;
++        }
++    }
++
++    for (i = 0; i < size; i++)
++        mixer_ctl_set_value(vol_ctl, i, (int)((float) max * adev->vol_balance[i] * volume));
++
++    return 0; // any return value other than 0 means that master volume becomes software emulated.
++}
++
++void adev_set_mic_volume(struct audio_hw_device *hw_dev, int percent)
++{
++    struct audio_device * adev = (struct audio_device *)hw_dev;
++    if (adev->hw_mixer == 0) {
++        ALOGD("%s : No existing hw_mixer, try opening hw_mixer for usbcard",__func__);
++        adev->hw_mixer = mixer_open(adev->usbcard);
++    }
++    if (adev->hw_mixer == 0) {
++        ALOGE("%s : failed to open hw_mixer for usbcard",__func__);
++        return;
++    }
++    struct mixer_ctl *vol_ctl = mixer_get_ctl_by_name(adev->hw_mixer, "Mic Capture Volume");
++    int max = mixer_ctl_get_range_max(vol_ctl);
++
++    mixer_ctl_set_value(vol_ctl, 0, max * percent / 100);
++}
++
+ static int adev_set_parameters(struct audio_hw_device *hw_dev, const char *kvpairs)
+ {
++// [KP Changes enable set parameter support]
++    ALOGD("TestLog : %s: kvpairs: %s", __func__, kvpairs);
++
++    struct audio_device * adev = (struct audio_device *)hw_dev;
++    char value[32];
++    int ret, val = 0;
++    struct str_parms *parms;
++
++    parms = str_parms_create_str(kvpairs);
++
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_TEST_BT_CARD, value, sizeof(value));
++    if (ret >= 0) {
++        val = atoi(value);
++        adev->btcard = val;
++        ALOGD("TestLog : adev_set_parameters : btcard : %d",adev->btcard);
++        
++        //read_bt_params();
++    }
++    
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_TEST_USB_CARD, value, sizeof(value));
++    if (ret >= 0) {
++        val = atoi(value);
++        adev->usbcard = val;
++        ALOGD("TestLog : adev_set_parameters : usbcard : %d",adev->usbcard);
++        
++        //read_usb_params();
++    }
++    
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_LOOPBACK_USB_IN_BT_OUT, value, sizeof(value));
++    if (ret >= 0) {
++        ALOGD("TestLog : adev_set_parameters : loopback1 USB_IN -> BT_OUT : %s ++",value);
++        pthread_mutex_lock(&adev->usb_thread_lock);
++        if (strcmp(value, "true") == 0){
++            if (adev->usb_thread == 0) {
++                adev_set_mic_volume(hw_dev, 90); // set microphone to 90% of maximum (default is 59%)
++                adev->terminate_usb_loopback = false;
++                pthread_create(&adev->usb_thread, NULL, &run_usb_bt_loopback, adev);
++                set_line_in(hw_dev);
++            }
++        } else {
++            if (adev->usb_thread != 0) {
++                adev->terminate_usb_loopback = true; // this will cause the thread to exit the main loop and terminate.
++                adev->usb_thread = 0;
++                set_line_in(hw_dev);
++                adev_set_master_volume(hw_dev, adev->master_volume); // reset master volume on termination
++            }
++        }
++        pthread_mutex_unlock(&adev->usb_thread_lock);
++    }
++
++    
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_LOOPBACK_BT_IN_USB_OUT, value, sizeof(value));
++    if (ret >= 0) {
++        ALOGD("TestLog : adev_set_parameters : loopback2 BT_IN -> USB_OUT : %s ++",value);
++        pthread_mutex_lock(&adev->sco_thread_lock);
++        if (strcmp(value, "true") == 0){
++            if (adev->sco_thread == 0) {
++                adev_set_mic_volume(hw_dev, 90); // set microphone to 90% of maximum (default is 59%)
++                adev->terminate_sco = false;
++                pthread_create(&adev->sco_thread, NULL, &run_bt_usb_loopback, adev);
++                set_line_in(hw_dev);
++            }
++        } else {
++            if (adev->sco_thread != 0) {
++                adev->terminate_sco = true; // this will cause the thread to exit the main loop and terminate.
++                adev->sco_thread = 0;
++                set_line_in(hw_dev);
++                adev_set_master_volume(hw_dev, adev->master_volume); // reset master volume on termination
++            }
++        }
++        pthread_mutex_unlock(&adev->sco_thread_lock);
++    }
++
++/*
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_CARD, value, sizeof(value));
++    if (ret >= 0) {
++        val = atoi(value);
++        adev->usbcard = val;
++        adev->btcard = (val + 1) % 2;
++    }
++*/
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_HFP_SET_SAMPLING_RATE, value, sizeof(value));
++    if (ret >= 0) {
++        val = atoi(value);
++        adev->sco_samplerate = 8000;// KP TODO : for now fixing it to 8k
++    }
++/*
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_HFP_ENABLE, value, sizeof(value));
++    if (ret >= 0) {
++        ALOGD("TestLog : adev_set_parameters : hfp_enable : %s ++",value);
++        pthread_mutex_lock(&adev->sco_thread_lock);
++        if (strcmp(value, "true") == 0){
++            if (adev->sco_thread == 0) {
++                adev_set_mic_volume(hw_dev, 90); // set microphone to 90% of maximum (default is 59%)
++                adev->terminate_sco = false;
++                pthread_create(&adev->sco_thread, NULL, &runScoLoopback, adev);
++                set_line_in(hw_dev);
++            }
++        } else {
++            if (adev->sco_thread != 0) {
++                adev->terminate_sco = true; // this will cause the thread to exit the main loop and terminate.
++                adev->sco_thread = 0;
++                set_line_in(hw_dev);
++                adev_set_master_volume(hw_dev, adev->master_volume); // reset master volume on termination
++            }
++        }
++        pthread_mutex_unlock(&adev->sco_thread_lock);
++    }
++*/
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_KEY_HFP_VOLUME, value, sizeof(value));
++    if (ret >= 0) {
++        val = atoi(value);
++        set_hfp_volume(hw_dev, 7); // val is always 1-15 inclusive KP : TODO : temporary use volume 7
++    }
++
++// Right now for primary & usb not being used.
++    ret = str_parms_get_str(parms, AUDIO_PARAMETER_LINEIN, value, sizeof(value));
++    if (ret >= 0){
++        if (strcmp(value, "play") == 0) adev->line_in = true;
++        else adev->line_in = false;
++
++        set_line_in(hw_dev);
++    }
++
+     return 0;
+ }
+ 
+@@ -1162,11 +2210,6 @@ static int adev_set_voice_volume(struct audio_hw_device *hw_dev, float volume)
+     return -ENOSYS;
+ }
+ 
+-static int adev_set_master_volume(struct audio_hw_device *hw_dev, float volume)
+-{
+-    return -ENOSYS;
+-}
+-
+ static int adev_set_mode(struct audio_hw_device *hw_dev, audio_mode_t mode)
+ {
+     return 0;
+@@ -1235,6 +2278,10 @@ static int adev_dump(const struct audio_hw_device *device, int fd)
+ 
+ static int adev_close(hw_device_t *device)
+ {
++    struct audio_device *adev = (struct audio_device *)device;
++    if (adev->hw_mixer != 0)
++        mixer_close(adev->hw_mixer);
++
+     free(device);
+ 
+     return 0;
+@@ -1242,6 +2289,8 @@ static int adev_close(hw_device_t *device)
+ 
+ static int adev_open(const hw_module_t* module, const char* name, hw_device_t** device)
+ {
++    
++    ALOGD("%s : TestLog : ++",__func__);
+     if (strcmp(name, AUDIO_HARDWARE_INTERFACE) != 0)
+         return -EINVAL;
+ 
+@@ -1275,6 +2324,12 @@ static int adev_open(const hw_module_t* module, const char* name, hw_device_t**
+     adev->hw_device.close_input_stream = adev_close_input_stream;
+     adev->hw_device.dump = adev_dump;
+ 
++//KP-change
++    adev->line_in = false;
++    adev->hw_mixer = 0;
++    adev->vol_balance = 0;
++    adev->master_volume = (float)0.5;
++
+     *device = &adev->hw_device.common;
+ 
+     return 0;
+diff --git a/modules/usbaudio/webrtc_wrapper.cpp b/modules/usbaudio/webrtc_wrapper.cpp
+new file mode 100644
+index 00000000..7d68993e
+--- /dev/null
++++ b/modules/usbaudio/webrtc_wrapper.cpp
+@@ -0,0 +1,119 @@
++#include <webrtc/modules/audio_processing/include/audio_processing.h>
++#include <webrtc/modules/include/module_common_types.h>
++#include "webrtc_wrapper.h"
++
++#define TO_CPP(a) (reinterpret_cast<webrtc::AudioProcessing*>(a))
++#define TO_C(a)   (reinterpret_cast<audioproc*>(a))
++#define F_TO_CPP(a) (reinterpret_cast<webrtc::AudioFrame*>(a))
++#define F_TO_C(a) (reinterpret_cast<audioframe*>(a))
++
++struct audioproc *audioproc_create(){
++    audioproc *a = TO_C(webrtc::AudioProcessing::Create());
++    return a;
++}
++
++struct audioframe *audioframe_create(int channels, int sample_rate, int samples_per_block){
++    webrtc::AudioFrame *frame = new webrtc::AudioFrame;
++    frame->num_channels_ = channels;
++    frame->sample_rate_hz_ = sample_rate;
++    frame->samples_per_channel_ = samples_per_block;
++    audioframe *a = F_TO_C(frame);
++    return a;
++}
++
++void audioframe_setdata(struct audioframe *frame, int16_t *block, size_t length){
++    size_t i;
++    webrtc::AudioFrame *af = F_TO_CPP(frame);
++    for (i=0; i<length; i++)
++        af->data_[i] = block[i];
++}
++
++void audioframe_getdata(struct audioframe *frame, int16_t *block, size_t length){
++    size_t i;
++    webrtc::AudioFrame *af = F_TO_CPP(frame);
++    for (i=0; i<length; i++)
++        block[i] = af->data_[i];
++}
++
++void audioproc_destroy(struct audioproc *apm){
++    delete TO_CPP(apm);
++}
++
++void audioproc_hpf_en(struct audioproc *apm, int enable){
++    TO_CPP(apm)->high_pass_filter()->Enable(enable);
++}
++
++void audioproc_aec_drift_comp_en(struct audioproc *apm, int enable){
++    TO_CPP(apm)->echo_cancellation()->enable_drift_compensation(enable);
++}
++
++void audioproc_aec_en(struct audioproc *apm, int enable){
++    TO_CPP(apm)->echo_cancellation()->Enable(enable);
++}
++
++void audioproc_aec_set_delay(struct audioproc *apm, int delay){
++    TO_CPP(apm)->set_stream_delay_ms(delay);
++}
++
++void audioproc_aec_delayag_en(struct audioproc *apm){
++        webrtc::Config config;
++        config.Set<webrtc::DelayAgnostic>(new webrtc::DelayAgnostic(true));
++        TO_CPP(apm)->SetExtraOptions(config);
++}
++
++void audioproc_aec_echo_ref(struct audioproc *apm, struct audioframe *frame){
++    TO_CPP(apm)->AnalyzeReverseStream(F_TO_CPP(frame));
++}
++
++void audioproc_ns_set_level(struct audioproc *apm, int level){
++    switch(level){
++    case 0:
++        TO_CPP(apm)->noise_suppression()->set_level(webrtc::NoiseSuppression::Level::kLow);
++        break;
++    case 1:
++        TO_CPP(apm)->noise_suppression()->set_level(webrtc::NoiseSuppression::Level::kModerate);
++        break;
++    case 2:
++        TO_CPP(apm)->noise_suppression()->set_level(webrtc::NoiseSuppression::Level::kHigh);
++        break;
++    case 3:
++        TO_CPP(apm)->noise_suppression()->set_level(webrtc::NoiseSuppression::Level::kVeryHigh);
++    }
++}
++
++void audioproc_ns_en(struct audioproc *apm, int enable){
++    TO_CPP(apm)->noise_suppression()->Enable(enable);
++}
++
++void audioproc_agc_set_level_limits(struct audioproc *apm, int low, int high){
++    TO_CPP(apm)->gain_control()->set_analog_level_limits(low, high);
++}
++
++void audioproc_agc_set_mode(struct audioproc *apm, int mode){
++    switch(mode){
++    case 0:
++        TO_CPP(apm)->gain_control()->set_mode(webrtc::GainControl::Mode::kAdaptiveAnalog);
++        break;
++    case 1:
++        TO_CPP(apm)->gain_control()->set_mode(webrtc::GainControl::Mode::kAdaptiveDigital);
++        break;
++    case 2:
++        TO_CPP(apm)->gain_control()->set_mode(webrtc::GainControl::Mode::kFixedDigital);
++    }
++}
++
++void audioproc_agc_en(struct audioproc *apm, int enable){
++    TO_CPP(apm)->gain_control()->Enable(enable);
++}
++
++void audioproc_voice_det_en(struct audioproc *apm, int enable){
++    TO_CPP(apm)->voice_detection()->Enable(enable);
++}
++
++int audioproc_voice_has_voice(struct audioproc *apm){
++    return TO_CPP(apm)->voice_detection()->stream_has_voice();
++}
++
++int audioproc_process(struct audioproc *apm, struct audioframe *frame){
++    return TO_CPP(apm)->ProcessStream(F_TO_CPP(frame));
++}
+diff --git a/modules/usbaudio/webrtc_wrapper.h b/modules/usbaudio/webrtc_wrapper.h
+new file mode 100644
+index 00000000..df68ba5e
+--- /dev/null
++++ b/modules/usbaudio/webrtc_wrapper.h
+@@ -0,0 +1,40 @@
++#ifndef WEBRTC_WRAPPER_H
++#define WEBRTC_WRAPPER_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++	struct audioproc;
++	struct audioframe;
++
++	struct audioproc *audioproc_create();
++	struct audioframe *audioframe_create(int channels, int sample_rate, int samples_per_block);
++	void audioframe_setdata(struct audioframe *frame, int16_t *block, size_t length);
++        void audioframe_getdata(struct audioframe *frame, int16_t *block, size_t length);
++
++	void audioproc_destroy(struct audioproc *apm);
++
++	void audioproc_hpf_en(struct audioproc *apm, int enable);
++
++	void audioproc_aec_drift_comp_en(struct audioproc *apm, int enable);
++	void audioproc_aec_en(struct audioproc *apm, int enable);
++	void audioproc_aec_set_delay(struct audioproc *apm, int delay);
++	void audioproc_aec_delayag_en(struct audioproc *apm);
++	void audioproc_aec_echo_ref(struct audioproc *apm, struct audioframe *frame);
++
++	void audioproc_ns_set_level(struct audioproc *apm, int level);
++	void audioproc_ns_en(struct audioproc *apm, int enable);
++
++	void audioproc_agc_set_level_limits(struct audioproc *apm, int low, int high);
++	void audioproc_agc_set_mode(struct audioproc *apm, int mode);
++	void audioproc_agc_en(struct audioproc *apm, int enable);
++
++	void audioproc_voice_det_en(struct audioproc *apm, int enable);
++	int audioproc_voice_has_voice(struct audioproc *apm);
++
++	int audioproc_process(struct audioproc *apm, struct audioframe *frame);
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+\ No newline at end of file
+-- 
+2.20.1
+
