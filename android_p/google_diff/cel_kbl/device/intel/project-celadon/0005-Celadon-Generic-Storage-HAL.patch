@@ -1,0 +1,428 @@
+From d92c03dbf7e7d0e171d52dbaab7565bbeb9c61a4 Mon Sep 17 00:00:00 2001
+From: tkaur <taranpreet.kaur@intel.com>
+Date: Wed, 13 Feb 2019 23:07:54 +0530
+Subject: [PATCH] [Celadon] Generic Storage HAL
+
+Storaged implementation exposing the lower layer storage device statistics
+and disk statistics information since the system boot.
+
+Tracked-On: OAM-73824
+Signed-off-by: taranpreet kaur <taranpreet.kaur@intel.com>
+Signed-off-by: N, Shyjumon <shyjumon.n@intel.com>
+---
+ health/Android.bp                    |   3 +
+ health/Storage.cpp                   | 101 +++++++++++++++++++++++
+ health/Storage_diskstats.cpp         |  91 +++++++++++++++++++++
+ health/Storage_info.cpp              | 117 +++++++++++++++++++++++++++
+ health/include/health2/storage_hal.h |  55 +++++++++++++
+ 5 files changed, 367 insertions(+)
+ create mode 100644 health/Storage.cpp
+ create mode 100644 health/Storage_diskstats.cpp
+ create mode 100644 health/Storage_info.cpp
+ create mode 100644 health/include/health2/storage_hal.h
+
+diff --git a/health/Android.bp b/health/Android.bp
+index 6996d66..80ba698 100644
+--- a/health/Android.bp
++++ b/health/Android.bp
+@@ -5,6 +5,9 @@ cc_library_static {
+     srcs: [
+         "Health.cpp",
+         "healthd_common.cpp",
++	"Storage.cpp",
++	"Storage_diskstats.cpp",
++	"Storage_info.cpp",
+     ],
+ 
+     cflags: ["-DHEALTHD_USE_HEALTH_2_0"],
+diff --git a/health/Storage.cpp b/health/Storage.cpp
+new file mode 100644
+index 0000000..4b35fd1
+--- /dev/null
++++ b/health/Storage.cpp
+@@ -0,0 +1,101 @@
++/*
++ * Copyright (C) 2018 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#define LOG_TAG "android.hardware.health@2.0-impl.celadon"
++#include <utils/String8.h>
++#include <cutils/properties.h>
++#include <android-base/file.h>
++#include <android-base/strings.h>
++#include <android-base/logging.h>
++#include <health2/Health.h>
++#include <health2/storage_hal.h>
++
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <vector>
++#include <stdio.h>
++#include <stdlib.h>
++#include <fstream>
++
++using namespace std;
++std::ifstream File;
++char diskbus_prop_value[PROP_VALUE_MAX];
++enum storage_type{EMMC, NVME, SDA, VDA, NODISK}; // TODO: Support shall be extended to UFS in future version.
++enum storage_type get_storage_type();
++class StorageInf* get_storage_dev(int dev_type);
++
++/*
++ * The function exposes the lower layer storage device wear information such as lifetime information.
++ * The function focus to expose the boot media information.
++ */
++void get_storage_info(std::vector<struct StorageInfo>& info) {
++        LOG(INFO) << LOG_TAG << "get_storage_info:START\n";
++        enum storage_type type;
++        type = get_storage_type();
++        StorageInf *IDev = get_storage_dev(type);
++        if(IDev != nullptr) {
++                IDev->get_storageinfo(info);
++        }
++        delete IDev;
++}
++
++/*
++ * The function identifies the boot medium from the available storage devices on board.
++ */
++enum storage_type get_storage_type() {
++	memset(diskbus_prop_value, 0, sizeof(diskbus_prop_value));
++        property_get(diskbus_build_property, diskbus_prop_value, "0");
++	if (strcmp(diskbus_prop_value,"17.0") == 0)
++		return SDA;
++	else if (strcmp(diskbus_prop_value,"1D.0") == 0)
++		return NVME;
++	else if (strcmp(diskbus_prop_value,"1C.0") == 0)
++		return EMMC;
++	else if (strcmp(diskbus_prop_value,"03.0") == 0)
++		return VDA;
++	else
++		return NODISK;
++}
++
++/*
++ * The function returns the boot media Storage device class
++ */
++class StorageInf* get_storage_dev(int dev_type) {
++	if(dev_type == SDA)
++		return new SdaDev();
++	else if(dev_type == EMMC)
++		return new EmmcDev();
++	else if(dev_type == VDA)
++                return new VdaDev();
++	else if(dev_type == NVME)
++                return new NvmeDev();
++	else
++		return nullptr;
++}
++
++/*
++ * The function exposes the lower layer storage device statistics since the system boot.
++ */
++void get_disk_stats(std::vector<struct DiskStats>& stats) {
++	LOG(INFO) << LOG_TAG << "get_disk_stats:START\n";
++	enum storage_type type;
++	type = get_storage_type();
++	StorageInf *SDev = get_storage_dev(type);
++	if(SDev != nullptr) {
++		SDev->get_diskstats(stats);
++	}
++	delete SDev;
++}
+diff --git a/health/Storage_diskstats.cpp b/health/Storage_diskstats.cpp
+new file mode 100644
+index 0000000..8e13557
+--- /dev/null
++++ b/health/Storage_diskstats.cpp
+@@ -0,0 +1,91 @@
++/*
++ * Copyright (C) 2018 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#define LOG_TAG "storagediskstats"
++#include <utils/String8.h>
++#include <cutils/properties.h>
++#include <android-base/file.h>
++#include <android-base/strings.h>
++#include <android-base/logging.h>
++#include <health2/Health.h>
++#include <health2/storage_hal.h>
++
++#include <vector>
++#include <stdio.h>
++#include <stdlib.h>
++#include <fstream>
++
++using namespace std;
++std::ifstream StatFile;
++uint64_t sysfs_block_stat;
++uint64_t sysfs_block_stat_val[13];
++uint64_t sysfs_block_read_counter = 0;
++
++void get_diskstats_io(std::vector<struct DiskStats>& stats) {
++        // publishing diskstat metrics to storaged framework
++       	LOG(INFO) << LOG_TAG << "get_diskstats_io: Enter\n";
++	DiskStats diskstats;
++        diskstats.reads = sysfs_block_stat_val[0];
++        diskstats.readMerges = sysfs_block_stat_val[1];
++        diskstats.readSectors = sysfs_block_stat_val[2];
++        diskstats.readTicks = sysfs_block_stat_val[3];
++        diskstats.writes = sysfs_block_stat_val[4];
++        diskstats.writeMerges = sysfs_block_stat_val[5];
++        diskstats.writeSectors = sysfs_block_stat_val[6];
++        diskstats.writeTicks = sysfs_block_stat_val[7];
++        diskstats.ioInFlight = sysfs_block_stat_val[8];
++        diskstats.ioTicks = sysfs_block_stat_val[9];
++        diskstats.ioInQueue = sysfs_block_stat_val[10];
++        stats.push_back(diskstats);
++}
++
++void get_disk_blk(const char blkpath[], std::vector<struct DiskStats>& stats) {
++        // Reading diskstat metrics from disk block path.
++	StatFile.open(blkpath);
++        if (!StatFile.is_open()) {
++		return;
++        }
++        while(StatFile >> sysfs_block_stat) {
++                sysfs_block_stat_val[sysfs_block_read_counter]= sysfs_block_stat;
++                sysfs_block_read_counter++;
++        }
++        get_diskstats_io(stats);
++        StatFile.close();
++}
++
++/*
++ * Device type:: get_diskstats utility
++ */
++void SdaDev :: get_diskstats(std::vector<struct DiskStats>& stats) {
++	sysfs_block_read_counter = 0;
++	const char diskstat_blkpath[] = "/sys/block/sda/stat";
++	get_disk_blk(diskstat_blkpath, stats); //parsing SATA diskstat information
++}
++
++void EmmcDev :: get_diskstats(std::vector<struct DiskStats>& stats) {
++        sysfs_block_read_counter = 0;
++	const char diskstat_blkpath[] = "/sys/block/mmcblk1/stat";
++	get_disk_blk(diskstat_blkpath, stats); //parsing MMC diskstat information
++}
++
++void VdaDev :: get_diskstats(std::vector<struct DiskStats>& stats) {
++        sysfs_block_read_counter = 0;
++	const char diskstat_blkpath[] = "/sys/block/vda/stat";
++	get_disk_blk(diskstat_blkpath, stats); //parsing VDA diskstat information
++}
++
++void NvmeDev :: get_diskstats(std::vector<struct DiskStats>&) {
++	//TODO: Place holder for NVMe
++}
+diff --git a/health/Storage_info.cpp b/health/Storage_info.cpp
+new file mode 100644
+index 0000000..5e2467d
+--- /dev/null
++++ b/health/Storage_info.cpp
+@@ -0,0 +1,117 @@
++/*
++ * Copyright (C) 2018 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#define LOG_TAG "storageinfo"
++#include <utils/String8.h>
++#include <cutils/properties.h>
++#include <android-base/file.h>
++#include <android-base/strings.h>
++#include <android-base/logging.h>
++#include <health2/Health.h>
++#include <health2/storage_hal.h>
++
++#include <vector>
++#include <stdio.h>
++#include <stdlib.h>
++#include <fstream>
++
++using namespace std;
++std::ifstream InfoFile;
++uint16_t ext_csd_stat_val[3];
++uint16_t ext_csd_lifetime_val;
++uint16_t ext_csd_lifetime_counter = 0;
++const char mmc1_sysfs_eol[] = "/sys/bus/mmc/devices/mmc1:0001/pre_eol_info";
++const char mmc1_sysfs_lifetime[] = "/sys/bus/mmc/devices/mmc1:0001/life_time";
++
++/*
++ * mmc version sys node is not supported.
++ * TODO: in Storaged future version
++ */
++//const char mmc1_sysfs_version[] = "/sys/bus/mmc/devices/mmc1:0001/version";
++
++/*
++ * Sda Device type :: get_storageinfo utility
++ */
++void SdaDev :: get_storageinfo(std::vector<struct StorageInfo>& info) {
++	/*
++         * SATA driver does not expose end of life and lifetime information.
++         * So assigning eol and lifetimeA, lifetimeB values manually. FIXME
++         */
++	StorageInfo storageinfo;
++	storageinfo.eol = 3;
++	storageinfo.lifetimeA = 0x0B;
++	storageinfo.lifetimeB = 0x0B;
++	storageinfo.version = "3.0";
++        info.push_back(storageinfo);
++}
++
++/*
++ * eMMC Device type :: get_storageinfo utility
++ */
++void EmmcDev :: get_storageinfo(std::vector<struct StorageInfo>& info) {
++        StorageInfo storageinfo;
++	ext_csd_lifetime_counter = 0;
++	InfoFile.open(mmc1_sysfs_eol);      //parsing ext_csd end of life information
++	if (!InfoFile.is_open()) {
++		return;
++	}
++	InfoFile >> std::hex >> storageinfo.eol;
++	InfoFile.close();
++	InfoFile.open(mmc1_sysfs_lifetime); //parsing ext_csd life time estimates
++	if (!InfoFile.is_open()) {
++		return;
++	}
++	while(InfoFile >> std::hex >> ext_csd_lifetime_val) {
++		ext_csd_stat_val[ext_csd_lifetime_counter] = ext_csd_lifetime_val;
++		ext_csd_lifetime_counter++;
++	}
++	storageinfo.lifetimeA = ext_csd_stat_val[0];
++	storageinfo.lifetimeB = ext_csd_stat_val[1];
++	InfoFile.close();
++
++	/*
++         * TO DO: ext_csd version parsing in Storaged version 0.1
++         * std::string ext_csd_version_val;
++         * File.open(mmc1_sysfs_version);
++         * File >> ext_csd_version_val;
++         * storageinfo.version = ext_csd_version_val;
++         * File.close();
++         */
++        storageinfo.version = "5.0";
++        info.push_back(storageinfo);
++}
++
++/*
++ * Virtual Device type :: get_storageinfo utility
++ */
++void VdaDev :: get_storageinfo(std::vector<struct StorageInfo>& info) {
++        StorageInfo storageinfo;
++	/*
++	 * Acrn has virtual nodes. So, it does not expose end of life and lifetime information.
++         * So assigning eol and lifetimeA, lifetimeB values manually. FIXME
++         */
++	storageinfo.eol = 3;
++	storageinfo.lifetimeA = 0x0B;
++	storageinfo.lifetimeB = 0x0B;
++	storageinfo.version = "5.0";
++        info.push_back(storageinfo);
++}
++
++/*
++ * NVMe Device type :: get_storageinfo utility
++ */
++void NvmeDev :: get_storageinfo(std::vector<struct StorageInfo>&) {
++	//TODO: Place holder for NVMe devices
++}
+diff --git a/health/include/health2/storage_hal.h b/health/include/health2/storage_hal.h
+new file mode 100644
+index 0000000..07a2bfd
+--- /dev/null
++++ b/health/include/health2/storage_hal.h
+@@ -0,0 +1,55 @@
++#ifndef _STORAGE_HAL_H_
++#define _STORAGE_HAL_H_
++
++#include <vector>
++#include <android/hardware/health/1.0/types.h>
++#include <android/hardware/health/2.0/IHealth.h>
++
++using android::hardware::health::V2_0::StorageInfo;
++using android::hardware::health::V2_0::DiskStats;
++const char diskbus_build_property[] = "ro.boot.diskbus";
++
++/*
++ * Storaged ::Get disk statistics and get storage information utilities.
++ */
++class StorageInf {
++public:
++	virtual void get_diskstats(std::vector<struct DiskStats>& stats) = 0;
++	virtual void get_storageinfo(std::vector<struct StorageInfo>& info) = 0;
++	virtual ~StorageInf() {}
++};
++
++class SdaDev : public StorageInf {
++public:
++	void get_diskstats(std::vector<struct DiskStats>& stats);
++	void get_storageinfo(std::vector<struct StorageInfo>& info);
++};
++
++class NvmeDev : public StorageInf {
++public:
++        void get_diskstats(std::vector<struct DiskStats>& stats);
++        void get_storageinfo(std::vector<struct StorageInfo>& info);
++};
++
++class EmmcDev : public StorageInf {
++public:
++	void get_diskstats(std::vector<struct DiskStats>& stats);
++        void get_storageinfo(std::vector<struct StorageInfo>& info);
++};
++
++class VdaDev : public StorageInf {
++public:
++        void get_diskstats(std::vector<struct DiskStats>& stats);
++        void get_storageinfo(std::vector<struct StorageInfo>& info);
++};
++
++/*
++ * publish diskstat metrics to storaged framework.
++ */
++void get_diskstats_io(std::vector<struct DiskStats>& stats);
++
++/*
++ * Read diskstat metrics from disk block path.
++ */
++void get_disk_blk(const char blkpath[], std::vector<struct DiskStats>& stats);
++#endif  /* _STORAGE_HAL_H_ */
+-- 
+2.20.1
+
