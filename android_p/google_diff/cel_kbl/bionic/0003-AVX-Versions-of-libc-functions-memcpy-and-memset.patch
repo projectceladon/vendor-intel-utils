@@ -1,0 +1,372 @@
+From 16b6bf391dbd1bac91158a47c9926fa448e8630a Mon Sep 17 00:00:00 2001
+From: Shalini Salomi Bodapati <shalini.salomi.bodapati@intel.com>
+Date: Thu, 14 Feb 2019 16:05:40 +0530
+Subject: [PATCH] AVX Versions of libc functions memcpy and memset
+
+Change-Id: I97972d15c4642d1b5fb586d7af5975682e7bf1b6
+Tracked-On: None
+Signed-off-by: Shalini Salomi Bodapati <shalini.salomi.bodapati@intel.com>
+---
+ libc/Android.bp                       |   4 +
+ libc/arch-x86_64/string/avx2-memcpy.S | 159 ++++++++++++++++++++++++++++++++
+ libc/arch-x86_64/string/avx2-memset.S | 165 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 328 insertions(+)
+ create mode 100644 libc/arch-x86_64/string/avx2-memcpy.S
+ create mode 100644 libc/arch-x86_64/string/avx2-memset.S
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index f913aee..83dde92 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -1273,8 +1273,12 @@ cc_library_static {
+             avx2: {
+                 srcs: [
+                     "arch-x86_64/string/avx2-wmemset.S",
++                    "arch-x86_64/string/avx2-memcpy.S",
++                    "arch-x86_64/string/avx2-memset.S",
+                ],
+                exclude_srcs: [
++                    "arch-x86_64/string/sse2-memcpy-slm.S",
++                    "arch-x86_64/string/sse2-memset-slm.S",
+                     "upstream-freebsd/lib/libc/string/wmemset.c",
+                 ],
+             },
+diff --git a/libc/arch-x86_64/string/avx2-memcpy.S b/libc/arch-x86_64/string/avx2-memcpy.S
+new file mode 100644
+index 0000000..70a40fe
+--- /dev/null
++++ b/libc/arch-x86_64/string/avx2-memcpy.S
+@@ -0,0 +1,159 @@
++/*
++ * Copyright 2017 Facebook, Inc.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++/*
++ * memcpy: An optimized memcpy implementation for x86_64.
++ *
++ * @author Bin Liu <binliu@fb.com>
++ */
++
++#ifndef L
++# define L(label)       .L##label
++#endif
++
++#ifndef cfi_startproc
++# define cfi_startproc  .cfi_startproc
++#endif
++
++#ifndef cfi_endproc
++# define cfi_endproc    .cfi_endproc
++#endif
++
++#ifndef ENTRY
++# define ENTRY(name)            \
++        .type name,  @function;         \
++        .globl name;            \
++        .align 16;             \
++name:           \
++        cfi_startproc
++#endif
++
++#ifndef END
++# define END(name)              \
++        cfi_endproc;            \
++        .size name, .-name
++#endif
++
++
++
++/*
++ * _memcpy_short is a local helper used when length < 8. It cannot be called
++ * from outside, because it expects a non-standard calling convention:
++ *
++ *    %rax:  destination buffer address.
++ *    %rsi:  source buffer address.
++ *    %edx:  length, in the range of [0, 7]
++ */
++
++        .type     _memcpy_short, @function
++_memcpy_short:
++.LSHORT:
++       cfi_startproc
++        //        if (length == 0) return;
++        test      %edx, %edx
++        jz        .LEND
++
++        movzbl    (%rsi), %ecx
++        //        if (length - 4 < 0) goto LS4;
++        sub       $4, %edx
++        jb        .LS4
++
++        mov       (%rsi), %ecx
++        mov       (%rsi, %rdx), %edi
++        mov       %ecx, (%rax)
++        mov       %edi, (%rax, %rdx)
++.LEND:
++       rep
++       ret
++       nop
++
++.LS4:
++        //        At this point, length can be 1 or 2 or 3, and $cl contains
++        //        the first byte.
++        mov       %cl, (%rax)
++                //if (length - 4 + 2 < 0) return;
++        add       $2, %edx
++        jnc       .LEND
++
++        //        length is 2 or 3 here. In either case, just copy the last
++        //        two bytes.
++        movzwl    (%rsi, %rdx), %ecx
++        mov       %cx, (%rax, %rdx)
++        ret
++        cfi_endproc
++        .size     _memcpy_short, .-_memcpy_short
++
++
++/*
++ * void* memcpy(void* dst, void* src, uint32_t length);
++ *
++ */
++ENTRY(memcpy)
++        mov       %rdx, %rcx
++        mov       %rdi, %rax
++        cmp       $8, %rdx
++        jb        .LSHORT
++
++        mov       -8(%rsi, %rdx), %r8
++        mov       (%rsi), %r9
++        mov       %r8, -8(%rdi, %rdx)
++        and       $24, %rcx
++        jz        .L32
++
++        mov       %r9, (%rdi)
++        mov       %rcx, %r8
++        sub       $16, %rcx
++        jb        .LT32
++        vmovdqu   (%rsi, %rcx), %xmm1
++        vmovdqu   %xmm1, (%rdi, %rcx)
++        //        Test if there are 32-byte groups
++.LT32:
++        add       %r8, %rsi
++        and       $-32, %rdx
++        jnz       .L32_adjDI
++        ret
++
++        .align    16
++.L32_adjDI:
++        add       %r8, %rdi
++.L32:
++        vmovdqu   (%rsi), %ymm0
++        shr       $6, %rdx
++        jnc       .L64_32read
++        vmovdqu   %ymm0, (%rdi)
++        lea       32(%rsi), %rsi
++        jnz       .L64_adjDI
++        vzeroupper
++        ret
++
++.L64_adjDI:
++        add       $32, %rdi
++
++.L64:
++        vmovdqu   (%rsi), %ymm0
++
++.L64_32read:
++        vmovdqu   32(%rsi), %ymm1
++        add       $64, %rsi
++        vmovdqu   %ymm0, (%rdi)
++        vmovdqu   %ymm1, 32(%rdi)
++        add       $64, %rdi
++        dec       %rdx
++        jnz       .L64
++        vzeroupper
++        ret
++END(memcpy)
++
+diff --git a/libc/arch-x86_64/string/avx2-memset.S b/libc/arch-x86_64/string/avx2-memset.S
+new file mode 100644
+index 0000000..d09f65d
+--- /dev/null
++++ b/libc/arch-x86_64/string/avx2-memset.S
+@@ -0,0 +1,165 @@
++/*
++    memset with AVX2
++   Copyright (C) 2014-2016 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.
++*/
++
++#include <private/bionic_asm.h>
++
++
++#ifndef L
++# define L(label)       .L##label
++#endif
++
++ENTRY(__memset_chk)
++  # %rdi = dst, %rsi = byte, %rdx = n, %rcx = dst_len
++  cmp %rcx, %rdx
++  ja __memset_chk_fail
++  // Fall through to memset...
++END(__memset_chk)
++
++
++ .section .text.avx2,"ax",@progbits
++
++ENTRY (memset)
++	vpxor	%xmm0, %xmm0, %xmm0
++	vmovd	%esi, %xmm1
++	lea	(%rdi, %rdx), %rsi
++	mov	%rdi, %rax
++	vpshufb	%xmm0, %xmm1, %xmm0
++	cmp	$16, %rdx
++	jb	L(less_16bytes)
++	cmp	$256, %rdx
++	jae	L(256bytesormore)
++	cmp	$128, %dl
++	jb	L(less_128bytes)
++	vmovdqu	%xmm0, (%rdi)
++	vmovdqu %xmm0, 0x10(%rdi)
++	vmovdqu %xmm0, 0x20(%rdi)
++	vmovdqu %xmm0, 0x30(%rdi)
++	vmovdqu %xmm0, 0x40(%rdi)
++	vmovdqu %xmm0, 0x50(%rdi)
++	vmovdqu %xmm0, 0x60(%rdi)
++	vmovdqu %xmm0, 0x70(%rdi)
++	vmovdqu %xmm0, -0x80(%rsi)
++	vmovdqu %xmm0, -0x70(%rsi)
++	vmovdqu %xmm0, -0x60(%rsi)
++	vmovdqu %xmm0, -0x50(%rsi)
++	vmovdqu %xmm0, -0x40(%rsi)
++	vmovdqu %xmm0, -0x30(%rsi)
++	vmovdqu %xmm0, -0x20(%rsi)
++	vmovdqu %xmm0, -0x10(%rsi)
++	ret
++
++	.p2align 4
++L(less_128bytes):
++	cmp	$64, %dl
++	jb	L(less_64bytes)
++	vmovdqu %xmm0, (%rdi)
++	vmovdqu %xmm0, 0x10(%rdi)
++	vmovdqu %xmm0, 0x20(%rdi)
++	vmovdqu %xmm0, 0x30(%rdi)
++	vmovdqu %xmm0, -0x40(%rsi)
++	vmovdqu %xmm0, -0x30(%rsi)
++	vmovdqu %xmm0, -0x20(%rsi)
++	vmovdqu %xmm0, -0x10(%rsi)
++	ret
++
++	.p2align 4
++L(less_64bytes):
++	cmp	$32, %dl
++	jb	L(less_32bytes)
++	vmovdqu %xmm0, (%rdi)
++	vmovdqu %xmm0, 0x10(%rdi)
++	vmovdqu %xmm0, -0x20(%rsi)
++	vmovdqu %xmm0, -0x10(%rsi)
++	ret
++
++	.p2align 4
++L(less_32bytes):
++	vmovdqu %xmm0, (%rdi)
++	vmovdqu %xmm0, -0x10(%rsi)
++	ret
++
++	.p2align 4
++L(less_16bytes):
++	cmp	$8, %dl
++	jb	L(less_8bytes)
++	vmovq %xmm0, (%rdi)
++	vmovq %xmm0, -0x08(%rsi)
++	ret
++
++	.p2align 4
++L(less_8bytes):
++	vmovd	%xmm0, %ecx
++	cmp	$4, %dl
++	jb	L(less_4bytes)
++	mov	%ecx, (%rdi)
++	mov	%ecx, -0x04(%rsi)
++	ret
++
++	.p2align 4
++L(less_4bytes):
++	cmp	$2, %dl
++	jb	L(less_2bytes)
++	mov	%cx, (%rdi)
++	mov	%cx, -0x02(%rsi)
++	ret
++
++	.p2align 4
++L(less_2bytes):
++	cmp	$1, %dl
++	jb	L(less_1bytes)
++	mov	%cl, (%rdi)
++L(less_1bytes):
++	ret
++
++	.p2align 4
++L(256bytesormore):
++	vinserti128 $1, %xmm0, %ymm0, %ymm0
++	and	$-0x20, %rdi
++	add	$0x20, %rdi
++	vmovdqu	%ymm0, (%rax)
++	sub	%rdi, %rax
++	lea	-0x80(%rax, %rdx), %rcx
++	cmp	$4096, %rcx
++	ja	L(gobble_data)
++L(gobble_128_loop):
++	vmovdqa	%ymm0, (%rdi)
++	vmovdqa	%ymm0, 0x20(%rdi)
++	vmovdqa	%ymm0, 0x40(%rdi)
++	vmovdqa	%ymm0, 0x60(%rdi)
++	sub	$-0x80, %rdi
++	add	$-0x80, %ecx
++	jb	L(gobble_128_loop)
++	mov	%rsi, %rax
++	vmovdqu	%ymm0, -0x80(%rsi)
++	vmovdqu	%ymm0, -0x60(%rsi)
++	vmovdqu	%ymm0, -0x40(%rsi)
++	vmovdqu	%ymm0, -0x20(%rsi)
++	sub	%rdx, %rax
++	vzeroupper
++	ret
++
++	.p2align 4
++L(gobble_data):
++	sub	$-0x80, %rcx
++	vmovd	%xmm0, %eax
++	rep	stosb
++	mov	%rsi, %rax
++	sub	%rdx, %rax
++	vzeroupper
++	ret
++
++END (memset)
+-- 
+1.9.1
+
