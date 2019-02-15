@@ -1,0 +1,3 @@
+[mixinfo]
+deps = ota-upgrade
+
