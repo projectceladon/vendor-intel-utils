@@ -20,6 +20,12 @@
 
 #define LOG_TAG "android.hardware.bluetooth-hci-h4"
 
+#include <sys/ioctl.h>
+#include <linux/usbdevice_fs.h>
+#include <asm/byteorder.h>
+#include <linux/usb/ch9.h>
+#include <libusb/libusb.h>
+
 typedef uint8_t UINT8;
 typedef uint16_t UINT16;
 
@@ -30,6 +36,10 @@ typedef uint16_t UINT16;
 
 #define T2_MAXIMUM_LATENCY                        0x000D
 #define HCIC_PARAM_SIZE_ENH_ACC_ESCO_CONN         63
+
+#define INTEL_VID 0x8087
+#define INTEL_PID_8265 0x0a2b // Windstorm peak
+#define INTEL_PID_3168 0x0aa7 //SandyPeak (SdP)
 
 #include <errno.h>
 #include <fcntl.h>
@@ -132,9 +142,94 @@ size_t H4Protocol::Send(uint8_t type, const uint8_t* data, size_t length){
     return ret;
 }
 
+bool H4Protocol::IsIntelController(uint16_t vid, uint16_t pid) {
+    if ((vid == INTEL_VID) && ((pid == INTEL_PID_8265) ||
+				(pid == INTEL_PID_3168)))
+        return true;
+    else
+	return false;
+}
+
+void H4Protocol::GetUsbpath(void) {
+    size_t count, i;
+    int ret, busnum, devnum;
+    struct libusb_device **dev_list = NULL;
+    struct libusb_context *ctx;
+    uint16_t vid = 0, pid = 0;
+    ALOGD(" Initializing GenericUSB (libusb-1.0)...\n");
+    ret = libusb_init(&ctx);
+    if (ret < 0) {
+        ALOGE("libusb failed to initialize: %d\n", ret);
+        return;
+    }
+    count = libusb_get_device_list(ctx, &dev_list);
+    if (count <= 0) {
+        ALOGE("Error getting USB device list: %s\n", strerror(count));
+        libusb_exit(ctx);
+        return;
+    }
+    for (i = 0; i < count; ++i) {
+        struct libusb_device* dev = dev_list[i];
+        busnum = libusb_get_bus_number(dev);
+        devnum = libusb_get_device_address(dev);
+        struct libusb_device_descriptor descriptor;
+        ret = libusb_get_device_descriptor(dev, &descriptor);
+        if (ret < 0)  {
+            ALOGE("Error getting device descriptor %d ", ret);
+            goto exit;
+        }
+        vid = descriptor.idVendor;
+        pid = descriptor.idProduct;
+        if (H4Protocol::IsIntelController(vid, pid)) {
+            sprintf(dev_address, "/dev/bus/usb/%03d/%03d", busnum, devnum);
+            ALOGV("Value of BT device address = %s", dev_address);
+            goto exit;
+        }
+    }
+exit:
+    libusb_free_device_list(dev_list, count);
+    libusb_exit(ctx);
+}
+
+void H4Protocol::SendHandle(void) {
+    int fd,ret;
+    fd = open(dev_address,O_WRONLY|O_NONBLOCK);
+    if (fd < 0) {
+        ALOGE("Fail to open USB device %s, value of fd= %d", dev_address, fd);
+    } else {
+        struct usbdevfs_ioctl   wrapper;
+        wrapper.ifno = 1;
+        wrapper.ioctl_code = USBDEVFS_IOCTL;
+        wrapper.data = sco_handle;
+        ret = ioctl(fd, USBDEVFS_IOCTL, &wrapper);
+        if (ret < 0)
+            ALOGE("Failed to send SCO handle err = %d", ret);
+        close(fd);
+    }
+}
+
 void H4Protocol::OnPacketReady() {
   switch (hci_packet_type_) {
     case HCI_PACKET_TYPE_EVENT:
+        if ((hci_packetizer_.GetPacket())[0] == HCI_COMMAND_COMPLETE_EVT) {
+                unsigned int cmd, lsb, msb;
+                msb = hci_packetizer_.GetPacket()[4] ;
+                lsb = hci_packetizer_.GetPacket()[3];
+                cmd = msb << 8 | lsb ;
+
+                if (cmd == HCI_RESET) {
+                    event_cb_(hci_packetizer_.GetPacket());
+                    hci_packet_type_ = HCI_PACKET_TYPE_UNKNOWN;
+                    H4Protocol::GetUsbpath();
+                    return;
+                }
+        } else if ((hci_packetizer_.GetPacket())[0] == HCI_ESCO_CONNECTION_COMP_EVT) {
+             const unsigned char *handle = hci_packetizer_.GetPacket().data() + 3;
+             memcpy(sco_handle, handle, 2);
+             ALOGI("Value of SCO handle = %x, %x", handle[0], handle[1]);
+             H4Protocol::SendHandle();
+        }
+
       event_cb_(hci_packetizer_.GetPacket());
       break;
     case HCI_PACKET_TYPE_ACL_DATA:
@@ -150,6 +245,16 @@ void H4Protocol::OnPacketReady() {
   // Get ready for the next type byte.
   hci_packet_type_ = HCI_PACKET_TYPE_UNKNOWN;
 }
+
+
+typedef struct
+{
+    uint8_t         type;
+    uint8_t         event;
+    uint8_t         len;
+    uint8_t         offset;
+    uint16_t        layer_specific;
+} BT_EVENT_HDR;
 
 void H4Protocol::OnDataReady(int fd) {
     if (hci_packet_type_ == HCI_PACKET_TYPE_UNKNOWN) {
@@ -187,8 +292,14 @@ void H4Protocol::OnDataReady(int fd) {
                            static_cast<int>(hci_packet_type_));
         } else {
             if(tpkt.data()[1] == HCI_COMMAND_COMPLETE_EVT) {
-                ALOGV("%s Command complete event ncmds = %d", __func__, tpkt.data()[3]);
+                ALOGD("%s Command complete event ncmds = %d",
+                                                     __func__, tpkt.data()[3]);
                 tpkt.data()[3] = 1;
+		/* Disable Enhance setup synchronous connections*/
+                BT_EVENT_HDR* hdr  = (BT_EVENT_HDR*)(tpkt.data());
+                if( hdr->layer_specific == HCI_READ_LOCAL_SUPPORTED_CMDS)
+                        tpkt.data()[36] &= ~((uint8_t)0x1 << 3);
+
             } else if (tpkt.data()[1] ==  HCI_COMMAND_STATUS_EVT) {
                 ALOGV("%s Command status event ncmd = %d", __func__, tpkt.data()[4]);
                 tpkt.data()[4] = 1;

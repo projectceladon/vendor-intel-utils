@@ -44,8 +44,18 @@ class H4Protocol : public HciProtocol {
 
   void OnDataReady(int fd);
 
+  bool IsIntelController(uint16_t vid, uint16_t pid);
+
+  void GetUsbpath(void);
+
+  void SendHandle(void);
+
  private:
   int uart_fd_;
+
+  uint8_t sco_handle[2];
+
+  char dev_address[32];
 
   PacketReadCallback event_cb_;
   PacketReadCallback acl_cb_;
