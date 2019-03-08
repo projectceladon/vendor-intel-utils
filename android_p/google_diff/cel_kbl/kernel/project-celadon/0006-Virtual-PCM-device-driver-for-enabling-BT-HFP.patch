@@ -1,0 +1,1266 @@
+From 739b7d023f4dd005edc00ba391180a1473debcc0 Mon Sep 17 00:00:00 2001
+From: Aiswarya Cyriac <aiswarya.cyriac@intel.com>
+Date: Thu, 7 Mar 2019 14:45:11 +0530
+Subject: [PATCH] Virtual PCM device driver for enabling BT HFP
+
+Virtual Sound card driver creates pcm sound card for
+android devices with Intel connectivity chip using USB
+transport, and will enable HFP feature
+
+Tracked-On:https://jira.devtools.intel.com/browse/OAM-75510
+Signed-off-by: Aiswarya Cyriac <aiswarya.cyriac@intel.com>
+Signed-off-by: Laxminarayan Bharadiya, Pankaj
+               <pankaj.laxminarayan.bharadiya@intel.com>
+Signed-off-by: Jeevaka Badrappan <jeevaka.badrappan@intel.com>
+---
+ drivers/bluetooth/btusb.c         |    2 +
+ drivers/misc/Kconfig              |   11 +
+ drivers/misc/Makefile             |    4 +-
+ drivers/misc/btusb_sco_snd_card.c | 1184 +++++++++++++++++++++++++++++
+ 4 files changed, 1200 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/misc/btusb_sco_snd_card.c
+
+diff --git a/drivers/bluetooth/btusb.c b/drivers/bluetooth/btusb.c
+index 77b67a5f21ee..507c72344d03 100644
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -3143,10 +3143,12 @@ static int btusb_probe(struct usb_interface *intf,
+ 	if (id->driver_info & BTUSB_AMP) {
+ 		/* AMP controllers do not support SCO packets */
+ 		data->isoc = NULL;
++#ifndef BT_SCOHCI
+ 	} else {
+ 		/* Interface orders are hardcoded in the specification */
+ 		data->isoc = usb_ifnum_to_if(data->udev, ifnum_base + 1);
+ 		data->isoc_ifnum = ifnum_base + 1;
++#endif
+ 	}
+ 
+ 	if (!reset)
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index 313494f63bca..c1263a31e73a 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -528,6 +528,17 @@ config UID_SYS_STATS_DEBUG
+ 	help
+ 	  Per TASK based io statistics exported to /proc/uid_io
+ 
++config BT_SCOHCI
++	tristate "HCI USB driver"
++	depends on BT
++	help
++	  Bluetooth SCO USB driver.
++	  This driver is required if you want to use Bluetooth devices with
++	  USB interface to support SCO.
++
++	  Say Y here to compile support for Bluetooth USB devices into the
++	  kernel or say M to compile it as module (btusb)
++
+ source "drivers/misc/c2port/Kconfig"
+ source "drivers/misc/eeprom/Kconfig"
+ source "drivers/misc/cb710/Kconfig"
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index 30b7c50e34c1..1842348ecc90 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -60,4 +60,6 @@ obj-$(CONFIG_OCXL)		+= ocxl/
+ obj-$(CONFIG_MISC_RTSX)		+= cardreader/
+ obj-$(CONFIG_UID_SYS_STATS)	+= uid_sys_stats.o
+ obj-$(CONFIG_INTEL_HDCP_VIRTIO) += virtio-hdcp/
+-obj-$(CONFIG_INTEL_COREU_VIRTIO)	+= virtio-coreu/
++obj-$(CONFIG_INTEL_COREU_VIRTIO) += virtio-coreu/
++obj-$(CONFIG_BT_SCOHCI)          += btusb_sco_snd_card.o
++
+diff --git a/drivers/misc/btusb_sco_snd_card.c b/drivers/misc/btusb_sco_snd_card.c
+new file mode 100644
+index 000000000000..398a8c2a0632
+--- /dev/null
++++ b/drivers/misc/btusb_sco_snd_card.c
+@@ -0,0 +1,1184 @@
++/*
++ *
++ *  Bluetooth SCO driver
++ *
++ *  Copyright (C) 2019-2020 Intel Corporation
++ *
++ *
++ *  This program is free software; you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program; if not, write to the Free Software
++ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ *
++ */
++
++#include <linux/cdev.h>
++#include <linux/delay.h>
++#include <linux/errno.h>
++#include <linux/jiffies.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/types.h>
++#include <linux/usb.h>
++#include <linux/version.h>
++
++#include <net/bluetooth/bluetooth.h>
++#include <net/bluetooth/hci.h>
++
++#include <sound/core.h>
++#include <sound/info.h>
++#include <sound/pcm.h>
++
++#include <linux/usb.h>
++#include <linux/usbdevice_fs.h>
++#include <asm/byteorder.h>
++
++
++
++#define FIRST_MINOR		0
++#define MINOR_CNT		1
++
++#define BTUSB_INTEL_NEW		0x2000
++
++#define DEVICE_INDEX		0
++#define NUM_PLAYBACK_SUBSTREAMS	1
++#define NUM_CAPTURE_SUBSTREAMS	1
++
++#define SCO_HDR_SIZE		3
++#define SCO_HANDLE_SIZE		2
++#define SCO_LENGTH_FIELD_SIZE	1
++#define MIN_PERIOD_SIZE		48
++#define MAX_PACKET_SIZE		(SCO_HDR_SIZE + MIN_PERIOD_SIZE)
++#define BTUSB_MAX_ISOC_FRAMES	10
++
++#define BTUSB_SCO_ALTERNATE_SETTING	2
++
++#define BTUSB_ISOC_TX_EP_CONFIGURED 1
++#define BTUSB_ISOC_RX_EP_CONFIGURED 2
++#define BTUSB_ISOC_TX_START	    3
++#define BTUSB_ISOC_RX_START	    4
++#define MAX_URBS		    12
++
++#define QUERY_SET_VARIABLES _IOW('q', 1, unsigned int(*)[2] )
++
++struct capture_data_cb {
++	unsigned char *buf;
++	unsigned int pos;
++	unsigned int expected;
++};
++
++static struct capture_data_cb* init_capture_data_cb(void)
++{
++
++	struct capture_data_cb *cb;
++
++	cb = kzalloc(sizeof(struct capture_data_cb), GFP_KERNEL);
++	if(!cb) {
++		return NULL;
++	}
++
++	cb->buf = kzalloc(HCI_MAX_SCO_SIZE, GFP_KERNEL);
++	if (!cb->buf) {
++		kfree(cb);
++		return NULL;
++	}
++	cb->pos = 0;
++	cb->expected = 0;
++
++	return cb;
++}
++
++static void deinit_capture_data_cb(struct capture_data_cb *cb)
++{
++	kfree(cb->buf);
++	kfree(cb);
++	cb->pos = 0;
++	cb->expected = 0;
++}
++
++struct btusb_data {
++	struct snd_card *card;
++	struct snd_pcm *pcm;
++	struct usb_device    *udev;
++	struct usb_interface *intf;
++
++	unsigned isoc_ifnum;
++
++	unsigned long flags;
++
++	spinlock_t txlock;
++	spinlock_t rxlock;
++
++	struct usb_endpoint_descriptor *isoc_tx_ep;
++	struct usb_endpoint_descriptor *isoc_rx_ep;
++
++	unsigned int sco_num;
++	int alternate_setting_num;
++	uint8_t *playback_data;
++
++	struct capture_data_cb *capture_data;
++
++	struct snd_pcm_substream *playback_stream;
++	struct snd_pcm_substream *capture_stream;
++
++	unsigned int playback_hwptr_done;	 ///* processed byte position in the buffer */
++	unsigned int playback_transfer_done;	///* processed frames since last period update */
++	unsigned int capture_hwptr_done;
++	unsigned int capture_transfer_done;
++
++	struct usb_anchor rx_anchor;
++
++	struct urb *tx_urb;
++	struct urb *rx_urb[MAX_URBS];
++};
++
++static void btusb_isoc_tx_complete(struct urb *urb);
++
++static dev_t dev;
++static struct cdev c_dev;
++static struct class *cl;
++uint8_t handle[2];
++
++static const struct usb_device_id btusb_sco_table[] = {
++	/* Intel Bluetooth devices */
++	{ USB_DEVICE(0x8087, 0x0025), .driver_info = BTUSB_INTEL_NEW },
++	{ USB_DEVICE(0x8087, 0x0026), .driver_info = BTUSB_INTEL_NEW },
++	{ USB_DEVICE(0x8087, 0x0a2b), .driver_info = BTUSB_INTEL_NEW },
++	{ USB_DEVICE(0x8087, 0x0aaa), .driver_info = BTUSB_INTEL_NEW },
++	{ }	/* Terminating entry */
++};
++
++MODULE_DEVICE_TABLE(usb, btusb_sco_table);
++
++static void dummy_proc_init(struct snd_card *card)
++{
++	struct snd_info_entry *entry;
++	if (!snd_card_proc_new(card, "dummy_pcm", &entry)) {
++		printk("btusb_sco:Registred sounc card in proc");
++	}
++}
++
++
++static inline void __fill_isoc_descriptor(struct urb *urb, int len, int mtu)
++{
++	int i, offset = 0;
++
++	for (i = 0; i < BTUSB_MAX_ISOC_FRAMES && len >= mtu;
++			i++, offset += mtu, len -= mtu) {
++		urb->iso_frame_desc[i].offset = offset;
++		urb->iso_frame_desc[i].length = mtu;
++	}
++
++	if (len && i < BTUSB_MAX_ISOC_FRAMES) {
++		urb->iso_frame_desc[i].offset = offset;
++		urb->iso_frame_desc[i].length = len;
++		i++;
++	}
++
++	urb->number_of_packets = i;
++}
++
++static int btusb_isoc_initialize_tx_urb(struct btusb_data *data)
++{
++	unsigned int pipe;
++
++	if (!data->isoc_tx_ep) {
++		pr_emerg("%s - isoc_tx_ep is NULL\n", __func__);
++		return -ENODEV;
++	}
++
++	data->tx_urb = usb_alloc_urb(BTUSB_MAX_ISOC_FRAMES, GFP_KERNEL);
++	if (!data->tx_urb) {
++		pr_emerg("%s - usb_alloc_urb is NULL\n", __func__);
++		return -ENOMEM;
++	}
++
++	pipe = usb_sndisocpipe(data->udev, data->isoc_tx_ep->bEndpointAddress);
++
++	usb_fill_int_urb(data->tx_urb, data->udev, pipe, data->playback_data,
++			MAX_PACKET_SIZE, btusb_isoc_tx_complete, data,
++			data->isoc_tx_ep->bInterval);
++
++	data->tx_urb->transfer_flags = URB_ISO_ASAP;
++
++	__fill_isoc_descriptor(data->tx_urb, MAX_PACKET_SIZE,
++			le16_to_cpu(data->isoc_tx_ep->wMaxPacketSize));
++
++	return 0;
++}
++
++static void btusb_isoc_prepare_tx_urb(struct btusb_data *data)
++{
++	unsigned int stride, frames, bytes;
++	static unsigned int oldptr;
++	uint8_t period_elapsed = 0;
++	unsigned long flags;
++	uint8_t *hw_ptr;
++
++	stride = data->playback_stream->runtime->frame_bits >> 3;
++	bytes = MIN_PERIOD_SIZE; // TODO: Check to be added in hw_params to reject other period size
++	hw_ptr = data->playback_data;
++	memcpy(hw_ptr, handle, SCO_HANDLE_SIZE);
++
++	memcpy(hw_ptr + SCO_HANDLE_SIZE, &bytes, SCO_LENGTH_FIELD_SIZE);
++
++	spin_lock_irqsave(&data->txlock, flags);
++
++	oldptr = data->playback_hwptr_done;
++	if (data->playback_hwptr_done >=
++			data->playback_stream->runtime->buffer_size * stride)
++		data->playback_hwptr_done -=
++			data->playback_stream->runtime->buffer_size * stride;
++
++	memcpy(hw_ptr + SCO_HDR_SIZE,
++	       data->playback_stream->runtime->dma_area + data->playback_hwptr_done,
++	       bytes);
++
++	data->playback_hwptr_done += MIN_PERIOD_SIZE;
++
++	frames = (bytes + (oldptr % stride)) / stride;
++	data->playback_transfer_done += frames;
++	if (data->playback_transfer_done >=
++			data->playback_stream->runtime->period_size) {
++		period_elapsed = 1;
++	}
++	spin_unlock_irqrestore(&data->txlock, flags);
++
++	if (period_elapsed == 1) {
++		period_elapsed = 0;
++		snd_pcm_period_elapsed(data->playback_stream);
++	}
++}
++
++
++static void btusb_isoc_submit_tx_urb(struct btusb_data *data)
++{
++	int err = usb_submit_urb(data->tx_urb, GFP_ATOMIC);
++	if (err < 0) {
++		if (err != -EPERM && err != -ENODEV)
++			pr_emerg("%s urb %p submission failed (%d)",
++					__func__, data->tx_urb, -err);
++		usb_free_urb(data->tx_urb);
++		data->tx_urb = NULL;
++	}
++}
++
++static void btusb_isoc_tx_complete(struct urb *urb)
++{
++	struct btusb_data *data = urb->context;
++
++	if (test_bit(BTUSB_ISOC_TX_START, &data->flags)) {
++		btusb_isoc_prepare_tx_urb(data);
++		btusb_isoc_submit_tx_urb(data);
++	}
++}
++
++unsigned char test_buffer[144];
++
++static void dummy_capture(struct btusb_data *data)
++{
++	unsigned long flags;
++	unsigned int hw_ptr;
++	unsigned int pending;
++	struct snd_pcm_runtime *runtime;
++	int i;
++	int test_buffer_size = sizeof(test_buffer)/sizeof(test_buffer[0]);
++
++
++	for (i = 0; i < test_buffer_size; i++)
++		test_buffer[i] = i;
++
++
++	spin_lock_irqsave(&data->rxlock, flags);
++
++	hw_ptr = data->capture_hwptr_done;
++
++	spin_unlock_irqrestore(&data->rxlock,flags);
++
++	runtime = data->capture_stream->runtime;
++	pending = runtime->dma_bytes - hw_ptr;
++
++	if (pending < test_buffer_size) {
++		memcpy(runtime->dma_area + hw_ptr, test_buffer, pending);
++		memcpy(runtime->dma_area, (void *)test_buffer + pending,
++				test_buffer_size - pending);
++	} else {
++		memcpy(runtime->dma_area + hw_ptr,(void *) test_buffer,
++				test_buffer_size);
++	}
++
++	spin_lock_irqsave(&data->rxlock,flags);
++	data->capture_hwptr_done = (hw_ptr + test_buffer_size) % runtime->dma_bytes;
++	hw_ptr = data->capture_hwptr_done;
++	spin_unlock_irqrestore(&data->rxlock, flags);
++
++	snd_pcm_period_elapsed(data->capture_stream);
++
++}
++
++static void process_sco_buffer(struct btusb_data *data)
++{
++	unsigned long flags;
++	unsigned int hw_ptr;
++	int sco_data_count;
++	struct snd_pcm_runtime *runtime;
++	unsigned char *sco_buffer = data->capture_data->buf;
++	unsigned char *audio_buffer = data->capture_data->buf + SCO_HDR_SIZE;
++	unsigned int pending;
++
++	sco_data_count = sco_buffer[SCO_HANDLE_SIZE];
++
++	spin_lock_irqsave(&data->rxlock,flags);
++	hw_ptr = data->capture_hwptr_done;
++	spin_unlock_irqrestore(&data->rxlock,flags);
++
++	runtime = data->capture_stream->runtime;
++	pending = runtime->dma_bytes - hw_ptr;
++
++	if (pending < sco_data_count) {
++		memcpy(runtime->dma_area + hw_ptr, audio_buffer, pending);
++		memcpy(runtime->dma_area, (void *)audio_buffer + pending,
++				sco_data_count - pending);
++	} else {
++		memcpy(runtime->dma_area + hw_ptr,(void *) audio_buffer,
++				sco_data_count);
++	}
++
++	spin_lock_irqsave(&data->rxlock,flags);
++	data->capture_hwptr_done  = (hw_ptr + sco_data_count) % runtime->dma_bytes;
++	hw_ptr = data->capture_hwptr_done;
++	spin_unlock_irqrestore(&data->rxlock,flags);
++}
++
++static int btusb_recv_isoc(struct btusb_data *data, void *buffer, int count){
++
++
++	int err = 0;
++	struct capture_data_cb *cb = data->capture_data;
++	int len;
++	struct hci_sco_hdr *sco_hdr;
++
++	while (count) {
++		if (cb->pos == 0) {
++			cb->expected = SCO_HDR_SIZE;
++		}
++
++		len = min_t(uint, cb->expected, count);
++
++		memcpy(cb->buf + cb->pos, buffer, len);
++
++		count -= len;
++		cb->expected -= len;
++		cb->pos += len;
++		buffer += len;
++
++		if (cb->pos == SCO_HDR_SIZE) {
++			sco_hdr = (struct hci_sco_hdr *)cb->buf;
++			cb->expected = cb->buf[2];
++			if(memcmp(cb->buf,handle,2)){
++                                cb->pos = 0;
++                                printk("%s:getting Invalid handle",__func__);
++                                return -EILSEQ;
++                        }
++                        if (cb->expected >48){
++                                printk("%s:Error in capture",__func__);
++			        return -EILSEQ;
++			}
++
++			if ((HCI_MAX_SCO_SIZE - cb->pos) < cb->expected) {
++				cb->pos = 0;
++				err = -EILSEQ;
++				break;
++			}
++		}
++
++		if (!cb->expected) {
++			// copy data to stream buffer
++			process_sco_buffer(data);
++			cb->pos = 0;
++		}
++	}
++
++	return 0;
++}
++
++static int btusb_isoc_submit_urb(struct urb *urb, struct btusb_data *data)
++{
++	int err;
++
++	usb_anchor_urb(urb, &data->rx_anchor);
++
++	err = usb_submit_urb(urb, GFP_ATOMIC);
++	if (err < 0) {
++		/* -EPERM: urb is being killed;
++		 * -ENODEV: device got disconnected
++		 */
++		if (err != -EPERM && err != -ENODEV)
++			pr_emerg("urb %p failed to submit (%d)",
++				urb, err);
++		usb_unanchor_urb(urb);
++	}
++	return err;
++}
++
++static void btusb_isoc_free_urb(struct urb *urb)
++{
++	usb_free_urb(urb);
++}
++
++static int btusb_isoc_submit_rx_urbs(struct btusb_data *data)
++{
++        int i, err = 0;
++
++	for (i = 0; i < MAX_URBS; i++) {
++		err = btusb_isoc_submit_urb(data->rx_urb[i], data);
++		if (err < 0) {
++			pr_emerg("%s - err: %d\n", __func__, err);
++			break;
++		}
++	}
++	return (i < 2) ? err : 0;
++}
++
++static void btusb_isoc_rx_complete(struct urb *urb)
++{
++	struct btusb_data *data = urb->context;
++
++	int i;
++
++	if (!test_bit(BTUSB_ISOC_RX_START, &data->flags)) {
++		pr_emerg("%s BTUSB_ISOC_RX_START not set\n", __func__);
++		return;
++	}
++
++	if (urb->status == 0) {
++		for (i = 0; i < urb->number_of_packets; i++) {
++			unsigned int offset = urb->iso_frame_desc[i].offset;
++			unsigned int length = urb->iso_frame_desc[i].actual_length;
++
++			if (urb->iso_frame_desc[i].status)
++				continue;
++
++			if (btusb_recv_isoc(data, urb->transfer_buffer + offset,
++						length) < 0) {
++				pr_emerg( "%s - corrupted SCO packet\n", __func__);
++			}
++		}
++	} else if (urb->status == -ENOENT) {
++		/* Avoid suspend failed when usb_kill_urb */
++		pr_emerg("%s - urb->status == -ENOENT\n", __func__);
++		return;
++	} else {
++		pr_emerg("%s - urb->status= %d\n", __func__, urb->status);
++		return;
++	}
++
++	snd_pcm_period_elapsed(data->capture_stream);
++
++	if (btusb_isoc_submit_urb(urb, data)) {
++		pr_emerg("%s - btusb_isoc_submit_rx_urb failed\n", __func__);
++	}
++}
++
++static int btusb_isoc_prepare_rx_urbs(struct btusb_data *data)
++{
++	struct urb *urb;
++	unsigned char *buf;
++	unsigned int pipe;
++	int i, size;
++
++	if (!data->isoc_rx_ep) {
++		pr_emerg("%s isoc_rx_ep is NULL\n", __func__);
++		return -ENODEV;
++	}
++
++	for (i = 0; i < MAX_URBS; i++) {
++		urb = usb_alloc_urb(BTUSB_MAX_ISOC_FRAMES, GFP_KERNEL);
++
++		if (!urb) {
++			pr_emerg("%s URB allocation failed\n", __func__);
++			return -ENOMEM;
++		}
++
++		size = le16_to_cpu(data->isoc_rx_ep->wMaxPacketSize) *
++			BTUSB_MAX_ISOC_FRAMES;
++
++		buf = kmalloc(size, GFP_KERNEL);
++		if (!buf) {
++			usb_free_urb(urb);
++			return -ENOMEM;
++		}
++
++		pipe = usb_rcvisocpipe(data->udev, data->isoc_rx_ep->bEndpointAddress);
++
++		usb_fill_int_urb(urb, data->udev, pipe, buf, size,
++				btusb_isoc_rx_complete, data,
++				data->isoc_rx_ep->bInterval);
++
++		urb->transfer_flags = URB_FREE_BUFFER | URB_ISO_ASAP; // Needs to be checked
++
++		__fill_isoc_descriptor(urb, size,
++				le16_to_cpu(data->isoc_rx_ep->wMaxPacketSize));
++
++		data->rx_urb[i] = urb;
++	}
++	return 0;
++}
++
++static inline int __set_isoc_interface(struct snd_pcm_substream *substream,
++				       int alternate_setting_num)
++{
++	struct usb_endpoint_descriptor *ep_desc;
++	int i, err;
++
++	struct btusb_data *data = snd_pcm_substream_chip(substream);
++
++	if (!data->intf)
++		return -ENODEV;
++
++        if(data->alternate_setting_num == alternate_setting_num){
++		return 0;
++	}
++	err = usb_set_interface(data->udev, data->isoc_ifnum,
++				alternate_setting_num);
++	if (err < 0) {
++		pr_emerg( "%s setting interface failed (%d)", __func__, -err);
++		return err;
++	}
++
++	data->alternate_setting_num = alternate_setting_num;
++
++	data->isoc_tx_ep = NULL;
++	data->isoc_rx_ep = NULL;
++
++	for (i = 0; i <data-> intf->cur_altsetting->desc.bNumEndpoints; i++) {
++		ep_desc = &data->intf->cur_altsetting->endpoint[i].desc;
++
++		if (!data->isoc_tx_ep && usb_endpoint_is_isoc_out(ep_desc)) {
++			data->isoc_tx_ep = ep_desc;
++			continue;
++		}
++
++		if (!data->isoc_rx_ep && usb_endpoint_is_isoc_in(ep_desc)) {
++			data->isoc_rx_ep = ep_desc;
++			continue;
++		}
++	}
++
++	if (!data->isoc_tx_ep || !data->isoc_rx_ep) {
++		pr_emerg( "%s - invalid SCO descriptors", __func__);
++		return -ENODEV;
++	}
++
++	return 0;
++}
++
++#define BUFF_SIZE_MAX	(PAGE_SIZE * 16)
++#define PRD_SIZE_MAX	PAGE_SIZE  /*4096*/
++#define MIN_PERIODS	4
++
++static struct snd_pcm_hardware btsco_pcm_hardware = {
++	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER //field contains the type and capabilities of this pcm
++		| SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID,
++	.rates = SNDRV_PCM_RATE_CONTINUOUS,
++	.buffer_bytes_max = BUFF_SIZE_MAX,
++	.period_bytes_min = MIN_PERIOD_SIZE,
++	.period_bytes_max = 16384,
++	.periods_min =	    MIN_PERIODS,
++	.periods_max =	    1024,
++
++};
++
++static int bt_pcm_open(struct snd_pcm_substream *substream)
++{
++	struct btusb_data *data;
++	struct snd_pcm_runtime *runtime;
++	data = snd_pcm_substream_chip(substream);
++	if (!data) {
++		pr_emerg("value of data is NULL");
++		return -ENOMEM ;
++	}
++	runtime = substream->runtime;
++
++	if (runtime == NULL) {
++		pr_emerg("%s: value of runtime is NULL",__func__);
++		return -ENODEV;
++	}
++
++	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
++		data->capture_data = init_capture_data_cb();
++		if (!data->capture_data) {
++			pr_emerg("value of capture_data is NULL");
++			return -ENOMEM;
++		}
++	} else if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		pr_emerg("%s Allocate playback_data\n", __func__);
++		data->playback_data =
++			kzalloc(sizeof(uint8_t) * MAX_PACKET_SIZE, GFP_KERNEL);
++		if (!data->playback_data) {
++			pr_emerg("playback_data memory allocation failed");
++			return -ENOMEM;
++		}
++	}
++
++	runtime->hw = btsco_pcm_hardware;
++
++	runtime->hw.rate_min = 8000;
++	runtime->hw.formats = SNDRV_PCM_FMTBIT_S16_LE;
++	runtime->hw.channels_min = 1;
++	runtime->hw.period_bytes_min = MIN_PERIOD_SIZE;
++	runtime->hw.rate_max = 16000;
++	runtime->hw.channels_max = runtime->hw.channels_min;
++	snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
++
++	return 0;
++}
++
++static int configure_endpoints(struct snd_pcm_substream *substream)
++{
++	struct btusb_data *data;
++	data = snd_pcm_substream_chip(substream);
++
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) 
++		set_bit(BTUSB_ISOC_TX_EP_CONFIGURED, &data->flags);
++	else
++		set_bit(BTUSB_ISOC_RX_EP_CONFIGURED, &data->flags);
++
++
++	if (test_bit(BTUSB_ISOC_RX_EP_CONFIGURED, &data->flags) ^
++			 test_bit(BTUSB_ISOC_TX_EP_CONFIGURED, &data->flags)) {
++		if (__set_isoc_interface(substream,
++					 BTUSB_SCO_ALTERNATE_SETTING) < 0) {
++			pr_emerg("%s setting alt settings failied\n", __func__);
++			return -EIO;
++		}
++	}
++	return 0;
++}
++
++
++static int bt_pcm_prepare(struct snd_pcm_substream *substream)
++{
++	struct btusb_data *data;
++	int err;
++
++	data = snd_pcm_substream_chip(substream);
++
++	// TODO: Does endpoint needs to be configured separately for Tx and Rx
++	// endpoints?
++	err = configure_endpoints(substream);
++	if (err < 0) {
++		pr_emerg("%s configure_endpoints failed err:%d\n",
++			 __func__, err);
++		return err;
++	}
++
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		pr_emerg("%s - SNDRV_PCM_STREAM_PLAYBACK\n", __func__);
++
++		/* TODO: No need to reset here */
++		clear_bit(BTUSB_ISOC_TX_START, &data->flags);
++
++		btusb_isoc_prepare_tx_urb(data);
++
++		err = btusb_isoc_initialize_tx_urb(data);
++		if (err < 0) {
++			pr_emerg("%s btusb_isoc_initialize_tx_urb failed err:%d\n",
++				 __func__, err);
++			if (data->tx_urb) {
++				usb_free_urb(data->tx_urb);
++				data->tx_urb = NULL;
++			}
++			return err;
++		}
++	} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
++		pr_emerg("%s - SNDRV_PCM_STREAM_CAPTURE\n", __func__);
++
++		/* TODO: No need to reset here */
++		clear_bit(BTUSB_ISOC_RX_START, &data->flags);
++		err = btusb_isoc_prepare_rx_urbs(data);
++		if (err < 0) {
++			pr_emerg("%s btusb_isoc_prepare_rx_urb failed err:%d\n",
++				 __func__, err);
++			return err;
++		}
++	}
++	return err;
++}
++
++
++static void btusb_isoc_stop_tx(struct btusb_data *data)
++{
++	clear_bit(BTUSB_ISOC_TX_START, &data->flags);
++}
++
++static int bt_pcm_close(struct snd_pcm_substream *substream)
++{
++	struct btusb_data *data;
++
++	/* stoping the work */
++	data = snd_pcm_substream_chip(substream);
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		pr_emerg("%s SNDRV_PCM_STREAM_PLAYBACK\n", __func__);
++		clear_bit(BTUSB_ISOC_TX_START, &data->flags);
++		clear_bit(BTUSB_ISOC_TX_EP_CONFIGURED,&data->flags);
++		if (data->playback_data) {
++			kfree(data->playback_data);
++			data->playback_data = NULL;
++		}
++	} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
++		pr_emerg("%s SNDRV_PCM_STREAM_CAPTURE\n", __func__);
++		clear_bit(BTUSB_ISOC_RX_START, &data->flags);
++		clear_bit(BTUSB_ISOC_RX_EP_CONFIGURED,&data->flags);
++		deinit_capture_data_cb(data->capture_data);
++	}
++
++	 if (!test_bit(BTUSB_ISOC_RX_EP_CONFIGURED, &data->flags)
++                        && !test_bit(BTUSB_ISOC_TX_EP_CONFIGURED, &data->flags)) {
++		pr_emerg("%s Reset EP and Alternate settings\n", __func__);
++
++		if (__set_isoc_interface(substream, 0) < 0){
++			printk("Resetting alt settings failed");
++			return -ENOENT;
++		}
++	}
++	return 0;
++}
++
++static int bt_pcm_hw_params(struct snd_pcm_substream *substream,
++			     struct snd_pcm_hw_params *hw_params)
++{
++	struct btusb_data *data;
++	int err;
++	unsigned long flags;
++	data = snd_pcm_substream_chip(substream);
++	err = snd_pcm_lib_malloc_pages(substream,
++			params_buffer_bytes(hw_params));
++
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		pr_emerg("%s - SNDRV_PCM_STREAM_PLAYBACK\n", __func__);
++		spin_lock_irqsave(&data->txlock, flags);
++		data->playback_stream = substream;
++		data->playback_hwptr_done = 0;
++		data->playback_transfer_done = 0;
++		spin_unlock_irqrestore(&data->txlock, flags);
++	} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
++		pr_emerg("%s - SNDRV_PCM_STREAM_CAPTURE\n", __func__);
++		spin_lock_irqsave(&data->rxlock, flags);
++		data->capture_stream = substream;
++		data->capture_hwptr_done = 0;
++		data->capture_transfer_done = 0;
++		spin_unlock_irqrestore(&data->rxlock, flags);
++	}
++
++	return 0;
++
++}
++static int bt_pcm_hw_free(struct snd_pcm_substream *substream)
++{
++	struct btusb_data *data;
++	unsigned long flags;
++	data = snd_pcm_substream_chip(substream);
++	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		pr_emerg("%s SNDRV_PCM_STREAM_PLAYBACK\n", __func__);
++		clear_bit(BTUSB_ISOC_TX_START, &data->flags);
++		//kfree(data->tx_urb->setup_packet);
++		if (data->tx_urb) {
++			usb_kill_urb(data->tx_urb);
++			usb_free_urb(data->tx_urb);
++			data->tx_urb = NULL;
++		}
++		spin_lock_irqsave(&data->txlock, flags);
++		data->playback_stream = NULL;
++		data->playback_hwptr_done = 0;
++		data->playback_transfer_done = 0;
++		spin_unlock_irqrestore(&data->txlock, flags);
++	} else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
++		int i;
++		pr_emerg("%s SNDRV_PCM_STREAM_CAPTURE\n", __func__);
++		clear_bit(BTUSB_ISOC_RX_START, &data->flags);
++		usb_kill_anchored_urbs(&data->rx_anchor);
++		for (i = 0; i < MAX_URBS; i++) {
++			if (data->rx_urb[i]) {
++				pr_emerg("%s - Valid URB\n", __func__);
++				usb_free_urb(data->rx_urb[i]);
++				data->rx_urb[i] = NULL;
++			}
++		}
++		spin_lock_irqsave(&data->rxlock, flags);
++		data->capture_stream = NULL;
++		data->capture_hwptr_done = 0;
++		data->capture_transfer_done = 0;
++		spin_unlock_irqrestore(&data->rxlock, flags);
++	} else {
++		//pr_emerg("%s - Invalid substream\n", __func__);
++	}
++
++	pr_emerg("%s - Release the allocated DMA buffer\n", __func__);
++	snd_pcm_lib_free_pages(substream);
++	pr_emerg("%s - After releasing the allocated DMA buffer\n", __func__);
++	return 0;
++}
++
++static void btusb_isoc_stop_rx(struct btusb_data *data)
++{
++	clear_bit(BTUSB_ISOC_RX_START, &data->flags);
++}
++
++static int bt_pcm_capture_trigger(struct snd_pcm_substream *substream,int cmd)
++{
++	struct btusb_data *data;
++	int err = 0;
++
++	data = snd_pcm_substream_chip(substream);
++	switch (cmd) {
++		case SNDRV_PCM_TRIGGER_START:
++		case SNDRV_PCM_TRIGGER_RESUME:
++			pr_emerg("%s - command: %s", __func__,
++				(cmd == SNDRV_PCM_TRIGGER_START) ?
++				"SNDRV_PCM_TRIGGER_START" : "SNDRV_PCM_TRIGGER_RESUME");
++			set_bit(BTUSB_ISOC_RX_START, &data->flags);
++			err = btusb_isoc_submit_rx_urbs(data);
++			if (err < 0)
++				pr_emerg("%s err:%d\n", __func__, err);
++			break;
++		case SNDRV_PCM_TRIGGER_STOP:
++		case SNDRV_PCM_TRIGGER_SUSPEND:
++			pr_emerg("%s - command: %s", __func__,
++				(cmd == SNDRV_PCM_TRIGGER_STOP) ?
++			  "SNDRV_PCM_TRIGGER_STOP" : "SNDRV_PCM_TRIGGER_SUSPEND");
++			btusb_isoc_stop_rx(data);
++			break;
++		default:
++			err = -EINVAL;
++	}
++	return err;
++}
++
++
++/* trigger is atomic can not used mutex sleep  or schedule another func */
++static int bt_pcm_playback_trigger(struct snd_pcm_substream *substream, int cmd)
++{
++	struct btusb_data *data = snd_pcm_substream_chip(substream);
++	int err = 0;
++
++	switch (cmd) {
++		case SNDRV_PCM_TRIGGER_START:
++		case SNDRV_PCM_TRIGGER_RESUME:
++			pr_emerg("%s - command: %s", __func__,
++				(cmd == SNDRV_PCM_TRIGGER_START)
++				? "SNDRV_PCM_TRIGGER_START" : "SNDRV_PCM_TRIGGER_RESUME");
++			set_bit(BTUSB_ISOC_TX_START, &data->flags);
++			btusb_isoc_submit_tx_urb(data);
++			break;
++		case SNDRV_PCM_TRIGGER_STOP:
++		case SNDRV_PCM_TRIGGER_SUSPEND:
++			//pr_emerg("%s - command: %s", __func__,
++			//	(cmd == SNDRV_PCM_TRIGGER_STOP)
++			//	? "SNDRV_PCM_TRIGGER_STOP" : "SNDRV_PCM_TRIGGER_SUSPEND");
++			btusb_isoc_stop_tx(data);
++			break;
++		default:
++			pr_emerg("%s - Invalid cmd: %d\n", __func__, cmd);
++			err = -EINVAL;
++	}
++	return err;
++}
++
++/* Atomic fuction This callback is called when the PCM middle layer inquires
++* the current hardware position on the buffer. The position must be returned
++* in frames, ranging from 0 to buffer_size - 1.*/
++static snd_pcm_uframes_t bt_pcm_pointer(struct snd_pcm_substream *substream)
++{
++	unsigned int playback_hwptr_done;
++	unsigned int capture_hwptr_done;
++	unsigned long flags;
++	struct btusb_data *data = snd_pcm_substream_chip(substream);
++
++	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
++		spin_lock_irqsave(&data->rxlock, flags);
++		capture_hwptr_done = data->capture_hwptr_done;
++		spin_unlock_irqrestore(&data->rxlock, flags);
++		return capture_hwptr_done /
++				(substream->runtime->frame_bits >> 3);
++	} else if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
++		spin_lock_irqsave(&data->txlock, flags);
++
++		playback_hwptr_done = data->playback_hwptr_done;
++
++		if (data->playback_transfer_done >=
++				(MAX_PACKET_SIZE - SCO_HDR_SIZE)) {
++			data->playback_transfer_done -=
++					(MAX_PACKET_SIZE - SCO_HDR_SIZE);
++			spin_unlock_irqrestore(&data->txlock, flags);
++			return playback_hwptr_done /
++				(substream->runtime->frame_bits >> 3);
++		} else {
++			spin_unlock_irqrestore(&data->txlock, flags);
++			return 0;
++		}
++	}
++	return 0;
++}
++
++static struct snd_pcm_ops btusb_isoc_capture_ops = {
++	.open = bt_pcm_open,
++	.close = bt_pcm_close,
++	.ioctl = snd_pcm_lib_ioctl,
++	.hw_params = bt_pcm_hw_params,
++	.hw_free = bt_pcm_hw_free,
++	.trigger = bt_pcm_capture_trigger,
++	.pointer = bt_pcm_pointer,
++	.prepare = bt_pcm_prepare,
++};
++
++static struct snd_pcm_ops btusb_isoc_playback_ops = {
++	.open = bt_pcm_open,
++	.close = bt_pcm_close,
++	.ioctl = snd_pcm_lib_ioctl,
++	.hw_params = bt_pcm_hw_params,
++	.hw_free = bt_pcm_hw_free,
++	.trigger = bt_pcm_playback_trigger,
++	.pointer = bt_pcm_pointer,
++	.prepare = bt_pcm_prepare,
++};
++
++static int snd_usb_audio_dev_free(struct snd_device *device)
++{
++	struct btusb_data *chip = device->device_data;
++	return snd_card_free(chip->card);
++}
++
++static int btusb_snd_card_create(struct btusb_data *data)
++{
++	int  err;
++	struct snd_card *card;
++
++	static struct snd_device_ops ops = {
++		.dev_free =	snd_usb_audio_dev_free,
++	};
++	struct snd_pcm *pcm;
++
++	err = snd_card_new(&(data->udev->dev), -1, NULL, THIS_MODULE, 0, &card);
++	if (err)
++		return err;
++	data->card = card;
++
++	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, data, &ops)) < 0) {
++		snd_card_free(card);
++		printk("error in creating the device");
++		return err;
++	}
++	err = snd_pcm_new(card, "USB audio source", DEVICE_INDEX,
++			  NUM_PLAYBACK_SUBSTREAMS, NUM_CAPTURE_SUBSTREAMS,
++			  &pcm);
++	if (err)
++		goto pcm_fail;
++
++	pcm->private_data = data;
++	pcm->info_flags = 0;
++	data->pcm = pcm;
++	strlcpy(pcm->name, "USB Bluetooth audio", sizeof(pcm->name));
++	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &btusb_isoc_capture_ops);
++	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &btusb_isoc_playback_ops);
++	err = snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
++			NULL, 64 * 1024, 64 * 1024);
++	if (err) {
++		pr_emerg("snd_pcm_lib_preallocate_pages_for_all err:%d\n", err);
++		goto pcm_fail;
++	}
++	strlcpy(card->driver, "bt_audio_source", sizeof(card->driver));
++	strlcpy(card->shortname, card->driver, sizeof(card->shortname));
++	strlcpy(card->longname, "USB Bluetooth audio source",
++			sizeof(card->longname));
++
++	err = snd_card_register(card);
++	if (err){
++		goto register_fail;
++	} else {
++		printk("%s:Sound card registred sucecssfully",__func__);
++	}
++
++	dummy_proc_init(card);
++	return 0;
++
++register_fail:
++	printk("%s: Failure in	registering sound card",__func__);
++pcm_fail:
++
++	printk("%s: Failure in regitsering PCM ", __func__);
++	snd_card_free(card);
++	return err;
++}
++
++int btusb_sco_probe(struct usb_interface *intf,const struct usb_device_id *id)
++{
++	int  err = 0;
++	struct btusb_data *data;
++
++	/* data allocated during card creation */
++	data = devm_kzalloc(&intf->dev, sizeof(*data), GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++
++	data->isoc_ifnum = intf->cur_altsetting->desc.bInterfaceNumber;
++	data->udev = interface_to_usbdev(intf);
++	data->intf = intf;
++	usb_set_intfdata(intf, data);
++
++	spin_lock_init(&data->txlock);
++	spin_lock_init(&data->rxlock);
++        init_usb_anchor(&data->rx_anchor);
++
++	err = btusb_snd_card_create(data);
++
++	return err;
++}
++
++
++static void btusb_sco_disconnect(struct usb_interface *intf)
++{
++	struct btusb_data *data = usb_get_intfdata(intf);
++
++
++	if (!data)
++		return;
++
++	if (data->intf)
++		usb_set_intfdata(data->intf, NULL);
++
++	snd_card_free_when_closed(data->card);
++}
++
++static struct usb_driver btusb_sco_driver = {
++	.name		= "btusb_sco",
++	.probe		= btusb_sco_probe,
++	.disconnect	= btusb_sco_disconnect,
++	.id_table	= btusb_sco_table,
++
++};
++
++
++static int bt_char_open(struct inode *i, struct file *f)
++{
++	return 0;
++}
++static int bt_char_close(struct inode *i, struct file *f)
++{
++	return 0;
++}
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,35))
++static int bt_char_ioctl(struct inode *i, struct file *f, unsigned int cmd, unsigned long arg)
++#else
++static long bt_char_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
++#endif
++{
++	printk("%s",__func__);
++
++	switch (cmd)
++	{
++		case QUERY_SET_VARIABLES:
++			if (copy_from_user(handle, (uint8_t *)arg, sizeof(uint8_t)*2))
++			{
++				return -EACCES;
++			}
++			printk("%s value of handle = %d ,%d",__func__, handle[0], handle[1]);
++			break;
++		default:
++			return -EINVAL;
++	}
++
++	return 0;
++}
++
++static struct file_operations query_fops =
++{
++	.owner = THIS_MODULE,
++	.open = bt_char_open,
++	.release = bt_char_close,
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,35))
++	.ioctl = bt_char_ioctl
++#else
++	.unlocked_ioctl = bt_char_ioctl
++#endif
++};
++
++
++int bt_ioctl_init(void)
++{
++	int ret;
++	struct device *dev_ret;
++
++
++	if ((ret = alloc_chrdev_region(&dev, FIRST_MINOR, MINOR_CNT, "query_ioctl")) < 0)
++	{
++		printk("allocation of character region failed");
++		return ret;
++	}
++
++	cdev_init(&c_dev, &query_fops);
++
++	if ((ret = cdev_add(&c_dev, dev, MINOR_CNT)) < 0)
++
++	{
++		printk("cdev add failed");
++		return ret;
++	}
++
++	if (IS_ERR(cl = class_create(THIS_MODULE, "char")))
++	{
++		printk("class create failed");
++		cdev_del(&c_dev);
++		unregister_chrdev_region(dev, MINOR_CNT);
++		return PTR_ERR(cl);
++	}
++	if (IS_ERR(dev_ret = device_create(cl, NULL, dev, NULL, "bt_sco_control")))
++	{
++		printk("device create failed");
++		class_destroy(cl);
++		cdev_del(&c_dev);
++		unregister_chrdev_region(dev, MINOR_CNT);
++		return PTR_ERR(dev_ret);
++	}
++
++	return 0;
++}
++
++void  bt_ioctl_exit(void)
++{
++	device_destroy(cl, dev);
++	class_destroy(cl);
++	cdev_del(&c_dev);
++	unregister_chrdev_region(dev, MINOR_CNT);
++}
++
++static int __init btusb_sco_init(void)
++{
++	printk(KERN_INFO "btusb_sco_init\n");
++	usb_register_driver(&btusb_sco_driver, THIS_MODULE, KBUILD_MODNAME);
++	bt_ioctl_init();
++	return 0;
++}
++
++static void __exit btusb_sco_exit(void)
++{
++	usb_deregister(&btusb_sco_driver);
++	bt_ioctl_exit();
++}
++
++module_init(btusb_sco_init);
++module_exit(btusb_sco_exit);
++
++MODULE_DESCRIPTION("SCO over btusb driver for Android");
++MODULE_AUTHOR("Aiswarya Cyriac <aiswarya.cyriac@intel.com>");
++MODULE_LICENSE("GPL");
++MODULE_VERSION("0.1");
+-- 
+2.17.1
+
