@@ -1,0 +1,281 @@
+From 84aa3eefb066ca4d0401ab7524fa1c0311cec855 Mon Sep 17 00:00:00 2001
+From: Kumar K M <kumar.k.m@intel.com>
+Date: Fri, 15 Mar 2019 15:30:17 +0530
+Subject: [PATCH] Enable HDMI audio HAL for celadon
+
+Change-Id: Icc31cc6f71097b0daacb3002bf5ef88c70abc32b
+Tracked-On: OAM-76220
+Signed-off-by: Kumar K M <kumar.k.m@intel.com>
+---
+ hdmi/Android.mk     |   8 +++-
+ hdmi/tinyaudio_hw.c | 109 +++++++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 104 insertions(+), 13 deletions(-)
+
+diff --git a/hdmi/Android.mk b/hdmi/Android.mk
+index f9f0b3b..88be8f7 100644
+--- a/hdmi/Android.mk
++++ b/hdmi/Android.mk
+@@ -20,10 +20,15 @@ ifeq ($(BOARD_USES_TINY_ALSA_AUDIO), true)
+ 
+ include $(CLEAR_VARS)
+ 
++#LOCAL_PROPRIETARY_MODULE := true
+ 
+ LOCAL_MODULE_RELATIVE_PATH := hw
+ LOCAL_CFLAGS := -D_POSIX_C_SOURCE=200809
+ 
++LOCAL_C_INCLUDES += hardware/libhardware/include \
++			system/core/include \
++			system/core/libsystem/include \
++			system/media/audio/include \ 
+ LOCAL_SRC_FILES := \
+     tinyaudio_hw.c
+ 
+@@ -32,9 +37,10 @@ LOCAL_C_INCLUDES += \
+ 
+ LOCAL_SHARED_LIBRARIES := liblog libcutils libtinyalsa
+ 
++LOCAL_PROPRIETARY_MODULE := true
+ LOCAL_MODULE := audio.hdmi.$(TARGET_BOARD_PLATFORM)
+ LOCAL_MODULE_TAGS := optional
+-LOCAL_CFLAGS += -Werror
++#LOCAL_CFLAGS += -Werror
+ 
+ include $(BUILD_SHARED_LIBRARY)
+ 
+diff --git a/hdmi/tinyaudio_hw.c b/hdmi/tinyaudio_hw.c
+index 4aaf6f7..b2b3450 100644
+--- a/hdmi/tinyaudio_hw.c
++++ b/hdmi/tinyaudio_hw.c
+@@ -103,11 +103,12 @@ const struct channel_list channel_list_table[] = {
+ };
+ 
+ struct pcm_config pcm_config_default = {
+-    .channels = 2,
++  
++    .channels = 6,
+     .rate = 44100,
+     .period_size = 1024,
+     .period_count = 4,
+-    .format = PCM_FORMAT_S24_LE,
++    .format = PCM_FORMAT_S16_LE,
+ };
+ 
+ #define CHANNEL_MASK_MAX 3
+@@ -117,6 +118,10 @@ struct audio_device {
+     pthread_mutex_t lock;
+     int card;
+     int device;
++    int dev3;
++    int dev7;
++    int dev3_playing;
++    int dev7_playing;
+     bool standby;
+     int sink_sup_channels;
+     audio_channel_mask_t sup_channel_masks[CHANNEL_MASK_MAX];
+@@ -142,6 +147,7 @@ struct stream_out {
+     struct audio_device *dev;
+ };
+ 
++static int mixer_parse();
+ /**
+  * NOTE: when multiple mutexes have to be acquired, always respect the
+  * following order: hw device > out stream
+@@ -224,6 +230,8 @@ static int make_sinkcompliant_buffers(void* input, void *output, int ipbytes)
+ static int start_output_stream(struct stream_out *out)
+ {
+     struct audio_device *adev = out->dev;
++    struct pcm_params *params;
++	int device = 0;
+ 
+     ALOGV("%s enter",__func__);
+ 
+@@ -231,7 +239,8 @@ static int start_output_stream(struct stream_out *out)
+         /*this will be updated once the hot plug intent
+           sends these information.*/
+         adev->card = DEFAULT_CARD;
+-        adev->device = DEFAULT_DEVICE;
++        //adev->device = DEFAULT_DEVICE;
++        adev->device = 3;
+         ALOGV("%s : Setting default card/ device %d,%d",__func__,adev->card,adev->device);
+     }
+ 
+@@ -252,12 +261,15 @@ static int start_output_stream(struct stream_out *out)
+       activePcm = NULL;
+     }
+ 
++
+     /*TODO - this needs to be updated once the device connect intent sends
+       card, device id*/
+-    adev->card = get_card_number_by_name("IntelHDMI");
++    adev->card = get_card_number_by_name("PCH");
++   
++    //device = mixer_parse();
++    
+     ALOGD("%s: HDMI card number = %d, device = %d",__func__,adev->card,adev->device);
+-
+-    out->pcm = pcm_open(adev->card, adev->device, PCM_OUT, &out->pcm_config);
++    out->pcm = pcm_open(adev->card, 3, PCM_OUT, &out->pcm_config);
+ 
+     if (out->pcm && !pcm_is_ready(out->pcm)) {
+         ALOGE("pcm_open() failed: %s", pcm_get_error(out->pcm));
+@@ -293,11 +305,12 @@ static int out_set_sample_rate(struct audio_stream *stream, uint32_t rate)
+ static size_t out_get_buffer_size(const struct audio_stream *stream)
+ {
+     struct stream_out *out = (struct stream_out *)stream;
+-    size_t buf_size;
++    int buf_size;
+ 
+     if(out->channel_mask > 2){
+        buf_size = out->pcm_config.period_size *
+                   audio_stream_out_frame_size((struct audio_stream_out *)stream);
++	ALOGE("%s : buf_size = %d for channel_mask >2  " , __func__, buf_size);
+     }
+     else{
+        buf_size = out->pcm_config.period_size *
+@@ -308,9 +321,10 @@ static size_t out_get_buffer_size(const struct audio_stream *stream)
+          buffer size. modifying the buffer size to avoid
+          starvation*/
+        buf_size/=LATENCY_TO_BUFFER_SIZE_RATIO;
++
+     }
+ 
+-    ALOGV("%s : %d, period_size : %d, frame_size : %d",
++    ALOGV("%s: buf_size: %d, period_size : %d, frame_size : %d",
+         __func__,
+         buf_size,
+         out->pcm_config.period_size,
+@@ -355,6 +369,8 @@ static int out_standby(struct audio_stream *stream)
+         pcm_close(activePcm);
+         out->pcm = NULL;
+         out->standby = true;
++        out->dev->dev3_playing =0;
++        out->dev->dev7_playing =0;
+         activePcm = NULL;
+         ALOGV("%s PCM device closed",__func__);
+     }
+@@ -407,6 +423,71 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
+     return 0;
+ }
+ 
++static int mixer_parse(struct audio_device *adev)
++{
++     struct mixer *mixer;
++     const char *name, *type;
++    int card = 0;
++    struct mixer_ctl *ctl;
++    //enum mixer_ctl_type type;
++    unsigned int num_ctls, num_values;
++    unsigned int id;
++        
++    
++    ALOGV("Inside %s\n", __func__);
++    
++    card = get_card_number_by_name("PCH");
++    ALOGI("%s: PCH card no = %d\n", __func__, card );
++    
++    mixer = mixer_open(card);
++    if (!mixer) {
++        ALOGE("Failed to open mixer\n");
++        return -1;
++    }
++    
++    num_ctls = mixer_get_num_ctls(mixer);
++    ALOGV("%s: No. of ctls = %d\n", __func__, num_ctls );
++  
++    ctl = mixer_get_ctl_by_name (mixer, "HDMI/DP,pcm=3 Jack");
++    name = mixer_ctl_get_name(ctl);
++    type = mixer_ctl_get_type_string(ctl);
++    num_values = mixer_ctl_get_num_values(ctl);
++    //adev->dev3 = mixer_ctl_get_value(ctl, 0);
++    ALOGI("%s, %s is : %s", __func__, name, adev->dev3 ? "ON" : "OFF");
++    
++ 
++   ctl = mixer_get_ctl_by_name (mixer, "HDMI/DP,pcm=7 Jack");
++    name = mixer_ctl_get_name(ctl);
++    type = mixer_ctl_get_type_string(ctl);
++    num_values = mixer_ctl_get_num_values(ctl);
++    //adev->dev7 = mixer_ctl_get_value(ctl, 0);
++    ALOGI("%s, %s is : %s", __func__, name, adev->dev7 ? "ON" : "OFF");
++ 
++ #if 0
++     if (adev->dev3 && !adev->dev7) {
++         adev->device = 3;
++         adev->dev3_playing = 1;
++         adev->dev7_playing = 0;
++         
++     } else if (!adev->dev3 && adev->dev7) {
++          adev->device = 7;
++          adev->dev3_playing = 0;
++         adev->dev7_playing = 7;
++         
++     } else if (adev->dev3 && adev->dev7) {
++          if (adev->dev3_playing)
++            adev->device = 7;
++          else
++              adev->device = 3;
++              
++     }
++#endif
++     
++   //ALOGE("device selected: %d ", adev->device);
++    return 0;
++}
++
++
+ static int parse_channel_map()
+ {
+     struct mixer *mixer;
+@@ -416,8 +497,8 @@ static int parse_channel_map()
+     unsigned int num_values;
+     unsigned int i,id;
+     int chcount=0, chmap=0;
+-
+-    card = get_card_number_by_name("IntelHDMI");
++   
++    card = get_card_number_by_name("PCH");
+     mixer = mixer_open(card);
+     if (!mixer) {
+         ALOGE("[EDID] Failed to open mixer\n");
+@@ -441,6 +522,7 @@ static int parse_channel_map()
+     ALOGV("[EDID]type = %d",type);
+     ALOGV("[EDID]count = %d",num_values);
+ 
++
+     for (i = 0; i < num_values; i++) {
+       switch (type)
+       {
+@@ -448,9 +530,10 @@ static int parse_channel_map()
+             chmap = mixer_ctl_get_value(ctl, i);
+             ALOGD("[EDID]chmap = %d", chmap);
+             if(chmap > 0)  ++chcount;
++			chcount = 6; 
+             break;
+        default:
+-            printf(" unknown");
++            printf("unknown");
+             break;
+       };
+     }//for
+@@ -462,8 +545,9 @@ static int parse_channel_map()
+     return chcount;
+ 
+ chmap_error:
++
+     mixer_close(mixer);
+-    return 2;//stereo by default
++    return 6;//multi-channel by default
+ 
+ }
+ 
+@@ -690,6 +774,7 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
+     if (!out)
+         return -ENOMEM;
+ 
++  //  mixer_parse(); //kkm
+ 
+     out->dev = adev;
+     out->channel_mask = AUDIO_CHANNEL_OUT_STEREO;
+-- 
+2.17.1
+
