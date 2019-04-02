@@ -1,0 +1,2623 @@
+From 284bdc43b963818cd9020c8e461595d9975de860 Mon Sep 17 00:00:00 2001
+From: Priyanka Bose <priyanka.bose@intel.com>
+Date: Tue, 2 Apr 2019 18:19:52 +0530
+Subject: [PATCH] Optimized exp() function :libm
+
+Change-Id: Ia231e66cab280bbb99660b9e757f332a2a1f8c22
+Category: Device Enablement
+Origin: Internal
+Upstream-Candidate: no
+Tracked-On: https://jira.devtools.intel.com/browse/OAM-79155
+Signed-off-by: Priyanka Bose <priyanka.bose@intel.com>
+---
+ ...p-function-based-on-glibc-algorithim.patch | 1449 +++++++++++++++++
+ .../lib/msun/src/math_config.h                |  223 +++
+ libm/x86/avx2_e_exp.S                         |  335 ++++
+ libm/x86_64/avx2_e_exp.S                      |  567 +++++++
+ 4 files changed, 2574 insertions(+)
+ create mode 100644 android_p/google_diff/cel_kbl/bionic/0001-Add-optimized-exp-function-based-on-glibc-algorithim.patch
+ create mode 100644 libm/upstream-freebsd/lib/msun/src/math_config.h
+ create mode 100644 libm/x86/avx2_e_exp.S
+ create mode 100644 libm/x86_64/avx2_e_exp.S
+
+diff --git a/android_p/google_diff/cel_kbl/bionic/0001-Add-optimized-exp-function-based-on-glibc-algorithim.patch b/android_p/google_diff/cel_kbl/bionic/0001-Add-optimized-exp-function-based-on-glibc-algorithim.patch
+new file mode 100644
+index 000000000..644f27bcf
+--- /dev/null
++++ b/android_p/google_diff/cel_kbl/bionic/0001-Add-optimized-exp-function-based-on-glibc-algorithim.patch
+@@ -0,0 +1,1449 @@
++From 0067e6ab2373f605ff498d415063998254deeb06 Mon Sep 17 00:00:00 2001
++From: Priyanka Bose <priyanka.bose@intel.com>
++Date: Tue, 2 Apr 2019 18:14:18 +0530
++Subject: [PATCH] Add optimized exp() function based on glibc algorithim and
++ using skylake compiler flags.
++
++Change-Id: Iece99d9af34d4b42c1fd7d9bff519c0419829462
++Category: Device Enablement
++Origin: Internal
++Upstream-Candidate: no
++Tracked-On: https://jira.devtools.intel.com/browse/OAM-79155
++Signed-off-by: Priyanka Bose <priyanka.bose@intel.com>
++---
++ .../lib/msun/src/math_config.h                |  238 ++++
++ libm/x86_64/e_exp.S                           | 1165 ++++++++---------
++ 2 files changed, 786 insertions(+), 617 deletions(-)
++ create mode 100644 libm/upstream-freebsd/lib/msun/src/math_config.h
++
++diff --git a/libm/upstream-freebsd/lib/msun/src/math_config.h b/libm/upstream-freebsd/lib/msun/src/math_config.h
++new file mode 100644
++index 000000000..717377ebd
++--- /dev/null
+++++ b/libm/upstream-freebsd/lib/msun/src/math_config.h
++@@ -0,0 +1,238 @@
+++/* Configuration for double precision math routines.
+++   Copyright (C) 2018-2019 Free Software Foundation, Inc.
+++   This file is part of the GNU C Library.
+++   The GNU C Library is free software; you can redistribute it and/or
+++   modify it under the terms of the GNU Lesser General Public
+++   License as published by the Free Software Foundation; either
+++   version 2.1 of the License, or (at your option) any later version.
+++   The GNU C Library is distributed in the hope that it will be useful,
+++   but WITHOUT ANY WARRANTY; without even the implied warranty of
+++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+++   Lesser General Public License for more details.
+++   You should have received a copy of the GNU Lesser General Public
+++   License along with the GNU C Library; if not, see
+++   <http://www.gnu.org/licenses/>.  */
+++   
+++#ifndef _MATH_CONFIG_H
+++#define _MATH_CONFIG_H
+++
+++
+++#include "math.h"
+++#include "math_private.h"
+++#include "endian.h"
+++#include "sys/types.h"
+++#include <stdint.h> 
+++#include <stdio.h>
+++
+++#ifndef WANT_ROUNDING
+++/* Correct special case results in non-nearest rounding modes.  */
+++# define WANT_ROUNDING 1
+++#endif
+++
+++#ifndef WANT_ERRNO
+++/* Set errno according to ISO C with (math_errhandling & MATH_ERRNO) != 0.  */
+++# define WANT_ERRNO 1
+++#endif
+++#ifndef WANT_ERRNO_UFLOW
+++/* Set errno to ERANGE if result underflows to 0 (in all rounding modes).  */
+++# define WANT_ERRNO_UFLOW (WANT_ROUNDING && WANT_ERRNO)
+++#endif
+++
+++#if defined SHARED || defined LIBC_NONSHARED \
+++  || (BUILD_PIE_DEFAULT)
+++# define attribute_hidden __attribute__ ((visibility ("hidden")))
+++#else
+++# define attribute_hidden
+++#endif
+++
+++
+++#define EXP_TABLE_BITS 7
+++#define EXP_POLY_ORDER 5
+++#define EXP2_POLY_ORDER 5
+++
+++
+++extern const struct exp_data
+++{
+++  double invln2N;
+++  double shift;
+++  double negln2hiN;
+++  double negln2loN;
+++  double poly[4]; /* Last four coefficients.  */
+++  double exp2_shift;
+++  double exp2_poly[EXP2_POLY_ORDER];
+++  uint64_t tab[2*(1 << EXP_TABLE_BITS)];
+++} __exp_data attribute_hidden;
+++
+++#define InvLn2N __exp_data.invln2N
+++#define NegLn2hiN __exp_data.negln2hiN
+++#define NegLn2loN __exp_data.negln2loN
+++#define Shift __exp_data.shift
+++#define T __exp_data.tab
+++#define C2 __exp_data.poly[5 - EXP_POLY_ORDER]
+++#define C3 __exp_data.poly[6 - EXP_POLY_ORDER]
+++#define C4 __exp_data.poly[7 - EXP_POLY_ORDER]
+++#define C5 __exp_data.poly[8 - EXP_POLY_ORDER]
+++
+++static const double
+++o_threshold=  7.09782712893383973096e+02,  /* 0x40862E42, 0xFEFA39EF */
+++u_threshold= -7.45133219101941108420e+02;  /* 0xc0874910, 0xD52D3051 */
+++
+++static volatile double
+++huge    = 1.0e+300,
+++twom1000= 9.33263618503218878990e-302;     /* 2**-1000=0x01700000,0*/
+++
+++
+++/*#define NOINLINE __attribute__ ((noinline))*/
+++
+++#ifdef __SSE2_MATH__
+++# define math_opt_barrier(x)                                                \
+++  ({ __typeof(x) __x;                                                        \
+++     if (sizeof (x) <= sizeof (double))        \
+++       __asm ("" : "=x" (__x) : "0" (x));                                \
+++     else                                                                \
+++       __asm ("" : "=t" (__x) : "0" (x));                                \
+++     __x; })
+++# define math_force_eval(x)                                                \
+++  do {                                                                        \
+++    if (sizeof (x) <= sizeof (double))        \
+++      __asm __volatile ("" : : "x" (x));                                \
+++    else                                                                \
+++      __asm __volatile ("" : : "f" (x));                                \
+++  } while (0)
+++#else
+++# define math_opt_barrier(x)                                                \
+++  ({ __typeof (x) __x;                                                                                           \
+++       __asm ("" : "=t" (__x) : "0" (x));                                \
+++     __x; })
+++# define math_force_eval(x)                                                \
+++  do {                                                                        \
+++    __typeof (x) __x = (x);                                                \
+++    if (sizeof (x) <= sizeof (double))        \
+++      __asm __volatile ("" : : "m" (__x));                                \
+++    else                                                                \
+++      __asm __volatile ("" : : "f" (__x));                                \
+++  } while (0)
+++#endif
+++
+++
+++/* math_narrow_eval reduces its floating-point argument to the range
+++   and precision of its semantic type.  (The original evaluation may
+++   still occur with excess range and precision, so the result may be
+++   affected by double rounding.)  */
+++#if FLT_EVAL_METHOD == 0
+++# define math_narrow_eval(x) (x)
+++#else
+++# if FLT_EVAL_METHOD == 1
+++#  define excess_precision(type) __builtin_types_compatible_p (type, float)
+++# else
+++#  define excess_precision(type) (__builtin_types_compatible_p (type, float) \
+++                                  || __builtin_types_compatible_p (type, \
+++                                                                   double))
+++# endif
+++# define math_narrow_eval(x)                                        \
+++  ({                                                                \
+++    __typeof (x) math_narrow_eval_tmp = (x);                        \
+++    if (excess_precision (__typeof (math_narrow_eval_tmp)))        \
+++      __asm__ ("" : "+m" (math_narrow_eval_tmp));                \
+++    math_narrow_eval_tmp;                                        \
+++   })
+++#endif
+++
+++#define with_errno(x, e) (x)
+++
+++static inline uint64_t
+++asuint64 (double f)
+++{
+++  union
+++  {
+++    double f;
+++    uint64_t i;
+++  } u = {f};
+++  return u.i;
+++}
+++static double
+++asdouble (uint64_t i)
+++{
+++  union
+++  {
+++    uint64_t i;
+++    double f;
+++  } u = {i};
+++  return u.f;
+++}
+++
+++/* Top 12 bits of a double (sign and exponent bits).  */
+++static inline uint32_t
+++top12 (double x)
+++{
+++  return asuint64 (x) >> 52;
+++}
+++
+++/* Check if the result underflowed to 0.  */
+++static inline double
+++check_uflow (double x)
+++{
+++  if (WANT_ERRNO) 
+++  {
+++     return x == 0.0 ? with_errno (x, ERANGE) : x;   
+++  }
+++  else {
+++     return x; 
+++  }
+++
+++/* return WANT_ERRNO ? __math_check_uflow (x) : x;*/
+++
+++}
+++
+++
+++/* Check if the result overerflowed to 0.  */
+++static inline double
+++check_oflow (double x)
+++{
+++
+++   if (WANT_ERRNO)
+++   {
+++      return isinf (x) ? with_errno (x, ERANGE) : x;
+++      
+++   } else {
+++      return x;
+++   }
+++  /*return WANT_ERRNO ? __math_check_uflow (x) : x;*/
+++
+++}
+++
+++
+++
+++/* NOINLINE reduces code size.  */
+++/*NOINLINE static double
+++xflow (uint32_t sign, double y)
+++{
+++  y = math_opt_barrier (sign ? -y : y) * y;
+++  return with_errno (y, ERANGE);
+++}*/
+++inline double
+++__math_uflow (uint32_t sign)
+++{
+++  double y = 0x1p-767;
+++  y = math_opt_barrier (sign ? -y : y) * y;
+++  return with_errno (y, ERANGE);
+++  /*return xflow (sign, 0x1p-767);*/
+++}
+++
+++inline double
+++__math_oflow (uint32_t sign)
+++{
+++  double y = 0x1p769;
+++  y = math_opt_barrier (sign ? -y : y) * y;
+++  return with_errno (y, ERANGE);
+++  /*return xflow (sign, 0x1p769);*/
+++}
+++
+++#endif
+++
+++
+++
+++
+++
+++
+++
++diff --git a/libm/x86_64/e_exp.S b/libm/x86_64/e_exp.S
++index 6882dfc9c..e5e12288f 100644
++--- a/libm/x86_64/e_exp.S
+++++ b/libm/x86_64/e_exp.S
++@@ -1,9 +1,9 @@
++ /*
++-Copyright (c) 2014, Intel Corporation
++-All rights reserved.
+++ Copyright (c) 2014, Intel Corporation
+++ All rights reserved.
++ 
++-Redistribution and use in source and binary forms, with or without
++-modification, are permitted provided that the following conditions are met:
+++ Redistribution and use in source and binary forms, with or without
+++ modification, are permitted provided that the following conditions are met:
++ 
++     * Redistributions of source code must retain the above copyright notice,
++     * this list of conditions and the following disclaimer.
++@@ -16,621 +16,552 @@ modification, are permitted provided that the following conditions are met:
++     * may be used to endorse or promote products derived from this software
++     * without specific prior written permission.
++ 
++-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
++-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+++ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+++ ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+++ WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+++ DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+++ ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+++ (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+++ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+++ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+++ (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+++ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++ 
++-/******************************************************************************/
++-//                     ALGORITHM DESCRIPTION
++-//                     ---------------------
++-//
++-// Description:
++-//  Let K = 64 (table size).
++-//        x    x/log(2)     n
++-//       e  = 2          = 2 * T[j] * (1 + P(y))
++-//  where
++-//       x = m*log(2)/K + y,    y in [-log(2)/K..log(2)/K]
++-//       m = n*K + j,           m,n,j - signed integer, j in [-K/2..K/2]
++-//                  j/K
++-//       values of 2   are tabulated as T[j] = T_hi[j] ( 1 + T_lo[j]).
++-//
++-//       P(y) is a minimax polynomial approximation of exp(x)-1
++-//       on small interval [-log(2)/K..log(2)/K] (were calculated by Maple V).
++-//
++-//  To avoid problems with arithmetic overflow and underflow,
++-//            n                        n1  n2
++-//  value of 2  is safely computed as 2 * 2 where n1 in [-BIAS/2..BIAS/2]
++-//  where BIAS is a value of exponent bias.
++-//
++-// Special cases:
++-//  exp(NaN) = NaN
++-//  exp(+INF) = +INF
++-//  exp(-INF) = 0
++-//  exp(x) = 1 for subnormals
++-//  for finite argument, only exp(0)=1 is exact
++-//  For IEEE double
++-//    if x >  709.782712893383973096 then exp(x) overflow
++-//    if x < -745.133219101941108420 then exp(x) underflow
++-//
++-/******************************************************************************/
+++/******************************************************************************
+++ *                     ALGORITHM DESCRIPTION
+++ *
+++ *
+++ * __ieee754_exp(x)
+++ * Returns the exponential of x.
+++ *
+++ * Method
+++ *   1. Argument reduction:
+++ *      Reduce x to an r so that |r| <= 0.5*ln2 ~ 0.34658.
+++ *	Given x, find r and integer k such that
+++ *
+++ *               x = k*ln2 + r,  |r| <= 0.5*ln2.
+++ *
+++ *      Here r will be represented as r = hi-lo for better
+++ *	accuracy.
+++ *
+++ *   2. Approximation of exp(r) by a special rational function on
+++ *	the interval [0,0.34658]:
+++ *	Write
+++ *	    R(r**2) = r*(exp(r)+1)/(exp(r)-1) = 2 + r*r/6 - r**4/360 + ...
+++ *      We use a special Remes algorithm on [0,0.34658] to generate
+++ * 	a polynomial of degree 5 to approximate R. The maximum error
+++ *	of this polynomial approximation is bounded by 2**-59. In
+++ *	other words,
+++ *	    R(z) ~ 2.0 + P1*z + P2*z**2 + P3*z**3 + P4*z**4 + P5*z**5
+++ *  	(where z=r*r, and the values of P1 to P5 are listed below)
+++ *	and
+++ *	    |                  5          |     -59
+++ *	    | 2.0+P1*z+...+P5*z   -  R(z) | <= 2
+++ *	    |                             |
+++ *	The computation of exp(r) thus becomes
+++*                             2*r
+++*		exp(r) = 1 + -------
+++*		              R - r
+++*                                 r*R1(r)
+++*		       = 1 + r + ----------- (for better accuracy)
+++*		                  2 - R1(r)
+++*	where
+++*			         2       4             10
+++*		R1(r) = r - (P1*r  + P2*r  + ... + P5*r   ).
+++*
+++*   3. Scale back to obtain exp(x):
+++*	From step 1, we have
+++*	   exp(x) = 2^k * exp(r)
+++*
+++* Special cases:
+++*	exp(INF) is INF, exp(NaN) is NaN;
+++*	exp(-INF) is 0, and
+++*	for finite argument, only exp(0)=1 is exact.
+++*
+++* Accuracy:
+++*	according to an error analysis, the error is always less than
+++*	1 ulp (unit in the last place).
+++*
+++* Misc. info.
+++*	For IEEE double
+++*	    if x >  7.09782712893383973096e+02 then exp(x) overflow
+++*	    if x < -7.45133219101941108420e+02 then exp(x) underflow
+++*
+++* Constants:
+++* The hexadecimal values are the intended ones for the following
+++* constants. The decimal values may be used, provided that the
+++* compiler will convert from decimal to binary accurately enough
+++* to produce the hexadecimal values shown.
++ 
++-#include <private/bionic_asm.h>
++-# -- Begin  exp
+++* This algorithim : Double-precision e^x function is implemented as
+++* Copyright (C) 2018 Free Software Foundation, Inc and is a
+++* part of the GNU C Library.
+++*/
+++
+++
+++
+++#define ENTRY(exp)		\
+++	.type  exp,  @function;		\
+++        .globl exp;		\
+++	.p2align 3;		\
+++ exp:		\
+++	.cfi_startproc
+++
+++#define END(name)		\
+++        .cfi_endproc;		\
+++        .size name, .-name
+++      
+++	
+++        .section	.rodata.cst8,"aM",@progbits,8
+++	.p2align	3
+++
+++.LCPI0_0:
+++	.quad	8070450532247928832     # double 3.1050361846014179E+231
+++.LCPI0_1:
+++	.quad	1152921504606846976     # double 1.2882297539194267E-231
+++.LCPI0_2:
+++	.quad	4607182418800017408     # double 1
+++.LCPI0_3:
+++	.quad	4640701337412797182     # double 184.66496523378731
+++.LCPI0_4:
+++	.quad	4843621399236968448     # double 6755399441055744
+++.LCPI0_5:
+++	.quad	-4379750637617807360    # double -6755399441055744
+++.LCPI0_6:
+++	.quad	-4650478699932942336    # double -0.0054152123481117087
+++.LCPI0_7:
+++	.quad	-4824208856859133126    # double -1.2864023111638346E-14
+++.LCPI0_8:
+++	.quad	4595172819793695804     # double 0.16666666666665886
+++.LCPI0_9:
+++	.quad	4602678819172646333     # double 0.49999999999996786
+++.LCPI0_10:
+++	.quad	4575957462836105239     # double 0.008333335853059549
+++.LCPI0_11:
+++	.quad	4586165622581701521     # double 0.041666680841067401
+++.LCPI0_12:
+++	.quad	-4616189618054758400    # double -1
+++.LCPI0_13:
+++	.quad	4503599627370496        # double 2.2250738585072014E-308
+++.LCPI0_14:
+++	.quad	9151314442816847872     # double 5.4861240687936887E+303
+++
+++# -- Begin exp
++ ENTRY(exp)
++-# parameter 1: %xmm0
++-..B1.1:
++-..___tag_value_exp.1:
++-        subq      $24, %rsp
++-..___tag_value_exp.3:
++-        movsd     %xmm0, 8(%rsp)
++-..B1.2:
++-        unpcklpd  %xmm0, %xmm0
++-        movapd    cv(%rip), %xmm1
++-        movapd    Shifter(%rip), %xmm6
++-        movapd    16+cv(%rip), %xmm2
++-        movapd    32+cv(%rip), %xmm3
++-        pextrw    $3, %xmm0, %eax
++-        andl      $32767, %eax
++-        movl      $16527, %edx
++-        subl      %eax, %edx
++-        subl      $15504, %eax
++-        orl       %eax, %edx
++-        cmpl      $-2147483648, %edx
++-        jae       .L_2TAG_PACKET_0.0.2
++-        mulpd     %xmm0, %xmm1
++-        addpd     %xmm6, %xmm1
++-        movapd    %xmm1, %xmm7
++-        subpd     %xmm6, %xmm1
++-        mulpd     %xmm1, %xmm2
++-        movapd    64+cv(%rip), %xmm4
++-        mulpd     %xmm1, %xmm3
++-        movapd    80+cv(%rip), %xmm5
++-        subpd     %xmm2, %xmm0
++-        movd      %xmm7, %eax
++-        movl      %eax, %ecx
++-        andl      $63, %ecx
++-        shll      $4, %ecx
++-        sarl      $6, %eax
++-        movl      %eax, %edx
++-        movdqa    mmask(%rip), %xmm6
++-        pand      %xmm6, %xmm7
++-        movdqa    bias(%rip), %xmm6
++-        paddq     %xmm6, %xmm7
++-        psllq     $46, %xmm7
++-        subpd     %xmm3, %xmm0
++-        lea       Tbl_addr(%rip), %r8
++-        movapd    (%rcx,%r8), %xmm2
++-        mulpd     %xmm0, %xmm4
++-        movapd    %xmm0, %xmm6
++-        movapd    %xmm0, %xmm1
++-        mulpd     %xmm6, %xmm6
++-        mulpd     %xmm6, %xmm0
++-        addpd     %xmm4, %xmm5
++-        mulsd     %xmm6, %xmm0
++-        mulpd     48+cv(%rip), %xmm6
++-        addsd     %xmm2, %xmm1
++-        unpckhpd  %xmm2, %xmm2
++-        mulpd     %xmm5, %xmm0
++-        addsd     %xmm0, %xmm1
++-        orpd      %xmm7, %xmm2
++-        unpckhpd  %xmm0, %xmm0
++-        addsd     %xmm1, %xmm0
++-        addsd     %xmm6, %xmm0
++-        addl      $894, %edx
++-        cmpl      $1916, %edx
++-        ja        .L_2TAG_PACKET_1.0.2
++-        mulsd     %xmm2, %xmm0
++-        addsd     %xmm2, %xmm0
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_1.0.2:
++-        xorpd     %xmm3, %xmm3
++-        movapd    ALLONES(%rip), %xmm4
++-        movl      $-1022, %edx
++-        subl      %eax, %edx
++-        movd      %edx, %xmm5
++-        psllq     %xmm5, %xmm4
++-        movl      %eax, %ecx
++-        sarl      $1, %eax
++-        pinsrw    $3, %eax, %xmm3
++-        movapd    ebias(%rip), %xmm6
++-        psllq     $4, %xmm3
++-        psubd     %xmm3, %xmm2
++-        mulsd     %xmm2, %xmm0
++-        cmpl      $52, %edx
++-        jg        .L_2TAG_PACKET_2.0.2
++-        andpd     %xmm2, %xmm4
++-        paddd     %xmm6, %xmm3
++-        subsd     %xmm4, %xmm2
++-        addsd     %xmm2, %xmm0
++-        cmpl      $1023, %ecx
++-        jge       .L_2TAG_PACKET_3.0.2
++-        pextrw    $3, %xmm0, %ecx
++-        andl      $32768, %ecx
++-        orl       %ecx, %edx
++-        cmpl      $0, %edx
++-        je        .L_2TAG_PACKET_4.0.2
++-        movapd    %xmm0, %xmm6
++-        addsd     %xmm4, %xmm0
++-        mulsd     %xmm3, %xmm0
++-        pextrw    $3, %xmm0, %ecx
++-        andl      $32752, %ecx
++-        cmpl      $0, %ecx
++-        je        .L_2TAG_PACKET_5.0.2
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_5.0.2:
++-        mulsd     %xmm3, %xmm6
++-        mulsd     %xmm3, %xmm4
++-        movq      %xmm6, %xmm0
++-        pxor      %xmm4, %xmm6
++-        psrad     $31, %xmm6
++-        pshufd    $85, %xmm6, %xmm6
++-        psllq     $1, %xmm0
++-        psrlq     $1, %xmm0
++-        pxor      %xmm6, %xmm0
++-        psrlq     $63, %xmm6
++-        paddq     %xmm6, %xmm0
++-        paddq     %xmm4, %xmm0
++-        movl      $15, (%rsp)
++-        jmp       .L_2TAG_PACKET_6.0.2
++-.L_2TAG_PACKET_4.0.2:
++-        addsd     %xmm4, %xmm0
++-        mulsd     %xmm3, %xmm0
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_3.0.2:
++-        addsd     %xmm4, %xmm0
++-        mulsd     %xmm3, %xmm0
++-        pextrw    $3, %xmm0, %ecx
++-        andl      $32752, %ecx
++-        cmpl      $32752, %ecx
++-        jnb       .L_2TAG_PACKET_7.0.2
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_2.0.2:
++-        paddd     %xmm6, %xmm3
++-        addpd     %xmm2, %xmm0
++-        mulsd     %xmm3, %xmm0
++-        movl      $15, (%rsp)
++-        jmp       .L_2TAG_PACKET_6.0.2
++-.L_2TAG_PACKET_8.0.2:
++-        cmpl      $2146435072, %eax
++-        jae       .L_2TAG_PACKET_9.0.2
++-        movl      12(%rsp), %eax
++-        cmpl      $-2147483648, %eax
++-        jae       .L_2TAG_PACKET_10.0.2
++-        movsd     XMAX(%rip), %xmm0
++-        mulsd     %xmm0, %xmm0
++-.L_2TAG_PACKET_7.0.2:
++-        movl      $14, (%rsp)
++-        jmp       .L_2TAG_PACKET_6.0.2
++-.L_2TAG_PACKET_10.0.2:
++-        movsd     XMIN(%rip), %xmm0
++-        mulsd     %xmm0, %xmm0
++-        movl      $15, (%rsp)
++-        jmp       .L_2TAG_PACKET_6.0.2
++-.L_2TAG_PACKET_9.0.2:
++-        movl      8(%rsp), %edx
++-        cmpl      $2146435072, %eax
++-        ja        .L_2TAG_PACKET_11.0.2
++-        cmpl      $0, %edx
++-        jne       .L_2TAG_PACKET_11.0.2
++-        movl      12(%rsp), %eax
++-        cmpl      $2146435072, %eax
++-        jne       .L_2TAG_PACKET_12.0.2
++-        movsd     INF(%rip), %xmm0
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_12.0.2:
++-        movsd     ZERO(%rip), %xmm0
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_11.0.2:
++-        movsd     8(%rsp), %xmm0
++-        addsd     %xmm0, %xmm0
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_0.0.2:
++-        movl      12(%rsp), %eax
++-        andl      $2147483647, %eax
++-        cmpl      $1083179008, %eax
++-        jae       .L_2TAG_PACKET_8.0.2
++-        movsd     8(%rsp), %xmm0
++-        addsd     ONE_val(%rip), %xmm0
++-        jmp       ..B1.5
++-.L_2TAG_PACKET_6.0.2:
++-        movq      %xmm0, 16(%rsp)
++-..B1.3:
++-        movq      16(%rsp), %xmm0
++-.L_2TAG_PACKET_13.0.2:
++-..B1.5:
++-        addq      $24, %rsp
++-..___tag_value_exp.4:
++-        ret       
++-..___tag_value_exp.5:
+++
+++# BB#0:
+++	vmovq	%xmm0, %rax
+++	movq	%rax, %rdx
+++	shrq	$52, %rdx
+++	andl	$2047, %edx             # imm = 0x7FF
+++	leal	-969(%rdx), %ecx
+++	cmpl	$63, %ecx
+++	jae	.LBB0_5
+++# BB#1:
+++	movl	%edx, %ecx
+++.LBB0_2:
+++	vmulsd	.LCPI0_3(%rip), %xmm0, %xmm1
+++	vaddsd	.LCPI0_4(%rip), %xmm1, %xmm1
+++	vaddsd	.LCPI0_5(%rip), %xmm1, %xmm2
+++	vmovq	%xmm1, %rdx
+++	vmulsd	.LCPI0_6(%rip), %xmm2, %xmm1
+++	vaddsd	%xmm1, %xmm0, %xmm0
+++	vmulsd	.LCPI0_7(%rip), %xmm2, %xmm1
+++	movq	%rdx, %rax
+++	shlq	$45, %rax
+++	movq	%rdx, %rsi
+++	andq	$127, %rsi
+++	shlq	$4, %rsi
+++	movq	__exp_data@GOTPCREL(%rip), %rdi
+++	addq	120(%rdi,%rsi), %rax
+++	vaddsd	%xmm1, %xmm0, %xmm0
+++	vmulsd	%xmm0, %xmm0, %xmm1
+++	vaddsd	112(%rdi,%rsi), %xmm0, %xmm2
+++	vmulsd	.LCPI0_8(%rip), %xmm0, %xmm3
+++	vaddsd	.LCPI0_9(%rip), %xmm3, %xmm3
+++	vmulsd	%xmm3, %xmm1, %xmm3
+++	vaddsd	%xmm2, %xmm3, %xmm2
+++	vmulsd	.LCPI0_10(%rip), %xmm0, %xmm0
+++	vmulsd	%xmm1, %xmm1, %xmm1
+++	vaddsd	.LCPI0_11(%rip), %xmm0, %xmm0
+++	vmulsd	%xmm0, %xmm1, %xmm0
+++	vaddsd	%xmm2, %xmm0, %xmm0
+++	testl	%ecx, %ecx
+++	je	.LBB0_17
+++# BB#3:
+++	testl	%edx, %edx
+++	js	.LBB0_14
+++# BB#4:
+++	movabsq	$-4544132024016830464, %rcx # imm = 0xC0F0000000000000
+++	addq	%rcx, %rax
+++	vmovq	%rax, %xmm1
+++	vmulsd	%xmm1, %xmm0, %xmm0
+++	vaddsd	%xmm1, %xmm0, %xmm0
+++	vmulsd	.LCPI0_14(%rip), %xmm0, %xmm1
+++	vmovapd	%xmm1, %xmm0
+++	retq
+++.LBB0_17:
+++	vmovq	%rax, %xmm1
+++	vmulsd	%xmm1, %xmm0, %xmm0
+++	vaddsd	%xmm1, %xmm0, %xmm1
+++.LBB0_18:
+++	vmovapd	%xmm1, %xmm0
+++	retq
+++.LBB0_14:
+++	movabsq	$4602678819172646912, %rcx # imm = 0x3FE0000000000000
+++	addq	%rcx, %rax
+++	vmovq	%rax, %xmm1
+++	vmulsd	%xmm1, %xmm0, %xmm2
+++	vaddsd	%xmm1, %xmm2, %xmm0
+++	vmovsd	.LCPI0_2(%rip), %xmm3   # xmm3 = mem[0],zero
+++	vucomisd	%xmm0, %xmm3
+++	jbe	.LBB0_16
+++# BB#15:
+++	vsubsd	%xmm0, %xmm1, %xmm1
+++	vaddsd	%xmm1, %xmm2, %xmm1
+++	vaddsd	%xmm3, %xmm0, %xmm2
+++	vsubsd	%xmm2, %xmm3, %xmm3
+++	vaddsd	%xmm3, %xmm0, %xmm0
+++	vaddsd	%xmm0, %xmm1, %xmm0
+++	vaddsd	%xmm0, %xmm2, %xmm0
+++	vaddsd	.LCPI0_12(%rip), %xmm0, %xmm0
+++	vxorpd	%xmm1, %xmm1, %xmm1
+++	vcmpeqsd	%xmm1, %xmm0, %xmm1
+++	vandnpd	%xmm0, %xmm1, %xmm0
+++	vmovsd	.LCPI0_13(%rip), %xmm1  # xmm1 = mem[0],zero
+++	vmovapd	%xmm1, %xmm2
+++	#APP
+++	#NO_APP
+++	vmulsd	%xmm1, %xmm2, %xmm1
+++	#APP
+++	#NO_APP
+++.LBB0_16:
+++	vmulsd	.LCPI0_13(%rip), %xmm0, %xmm1
+++	vmovapd	%xmm1, %xmm0
+++	retq
+++.LBB0_5:
+++	cmpl	$968, %edx              # imm = 0x3C8
+++	ja	.LBB0_7
+++# BB#6:
+++	vaddsd	.LCPI0_2(%rip), %xmm0, %xmm1
+++	vmovapd	%xmm1, %xmm0
+++	retq
+++.LBB0_7:
+++	xorl	%ecx, %ecx
+++	cmpl	$1033, %edx             # imm = 0x409
+++	jb	.LBB0_2
+++# BB#8:
+++	vxorpd	%xmm1, %xmm1, %xmm1
+++	movabsq	$-4503599627370496, %rcx # imm = 0xFFF0000000000000
+++	cmpq	%rcx, %rax
+++	je	.LBB0_18
+++# BB#9:
+++	cmpl	$2047, %edx             # imm = 0x7FF
+++	jne	.LBB0_11
+++# BB#10:
+++	vaddsd	.LCPI0_2(%rip), %xmm0, %xmm1
+++	vmovapd	%xmm1, %xmm0
+++	retq
+++.LBB0_11:
+++	testq	%rax, %rax
+++	js	.LBB0_12
+++# BB#13:
+++	vmovsd	.LCPI0_0(%rip), %xmm0   # xmm0 = mem[0],zero
+++	vmovapd	%xmm0, %xmm1
+++	#APP
+++	#NO_APP
+++	vmulsd	%xmm0, %xmm1, %xmm1
+++	vmovapd	%xmm1, %xmm0
+++	retq
+++.LBB0_12:
+++	vmovsd	.LCPI0_1(%rip), %xmm0   # xmm0 = mem[0],zero
+++	vmovapd	%xmm0, %xmm1
+++	#APP
+++	#NO_APP
+++	vmulsd	%xmm0, %xmm1, %xmm1
+++	vmovapd	%xmm1, %xmm0
+++	retq
++ END(exp)
++-# -- End  exp
++-	.section .rodata, "a"
++-	.align 16
++-	.align 16
++-cv:
++-	.long	1697350398
++-	.long	1079448903
++-	.long	1697350398
++-	.long	1079448903
++-	.long	4277796864
++-	.long	1065758274
++-	.long	4277796864
++-	.long	1065758274
++-	.long	3164486458
++-	.long	1025308570
++-	.long	3164486458
++-	.long	1025308570
++-	.long	4294967294
++-	.long	1071644671
++-	.long	4294967294
++-	.long	1071644671
++-	.long	3811088480
++-	.long	1062650204
++-	.long	1432067621
++-	.long	1067799893
++-	.long	3230715663
++-	.long	1065423125
++-	.long	1431604129
++-	.long	1069897045
++-	.type	cv,@object
++-	.size	cv,96
++-	.align 16
++-Shifter:
++-	.long	0
++-	.long	1127743488
++-	.long	0
++-	.long	1127743488
++-	.type	Shifter,@object
++-	.size	Shifter,16
++-	.align 16
++-mmask:
++-	.long	4294967232
++-	.long	0
++-	.long	4294967232
++-	.long	0
++-	.type	mmask,@object
++-	.size	mmask,16
++-	.align 16
++-bias:
++-	.long	65472
++-	.long	0
++-	.long	65472
++-	.long	0
++-	.type	bias,@object
++-	.size	bias,16
++-	.align 16
++-Tbl_addr:
++-	.long	0
++-	.long	0
++-	.long	0
++-	.long	0
++-	.long	235107661
++-	.long	1018002367
++-	.long	1048019040
++-	.long	11418
++-	.long	896005651
++-	.long	1015861842
++-	.long	3541402996
++-	.long	22960
++-	.long	1642514529
++-	.long	1012987726
++-	.long	410360776
++-	.long	34629
++-	.long	1568897900
++-	.long	1016568486
++-	.long	1828292879
++-	.long	46424
++-	.long	1882168529
++-	.long	1010744893
++-	.long	852742562
++-	.long	58348
++-	.long	509852888
++-	.long	1017336174
++-	.long	3490863952
++-	.long	70401
++-	.long	653277307
++-	.long	1017431380
++-	.long	2930322911
++-	.long	82586
++-	.long	1649557430
++-	.long	1017729363
++-	.long	1014845818
++-	.long	94904
++-	.long	1058231231
++-	.long	1015777676
++-	.long	3949972341
++-	.long	107355
++-	.long	1044000607
++-	.long	1016786167
++-	.long	828946858
++-	.long	119943
++-	.long	1151779725
++-	.long	1015705409
++-	.long	2288159958
++-	.long	132667
++-	.long	3819481236
++-	.long	1016499965
++-	.long	1853186616
++-	.long	145530
++-	.long	2552227826
++-	.long	1015039787
++-	.long	1709341917
++-	.long	158533
++-	.long	1829350193
++-	.long	1015216097
++-	.long	4112506593
++-	.long	171677
++-	.long	1913391795
++-	.long	1015756674
++-	.long	2799960843
++-	.long	184965
++-	.long	1303423926
++-	.long	1015238005
++-	.long	171030293
++-	.long	198398
++-	.long	1574172746
++-	.long	1016061241
++-	.long	2992903935
++-	.long	211976
++-	.long	3424156969
++-	.long	1017196428
++-	.long	926591434
++-	.long	225703
++-	.long	1938513547
++-	.long	1017631273
++-	.long	887463926
++-	.long	239579
++-	.long	2804567149
++-	.long	1015390024
++-	.long	1276261410
++-	.long	253606
++-	.long	631083525
++-	.long	1017690182
++-	.long	569847337
++-	.long	267786
++-	.long	1623370770
++-	.long	1011049453
++-	.long	1617004845
++-	.long	282120
++-	.long	3667985273
++-	.long	1013894369
++-	.long	3049340112
++-	.long	296610
++-	.long	3145379760
++-	.long	1014403278
++-	.long	3577096743
++-	.long	311258
++-	.long	2603100681
++-	.long	1017152460
++-	.long	1990012070
++-	.long	326066
++-	.long	3249202951
++-	.long	1017448880
++-	.long	1453150081
++-	.long	341035
++-	.long	419288974
++-	.long	1016280325
++-	.long	917841882
++-	.long	356167
++-	.long	3793507337
++-	.long	1016095713
++-	.long	3712504873
++-	.long	371463
++-	.long	728023093
++-	.long	1016345318
++-	.long	363667784
++-	.long	386927
++-	.long	2582678538
++-	.long	1017123460
++-	.long	2956612996
++-	.long	402558
++-	.long	7592966
++-	.long	1016721543
++-	.long	2186617380
++-	.long	418360
++-	.long	228611441
++-	.long	1016696141
++-	.long	1719614412
++-	.long	434334
++-	.long	2261665670
++-	.long	1017457593
++-	.long	1013258798
++-	.long	450482
++-	.long	544148907
++-	.long	1017323666
++-	.long	3907805043
++-	.long	466805
++-	.long	2383914918
++-	.long	1017143586
++-	.long	1447192520
++-	.long	483307
++-	.long	1176412038
++-	.long	1017267372
++-	.long	1944781190
++-	.long	499988
++-	.long	2882956373
++-	.long	1013312481
++-	.long	919555682
++-	.long	516851
++-	.long	3154077648
++-	.long	1016528543
++-	.long	2571947538
++-	.long	533897
++-	.long	348651999
++-	.long	1016405780
++-	.long	2604962540
++-	.long	551129
++-	.long	3253791412
++-	.long	1015920431
++-	.long	1110089947
++-	.long	568549
++-	.long	1509121860
++-	.long	1014756995
++-	.long	2568320822
++-	.long	586158
++-	.long	2617649212
++-	.long	1017340090
++-	.long	2966275556
++-	.long	603959
++-	.long	553214634
++-	.long	1016457425
++-	.long	2682146383
++-	.long	621954
++-	.long	730975783
++-	.long	1014083580
++-	.long	2191782032
++-	.long	640145
++-	.long	1486499517
++-	.long	1016818996
++-	.long	2069751140
++-	.long	658534
++-	.long	2595788928
++-	.long	1016407932
++-	.long	2990417244
++-	.long	677123
++-	.long	1853053619
++-	.long	1015310724
++-	.long	1434058175
++-	.long	695915
++-	.long	2462790535
++-	.long	1015814775
++-	.long	2572866477
++-	.long	714911
++-	.long	3693944214
++-	.long	1017259110
++-	.long	3092190714
++-	.long	734114
++-	.long	2979333550
++-	.long	1017188654
++-	.long	4076559942
++-	.long	753526
++-	.long	174054861
++-	.long	1014300631
++-	.long	2420883922
++-	.long	773150
++-	.long	816778419
++-	.long	1014197934
++-	.long	3716502172
++-	.long	792987
++-	.long	3507050924
++-	.long	1015341199
++-	.long	777507147
++-	.long	813041
++-	.long	1821514088
++-	.long	1013410604
++-	.long	3706687593
++-	.long	833312
++-	.long	920623539
++-	.long	1016295433
++-	.long	1242007931
++-	.long	853805
++-	.long	2789017511
++-	.long	1014276997
++-	.long	3707479175
++-	.long	874520
++-	.long	3586233004
++-	.long	1015962192
++-	.long	64696965
++-	.long	895462
++-	.long	474650514
++-	.long	1016642419
++-	.long	863738718
++-	.long	916631
++-	.long	1614448851
++-	.long	1014281732
++-	.long	3884662774
++-	.long	938030
++-	.long	2450082086
++-	.long	1016164135
++-	.long	2728693977
++-	.long	959663
++-	.long	1101668360
++-	.long	1015989180
++-	.long	3999357479
++-	.long	981531
++-	.long	835814894
++-	.long	1015702697
++-	.long	1533953344
++-	.long	1003638
++-	.long	1301400989
++-	.long	1014466875
++-	.long	2174652632
++-	.long	1025985
++-	.type	Tbl_addr,@object
++-	.size	Tbl_addr,1024
++-	.align 16
++-ALLONES:
++-	.long	4294967295
++-	.long	4294967295
++-	.long	4294967295
++-	.long	4294967295
++-	.type	ALLONES,@object
++-	.size	ALLONES,16
++-	.align 16
++-ebias:
++-	.long	0
++-	.long	1072693248
++-	.long	0
++-	.long	1072693248
++-	.type	ebias,@object
++-	.size	ebias,16
++-	.align 4
++-XMAX:
++-	.long	4294967295
++-	.long	2146435071
++-	.type	XMAX,@object
++-	.size	XMAX,8
++-	.align 4
++-XMIN:
++-	.long	0
++-	.long	1048576
++-	.type	XMIN,@object
++-	.size	XMIN,8
++-	.align 4
++-INF:
++-	.long	0
++-	.long	2146435072
++-	.type	INF,@object
++-	.size	INF,8
++-	.align 4
++-ZERO:
++-	.long	0
++-	.long	0
++-	.type	ZERO,@object
++-	.size	ZERO,8
++-	.align 4
++-ONE_val:
++-	.long	0
++-	.long	1072693248
++-	.type	ONE_val,@object
++-	.size	ONE_val,8
++-	.data
++-	.section .note.GNU-stack, ""
++-// -- Begin DWARF2 SEGMENT .eh_frame
++-	.section .eh_frame,"a",@progbits
++-.eh_frame_seg:
++-	.align 1
++-	.4byte 0x00000014
++-	.8byte 0x00527a0100000000
++-	.8byte 0x08070c1b01107801
++-	.4byte 0x00000190
++-	.4byte 0x0000001c
++-	.4byte 0x0000001c
++-	.4byte ..___tag_value_exp.1-.
++-	.4byte ..___tag_value_exp.5-..___tag_value_exp.1
++-	.2byte 0x0400
++-	.4byte ..___tag_value_exp.3-..___tag_value_exp.1
++-	.2byte 0x200e
++-	.byte 0x04
++-	.4byte ..___tag_value_exp.4-..___tag_value_exp.3
++-	.2byte 0x080e
++-	.byte 0x00
++-# End
+++# -- End exp
+++	.type	__exp_data,@object      # @__exp_data
+++	.section	.rodata,"a",@progbits
+++	.globl	__exp_data
+++	.p2align	3
+++__exp_data:
+++	.quad	4640701337412797182     # double 184.66496523378731
+++	.quad	4843621399236968448     # double 6755399441055744
+++	.quad	-4650478699932942336    # double -0.0054152123481117087
+++	.quad	-4824208856859133126    # double -1.2864023111638346E-14
+++	.quad	4602678819172646333     # double 0.49999999999996786
+++	.quad	4595172819793695804     # double 0.16666666666665886
+++	.quad	4586165622581701521     # double 0.041666680841067401
+++	.quad	4575957462836105239     # double 0.008333335853059549
+++	.quad	4812096201845374976     # double 52776558133248
+++	.quad	4604418534313441775     # double 0.69314718055994529
+++	.quad	4597823092348339236     # double 0.24022650695909065
+++	.quad	4588159806095553717     # double 0.0555041086686087
+++	.quad	4576698097375531212     # double 0.0096181319757210545
+++	.quad	4563791157088107140     # double 0.0013332074570119598
+++	.quad	0                       # 0x0
+++	.quad	4607182418800017408     # 0x3ff0000000000000
+++	.quad	4367149474599452526     # 0x3c9b3b4f1a88bf6e
+++	.quad	4607171688528556853     # 0x3feff63da9fb3335
+++	.quad	-4868004084858692515    # 0xbc7160139cd8dc5d
+++	.quad	4607161091040444513     # 0x3fefec9a3e778061
+++	.quad	-4859280119576434991    # 0xbc905e7a108766d1
+++	.quad	4607150627056680837     # 0x3fefe315e86e7f85
+++	.quad	4363093389540324883     # 0x3c8cd2523567f613
+++	.quad	4607140297302181236     # 0x3fefd9b0d3158574
+++	.quad	-4860564323061625094    # 0xbc8bce8023f98efa
+++	.quad	4607130102505797342     # 0x3fefd06b29ddf6de
+++	.quad	4350749156061923425     # 0x3c60f74e61e6c861
+++	.quad	4607120043400338376     # 0x3fefc74518759bc8
+++	.quad	4364168240100004761     # 0x3c90a3e45b33d399
+++	.quad	4607110120722592643     # 0x3fefbe3ecac6f383
+++	.quad	4366128403083131757     # 0x3c979aa65d837b6d
+++	.quad	4607100335213349135     # 0x3fefb5586cf9890f
+++	.quad	4363624214708482044     # 0x3c8eb51a92fdeffc
+++	.quad	4607090687617419255     # 0x3fefac922b7247f7
+++	.quad	4341116261916187857     # 0x3c3ebe3d702f9cd1
+++	.quad	4607081178683658658     # 0x3fefa3ec32d3d1a2
+++	.quad	-4870076522866643445    # 0xbc6a033489906e0b
+++	.quad	4607071809164989211     # 0x3fef9b66affed31b
+++	.quad	-4857881712154133234    # 0xbc9556522a2fbd0e
+++	.quad	4607062579818421073     # 0x3fef9301d0125b51
+++	.quad	-4877256630102726059    # 0xbc5080ef8c4eea55
+++	.quad	4607053491405074892     # 0x3fef8abdc06c31cc
+++	.quad	-4858881367677209578    # 0xbc91c923b9d5f416
+++	.quad	4607044544690204128     # 0x3fef829aaea92de0
+++	.quad	4359717415120819631     # 0x3c80d3e3e95c55af
+++	.quad	4607035740443217489     # 0x3fef7a98c8a58e51
+++	.quad	-4863857816615152824    # 0xbc801b15eaa59348
+++	.quad	4607027079437701499     # 0x3fef72b83c7d517b
+++	.quad	-4859630355816238531    # 0xbc8f1ff055de323d
+++	.quad	4607018562451443178     # 0x3fef6af9388c8dea
+++	.quad	4362731899485115327     # 0x3c8b898c3f1353bf
+++	.quad	4607010190266452853     # 0x3fef635beb6fcb75
+++	.quad	-4857455882053489882    # 0xbc96d99c7611eb26
+++	.quad	4607001963668987092     # 0x3fef5be084045cd4
+++	.quad	4367063335334195040     # 0x3c9aecf73e3a2f60
+++	.quad	4606993883449571754     # 0x3fef54873168b9aa
+++	.quad	-4859410923963139939    # 0xbc8fe782cb86389d
+++	.quad	4606985950403025181     # 0x3fef4d5022fcd91d
+++	.quad	4362421515177083789     # 0x3c8a6f4144a6c38d
+++	.quad	4606978165328481494     # 0x3fef463b88628cd6
+++	.quad	4359618604155798653     # 0x3c807a05b0e4047d
+++	.quad	4606970529029414038     # 0x3fef3f49917ddc96
+++	.quad	4365834109879625876     # 0x3c968efde3a8a894
+++	.quad	4606963042313658936     # 0x3fef387a6e756238
+++	.quad	4361558225371547773     # 0x3c875e18f274487d
+++	.quad	4606955705993438783     # 0x3fef31ce4fb2a63f
+++	.quad	4359562691856033778     # 0x3c80472b981fe7f2
+++	.quad	4606948520885386461     # 0x3fef2b4565e27cdd
+++	.quad	-4857492308587640738    # 0xbc96b87b3f71085e
+++	.quad	4606941487810569089     # 0x3fef24dfe1f56381
+++	.quad	4360319936817113905     # 0x3c82f7e16d09ab31
+++	.quad	4606934607594512097     # 0x3fef1e9df51fdee1
+++	.quad	-4882709470952570886    # 0xbc3d219b1a6fbffa
+++	.quad	4606927881067223440     # 0x3fef187fd0dad990
+++	.quad	4362641697437125300     # 0x3c8b3782720c0ab4
+++	.quad	4606921309063217931     # 0x3fef1285a6e4030b
+++	.quad	4354440509323660175     # 0x3c6e149289cecb8f
+++	.quad	4606914892421541718     # 0x3fef0cafa93e2f56
+++	.quad	4360414030434708406     # 0x3c834d754db0abb6
+++	.quad	4606908631985796885     # 0x3fef06fe0a31b715
+++	.quad	4361245865020257356     # 0x3c864201e2ac744c
+++	.quad	4606902528604166193     # 0x3fef0170fc4cd831
+++	.quad	4363949802402347082     # 0x3c8fdd395dd3f84a
+++	.quad	4606896583129437951     # 0x3feefc08b26416ff
+++	.quad	-4862018976549545212    # 0xbc86a3803b8e5b04
+++	.quad	4606890796419031025     # 0x3feef6c55f929ff1
+++	.quad	-4858738662784151448    # 0xbc924aedcc4b5068
+++	.quad	4606885169335019979     # 0x3feef1a7373aa9cb
+++	.quad	-4856841960950780530    # 0xbc9907f81b512d8e
+++	.quad	4606879702744160358     # 0x3feeecae6d05d866
+++	.quad	-4867878926798276910    # 0xbc71d1e83e9436d2
+++	.quad	4606874397517914103     # 0x3feee7db34e59ff7
+++	.quad	-4856823124960863467    # 0xbc991919b3ce1b15
+++	.quad	4606869254532475109     # 0x3feee32dc313a8e5
+++	.quad	4361066948569222253     # 0x3c859f48a72a4c6d
+++	.quad	4606864274668794914     # 0x3feedea64c123422
+++	.quad	-4858519367427004022    # 0xbc9312607a28698a
+++	.quad	4606859458812608540     # 0x3feeda4504ac801c
+++	.quad	-4874962362796897957    # 0xbc58a78f4817895b
+++	.quad	4606854807854460458     # 0x3feed60a21f72e2a
+++	.quad	-4864964451502548453    # 0xbc7c2c9b67499a1b
+++	.quad	4606850322689730711     # 0x3feed1f5d950a897
+++	.quad	4342424336897059857     # 0x3c4363ed60c2ac11
+++	.quad	4606846004218661165     # 0x3feece086061892d
+++	.quad	4365789078613288175     # 0x3c9666093b0664ef
+++	.quad	4606841853346381911     # 0x3feeca41ed1d0057
+++	.quad	4354643160121541497     # 0x3c6ecce1daa10379
+++	.quad	4606837870982937808     # 0x3feec6a2b5c13cd0
+++	.quad	4365113450260533808     # 0x3c93ff8e3f0f1230
+++	.quad	4606834058043315166     # 0x3feec32af0d7d3de
+++	.quad	4356828907110576048     # 0x3c7690cebb7aafb0
+++	.quad	4606830415447468583     # 0x3feebfdad5362a27
+++	.quad	4364865165386375287     # 0x3c931dbdeb54e077
+++	.quad	4606826944120347917     # 0x3feebcb299fddd0d
+++	.quad	-4859502521842818162    # 0xbc8f94340071a38e
+++	.quad	4606823644991925415     # 0x3feeb9b2769d2ca7
+++	.quad	-4861672301267803319    # 0xbc87deccdc93a349
+++	.quad	4606820518997222978     # 0x3feeb6daa2cf6642
+++	.quad	-4865894452217038753    # 0xbc78dec6bd0f385f
+++	.quad	4606817567076339586     # 0x3feeb42b569d4f82
+++	.quad	-4862178651875353354    # 0xbc861246ec7b5cf6
+++	.quad	4606814790174478863     # 0x3feeb1a4ca5d920f
+++	.quad	4364890759862540174     # 0x3c93350518fdd78e
+++	.quad	4606812189241976794     # 0x3feeaf4736b527da
+++	.quad	4358244976955136773     # 0x3c7b98b72f8a9b05
+++	.quad	4606809765234329597     # 0x3feead12d497c7fd
+++	.quad	4364097860734309385     # 0x3c9063e1e21c5409
+++	.quad	4606807519112221737     # 0x3feeab07dd485429
+++	.quad	4338311716453074666     # 0x3c34c7855019c6ea
+++	.quad	4606805451841554103     # 0x3feea9268a5946b7
+++	.quad	4365169902980743221     # 0x3c9432e62b64c035
+++	.quad	4606803564393472328     # 0x3feea76f15ad2148
+++	.quad	-4860258889723447649    # 0xbc8ce44a6199769f
+++	.quad	4606801857744395273     # 0x3feea5e1b976dc09
+++	.quad	-4860452975632495192    # 0xbc8c33c53bef4da8
+++	.quad	4606800332876043653     # 0x3feea47eb03a5585
+++	.quad	-4862669920490755666    # 0xbc845378892be9ae
+++	.quad	4606798990775468832     # 0x3feea34634ccc320
+++	.quad	-4858312122400614312    # 0xbc93cedd78565858
+++	.quad	4606797832435081765     # 0x3feea23882552225
+++	.quad	4347962289735735652     # 0x3c5710aa807e1964
+++	.quad	4606796858852682099     # 0x3feea155d44ca973
+++	.quad	-4858341730713460184    # 0xbc93b3efbf5e2228
+++	.quad	4606796071031487437     # 0x3feea09e667f3bcd
+++	.quad	-4870059510540748414    # 0xbc6a12ad8734b982
+++	.quad	4606795469980162751     # 0x3feea012750bdabf
+++	.quad	-4871936092595705362    # 0xbc6367efb86da9ee
+++	.quad	4606795056712849967     # 0x3fee9fb23c651a2f
+++	.quad	-4863645441585018799    # 0xbc80dc3d54e08851
+++	.quad	4606794832249197700     # 0x3fee9f7df9519484
+++	.quad	-4866104880896786737    # 0xbc781f647e5a3ecf
+++	.quad	4606794797614391156     # 0x3fee9f75e8ec5f74
+++	.quad	-4861936742874514000    # 0xbc86ee4ac08b7db0
+++	.quad	4606794953839182196     # 0x3fee9f9a48a58174
+++	.quad	-4862171044651866486    # 0xbc8619321e55e68a
+++	.quad	4606795301959919561     # 0x3fee9feb564267c9
+++	.quad	4364160436192007379     # 0x3c909ccb5e09d4d3
+++	.quad	4606795843018579263     # 0x3feea0694fde5d3f
+++	.quad	-4865239048860621539    # 0xbc7b32dcb94da51d
+++	.quad	4606796578062795143     # 0x3feea11473eb0187
+++	.quad	4365374511615819883     # 0x3c94ecfd5467c06b
+++	.quad	4606797508145889586     # 0x3feea1ed0130c132
+++	.quad	4352143969406577749     # 0x3c65ebe1abd66c55
+++	.quad	4606798634326904418     # 0x3feea2f336cf4e62
+++	.quad	-4861457929465508030    # 0xbc88a1c52fb3cf42
+++	.quad	4606799957670631954     # 0x3feea427543e1a12
+++	.quad	-4858423338550479052    # 0xbc9369b6f13b3734
+++	.quad	4606801479247646227     # 0x3feea589994cce13
+++	.quad	-4863783675556659426    # 0xbc805e843a19ff1e
+++	.quad	4606803200134334381     # 0x3feea71a4623c7ad
+++	.quad	-4858024654332078226    # 0xbc94d450d872576e
+++	.quad	4606805121412928237     # 0x3feea8d99b4492ed
+++	.quad	4364178698342926848     # 0x3c90ad675b0e8a00
+++	.quad	4606807244171536025     # 0x3feeaac7d98a6699
+++	.quad	4363345029737015988     # 0x3c8db72fc1f0eab4
+++	.quad	4606809569504174299     # 0x3feeace5422aa0db
+++	.quad	-4871286895867992065    # 0xbc65b6609cc5e7ff
+++	.quad	4606812098510800012     # 0x3feeaf3216b5448c
+++	.quad	4358348108421357380     # 0x3c7bf68359f35f44
+++	.quad	4606814832297342774     # 0x3feeb1ae99157736
+++	.quad	-4858529541450220157    # 0xbc93091fa71e3d83
+++	.quad	4606817771975737286     # 0x3feeb45b0b91ffc6
+++	.quad	-4873552611666813399    # 0xbc5da9b88b6c1e29
+++	.quad	4606820918663955941     # 0x3feeb737b0cdc5e5
+++	.quad	-4869477542650660519    # 0xbc6c23f97c90b959
+++	.quad	4606824273486041615     # 0x3feeba44cbc8520f
+++	.quad	-4858747092350994006    # 0xbc92434322f4f9aa
+++	.quad	4606827837572140624     # 0x3feebd829fde4e50
+++	.quad	-4862257653857481141    # 0xbc85ca6cd7668e4b
+++	.quad	4606831612058535866     # 0x3feec0f170ca07ba
+++	.quad	4355455812241575463     # 0x3c71affc2b91ce27
+++	.quad	4606835598087680144     # 0x3feec49182a3f090
+++	.quad	4354367543587795899     # 0x3c6dd235e10a73bb
+++	.quad	4606839796808229667     # 0x3feec86319e32323
+++	.quad	-4861700651175763357    # 0xbc87c50422622263
+++	.quad	4606844209375077733     # 0x3feecc667b5de565
+++	.quad	4362612029712904661     # 0x3c8b1c86e3e231d5
+++	.quad	4606848836949388595     # 0x3feed09bec4a2d33
+++	.quad	-4858896013081134315    # 0xbc91bbd1d3bcbb15
+++	.quad	4606853680698631517     # 0x3feed503b23e255d
+++	.quad	4364212552380330450     # 0x3c90cc319cee31d2
+++	.quad	4606858741796615000     # 0x3feed99e1330b358
+++	.quad	4360726356711135923     # 0x3c8469846e735ab3
+++	.quad	4606864021423521215     # 0x3feede6b5579fdbf
+++	.quad	-4863078573502718540    # 0xbc82dfcd978e9db4
+++	.quad	4606869520765940602     # 0x3feee36bbfd3f37a
+++	.quad	4362891239881388935     # 0x3c8c1a7792cb3387
+++	.quad	4606875241016906669     # 0x3feee89f995ad3ad
+++	.quad	-4859248142566958598    # 0xbc907b8f4ad1d9fa
+++	.quad	4606881183375930982     # 0x3feeee07298db666
+++	.quad	-4875775683326071110    # 0xbc55c3d956dcaeba
+++	.quad	4606887349049038331     # 0x3feef3a2b84f15fb
+++	.quad	-4859203616861915584    # 0xbc90a40e3da6f640
+++	.quad	4606893739248802106     # 0x3feef9728de5593a
+++	.quad	-4870406652589927628    # 0xbc68d6f438ad9334
+++	.quad	4606900355194379847     # 0x3feeff76f2fb5e47
+++	.quad	-4858839866725070283    # 0xbc91eee26b588a35
+++	.quad	4606907198111549002     # 0x3fef05b030a1064a
+++	.quad	4356388038631218637     # 0x3c74ffd70a5fddcd
+++	.quad	4606914269232742866     # 0x3fef0c1e904bc1d2
+++	.quad	-4858893633017702228    # 0xbc91bdfbfa9298ac
+++	.quad	4606921569797086729     # 0x3fef12c25bd71e09
+++	.quad	4355946959017544883     # 0x3c736eae30af0cb3
+++	.quad	4606929101050434204     # 0x3fef199bdd85529c
+++	.quad	4363674894410448276     # 0x3c8ee3325c9ffd94
+++	.quad	4606936864245403770     # 0x3fef20ab5fffd07a
+++	.quad	4360857247493478828     # 0x3c84e08fd10959ac
+++	.quad	4606944860641415499     # 0x3fef27f12e57d14b
+++	.quad	4351547817417644647     # 0x3c63cdaf384e1a67
+++	.quad	4606953091504727989     # 0x3fef2f6d9406e7b5
+++	.quad	4352565403421120872     # 0x3c676b2c6c921968
+++	.quad	4606961558108475497     # 0x3fef3720dcef9069
+++	.quad	-4863735759665056302    # 0xbc808a1883ccb5d2
+++	.quad	4606970261732705274     # 0x3fef3f0b555dc3fa
+++	.quad	-4859474856892171665    # 0xbc8fad5d3ffffa6f
+++	.quad	4606979203664415100     # 0x3fef472d4a07897c
+++	.quad	-4859368956010059447    # 0xbc900dae3875a949
+++	.quad	4606988385197591026     # 0x3fef4f87080d89f2
+++	.quad	4356286533989107623     # 0x3c74a385a63d07a7
+++	.quad	4606997807633245319     # 0x3fef5818dcfba487
+++	.quad	-4863164539274780145    # 0xbc82919e2040220f
+++	.quad	4607007472279454616     # 0x3fef60e316c98398
+++	.quad	4363524392198705836     # 0x3c8e5a50d5c192ac
+++	.quad	4607017380451398277     # 0x3fef69e603db3285
+++	.quad	4360674496013757259     # 0x3c843a59ac016b4b
+++	.quad	4607027533471396960     # 0x3fef7321f301b460
+++	.quad	-4863090309766824417    # 0xbc82d52107b43e1f
+++	.quad	4607037932668951391     # 0x3fef7c97337b9b5f
+++	.quad	-4861307347717911095    # 0xbc892ab93b470dc9
+++	.quad	4607048579380781353     # 0x3fef864614f5a129
+++	.quad	4356306869484685523     # 0x3c74b604603a88d3
+++	.quad	4607059474950864886     # 0x3fef902ee78b3ff6
+++	.quad	4360546482996998769     # 0x3c83c5ec519d7271
+++	.quad	4607070620730477699     # 0x3fef9a51fbc74c83
+++	.quad	-4859393813814996496    # 0xbc8ff7128fd391f0
+++	.quad	4607082018078232794     # 0x3fefa4afa2a490da
+++	.quad	-4860036451210660739    # 0xbc8dae98e223747d
+++	.quad	4607093668360120305     # 0x3fefaf482d8e67f1
+++	.quad	4363640302291525640     # 0x3c8ec3bc41aa2008
+++	.quad	4607105572949547559     # 0x3fefba1bee615a27
+++	.quad	4360658257139329842     # 0x3c842b94c3a9eb32
+++	.quad	4607117733227379351     # 0x3fefc52b376bba97
+++	.quad	4362409866909812206     # 0x3c8a64a931d185ee
+++	.quad	4607130150581978432     # 0x3fefd0765b6e4540
+++	.quad	-4859885672053611539    # 0xbc8e37bae43be3ed
+++	.quad	4607142826409246228     # 0x3fefdbfdad9cbe14
+++	.quad	4357102052301720989     # 0x3c77893b4d91cd9d
+++	.quad	4607155762112663768     # 0x3fefe7c1819e90d8
+++	.quad	4346824392926350473     # 0x3c5305c14160cc89
+++	.quad	4607168959103332849     # 0x3feff3c22b8f71f1
+++	.size	__exp_data, 2160
+++
+++	.section	".note.GNU-stack","",@progbits
+++
+++
+++#        END
++-- 
++2.20.1
++
+diff --git a/libm/upstream-freebsd/lib/msun/src/math_config.h b/libm/upstream-freebsd/lib/msun/src/math_config.h
+new file mode 100644
+index 000000000..ccba8ead8
+--- /dev/null
++++ b/libm/upstream-freebsd/lib/msun/src/math_config.h
+@@ -0,0 +1,223 @@
++/* Configuration for double precision math routines.
++   Copyright (C) 2018-2019 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++   
++#ifndef _MATH_CONFIG_H
++#define _MATH_CONFIG_H
++
++
++#include "math.h"
++#include "math_private.h"
++#include "endian.h"
++#include "sys/types.h"
++
++#ifndef WANT_ROUNDING
++/* Correct special case results in non-nearest rounding modes.  */
++# define WANT_ROUNDING 1
++#endif
++
++#ifndef WANT_ERRNO
++/* Set errno according to ISO C with (math_errhandling & MATH_ERRNO) != 0.  */
++# define WANT_ERRNO 1
++#endif
++#ifndef WANT_ERRNO_UFLOW
++/* Set errno to ERANGE if result underflows to 0 (in all rounding modes).  */
++# define WANT_ERRNO_UFLOW (WANT_ROUNDING && WANT_ERRNO)
++#endif
++
++#if defined SHARED || defined LIBC_NONSHARED \
++  || (BUILD_PIE_DEFAULT)
++# define attribute_hidden __attribute__ ((visibility ("hidden")))
++#else
++# define attribute_hidden
++#endif
++
++
++#define EXP_TABLE_BITS 7
++#define EXP_POLY_ORDER 5
++#define EXP2_POLY_ORDER 5
++
++
++extern const struct exp_data
++{
++  double invln2N;
++  double shift;
++  double negln2hiN;
++  double negln2loN;
++  double poly[4]; /* Last four coefficients.  */
++  double exp2_shift;
++  double exp2_poly[EXP2_POLY_ORDER];
++  uint64_t tab[2*(1 << EXP_TABLE_BITS)];
++} __exp_data attribute_hidden;
++
++#define InvLn2N __exp_data.invln2N
++#define NegLn2hiN __exp_data.negln2hiN
++#define NegLn2loN __exp_data.negln2loN
++#define Shift __exp_data.shift
++#define T __exp_data.tab
++#define C2 __exp_data.poly[5 - EXP_POLY_ORDER]
++#define C3 __exp_data.poly[6 - EXP_POLY_ORDER]
++#define C4 __exp_data.poly[7 - EXP_POLY_ORDER]
++#define C5 __exp_data.poly[8 - EXP_POLY_ORDER]
++
++static const double
++o_threshold=  7.09782712893383973096e+02,  /* 0x40862E42, 0xFEFA39EF */
++u_threshold= -7.45133219101941108420e+02;  /* 0xc0874910, 0xD52D3051 */
++
++static volatile double
++huge    = 1.0e+300,
++twom1000= 9.33263618503218878990e-302;     /* 2**-1000=0x01700000,0*/
++
++
++
++#ifdef __SSE2_MATH__
++# define math_opt_barrier(x)                                                \
++  ({ __typeof(x) __x;                                                        \
++     if (sizeof (x) <= sizeof (double))        \
++       __asm ("" : "=x" (__x) : "0" (x));                                \
++     else                                                                \
++       __asm ("" : "=t" (__x) : "0" (x));                                \
++     __x; })
++# define math_force_eval(x)                                                \
++  do {                                                                        \
++    if (sizeof (x) <= sizeof (double))        \
++      __asm __volatile ("" : : "x" (x));                                \
++    else                                                                \
++      __asm __volatile ("" : : "f" (x));                                \
++  } while (0)
++#else
++# define math_opt_barrier(x)                                                \
++  ({ __typeof (x) __x;                                                                                           \
++       __asm ("" : "=t" (__x) : "0" (x));                                \
++     __x; })
++# define math_force_eval(x)                                                \
++  do {                                                                        \
++    __typeof (x) __x = (x);                                                \
++    if (sizeof (x) <= sizeof (double))        \
++      __asm __volatile ("" : : "m" (__x));                                \
++    else                                                                \
++      __asm __volatile ("" : : "f" (__x));                                \
++  } while (0)
++#endif
++
++
++/* math_narrow_eval reduces its floating-point argument to the range
++   and precision of its semantic type.  (The original evaluation may
++   still occur with excess range and precision, so the result may be
++   affected by double rounding.)  */
++#if FLT_EVAL_METHOD == 0
++# define math_narrow_eval(x) (x)
++#else
++# if FLT_EVAL_METHOD == 1
++#  define excess_precision(type) __builtin_types_compatible_p (type, float)
++# else
++#  define excess_precision(type) (__builtin_types_compatible_p (type, float) \
++                                  || __builtin_types_compatible_p (type, \
++                                                                   double))
++# endif
++# define math_narrow_eval(x)                                        \
++  ({                                                                \
++    __typeof (x) math_narrow_eval_tmp = (x);                        \
++    if (excess_precision (__typeof (math_narrow_eval_tmp)))        \
++      __asm__ ("" : "+m" (math_narrow_eval_tmp));                \
++    math_narrow_eval_tmp;                                        \
++   })
++#endif
++
++#define with_errno(x, e) (x)
++
++static inline uint64_t
++asuint64 (double f)
++{
++  union
++  {
++    double f;
++    uint64_t i;
++  } u = {f};
++  return u.i;
++}
++static double
++asdouble (uint64_t i)
++{
++  union
++  {
++    uint64_t i;
++    double f;
++  } u = {i};
++  return u.f;
++}
++
++/* Top 12 bits of a double (sign and exponent bits).  */
++static inline uint32_t
++top12 (double x)
++{
++  return asuint64 (x) >> 52;
++}
++
++/* Check if the result underflowed to 0.  */
++static inline double
++check_uflow (double x)
++{
++  if (WANT_ERRNO) 
++  {
++     return x == 0.0 ? with_errno (x, ERANGE) : x;   
++  }
++  else {
++     return x; 
++  }
++
++}
++
++
++/* Check if the result overerflowed to 0.  */
++static inline double
++check_oflow (double x)
++{
++
++   if (WANT_ERRNO)
++   {
++      return isinf (x) ? with_errno (x, ERANGE) : x;
++      
++   } else {
++      return x;
++   }
++
++}
++
++
++inline double
++__math_uflow (uint32_t sign)
++{
++  double y = 0x1p-767;
++  y = math_opt_barrier (sign ? -y : y) * y;
++  return with_errno (y, ERANGE);
++
++}
++
++inline double
++__math_oflow (uint32_t sign)
++{
++  double y = 0x1p769;
++  y = math_opt_barrier (sign ? -y : y) * y;
++  return with_errno (y, ERANGE);
++}
++
++#endif
++
++
++
++
++
++
++
+diff --git a/libm/x86/avx2_e_exp.S b/libm/x86/avx2_e_exp.S
+new file mode 100644
+index 000000000..b569eba1e
+--- /dev/null
++++ b/libm/x86/avx2_e_exp.S
+@@ -0,0 +1,335 @@
++/*
++ Copyright (c) 2014, Intel Corporation
++ All rights reserved.
++
++ Redistribution and use in source and binary forms, with or without
++ modification, are permitted provided that the following conditions are met:
++
++    * Redistributions of source code must retain the above copyright notice,
++    * this list of conditions and the following disclaimer.
++
++    * Redistributions in binary form must reproduce the above copyright notice,
++    * this list of conditions and the following disclaimer in the documentation
++    * and/or other materials provided with the distribution.
++
++    * Neither the name of Intel Corporation nor the names of its contributors
++    * may be used to endorse or promote products derived from this software
++    * without specific prior written permission.
++
++ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++ ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
++ ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++*/
++
++/******************************************************************************
++ *                     ALGORITHM DESCRIPTION
++ *
++ *
++ * __ieee754_exp(x)
++ * Returns the exponential of x.
++ *
++ * Method
++ *   1. Argument reduction:
++ *      Reduce x to an r so that |r| <= 0.5*ln2 ~ 0.34658.
++ *	Given x, find r and integer k such that
++ *
++ *               x = k*ln2 + r,  |r| <= 0.5*ln2.
++ *
++ *      Here r will be represented as r = hi-lo for better
++ *	accuracy.
++ *
++ *   2. Approximation of exp(r) by a special rational function on
++ *	the interval [0,0.34658]:
++ *	Write
++ *	    R(r**2) = r*(exp(r)+1)/(exp(r)-1) = 2 + r*r/6 - r**4/360 + ...
++ *      We use a special Remes algorithm on [0,0.34658] to generate
++ * 	a polynomial of degree 5 to approximate R. The maximum error
++ *	of this polynomial approximation is bounded by 2**-59. In
++ *	other words,
++ *	    R(z) ~ 2.0 + P1*z + P2*z**2 + P3*z**3 + P4*z**4 + P5*z**5
++ *  	(where z=r*r, and the values of P1 to P5 are listed below)
++ *	and
++ *	    |                  5          |     -59
++ *	    | 2.0+P1*z+...+P5*z   -  R(z) | <= 2
++ *	    |                             |
++ *	The computation of exp(r) thus becomes
++*                             2*r
++*		exp(r) = 1 + -------
++*		              R - r
++*                                 r*R1(r)
++*		       = 1 + r + ----------- (for better accuracy)
++*		                  2 - R1(r)
++*	where
++*			         2       4             10
++*		R1(r) = r - (P1*r  + P2*r  + ... + P5*r   ).
++*
++*   3. Scale back to obtain exp(x):
++*	From step 1, we have
++*	   exp(x) = 2^k * exp(r)
++*
++* Special cases:
++*	exp(INF) is INF, exp(NaN) is NaN;
++*	exp(-INF) is 0, and
++*	for finite argument, only exp(0)=1 is exact.
++*
++* Accuracy:
++*	according to an error analysis, the error is always less than
++*	1 ulp (unit in the last place).
++*
++* Misc. info.
++*	For IEEE double
++*	    if x >  7.09782712893383973096e+02 then exp(x) overflow
++*	    if x < -7.45133219101941108420e+02 then exp(x) underflow
++*
++* Constants:
++* The hexadecimal values are the intended ones for the following
++* constants. The decimal values may be used, provided that the
++* compiler will convert from decimal to binary accurately enough
++* to produce the hexadecimal values shown.
++
++* This algorithim : Double-precision e^x function is implemented as
++* Copyright (C) 2018 Free Software Foundation, Inc and is a
++* part of the GNU C Library.
++*/
++
++
++
++#define ENTRY(exp)		\
++	.type  exp,  @function;		\
++        .globl exp;		\
++	.p2align 3;		\
++ exp:		\
++	.cfi_startproc
++
++#define END(name)		\
++        .cfi_endproc;		\
++        .size name, .-name
++      
++	.section	.rodata.cst8,"aM",@progbits,8
++	.p2align	3               # -- Begin function exp
++.LCPI0_0:
++	.quad	4607182418800017408     # double 1
++.LCPI0_1:
++	.quad	4649454530587146735     # double 709.78271289338397
++.LCPI0_2:
++	.quad	-4573606559926636463    # double -745.13321910194111
++.LCPI0_3:
++	.quad	4609176140021203710     # double 1.4426950408889634
++.LCPI0_4:
++	.quad	4604418534311723008     # double 0.69314718036912382
++.LCPI0_5:
++	.quad	4461442080421002358     # double 1.9082149292705877E-10
++.LCPI0_6:
++	.quad	4496342204012209360     # double 4.1381367970572385E-8
++.LCPI0_7:
++	.quad	-4702957295668925455    # double -1.6533902205465252E-6
++.LCPI0_8:
++	.quad	4544508515198557740     # double 6.6137563214379344E-5
++.LCPI0_9:
++	.quad	-4654820494858601069    # double -0.0027777777777015593
++.LCPI0_10:
++	.quad	4595172819793696062     # double 0.16666666666666602
++.LCPI0_11:
++	.quad	4611686018427387904     # double 2
++.LCPI0_12:
++	.quad	9214364837600034816     # double 8.9884656743115795E+307
++.LCPI0_13:
++	.quad	-4611686018427387904    # double -2
++
++# -- Begin exp
++ENTRY(exp)
++
++# BB#0:
++	vmovq	%xmm0, %rax
++	movq	%rax, %rdx
++	shrq	$32, %rdx
++	movq	%rax, %rcx
++	shrq	$63, %rcx
++	movl	%edx, %esi
++	andl	$2147483647, %esi       # imm = 0x7FFFFFFF
++	cmpl	$1082535490, %esi       # imm = 0x40862E42
++	jb	.LBB0_10
++# BB#1:
++	cmpl	$2146435072, %esi       # imm = 0x7FF00000
++	jb	.LBB0_6
++# BB#2:
++	andl	$1048575, %edx          # imm = 0xFFFFF
++	vmovapd	%xmm0, %xmm1
++	testl	%ecx, %ecx
++	je	.LBB0_4
++# BB#3:
++	vxorpd	%xmm1, %xmm1, %xmm1
++.LBB0_4:
++	orl	%eax, %edx
++	je	.LBB0_26
++# BB#5:
++	vaddsd	%xmm0, %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_10:
++	cmpl	$1071001155, %esi       # imm = 0x3FD62E43
++	jb	.LBB0_15
++# BB#11:
++	cmpl	$1072734897, %esi       # imm = 0x3FF0A2B1
++	ja	.LBB0_13
++# BB#12:
++	leaq	ln2HI(%rip), %rax
++	vmovsd	(%rax,%rcx,8), %xmm2    # xmm2 = mem[0],zero
++	leaq	ln2LO(%rip), %rax
++	vmovsd	(%rax,%rcx,8), %xmm1    # xmm1 = mem[0],zero
++	movl	%ecx, %eax
++	xorl	$1, %eax
++	subl	%ecx, %eax
++	jmp	.LBB0_14
++.LBB0_6:
++	vucomisd	.LCPI0_1(%rip), %xmm0
++	jbe	.LBB0_8
++# BB#7:
++	vmovsd	huge(%rip), %xmm0       # xmm0 = mem[0],zero
++	vmulsd	huge(%rip), %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_15:
++	vxorpd	%xmm1, %xmm1, %xmm1
++	xorl	%eax, %eax
++	cmpl	$1043333119, %esi       # imm = 0x3E2FFFFF
++	ja	.LBB0_17
++# BB#16:
++	vaddsd	huge(%rip), %xmm0, %xmm2
++	vucomisd	.LCPI0_0(%rip), %xmm2
++	jbe	.LBB0_17
++# BB#27:
++	vaddsd	.LCPI0_0(%rip), %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_17:
++	vxorpd	%xmm2, %xmm2, %xmm2
++	jmp	.LBB0_18
++.LBB0_8:
++	vmovsd	.LCPI0_2(%rip), %xmm1   # xmm1 = mem[0],zero
++	vucomisd	%xmm0, %xmm1
++	jbe	.LBB0_13
++# BB#9:
++	vmovsd	twom1000(%rip), %xmm0   # xmm0 = mem[0],zero
++	jmp	.LBB0_25
++.LBB0_13:
++	vmulsd	.LCPI0_3(%rip), %xmm0, %xmm1
++	leaq	halF(%rip), %rax
++	vaddsd	(%rax,%rcx,8), %xmm1, %xmm1
++	vcvttsd2si	%xmm1, %eax
++	vcvtsi2sdl	%eax, %xmm2, %xmm1
++	vmulsd	.LCPI0_4(%rip), %xmm1, %xmm2
++	vmulsd	.LCPI0_5(%rip), %xmm1, %xmm1
++.LBB0_14:
++	vsubsd	%xmm2, %xmm0, %xmm2
++	vsubsd	%xmm1, %xmm2, %xmm0
++.LBB0_18:
++	vmulsd	%xmm0, %xmm0, %xmm3
++	cmpl	$-1022, %eax            # imm = 0xFC02
++	movl	$1072693248, %edx       # imm = 0x3FF00000
++	movl	$2121269248, %ecx       # imm = 0x7E700000
++	cmovgl	%edx, %ecx
++	vmulsd	.LCPI0_6(%rip), %xmm3, %xmm4
++	vaddsd	.LCPI0_7(%rip), %xmm4, %xmm4
++	vmulsd	%xmm4, %xmm3, %xmm4
++	vaddsd	.LCPI0_8(%rip), %xmm4, %xmm4
++	vmulsd	%xmm4, %xmm3, %xmm4
++	vaddsd	.LCPI0_9(%rip), %xmm4, %xmm4
++	vmulsd	%xmm4, %xmm3, %xmm4
++	vaddsd	.LCPI0_10(%rip), %xmm4, %xmm4
++	vmulsd	%xmm4, %xmm3, %xmm3
++	vsubsd	%xmm3, %xmm0, %xmm3
++	vmulsd	%xmm3, %xmm0, %xmm4
++	testl	%eax, %eax
++	je	.LBB0_19
++# BB#20:
++	movl	%eax, %edx
++	shll	$20, %edx
++	addl	%edx, %ecx
++	shlq	$32, %rcx
++	vmovq	%rcx, %xmm0
++	vmovsd	.LCPI0_11(%rip), %xmm5  # xmm5 = mem[0],zero
++	vsubsd	%xmm3, %xmm5, %xmm3
++	vdivsd	%xmm3, %xmm4, %xmm3
++	vsubsd	%xmm3, %xmm1, %xmm1
++	vsubsd	%xmm2, %xmm1, %xmm1
++	vmovsd	.LCPI0_0(%rip), %xmm2   # xmm2 = mem[0],zero
++	vsubsd	%xmm1, %xmm2, %xmm1
++	cmpl	$-1021, %eax            # imm = 0xFC03
++	jl	.LBB0_24
++# BB#21:
++	cmpl	$1024, %eax             # imm = 0x400
++	jne	.LBB0_23
++# BB#22:
++	vaddsd	%xmm1, %xmm1, %xmm0
++	vmulsd	.LCPI0_12(%rip), %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_19:
++	vaddsd	.LCPI0_13(%rip), %xmm3, %xmm1
++	vdivsd	%xmm1, %xmm4, %xmm1
++	vsubsd	%xmm0, %xmm1, %xmm0
++	vmovsd	.LCPI0_0(%rip), %xmm1   # xmm1 = mem[0],zero
++	vsubsd	%xmm0, %xmm1, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_24:
++	vmulsd	%xmm0, %xmm1, %xmm0
++.LBB0_25:
++	vmulsd	twom1000(%rip), %xmm0, %xmm1
++.LBB0_26:
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_23:
++	vmulsd	%xmm0, %xmm1, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++END(exp)
++# -- End exp
++                                 
++	.type	huge,@object            # @huge
++	.data
++	.p2align	3
++huge:
++	.quad	9094988921128908188     # double 1.0000000000000001E+300
++	.size	huge, 8
++
++	.type	twom1000,@object        # @twom1000
++	.p2align	3
++twom1000:
++	.quad	103582791429521408      # double 9.3326361850321888E-302
++	.size	twom1000, 8
++
++	.type	ln2HI,@object           # @ln2HI
++	.section	.rodata.cst16,"aM",@progbits,16
++	.p2align	4
++ln2HI:
++	.quad	4604418534311723008     # double 0.69314718036912382
++	.quad	-4618953502543052800    # double -0.69314718036912382
++	.size	ln2HI, 16
++
++	.type	ln2LO,@object           # @ln2LO
++	.p2align	4
++ln2LO:
++	.quad	4461442080421002358     # double 1.9082149292705877E-10
++	.quad	-4761929956433773450    # double -1.9082149292705877E-10
++	.size	ln2LO, 16
++
++	.type	halF,@object            # @halF
++	.p2align	4
++halF:
++	.quad	4602678819172646912     # double 0.5
++	.quad	-4620693217682128896    # double -0.5
++	.size	halF, 16
++
++
++	.section	".note.GNU-stack","",@progbits
++
++#        END
+diff --git a/libm/x86_64/avx2_e_exp.S b/libm/x86_64/avx2_e_exp.S
+new file mode 100644
+index 000000000..e5e12288f
+--- /dev/null
++++ b/libm/x86_64/avx2_e_exp.S
+@@ -0,0 +1,567 @@
++/*
++ Copyright (c) 2014, Intel Corporation
++ All rights reserved.
++
++ Redistribution and use in source and binary forms, with or without
++ modification, are permitted provided that the following conditions are met:
++
++    * Redistributions of source code must retain the above copyright notice,
++    * this list of conditions and the following disclaimer.
++
++    * Redistributions in binary form must reproduce the above copyright notice,
++    * this list of conditions and the following disclaimer in the documentation
++    * and/or other materials provided with the distribution.
++
++    * Neither the name of Intel Corporation nor the names of its contributors
++    * may be used to endorse or promote products derived from this software
++    * without specific prior written permission.
++
++ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++ ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
++ ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++*/
++
++/******************************************************************************
++ *                     ALGORITHM DESCRIPTION
++ *
++ *
++ * __ieee754_exp(x)
++ * Returns the exponential of x.
++ *
++ * Method
++ *   1. Argument reduction:
++ *      Reduce x to an r so that |r| <= 0.5*ln2 ~ 0.34658.
++ *	Given x, find r and integer k such that
++ *
++ *               x = k*ln2 + r,  |r| <= 0.5*ln2.
++ *
++ *      Here r will be represented as r = hi-lo for better
++ *	accuracy.
++ *
++ *   2. Approximation of exp(r) by a special rational function on
++ *	the interval [0,0.34658]:
++ *	Write
++ *	    R(r**2) = r*(exp(r)+1)/(exp(r)-1) = 2 + r*r/6 - r**4/360 + ...
++ *      We use a special Remes algorithm on [0,0.34658] to generate
++ * 	a polynomial of degree 5 to approximate R. The maximum error
++ *	of this polynomial approximation is bounded by 2**-59. In
++ *	other words,
++ *	    R(z) ~ 2.0 + P1*z + P2*z**2 + P3*z**3 + P4*z**4 + P5*z**5
++ *  	(where z=r*r, and the values of P1 to P5 are listed below)
++ *	and
++ *	    |                  5          |     -59
++ *	    | 2.0+P1*z+...+P5*z   -  R(z) | <= 2
++ *	    |                             |
++ *	The computation of exp(r) thus becomes
++*                             2*r
++*		exp(r) = 1 + -------
++*		              R - r
++*                                 r*R1(r)
++*		       = 1 + r + ----------- (for better accuracy)
++*		                  2 - R1(r)
++*	where
++*			         2       4             10
++*		R1(r) = r - (P1*r  + P2*r  + ... + P5*r   ).
++*
++*   3. Scale back to obtain exp(x):
++*	From step 1, we have
++*	   exp(x) = 2^k * exp(r)
++*
++* Special cases:
++*	exp(INF) is INF, exp(NaN) is NaN;
++*	exp(-INF) is 0, and
++*	for finite argument, only exp(0)=1 is exact.
++*
++* Accuracy:
++*	according to an error analysis, the error is always less than
++*	1 ulp (unit in the last place).
++*
++* Misc. info.
++*	For IEEE double
++*	    if x >  7.09782712893383973096e+02 then exp(x) overflow
++*	    if x < -7.45133219101941108420e+02 then exp(x) underflow
++*
++* Constants:
++* The hexadecimal values are the intended ones for the following
++* constants. The decimal values may be used, provided that the
++* compiler will convert from decimal to binary accurately enough
++* to produce the hexadecimal values shown.
++
++* This algorithim : Double-precision e^x function is implemented as
++* Copyright (C) 2018 Free Software Foundation, Inc and is a
++* part of the GNU C Library.
++*/
++
++
++
++#define ENTRY(exp)		\
++	.type  exp,  @function;		\
++        .globl exp;		\
++	.p2align 3;		\
++ exp:		\
++	.cfi_startproc
++
++#define END(name)		\
++        .cfi_endproc;		\
++        .size name, .-name
++      
++	
++        .section	.rodata.cst8,"aM",@progbits,8
++	.p2align	3
++
++.LCPI0_0:
++	.quad	8070450532247928832     # double 3.1050361846014179E+231
++.LCPI0_1:
++	.quad	1152921504606846976     # double 1.2882297539194267E-231
++.LCPI0_2:
++	.quad	4607182418800017408     # double 1
++.LCPI0_3:
++	.quad	4640701337412797182     # double 184.66496523378731
++.LCPI0_4:
++	.quad	4843621399236968448     # double 6755399441055744
++.LCPI0_5:
++	.quad	-4379750637617807360    # double -6755399441055744
++.LCPI0_6:
++	.quad	-4650478699932942336    # double -0.0054152123481117087
++.LCPI0_7:
++	.quad	-4824208856859133126    # double -1.2864023111638346E-14
++.LCPI0_8:
++	.quad	4595172819793695804     # double 0.16666666666665886
++.LCPI0_9:
++	.quad	4602678819172646333     # double 0.49999999999996786
++.LCPI0_10:
++	.quad	4575957462836105239     # double 0.008333335853059549
++.LCPI0_11:
++	.quad	4586165622581701521     # double 0.041666680841067401
++.LCPI0_12:
++	.quad	-4616189618054758400    # double -1
++.LCPI0_13:
++	.quad	4503599627370496        # double 2.2250738585072014E-308
++.LCPI0_14:
++	.quad	9151314442816847872     # double 5.4861240687936887E+303
++
++# -- Begin exp
++ENTRY(exp)
++
++# BB#0:
++	vmovq	%xmm0, %rax
++	movq	%rax, %rdx
++	shrq	$52, %rdx
++	andl	$2047, %edx             # imm = 0x7FF
++	leal	-969(%rdx), %ecx
++	cmpl	$63, %ecx
++	jae	.LBB0_5
++# BB#1:
++	movl	%edx, %ecx
++.LBB0_2:
++	vmulsd	.LCPI0_3(%rip), %xmm0, %xmm1
++	vaddsd	.LCPI0_4(%rip), %xmm1, %xmm1
++	vaddsd	.LCPI0_5(%rip), %xmm1, %xmm2
++	vmovq	%xmm1, %rdx
++	vmulsd	.LCPI0_6(%rip), %xmm2, %xmm1
++	vaddsd	%xmm1, %xmm0, %xmm0
++	vmulsd	.LCPI0_7(%rip), %xmm2, %xmm1
++	movq	%rdx, %rax
++	shlq	$45, %rax
++	movq	%rdx, %rsi
++	andq	$127, %rsi
++	shlq	$4, %rsi
++	movq	__exp_data@GOTPCREL(%rip), %rdi
++	addq	120(%rdi,%rsi), %rax
++	vaddsd	%xmm1, %xmm0, %xmm0
++	vmulsd	%xmm0, %xmm0, %xmm1
++	vaddsd	112(%rdi,%rsi), %xmm0, %xmm2
++	vmulsd	.LCPI0_8(%rip), %xmm0, %xmm3
++	vaddsd	.LCPI0_9(%rip), %xmm3, %xmm3
++	vmulsd	%xmm3, %xmm1, %xmm3
++	vaddsd	%xmm2, %xmm3, %xmm2
++	vmulsd	.LCPI0_10(%rip), %xmm0, %xmm0
++	vmulsd	%xmm1, %xmm1, %xmm1
++	vaddsd	.LCPI0_11(%rip), %xmm0, %xmm0
++	vmulsd	%xmm0, %xmm1, %xmm0
++	vaddsd	%xmm2, %xmm0, %xmm0
++	testl	%ecx, %ecx
++	je	.LBB0_17
++# BB#3:
++	testl	%edx, %edx
++	js	.LBB0_14
++# BB#4:
++	movabsq	$-4544132024016830464, %rcx # imm = 0xC0F0000000000000
++	addq	%rcx, %rax
++	vmovq	%rax, %xmm1
++	vmulsd	%xmm1, %xmm0, %xmm0
++	vaddsd	%xmm1, %xmm0, %xmm0
++	vmulsd	.LCPI0_14(%rip), %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_17:
++	vmovq	%rax, %xmm1
++	vmulsd	%xmm1, %xmm0, %xmm0
++	vaddsd	%xmm1, %xmm0, %xmm1
++.LBB0_18:
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_14:
++	movabsq	$4602678819172646912, %rcx # imm = 0x3FE0000000000000
++	addq	%rcx, %rax
++	vmovq	%rax, %xmm1
++	vmulsd	%xmm1, %xmm0, %xmm2
++	vaddsd	%xmm1, %xmm2, %xmm0
++	vmovsd	.LCPI0_2(%rip), %xmm3   # xmm3 = mem[0],zero
++	vucomisd	%xmm0, %xmm3
++	jbe	.LBB0_16
++# BB#15:
++	vsubsd	%xmm0, %xmm1, %xmm1
++	vaddsd	%xmm1, %xmm2, %xmm1
++	vaddsd	%xmm3, %xmm0, %xmm2
++	vsubsd	%xmm2, %xmm3, %xmm3
++	vaddsd	%xmm3, %xmm0, %xmm0
++	vaddsd	%xmm0, %xmm1, %xmm0
++	vaddsd	%xmm0, %xmm2, %xmm0
++	vaddsd	.LCPI0_12(%rip), %xmm0, %xmm0
++	vxorpd	%xmm1, %xmm1, %xmm1
++	vcmpeqsd	%xmm1, %xmm0, %xmm1
++	vandnpd	%xmm0, %xmm1, %xmm0
++	vmovsd	.LCPI0_13(%rip), %xmm1  # xmm1 = mem[0],zero
++	vmovapd	%xmm1, %xmm2
++	#APP
++	#NO_APP
++	vmulsd	%xmm1, %xmm2, %xmm1
++	#APP
++	#NO_APP
++.LBB0_16:
++	vmulsd	.LCPI0_13(%rip), %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_5:
++	cmpl	$968, %edx              # imm = 0x3C8
++	ja	.LBB0_7
++# BB#6:
++	vaddsd	.LCPI0_2(%rip), %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_7:
++	xorl	%ecx, %ecx
++	cmpl	$1033, %edx             # imm = 0x409
++	jb	.LBB0_2
++# BB#8:
++	vxorpd	%xmm1, %xmm1, %xmm1
++	movabsq	$-4503599627370496, %rcx # imm = 0xFFF0000000000000
++	cmpq	%rcx, %rax
++	je	.LBB0_18
++# BB#9:
++	cmpl	$2047, %edx             # imm = 0x7FF
++	jne	.LBB0_11
++# BB#10:
++	vaddsd	.LCPI0_2(%rip), %xmm0, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_11:
++	testq	%rax, %rax
++	js	.LBB0_12
++# BB#13:
++	vmovsd	.LCPI0_0(%rip), %xmm0   # xmm0 = mem[0],zero
++	vmovapd	%xmm0, %xmm1
++	#APP
++	#NO_APP
++	vmulsd	%xmm0, %xmm1, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++.LBB0_12:
++	vmovsd	.LCPI0_1(%rip), %xmm0   # xmm0 = mem[0],zero
++	vmovapd	%xmm0, %xmm1
++	#APP
++	#NO_APP
++	vmulsd	%xmm0, %xmm1, %xmm1
++	vmovapd	%xmm1, %xmm0
++	retq
++END(exp)
++# -- End exp
++	.type	__exp_data,@object      # @__exp_data
++	.section	.rodata,"a",@progbits
++	.globl	__exp_data
++	.p2align	3
++__exp_data:
++	.quad	4640701337412797182     # double 184.66496523378731
++	.quad	4843621399236968448     # double 6755399441055744
++	.quad	-4650478699932942336    # double -0.0054152123481117087
++	.quad	-4824208856859133126    # double -1.2864023111638346E-14
++	.quad	4602678819172646333     # double 0.49999999999996786
++	.quad	4595172819793695804     # double 0.16666666666665886
++	.quad	4586165622581701521     # double 0.041666680841067401
++	.quad	4575957462836105239     # double 0.008333335853059549
++	.quad	4812096201845374976     # double 52776558133248
++	.quad	4604418534313441775     # double 0.69314718055994529
++	.quad	4597823092348339236     # double 0.24022650695909065
++	.quad	4588159806095553717     # double 0.0555041086686087
++	.quad	4576698097375531212     # double 0.0096181319757210545
++	.quad	4563791157088107140     # double 0.0013332074570119598
++	.quad	0                       # 0x0
++	.quad	4607182418800017408     # 0x3ff0000000000000
++	.quad	4367149474599452526     # 0x3c9b3b4f1a88bf6e
++	.quad	4607171688528556853     # 0x3feff63da9fb3335
++	.quad	-4868004084858692515    # 0xbc7160139cd8dc5d
++	.quad	4607161091040444513     # 0x3fefec9a3e778061
++	.quad	-4859280119576434991    # 0xbc905e7a108766d1
++	.quad	4607150627056680837     # 0x3fefe315e86e7f85
++	.quad	4363093389540324883     # 0x3c8cd2523567f613
++	.quad	4607140297302181236     # 0x3fefd9b0d3158574
++	.quad	-4860564323061625094    # 0xbc8bce8023f98efa
++	.quad	4607130102505797342     # 0x3fefd06b29ddf6de
++	.quad	4350749156061923425     # 0x3c60f74e61e6c861
++	.quad	4607120043400338376     # 0x3fefc74518759bc8
++	.quad	4364168240100004761     # 0x3c90a3e45b33d399
++	.quad	4607110120722592643     # 0x3fefbe3ecac6f383
++	.quad	4366128403083131757     # 0x3c979aa65d837b6d
++	.quad	4607100335213349135     # 0x3fefb5586cf9890f
++	.quad	4363624214708482044     # 0x3c8eb51a92fdeffc
++	.quad	4607090687617419255     # 0x3fefac922b7247f7
++	.quad	4341116261916187857     # 0x3c3ebe3d702f9cd1
++	.quad	4607081178683658658     # 0x3fefa3ec32d3d1a2
++	.quad	-4870076522866643445    # 0xbc6a033489906e0b
++	.quad	4607071809164989211     # 0x3fef9b66affed31b
++	.quad	-4857881712154133234    # 0xbc9556522a2fbd0e
++	.quad	4607062579818421073     # 0x3fef9301d0125b51
++	.quad	-4877256630102726059    # 0xbc5080ef8c4eea55
++	.quad	4607053491405074892     # 0x3fef8abdc06c31cc
++	.quad	-4858881367677209578    # 0xbc91c923b9d5f416
++	.quad	4607044544690204128     # 0x3fef829aaea92de0
++	.quad	4359717415120819631     # 0x3c80d3e3e95c55af
++	.quad	4607035740443217489     # 0x3fef7a98c8a58e51
++	.quad	-4863857816615152824    # 0xbc801b15eaa59348
++	.quad	4607027079437701499     # 0x3fef72b83c7d517b
++	.quad	-4859630355816238531    # 0xbc8f1ff055de323d
++	.quad	4607018562451443178     # 0x3fef6af9388c8dea
++	.quad	4362731899485115327     # 0x3c8b898c3f1353bf
++	.quad	4607010190266452853     # 0x3fef635beb6fcb75
++	.quad	-4857455882053489882    # 0xbc96d99c7611eb26
++	.quad	4607001963668987092     # 0x3fef5be084045cd4
++	.quad	4367063335334195040     # 0x3c9aecf73e3a2f60
++	.quad	4606993883449571754     # 0x3fef54873168b9aa
++	.quad	-4859410923963139939    # 0xbc8fe782cb86389d
++	.quad	4606985950403025181     # 0x3fef4d5022fcd91d
++	.quad	4362421515177083789     # 0x3c8a6f4144a6c38d
++	.quad	4606978165328481494     # 0x3fef463b88628cd6
++	.quad	4359618604155798653     # 0x3c807a05b0e4047d
++	.quad	4606970529029414038     # 0x3fef3f49917ddc96
++	.quad	4365834109879625876     # 0x3c968efde3a8a894
++	.quad	4606963042313658936     # 0x3fef387a6e756238
++	.quad	4361558225371547773     # 0x3c875e18f274487d
++	.quad	4606955705993438783     # 0x3fef31ce4fb2a63f
++	.quad	4359562691856033778     # 0x3c80472b981fe7f2
++	.quad	4606948520885386461     # 0x3fef2b4565e27cdd
++	.quad	-4857492308587640738    # 0xbc96b87b3f71085e
++	.quad	4606941487810569089     # 0x3fef24dfe1f56381
++	.quad	4360319936817113905     # 0x3c82f7e16d09ab31
++	.quad	4606934607594512097     # 0x3fef1e9df51fdee1
++	.quad	-4882709470952570886    # 0xbc3d219b1a6fbffa
++	.quad	4606927881067223440     # 0x3fef187fd0dad990
++	.quad	4362641697437125300     # 0x3c8b3782720c0ab4
++	.quad	4606921309063217931     # 0x3fef1285a6e4030b
++	.quad	4354440509323660175     # 0x3c6e149289cecb8f
++	.quad	4606914892421541718     # 0x3fef0cafa93e2f56
++	.quad	4360414030434708406     # 0x3c834d754db0abb6
++	.quad	4606908631985796885     # 0x3fef06fe0a31b715
++	.quad	4361245865020257356     # 0x3c864201e2ac744c
++	.quad	4606902528604166193     # 0x3fef0170fc4cd831
++	.quad	4363949802402347082     # 0x3c8fdd395dd3f84a
++	.quad	4606896583129437951     # 0x3feefc08b26416ff
++	.quad	-4862018976549545212    # 0xbc86a3803b8e5b04
++	.quad	4606890796419031025     # 0x3feef6c55f929ff1
++	.quad	-4858738662784151448    # 0xbc924aedcc4b5068
++	.quad	4606885169335019979     # 0x3feef1a7373aa9cb
++	.quad	-4856841960950780530    # 0xbc9907f81b512d8e
++	.quad	4606879702744160358     # 0x3feeecae6d05d866
++	.quad	-4867878926798276910    # 0xbc71d1e83e9436d2
++	.quad	4606874397517914103     # 0x3feee7db34e59ff7
++	.quad	-4856823124960863467    # 0xbc991919b3ce1b15
++	.quad	4606869254532475109     # 0x3feee32dc313a8e5
++	.quad	4361066948569222253     # 0x3c859f48a72a4c6d
++	.quad	4606864274668794914     # 0x3feedea64c123422
++	.quad	-4858519367427004022    # 0xbc9312607a28698a
++	.quad	4606859458812608540     # 0x3feeda4504ac801c
++	.quad	-4874962362796897957    # 0xbc58a78f4817895b
++	.quad	4606854807854460458     # 0x3feed60a21f72e2a
++	.quad	-4864964451502548453    # 0xbc7c2c9b67499a1b
++	.quad	4606850322689730711     # 0x3feed1f5d950a897
++	.quad	4342424336897059857     # 0x3c4363ed60c2ac11
++	.quad	4606846004218661165     # 0x3feece086061892d
++	.quad	4365789078613288175     # 0x3c9666093b0664ef
++	.quad	4606841853346381911     # 0x3feeca41ed1d0057
++	.quad	4354643160121541497     # 0x3c6ecce1daa10379
++	.quad	4606837870982937808     # 0x3feec6a2b5c13cd0
++	.quad	4365113450260533808     # 0x3c93ff8e3f0f1230
++	.quad	4606834058043315166     # 0x3feec32af0d7d3de
++	.quad	4356828907110576048     # 0x3c7690cebb7aafb0
++	.quad	4606830415447468583     # 0x3feebfdad5362a27
++	.quad	4364865165386375287     # 0x3c931dbdeb54e077
++	.quad	4606826944120347917     # 0x3feebcb299fddd0d
++	.quad	-4859502521842818162    # 0xbc8f94340071a38e
++	.quad	4606823644991925415     # 0x3feeb9b2769d2ca7
++	.quad	-4861672301267803319    # 0xbc87deccdc93a349
++	.quad	4606820518997222978     # 0x3feeb6daa2cf6642
++	.quad	-4865894452217038753    # 0xbc78dec6bd0f385f
++	.quad	4606817567076339586     # 0x3feeb42b569d4f82
++	.quad	-4862178651875353354    # 0xbc861246ec7b5cf6
++	.quad	4606814790174478863     # 0x3feeb1a4ca5d920f
++	.quad	4364890759862540174     # 0x3c93350518fdd78e
++	.quad	4606812189241976794     # 0x3feeaf4736b527da
++	.quad	4358244976955136773     # 0x3c7b98b72f8a9b05
++	.quad	4606809765234329597     # 0x3feead12d497c7fd
++	.quad	4364097860734309385     # 0x3c9063e1e21c5409
++	.quad	4606807519112221737     # 0x3feeab07dd485429
++	.quad	4338311716453074666     # 0x3c34c7855019c6ea
++	.quad	4606805451841554103     # 0x3feea9268a5946b7
++	.quad	4365169902980743221     # 0x3c9432e62b64c035
++	.quad	4606803564393472328     # 0x3feea76f15ad2148
++	.quad	-4860258889723447649    # 0xbc8ce44a6199769f
++	.quad	4606801857744395273     # 0x3feea5e1b976dc09
++	.quad	-4860452975632495192    # 0xbc8c33c53bef4da8
++	.quad	4606800332876043653     # 0x3feea47eb03a5585
++	.quad	-4862669920490755666    # 0xbc845378892be9ae
++	.quad	4606798990775468832     # 0x3feea34634ccc320
++	.quad	-4858312122400614312    # 0xbc93cedd78565858
++	.quad	4606797832435081765     # 0x3feea23882552225
++	.quad	4347962289735735652     # 0x3c5710aa807e1964
++	.quad	4606796858852682099     # 0x3feea155d44ca973
++	.quad	-4858341730713460184    # 0xbc93b3efbf5e2228
++	.quad	4606796071031487437     # 0x3feea09e667f3bcd
++	.quad	-4870059510540748414    # 0xbc6a12ad8734b982
++	.quad	4606795469980162751     # 0x3feea012750bdabf
++	.quad	-4871936092595705362    # 0xbc6367efb86da9ee
++	.quad	4606795056712849967     # 0x3fee9fb23c651a2f
++	.quad	-4863645441585018799    # 0xbc80dc3d54e08851
++	.quad	4606794832249197700     # 0x3fee9f7df9519484
++	.quad	-4866104880896786737    # 0xbc781f647e5a3ecf
++	.quad	4606794797614391156     # 0x3fee9f75e8ec5f74
++	.quad	-4861936742874514000    # 0xbc86ee4ac08b7db0
++	.quad	4606794953839182196     # 0x3fee9f9a48a58174
++	.quad	-4862171044651866486    # 0xbc8619321e55e68a
++	.quad	4606795301959919561     # 0x3fee9feb564267c9
++	.quad	4364160436192007379     # 0x3c909ccb5e09d4d3
++	.quad	4606795843018579263     # 0x3feea0694fde5d3f
++	.quad	-4865239048860621539    # 0xbc7b32dcb94da51d
++	.quad	4606796578062795143     # 0x3feea11473eb0187
++	.quad	4365374511615819883     # 0x3c94ecfd5467c06b
++	.quad	4606797508145889586     # 0x3feea1ed0130c132
++	.quad	4352143969406577749     # 0x3c65ebe1abd66c55
++	.quad	4606798634326904418     # 0x3feea2f336cf4e62
++	.quad	-4861457929465508030    # 0xbc88a1c52fb3cf42
++	.quad	4606799957670631954     # 0x3feea427543e1a12
++	.quad	-4858423338550479052    # 0xbc9369b6f13b3734
++	.quad	4606801479247646227     # 0x3feea589994cce13
++	.quad	-4863783675556659426    # 0xbc805e843a19ff1e
++	.quad	4606803200134334381     # 0x3feea71a4623c7ad
++	.quad	-4858024654332078226    # 0xbc94d450d872576e
++	.quad	4606805121412928237     # 0x3feea8d99b4492ed
++	.quad	4364178698342926848     # 0x3c90ad675b0e8a00
++	.quad	4606807244171536025     # 0x3feeaac7d98a6699
++	.quad	4363345029737015988     # 0x3c8db72fc1f0eab4
++	.quad	4606809569504174299     # 0x3feeace5422aa0db
++	.quad	-4871286895867992065    # 0xbc65b6609cc5e7ff
++	.quad	4606812098510800012     # 0x3feeaf3216b5448c
++	.quad	4358348108421357380     # 0x3c7bf68359f35f44
++	.quad	4606814832297342774     # 0x3feeb1ae99157736
++	.quad	-4858529541450220157    # 0xbc93091fa71e3d83
++	.quad	4606817771975737286     # 0x3feeb45b0b91ffc6
++	.quad	-4873552611666813399    # 0xbc5da9b88b6c1e29
++	.quad	4606820918663955941     # 0x3feeb737b0cdc5e5
++	.quad	-4869477542650660519    # 0xbc6c23f97c90b959
++	.quad	4606824273486041615     # 0x3feeba44cbc8520f
++	.quad	-4858747092350994006    # 0xbc92434322f4f9aa
++	.quad	4606827837572140624     # 0x3feebd829fde4e50
++	.quad	-4862257653857481141    # 0xbc85ca6cd7668e4b
++	.quad	4606831612058535866     # 0x3feec0f170ca07ba
++	.quad	4355455812241575463     # 0x3c71affc2b91ce27
++	.quad	4606835598087680144     # 0x3feec49182a3f090
++	.quad	4354367543587795899     # 0x3c6dd235e10a73bb
++	.quad	4606839796808229667     # 0x3feec86319e32323
++	.quad	-4861700651175763357    # 0xbc87c50422622263
++	.quad	4606844209375077733     # 0x3feecc667b5de565
++	.quad	4362612029712904661     # 0x3c8b1c86e3e231d5
++	.quad	4606848836949388595     # 0x3feed09bec4a2d33
++	.quad	-4858896013081134315    # 0xbc91bbd1d3bcbb15
++	.quad	4606853680698631517     # 0x3feed503b23e255d
++	.quad	4364212552380330450     # 0x3c90cc319cee31d2
++	.quad	4606858741796615000     # 0x3feed99e1330b358
++	.quad	4360726356711135923     # 0x3c8469846e735ab3
++	.quad	4606864021423521215     # 0x3feede6b5579fdbf
++	.quad	-4863078573502718540    # 0xbc82dfcd978e9db4
++	.quad	4606869520765940602     # 0x3feee36bbfd3f37a
++	.quad	4362891239881388935     # 0x3c8c1a7792cb3387
++	.quad	4606875241016906669     # 0x3feee89f995ad3ad
++	.quad	-4859248142566958598    # 0xbc907b8f4ad1d9fa
++	.quad	4606881183375930982     # 0x3feeee07298db666
++	.quad	-4875775683326071110    # 0xbc55c3d956dcaeba
++	.quad	4606887349049038331     # 0x3feef3a2b84f15fb
++	.quad	-4859203616861915584    # 0xbc90a40e3da6f640
++	.quad	4606893739248802106     # 0x3feef9728de5593a
++	.quad	-4870406652589927628    # 0xbc68d6f438ad9334
++	.quad	4606900355194379847     # 0x3feeff76f2fb5e47
++	.quad	-4858839866725070283    # 0xbc91eee26b588a35
++	.quad	4606907198111549002     # 0x3fef05b030a1064a
++	.quad	4356388038631218637     # 0x3c74ffd70a5fddcd
++	.quad	4606914269232742866     # 0x3fef0c1e904bc1d2
++	.quad	-4858893633017702228    # 0xbc91bdfbfa9298ac
++	.quad	4606921569797086729     # 0x3fef12c25bd71e09
++	.quad	4355946959017544883     # 0x3c736eae30af0cb3
++	.quad	4606929101050434204     # 0x3fef199bdd85529c
++	.quad	4363674894410448276     # 0x3c8ee3325c9ffd94
++	.quad	4606936864245403770     # 0x3fef20ab5fffd07a
++	.quad	4360857247493478828     # 0x3c84e08fd10959ac
++	.quad	4606944860641415499     # 0x3fef27f12e57d14b
++	.quad	4351547817417644647     # 0x3c63cdaf384e1a67
++	.quad	4606953091504727989     # 0x3fef2f6d9406e7b5
++	.quad	4352565403421120872     # 0x3c676b2c6c921968
++	.quad	4606961558108475497     # 0x3fef3720dcef9069
++	.quad	-4863735759665056302    # 0xbc808a1883ccb5d2
++	.quad	4606970261732705274     # 0x3fef3f0b555dc3fa
++	.quad	-4859474856892171665    # 0xbc8fad5d3ffffa6f
++	.quad	4606979203664415100     # 0x3fef472d4a07897c
++	.quad	-4859368956010059447    # 0xbc900dae3875a949
++	.quad	4606988385197591026     # 0x3fef4f87080d89f2
++	.quad	4356286533989107623     # 0x3c74a385a63d07a7
++	.quad	4606997807633245319     # 0x3fef5818dcfba487
++	.quad	-4863164539274780145    # 0xbc82919e2040220f
++	.quad	4607007472279454616     # 0x3fef60e316c98398
++	.quad	4363524392198705836     # 0x3c8e5a50d5c192ac
++	.quad	4607017380451398277     # 0x3fef69e603db3285
++	.quad	4360674496013757259     # 0x3c843a59ac016b4b
++	.quad	4607027533471396960     # 0x3fef7321f301b460
++	.quad	-4863090309766824417    # 0xbc82d52107b43e1f
++	.quad	4607037932668951391     # 0x3fef7c97337b9b5f
++	.quad	-4861307347717911095    # 0xbc892ab93b470dc9
++	.quad	4607048579380781353     # 0x3fef864614f5a129
++	.quad	4356306869484685523     # 0x3c74b604603a88d3
++	.quad	4607059474950864886     # 0x3fef902ee78b3ff6
++	.quad	4360546482996998769     # 0x3c83c5ec519d7271
++	.quad	4607070620730477699     # 0x3fef9a51fbc74c83
++	.quad	-4859393813814996496    # 0xbc8ff7128fd391f0
++	.quad	4607082018078232794     # 0x3fefa4afa2a490da
++	.quad	-4860036451210660739    # 0xbc8dae98e223747d
++	.quad	4607093668360120305     # 0x3fefaf482d8e67f1
++	.quad	4363640302291525640     # 0x3c8ec3bc41aa2008
++	.quad	4607105572949547559     # 0x3fefba1bee615a27
++	.quad	4360658257139329842     # 0x3c842b94c3a9eb32
++	.quad	4607117733227379351     # 0x3fefc52b376bba97
++	.quad	4362409866909812206     # 0x3c8a64a931d185ee
++	.quad	4607130150581978432     # 0x3fefd0765b6e4540
++	.quad	-4859885672053611539    # 0xbc8e37bae43be3ed
++	.quad	4607142826409246228     # 0x3fefdbfdad9cbe14
++	.quad	4357102052301720989     # 0x3c77893b4d91cd9d
++	.quad	4607155762112663768     # 0x3fefe7c1819e90d8
++	.quad	4346824392926350473     # 0x3c5305c14160cc89
++	.quad	4607168959103332849     # 0x3feff3c22b8f71f1
++	.size	__exp_data, 2160
++
++	.section	".note.GNU-stack","",@progbits
++
++
++#        END
+-- 
+2.20.1
+
