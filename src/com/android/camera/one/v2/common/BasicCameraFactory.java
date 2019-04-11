@@ -126,16 +126,16 @@ public class BasicCameraFactory {
         // Also, de-register these callbacks when the camera is closed (to
         // not leak memory).
         SafeCloseable zoomCallback = zoom.addCallback(mPreviewUpdater, MoreExecutors
-                .sameThreadExecutor());
+                .directExecutor());
         lifetime.add(zoomCallback);
         SafeCloseable flashCallback = flash.addCallback(mPreviewUpdater, MoreExecutors
-                .sameThreadExecutor());
+                .directExecutor());
         lifetime.add(flashCallback);
         SafeCloseable exposureCallback = exposure.addCallback(mPreviewUpdater, MoreExecutors
-                .sameThreadExecutor());
+                .directExecutor());
         lifetime.add(exposureCallback);
         SafeCloseable hdrCallback = hdrSceneSetting.addCallback(mPreviewUpdater, MoreExecutors
-                .sameThreadExecutor());
+                .directExecutor());
         lifetime.add(hdrCallback);
 
         int sensorOrientation = cameraCharacteristics.getSensorOrientation();

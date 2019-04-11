@@ -21,7 +21,7 @@ import android.media.Image;
 import android.os.Handler;
 import android.view.Surface;
 
-import com.google.common.base.Objects;
+import com.google.common.base.MoreObjects;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -160,9 +160,9 @@ public final class AndroidImageReaderProxy implements ImageReaderProxy {
 
     @Override
     public String toString() {
-        Objects.ToStringHelper tsh;
+        MoreObjects.ToStringHelper tsh;
         synchronized (mLock) {
-            tsh = Objects.toStringHelper(mDelegate);
+            tsh = MoreObjects.toStringHelper(mDelegate);
         }
         return tsh.add("width", getWidth())
                 .add("height", getHeight())

@@ -51,7 +51,7 @@ public class DynamicRingBufferFactory {
             public void run() {
                 ringBuffer.setMaxSize(Math.max(0, maxRingBufferSize.get()));
             }
-        }, MoreExecutors.sameThreadExecutor()));
+        }, MoreExecutors.directExecutor()));
         ringBuffer.setMaxSize(Math.max(0, maxRingBufferSize.get()));
 
         mOutputTicketPool = ringBuffer;
