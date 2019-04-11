@@ -19,6 +19,7 @@ package com.android.camera.one.v2.camera2proxy;
 import android.graphics.Rect;
 import android.media.Image;
 
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 
 import java.util.List;
@@ -102,7 +103,7 @@ public abstract class ForwardingImageProxy implements ImageProxy {
 
     @Override
     public String toString() {
-        return Objects.toStringHelper(this)
+        return MoreObjects.toStringHelper(this)
                 .add("timestamp", getTimestamp())
                 .add("width", getWidth())
                 .add("height", getHeight())
