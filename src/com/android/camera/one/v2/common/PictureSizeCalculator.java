@@ -22,6 +22,7 @@ import com.android.camera.one.OneCameraAccessException;
 import com.android.camera.one.OneCameraCharacteristics;
 import com.android.camera.util.AspectRatio;
 import com.android.camera.util.Size;
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 
@@ -76,7 +77,7 @@ public final class PictureSizeCalculator {
 
         @Override
         public String toString() {
-            return Objects.toStringHelper("PictureSizeCalculator.Configuration")
+            return MoreObjects.toStringHelper("PictureSizeCalculator.Configuration")
                     .add("native size", mSize)
                     .add("crop", mPostCrop)
                     .toString();
