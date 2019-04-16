@@ -39,6 +39,7 @@ import com.google.common.base.Optional;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 
 import java.nio.ByteBuffer;
 import java.util.HashMap;
@@ -355,7 +356,7 @@ public class TaskCompressImageToJpeg extends TaskJpegEncode {
             @Override
             public void onFailure(Throwable throwable) {
             }
-        });
+        }, MoreExecutors.directExecutor());
 
         final ListenableFuture<TotalCaptureResultProxy> requestMetadata = img.metadata;
         // If TotalCaptureResults are available add them to the capture event.

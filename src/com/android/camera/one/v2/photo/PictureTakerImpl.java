@@ -28,7 +28,7 @@ import com.android.camera.one.v2.commands.CameraCommandExecutor;
 import com.android.camera.one.v2.core.ResourceAcquisitionFailedException;
 import com.android.camera.one.v2.imagesaver.ImageSaver;
 import com.android.camera.session.CaptureSession;
-import com.google.common.base.Objects;
+import com.google.common.base.MoreObjects;
 
 class PictureTakerImpl implements PictureTaker {
     private final MainThread mMainExecutor;
@@ -70,7 +70,7 @@ class PictureTakerImpl implements PictureTaker {
 
         @Override
         public String toString() {
-            return Objects.toStringHelper(this)
+            return MoreObjects.toStringHelper(this)
                     .add("command", mCommand)
                     .toString();
         }

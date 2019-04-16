@@ -35,6 +35,7 @@ import com.android.camera.util.Size;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 
 import java.util.concurrent.Executor;
 
@@ -159,7 +160,7 @@ class GenericOneCameraImpl implements OneCamera {
             public void onFailure(@Nonnull Throwable throwable) {
                 listener.onSetupFailed();
             }
-        });
+        }, MoreExecutors.directExecutor());
     }
 
     @Override
