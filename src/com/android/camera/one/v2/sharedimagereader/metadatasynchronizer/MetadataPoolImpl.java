@@ -25,6 +25,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 
 import java.util.HashMap;
@@ -81,7 +82,7 @@ public class MetadataPoolImpl implements Updatable<TotalCaptureResultProxy>, Met
             public void onFailure(Throwable throwable) {
                 throw new UnsupportedOperationException();
             }
-        });
+        }, MoreExecutors.directExecutor());
         return Futures2.nonCancellationPropagating(future);
     }
 

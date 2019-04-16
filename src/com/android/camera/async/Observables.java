@@ -114,6 +114,6 @@ public class Observables {
             public void run() {
                 callback.update(observable.get());
             }
-        }, MoreExecutors.sameThreadExecutor());
+        }, MoreExecutors.directExecutor());
     }
 }
