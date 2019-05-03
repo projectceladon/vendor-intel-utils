@@ -181,7 +181,8 @@ void H4Protocol::GetUsbpath(void) {
         vid = descriptor.idVendor;
         pid = descriptor.idProduct;
         if (H4Protocol::IsIntelController(vid, pid)) {
-            sprintf(dev_address, "/dev/bus/usb/%03d/%03d", busnum, devnum);
+            snprintf(dev_address, sizeof(dev_address), "/dev/bus/usb/%03d/%03d",
+                                                       busnum, devnum);
             ALOGV("Value of BT device address = %s", dev_address);
             goto exit;
         }
