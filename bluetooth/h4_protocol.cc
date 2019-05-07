@@ -40,6 +40,8 @@ typedef uint16_t UINT16;
 #define INTEL_VID 0x8087
 #define INTEL_PID_8265 0x0a2b // Windstorm peak
 #define INTEL_PID_3168 0x0aa7 //SandyPeak (SdP)
+#define INTEL_PID_9260 0x0025 // 9160/9260 (also known as ThunderPeak)
+#define INTEL_PID_9560 0x0aaa // 9460/9560 also know as Jefferson Peak (JfP)
 
 #include <errno.h>
 #include <fcntl.h>
@@ -144,7 +146,9 @@ size_t H4Protocol::Send(uint8_t type, const uint8_t* data, size_t length){
 
 bool H4Protocol::IsIntelController(uint16_t vid, uint16_t pid) {
     if ((vid == INTEL_VID) && ((pid == INTEL_PID_8265) ||
-				(pid == INTEL_PID_3168)))
+                                (pid == INTEL_PID_3168)||
+                                (pid == INTEL_PID_9260)||
+                                (pid == INTEL_PID_9560)))
         return true;
     else
 	return false;
