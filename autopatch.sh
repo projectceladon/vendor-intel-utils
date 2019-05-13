@@ -16,7 +16,8 @@
 
 top_dir=`pwd`
 utils_dir="$top_dir/vendor/intel/utils"
-patch_dir="$utils_dir/android_p/google_diff/$TARGET_PRODUCT"
+common_patch_dir="$utils_dir/android_p/common"
+patch_dir="$utils_dir/android_p/target/$TARGET_PRODUCT"
 private_utils_dir="$top_dir/vendor/intel/PRIVATE/utils"
 private_patch_dir="$private_utils_dir/android_p/google_diff/$TARGET_PRODUCT"
 
@@ -80,6 +81,11 @@ apply_patch() {
 }
 
 #Apply common patches
+cd $common_patch_dir
+common_patch_list=`find * -iname "*.patch" | sort -u`
+apply_patch "$common_patch_list" "$common_patch_dir"
+
+#Aplly target specific patches
 cd $patch_dir
 patch_list=`find * -iname "*.patch" | sort -u`
 apply_patch "$patch_list" "$patch_dir"
