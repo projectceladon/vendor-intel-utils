@@ -31,10 +31,12 @@ public class LocationManager {
     LocationProvider mLocationProvider;
     private boolean mRecordLocation;
 
-    public LocationManager(Context context) {
-        Log.d(TAG, "Using legacy location provider.");
-        LegacyLocationProvider llp = new LegacyLocationProvider(context);
-        mLocationProvider = llp;
+    public LocationManager(Context context, boolean NoOpLocationProvider) {
+        Log.d(TAG, "Using " +
+                (NoOpLocationProvider ? "NoOpLocationProvider" : "LegacyLocationProvider"));
+        LocationProvider lp = NoOpLocationProvider ? new NoOpLocationProvider(context) :
+                new LegacyLocationProvider(context);
+        mLocationProvider = lp;
     }
 
     /**
