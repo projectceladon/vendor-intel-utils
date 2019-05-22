@@ -1,4 +1,4 @@
-From a641dd35bc4baf83d50749d15b24407aa6096423 Mon Sep 17 00:00:00 2001
+From f2ebbe7bdd5124ebc7eb7a0f44a67093d858a7ed Mon Sep 17 00:00:00 2001
 From: Zhong,Fangjian <fangjian.zhong@intel.com>
 Date: Mon, 23 Apr 2018 08:20:33 +0800
 Subject: [PATCH] x64-64 enabling patch for Google diff
@@ -409,7 +409,7 @@ index 60a10c8..006abf3 100644
  }
  
 diff --git a/arch/x86/64/ops.S b/arch/x86/64/ops.S
-index 10b55bd..fd016f3 100644
+index 10b55bd..bacb89e 100644
 --- a/arch/x86/64/ops.S
 +++ b/arch/x86/64/ops.S
 @@ -37,12 +37,12 @@
@@ -446,6 +446,24 @@ index 10b55bd..fd016f3 100644
      jnz 1f                  /* static prediction: branch forward not taken */
      ret
  1:
+@@ -74,3 +74,16 @@
+ 1:
+     ret
+ 
++#ifdef STACK_PROTECTOR
++FUNCTION(get_rand_64)
++    mov $10, %rdx
++1:
++    rdrand %rax
++    jc 2f            #jump short if carry (CF=1)
++    dec %rdx
++    jnz 1b
++    jz 3f
++2:  mov %rax, (%rdi)
++3:  mov %rdx, %rax
++    ret
++#endif
+\ No newline at end of file
 diff --git a/arch/x86/64/start.S b/arch/x86/64/start.S
 index edf4e11..f9a5d33 100644
 --- a/arch/x86/64/start.S
@@ -494,10 +512,10 @@ index edf4e11..f9a5d33 100644
  
 diff --git a/arch/x86/64/usercopy.c b/arch/x86/64/usercopy.c
 new file mode 100644
-index 0000000..33fd918
+index 0000000..4a3a757
 --- /dev/null
 +++ b/arch/x86/64/usercopy.c
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,119 @@
 +/*
 + * Copyright (c) 2018 Intel Corporation
 + *
@@ -547,6 +565,7 @@ index 0000000..33fd918
 +status_t arch_copy_from_user(void *kdest, user_addr_t usrc, size_t len)
 +{
 +    vmm_region_t *region = get_region(usrc);
++    status_t ret = 0;
 +
 +    if (0 == len)
 +        return NO_ERROR;
@@ -558,8 +577,11 @@ index 0000000..33fd918
 +        return ERR_FAULT;
 +
 +    __asm__ volatile("stac");
-+    memcpy(kdest, (void *)(uint64_t)usrc, len);
++    ret = memcpy_s(kdest, len, (void *)(uint64_t)usrc, len);
 +    __asm__ volatile("clac");
++
++    if(ret)
++        return ERR_FAULT;
 +
 +    return NO_ERROR;
 +}
@@ -567,6 +589,7 @@ index 0000000..33fd918
 +status_t arch_copy_to_user(user_addr_t udest, const void *ksrc, size_t len)
 +{
 +    vmm_region_t *region = get_region(udest);
++    status_t ret = 0;
 +
 +    if (0 == len)
 +        return NO_ERROR;
@@ -578,8 +601,11 @@ index 0000000..33fd918
 +        return ERR_FAULT;
 +
 +    __asm__ volatile("stac");
-+    memcpy((void *)(uint64_t)udest, ksrc, len);
++    ret = memcpy_s((void *)(uint64_t)udest, len, ksrc, len);
 +    __asm__ volatile("clac");
++
++    if(ret)
++        return ERR_FAULT;
 +
 +    return NO_ERROR;
 +}
@@ -610,7 +636,7 @@ index 0000000..33fd918
 +    return act_len;
 +}
 diff --git a/arch/x86/arch.c b/arch/x86/arch.c
-index 721c57e..cc81b93 100644
+index 721c57e..df79d35 100644
 --- a/arch/x86/arch.c
 +++ b/arch/x86/arch.c
 @@ -1,6 +1,6 @@
@@ -621,7 +647,7 @@ index 721c57e..cc81b93 100644
   *
   * Permission is hereby granted, free of charge, to any person obtaining
   * a copy of this software and associated documentation files
-@@ -27,42 +27,108 @@
+@@ -27,42 +27,124 @@
  #include <arch/ops.h>
  #include <arch/x86.h>
  #include <arch/x86/mmu.h>
@@ -633,6 +659,11 @@ index 721c57e..cc81b93 100644
  #include <sys/types.h>
  #include <string.h>
 +#include <assert.h>
++#ifdef STACK_PROTECTOR
++#include <kernel/vm.h>
++#include <arch/usercopy.h>
++#include <err.h>
++#endif
  
  /* early stack */
 -uint8_t _kstack[PAGE_SIZE] __ALIGNED(8);
@@ -650,6 +681,17 @@ index 721c57e..cc81b93 100644
 +extern uint64_t __tss_end;
 +extern void x86_syscall(void);
  
++#ifdef STACK_PROTECTOR
++typedef struct stack_guard_segment {
++    /* clang hardcodes the stack cookie offset as 0x28 on x86-64 */
++    uint8_t padding[40];
++    uint64_t stack_guard;
++} stack_guard_segment_t;
++
++#define STACK_GUARD_SEGMENT_SIZE 0x30
++void *start_fs_base = NULL;
++#endif
++
 +static void init_global_state(x86_global_states_t *states, uint cpu)
 +{
 +    states->cur_thread    = NULL;
@@ -745,7 +787,7 @@ index 721c57e..cc81b93 100644
  
      x86_mmu_early_init();
  }
-@@ -70,6 +136,9 @@
+@@ -70,6 +152,9 @@
  void arch_init(void)
  {
      x86_mmu_init();
@@ -755,7 +797,7 @@ index 721c57e..cc81b93 100644
  
  #ifdef X86_WITH_FPU
      fpu_init();
-@@ -83,37 +152,42 @@
+@@ -83,37 +168,84 @@
  
  void arch_enter_uspace(vaddr_t entry_point, vaddr_t user_stack_top, uint32_t flags, ulong arg0)
  {
@@ -767,12 +809,34 @@ index 721c57e..cc81b93 100644
 +    register uint64_t code_seg = USER_CODE_64_SELECTOR | USER_RPL;
 +    register uint64_t data_seg = USER_DATA_64_SELECTOR | USER_RPL;
 +    register uint64_t usr_flags = USER_EFLAGS;
++#ifdef STACK_PROTECTOR
++    static uint32_t tid = 0; /* trusty thread count */
++    thread_t *cur_thread = get_current_thread();
++    status_t status;
++    int ret = 0;
++    stack_guard_segment_t stack_guard_segment;
  
 -    thread_t *ct = get_current_thread();
--
++    /* allocate one page memory for fs base. Each TA gets its
++       fs base with the offset by tid */
++    if(!start_fs_base) {
++        start_fs_base = memalign(PAGE_SIZE, PAGE_SIZE);
++    }
+ 
 -    vaddr_t kernel_stack_top = (uintptr_t)ct->stack + ct->stack_size;
 -    kernel_stack_top = ROUNDDOWN(kernel_stack_top, 16);
--
++    status = vmm_alloc_physical(cur_thread->aspace, "fs_base",
++                             PAGE_SIZE, (void **)&cur_thread->arch.fs_base,
++                             PAGE_SIZE_SHIFT, vaddr_to_paddr(start_fs_base),
++                             0,
++                             ARCH_MMU_FLAG_PERM_NO_EXECUTE |
++                             ARCH_MMU_FLAG_PERM_USER);
++    if(status != NO_ERROR) {
++        dprintf(0, "arch_enter_uspace: failed to alloc fs_base\n");
++    } else {
++        assert(tid * STACK_GUARD_SEGMENT_SIZE < PAGE_SIZE);
++        cur_thread->arch.fs_base += tid++ * STACK_GUARD_SEGMENT_SIZE;
+ 
 -    /* set up a default spsr to get into 64bit user space:
 -     * zeroed NZCV
 -     * no SS, no IL, no D
@@ -780,9 +844,20 @@ index 721c57e..cc81b93 100644
 -     * mode 0: EL0t
 -     */
 -    uint32_t spsr = 0;
--
++        ret = get_rand_64(&stack_guard_segment.stack_guard);
++        /* in case get_rand_64 fail, use the address instead */
++        if(ret == 0) {
++            stack_guard_segment.stack_guard = (uint64_t)&stack_guard_segment.stack_guard;
++        }
+ 
 -    arch_disable_ints();
--
++        status = arch_copy_to_user(cur_thread->arch.fs_base,
++                                &stack_guard_segment, sizeof(stack_guard_segment));
++        if(status) {
++            dprintf(CRITICAL, "failed to copy to fs base!\n");
++        }
++    }
+ 
 -    asm volatile(
 -        "mov    sp, %[kstack];"
 -        "msr    sp_el0, %[ustack];"
@@ -795,6 +870,10 @@ index 721c57e..cc81b93 100644
 -        [entry]"r"(entry_point),
 -        [spsr]"r"(spsr)
 -        : "memory");
+-    __UNREACHABLE;
++    write_msr(X86_MSR_FS_BASE, (uint64_t)cur_thread->arch.fs_base);
+ #endif
++
 +    __asm__ __volatile__ (
 +            "pushq %0   \n\t"
 +            "pushq %1   \n\t"
@@ -806,13 +885,14 @@ index 721c57e..cc81b93 100644
 +            "swapgs \n\t"
 +            "movw %%ax, %%ds    \n\t"
 +            "movw %%ax, %%es    \n\t"
++#if !defined(STACK_PROTECTOR)
 +            "movw %%ax, %%fs    \n\t"
++#endif
 +            "movw %%ax, %%gs    \n\t"
 +            "iretq"
 +            :
 +            :"r"(data_seg),"r"(sp_usr),"r"(usr_flags),"r"(code_seg),"r"(entry));
-     __UNREACHABLE;
--#endif
++    __UNREACHABLE;
 +}
 +
 +void arch_syscall_stack_switch(vaddr_t new_thread_syscall)
@@ -988,7 +1068,7 @@ index b617eb5..7b82bc5 100644
  
          case INT_MF: { /* x87 floating point math fault */
 diff --git a/arch/x86/fpu.c b/arch/x86/fpu.c
-index 414fbfa..9ca6438 100644
+index 414fbfa..ad38d74 100644
 --- a/arch/x86/fpu.c
 +++ b/arch/x86/fpu.c
 @@ -39,6 +39,7 @@
@@ -1047,7 +1127,7 @@ index 414fbfa..9ca6438 100644
      x86_set_cr4(x);
  
      __asm__ __volatile__("stmxcsr %0" : "=m" (mxcsr));
-@@ -127,16 +133,17 @@
+@@ -127,16 +133,21 @@
      __asm__ __volatile__("ldmxcsr %0" : : "m" (mxcsr));
  
      /* save fpu initial states, and used when new thread creates */
@@ -1061,14 +1141,18 @@ index 414fbfa..9ca6438 100644
  void fpu_init_thread_states(thread_t *t)
  {
 +    uint cpu_id = arch_curr_cpu_num();
++    status_t ret = 0;
 +
      t->arch.fpu_states = (vaddr_t *)ROUNDUP(((vaddr_t)t->arch.fpu_buffer), 16);
 -    memcpy(t->arch.fpu_states, fpu_init_states, sizeof(fpu_init_states));
-+    memcpy(t->arch.fpu_states, (const void *)fpu_init_states[cpu_id].fpu_states, sizeof(fpu_init_states_t));
++    ret = memcpy_s(t->arch.fpu_states, sizeof(fpu_init_states_t),
++                   (const void *)fpu_init_states[cpu_id].fpu_states, sizeof(fpu_init_states_t));
++    if(ret)
++        panic("memcpy_s fails in fpu_init_thread_states()\n");
  }
  
  void fpu_context_switch(thread_t *old_thread, thread_t *new_thread)
-@@ -144,34 +151,14 @@
+@@ -144,34 +155,14 @@
      if (fp_supported == 0)
          return;
  
@@ -1357,7 +1441,7 @@ index 5ad97b1..b786075 100644
 +
  #endif // !ASSEMBLY
 diff --git a/arch/x86/include/arch/arch_thread.h b/arch/x86/include/arch/arch_thread.h
-index bd970a4..0882db9 100644
+index bd970a4..45cb4bd 100644
 --- a/arch/x86/include/arch/arch_thread.h
 +++ b/arch/x86/include/arch/arch_thread.h
 @@ -1,6 +1,6 @@
@@ -1368,7 +1452,7 @@ index bd970a4..0882db9 100644
   *
   * Permission is hereby granted, free of charge, to any person obtaining
   * a copy of this software and associated documentation files
-@@ -25,6 +25,23 @@
+@@ -25,11 +25,32 @@
  
  #include <sys/types.h>
  
@@ -1392,6 +1476,15 @@ index bd970a4..0882db9 100644
  struct arch_thread {
      vaddr_t sp;
  #if X86_WITH_FPU
+     vaddr_t *fpu_states;
+     uint8_t fpu_buffer[512 + 16];
+ #endif
++#ifdef STACK_PROTECTOR
++    /* fs base of TA. It's user address */
++    vaddr_t fs_base;
++#endif
+ };
+ 
 diff --git a/arch/x86/include/arch/aspace.h b/arch/x86/include/arch/aspace.h
 index 3c82778..a494a66 100644
 --- a/arch/x86/include/arch/aspace.h
@@ -1484,7 +1577,7 @@ index b641113..203c80a 100644
  
  typedef x86_flags_t spin_lock_saved_state_t;
 diff --git a/arch/x86/include/arch/x86.h b/arch/x86/include/arch/x86.h
-index 2e7087e..f6c73c0 100644
+index 2e7087e..4f07a39 100644
 --- a/arch/x86/include/arch/x86.h
 +++ b/arch/x86/include/arch/x86.h
 @@ -1,6 +1,6 @@
@@ -1495,7 +1588,7 @@ index 2e7087e..f6c73c0 100644
   * Copyright (c) 2016 Travis Geiselbrecht
   *
   * Permission is hereby granted, free of charge, to any person obtaining
-@@ -136,24 +136,27 @@
+@@ -136,24 +136,28 @@
  typedef tss_64_t tss_t;
  #endif
  
@@ -1535,13 +1628,14 @@ index 2e7087e..f6c73c0 100644
 +#define X86_CR4_SMAP            0x00200000 /* SMAP protection enabling */
 +#define X86_EFER_NXE            0x00000800 /* to enable execute disable bit */
 +#define X86_MSR_EFER            0xc0000080 /* EFER Model Specific Register id */
++#define X86_MSR_FS_BASE         0xc0000100 /* Map of base address of FS */
 +#define X86_MSR_GS_BASE         0xc0000101 /* Map of base address of GS */
 +#define X86_MSR_KRNL_GS_BASE    0xc0000102 /* Swap target of base address of GS */
 +#define X86_CR4_PSE             0xffffffef /* Disabling PSE bit in the CR4 */
  
  #if ARCH_X86_32
  static inline void set_in_cr0(uint32_t mask)
-@@ -497,7 +500,7 @@
+@@ -497,7 +501,7 @@
          "cpuid \n\t"
          :"=b" (reg_b)
          :"a" (reg_a),"c" (reg_c));
@@ -1550,7 +1644,7 @@ index 2e7087e..f6c73c0 100644
  }
  
  static inline uint32_t check_smap_avail(void)
-@@ -509,7 +512,7 @@
+@@ -509,7 +513,7 @@
          "cpuid \n\t"
          :"=b" (reg_b)
          :"a" (reg_a),"c" (reg_c));
@@ -1559,7 +1653,7 @@ index 2e7087e..f6c73c0 100644
  }
  #endif // ARCH_X86_32
  
-@@ -828,7 +831,7 @@
+@@ -828,7 +832,7 @@
          "cpuid \n\t"
          :"=b" (reg_b)
          :"a" (reg_a),"c" (reg_c));
@@ -1568,7 +1662,7 @@ index 2e7087e..f6c73c0 100644
  }
  
  static inline uint64_t check_smap_avail(void)
-@@ -840,9 +843,42 @@
+@@ -840,9 +844,46 @@
          "cpuid \n\t"
          :"=b" (reg_b)
          :"a" (reg_a),"c" (reg_c));
@@ -1608,6 +1702,10 @@ index 2e7087e..f6c73c0 100644
 +}
 +
 +void *get_tss_base(void);
++
++#ifdef STACK_PROTECTOR
++int get_rand_64(uint64_t* val_ret);
++#endif
 +
  #endif // ARCH_X86_64
  
@@ -1711,10 +1809,10 @@ index b71cdc6..9722a59 100644
  #define X86_2MB_PAGE_FRAME  (0x000fffffffe00000ul)
 diff --git a/arch/x86/include/arch/x86/mp.h b/arch/x86/include/arch/x86/mp.h
 new file mode 100644
-index 0000000..b6b6455
+index 0000000..0e1cfbe
 --- /dev/null
 +++ b/arch/x86/include/arch/x86/mp.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,59 @@
 +/*
 + * Copyright (c) 2018 Intel Corporation
 + *
@@ -1742,6 +1840,10 @@ index 0000000..b6b6455
 +#include <arch/x86.h>
 +
 +typedef struct x86_global_state {
++#ifdef STACK_PROTECTOR
++    uint8_t padding[40];
++    uint64_t stack_guard;
++#endif
 +    void *cur_thread;
 +    uint64_t syscall_stack;
 +} x86_global_states_t;
@@ -1967,7 +2069,7 @@ index 0000000..434cc0a
 +    return !!BIT(val, bit);
 +}
 diff --git a/arch/x86/rules.mk b/arch/x86/rules.mk
-index e26dfb9..b14afff 100644
+index e26dfb9..cec1532 100644
 --- a/arch/x86/rules.mk
 +++ b/arch/x86/rules.mk
 @@ -24,8 +24,8 @@
@@ -1990,7 +2092,7 @@ index e26dfb9..b14afff 100644
  	SMP_MAX_CPUS=1 \
  	X86_WITH_FPU=1
  
-@@ -47,14 +49,19 @@
+@@ -47,14 +49,24 @@
  	$(SUBARCH_DIR)/exceptions.S \
  	$(SUBARCH_DIR)/mmu.c \
  	$(SUBARCH_DIR)/ops.S \
@@ -2006,13 +2108,18 @@ index e26dfb9..b14afff 100644
 +	$(LOCAL_DIR)/fpu.c \
 +	$(LOCAL_DIR)/local_apic.c
 +
++ifeq (true,$(call TOBOOL,$(STACK_PROTECTOR)))
++MODULE_SRCS += \
++	$(LOCAL_DIR)/stack_chk.c
++endif
++
 +ifeq (true, $(WITH_CUSTOMIZED_BOOTSTRAP))
 +	MODULE_SRCS := $(filter-out $(SUBARCH_DIR)/start.S, $(MODULE_SRCS))
 +endif
  
  include $(LOCAL_DIR)/toolchain.mk
  
-@@ -74,6 +81,9 @@
+@@ -74,6 +86,9 @@
  $(warning ARCH_x86_64_TOOLCHAIN_PREFIX = $(ARCH_x86_64_TOOLCHAIN_PREFIX))
  $(warning TOOLCHAIN_PREFIX = $(TOOLCHAIN_PREFIX))
  
@@ -2022,16 +2129,75 @@ index e26dfb9..b14afff 100644
  
  cc-option = $(shell if test -z "`$(1) $(2) -S -o /dev/null -xc /dev/null 2>&1`"; \
  	then echo "$(2)"; else echo "$(3)"; fi ;)
-@@ -84,6 +94,7 @@
+@@ -83,17 +98,26 @@
+ 
  GLOBAL_COMPILEFLAGS += -fasynchronous-unwind-tables
  GLOBAL_COMPILEFLAGS += -gdwarf-2
- GLOBAL_COMPILEFLAGS += -fno-pic
+-GLOBAL_COMPILEFLAGS += -fno-pic
++#GLOBAL_COMPILEFLAGS += -fno-pic
 +GLOBAL_COMPILEFLAGS += -msoft-float
  GLOBAL_LDFLAGS += -z max-page-size=4096
++GLOBAL_LDFLAGS += -z noexecstack
  
  ifeq ($(SUBARCH),x86-64)
++ifeq (true,$(call TOBOOL,$(STACK_PROTECTOR)))
++GLOBAL_DEFINES += \
++  STACK_PROTECTOR=1
++GLOBAL_COMPILEFLAGS += -fstack-protector-strong
++else
+ GLOBAL_COMPILEFLAGS += -fno-stack-protector
+-GLOBAL_COMPILEFLAGS += -mcmodel=kernel
+-GLOBAL_COMPILEFLAGS += -mno-red-zone
++endif
++KERNEL_COMPILEFLAGS += -mcmodel=kernel
++KERNEL_COMPILEFLAGS += -mno-red-zone
++KERNEL_COMPILEFLAGS += -fPIE -include arch/hidden.h
+ endif # SUBARCH x86-64
+ 
+ 
+-ARCH_OPTFLAGS := -O2
++ARCH_OPTFLAGS := -O2 -D_FORTIFY_SOURCE=2
+ 
+ LINKER_SCRIPT += $(SUBARCH_BUILDDIR)/kernel.ld
+ 
+diff --git a/arch/x86/stack_chk.c b/arch/x86/stack_chk.c
+new file mode 100644
+index 0000000..e2cfa89
+--- /dev/null
++++ b/arch/x86/stack_chk.c
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (c) 2019 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files
++ * (the "Software"), to deal in the Software without restriction,
++ * including without limitation the rights to use, copy, modify, merge,
++ * publish, distribute, sublicense, and/or sell copies of the Software,
++ * and to permit persons to whom the Software is furnished to do so,
++ * subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be
++ * included in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
++ * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
++ * CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
++ * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
++ * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++#include <debug.h>
++#include <trace.h>
++
++void __stack_chk_fail(void)
++{
++    panic("kernel stack is corrupted\n");
++}
 diff --git a/arch/x86/thread.c b/arch/x86/thread.c
-index e75f199..85eb57f 100644
+index e75f199..df9a34e 100644
 --- a/arch/x86/thread.c
 +++ b/arch/x86/thread.c
 @@ -1,7 +1,7 @@
@@ -2065,7 +2231,7 @@ index e75f199..85eb57f 100644
  
      thread_exit(ret);
  }
-@@ -123,38 +121,19 @@
+@@ -123,38 +121,29 @@
          :
          : "d" (&oldthread->arch.sp), "a" (newthread->arch.sp)
      );
@@ -2106,6 +2272,16 @@ index e75f199..85eb57f 100644
  #endif
 +    tss_base->rsp0 = stack_top;
 +    write_msr(SYSENTER_ESP_MSR, stack_top);
++
++#ifdef STACK_PROTECTOR
++    if(oldthread->tls[TLS_ENTRY_TRUSTY]) {
++        oldthread->arch.fs_base = read_msr(X86_MSR_FS_BASE);
++    }
++
++    if(newthread->tls[TLS_ENTRY_TRUSTY]) {
++        write_msr(X86_MSR_FS_BASE, newthread->arch.fs_base);
++    }
++#endif
  
      x86_64_context_switch(&oldthread->arch.sp, newthread->arch.sp);
  }
@@ -2146,10 +2322,18 @@ index dba751e..aa041fd 100644
  endif
  
 diff --git a/engine.mk b/engine.mk
-index c0a45fa..527c149 100644
+index c0a45fa..40a3377 100644
 --- a/engine.mk
 +++ b/engine.mk
-@@ -133,6 +133,9 @@
+@@ -65,6 +65,7 @@
+ GLOBAL_COMPILEFLAGS += -Werror -Wall -Wsign-compare -Wno-multichar -Wno-unused-function -Wno-unused-label -Wno-tautological-compare
+ GLOBAL_COMPILEFLAGS += -fno-short-enums -fno-common
+ GLOBAL_CFLAGS := --std=c11 -Wstrict-prototypes -Wwrite-strings
++GLOBAL_CFLAGS += -Wformat -Wformat-security
+ GLOBAL_CPPFLAGS := --std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics
+ #GLOBAL_CPPFLAGS += -Weffc++
+ GLOBAL_ASMFLAGS := -DASSEMBLY
+@@ -133,6 +134,9 @@
  # comment out or override if you want to see the full output of each command
  NOECHO ?= @
  
@@ -2159,7 +2343,7 @@ index c0a45fa..527c149 100644
  # default to building with clang
  CLANGBUILD ?= true
  override CLANGBUILD := $(call TOBOOL,$(CLANGBUILD))
-@@ -141,8 +144,6 @@
+@@ -141,8 +145,6 @@
  GLOBAL_COMPILEFLAGS += -Wimplicit-fallthrough
  endif
  
@@ -2168,7 +2352,7 @@ index c0a45fa..527c149 100644
  ifndef TARGET
  $(error couldn't find project or project doesn't define target)
  endif
-@@ -184,6 +185,10 @@
+@@ -184,6 +186,10 @@
  	LK_DEBUGLEVEL=$(DEBUG)
  endif
  
@@ -2179,6 +2363,17 @@ index c0a45fa..527c149 100644
  # allow additional defines from outside the build system
  ifneq ($(EXTERNAL_DEFINES),)
  GLOBAL_DEFINES += $(EXTERNAL_DEFINES)
+diff --git a/include/arch/hidden.h b/include/arch/hidden.h
+new file mode 100644
+index 0000000..e36e6da
+--- /dev/null
++++ b/include/arch/hidden.h
+@@ -0,0 +1,5 @@
++/*
++ * Use a pragma to set all objects to hidden, the command-line option does not
++ * apply to externs.
++ */
++#pragma GCC visibility push(hidden)
 diff --git a/include/arch/ops.h b/include/arch/ops.h
 index f097751..906757e 100644
 --- a/include/arch/ops.h
@@ -2592,6 +2787,67 @@ index 3dc080b..1babff9 100644
 +ifeq ($(SUBARCH),x86-64)
 +include $(LOCAL_DIR)/64/rules.mk
 +endif
+diff --git a/make/compile.mk b/make/compile.mk
+index bae61d5..65004f9 100644
+--- a/make/compile.mk
++++ b/make/compile.mk
+@@ -41,46 +41,48 @@
+ $(MODULE_OBJS): MODULE_SRCDEPS:=$(MODULE_SRCDEPS)
+ $(MODULE_OBJS): MODULE_INCLUDES:=$(MODULE_INCLUDES)
+ 
++COMPILEFLAGS = $(GLOBAL_COMPILEFLAGS) $(KERNEL_COMPILEFLAGS)
++
+ $(MODULE_COBJS): $(BUILDDIR)/%.o: %.c $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CFLAGS) $(ARCH_CFLAGS) $(MODULE_CFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CFLAGS) $(ARCH_CFLAGS) $(MODULE_CFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ $(MODULE_CPPOBJS): $(BUILDDIR)/%.o: %.cpp $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ $(MODULE_CCOBJS): $(BUILDDIR)/%.o: %.cc $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ $(MODULE_ASMOBJS): $(BUILDDIR)/%.o: %.S $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_ASMFLAGS) $(ARCH_ASMFLAGS) $(MODULE_ASMFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_ASMFLAGS) $(ARCH_ASMFLAGS) $(MODULE_ASMFLAGS) $(THUMBCFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ # overridden arm versions
+ $(MODULE_ARM_COBJS): $(BUILDDIR)/%.o: %.c $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CFLAGS) $(ARCH_CFLAGS) $(MODULE_CFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CFLAGS) $(ARCH_CFLAGS) $(MODULE_CFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ $(MODULE_ARM_CPPOBJS): $(BUILDDIR)/%.o: %.cpp $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ $(MODULE_ARM_CCOBJS): $(BUILDDIR)/%.o: %.cc $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_CPPFLAGS) $(ARCH_CPPFLAGS) $(MODULE_CPPFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ $(MODULE_ARM_ASMOBJS): $(BUILDDIR)/%.o: %.S $(MODULE_SRCDEPS)
+ 	@$(MKDIR)
+ 	@echo compiling $<
+-	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(GLOBAL_COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_ASMFLAGS) $(ARCH_ASMFLAGS) $(MODULE_ASMFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
++	$(NOECHO)$(CC) $(GLOBAL_OPTFLAGS) $(MODULE_OPTFLAGS) $(COMPILEFLAGS) $(ARCH_COMPILEFLAGS) $(MODULE_COMPILEFLAGS) $(GLOBAL_ASMFLAGS) $(ARCH_ASMFLAGS) $(MODULE_ASMFLAGS) $(GLOBAL_INCLUDES) $(MODULE_INCLUDES) -c $< -MD -MP -MT $@ -MF $(@:%o=%d) -o $@
+ 
+ # clear some variables we set here
+ MODULE_CSRCS :=
 diff --git a/make/module.mk b/make/module.mk
 index b8aafa9..860cb09 100644
 --- a/make/module.mk
