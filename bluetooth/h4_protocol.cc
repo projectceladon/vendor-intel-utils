@@ -169,8 +169,7 @@ void H4Protocol::GetUsbpath(void) {
     count = libusb_get_device_list(ctx, &dev_list);
     if (count <= 0) {
         ALOGE("Error getting USB device list: %s\n", strerror(count));
-        libusb_exit(ctx);
-        return;
+        goto exit;
     }
     for (i = 0; i < count; ++i) {
         struct libusb_device* dev = dev_list[i];
