@@ -62,13 +62,13 @@ struct ShaderConfig
     }
     ShaderConfig(){}
 
-    int localSizeX;
-    int localSizeY;
-    int localSizeZ;
-    int blockWidth;
-    int blockHeight;
-    int blockDepth;
-    int shaderType;
+    int localSizeX = {0};
+    int localSizeY = {0};
+    int localSizeZ= {0};
+    int blockWidth = {0};
+    int blockHeight = {0};
+    int blockDepth = {0};
+    int shaderType = {0};
 };
 
 // in(inH, inW, inC) out(outH, outW, outC)

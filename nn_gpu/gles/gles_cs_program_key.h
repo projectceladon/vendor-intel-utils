@@ -27,8 +27,9 @@ struct GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyBasic(OperationType type)
     {
-        size_t size = sizeof(*this);
-        memset(this, 0xBB, size);
+        localSizeX = 0;
+        localSizeY = 0;
+        localSizeZ = 0;
         opType = type;
     }
     OperationType opType;
@@ -41,13 +42,13 @@ struct GlesCsProgramKeyBasic
 struct GlesCsProgramKeyAdd : GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyAdd() : GlesCsProgramKeyBasic(OperationType::ADD) {}
-    bool broadcast;
+    bool broadcast = {false};
 };
 
 struct GlesCsProgramKeyConcatenation: GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyConcatenation() : GlesCsProgramKeyBasic(OperationType::CONCATENATION) {}
-    bool lastaxis;
+    bool lastaxis = {false};
 };
 
 struct ConvParam
@@ -78,37 +79,37 @@ struct ConvParam
     }
     ConvParam(){}
 
-    int batch;
-    int inH;
-    int inW;
-    int inC;
-    int outH;
-    int outW;
-    int outC;
-    int filterH;
-    int filterW;
-    int strideH;
-    int strideW;
-    int padH;
-    int padW;
-    int activation;
-    bool hasBias;
+    int batch = {0};
+    int inH = {0};
+    int inW = {0};
+    int inC = {0};
+    int outH = {0};
+    int outW = {0};
+    int outC = {0};
+    int filterH = {0};
+    int filterW = {0};
+    int strideH = {0};
+    int strideW = {0};
+    int padH = {0};
+    int padW = {0};
+    int activation = {0};
+    bool hasBias = {false};
 };
 
 struct GlesCsProgramKeyConv: GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyConv() : GlesCsProgramKeyBasic(OperationType::CONV_2D) {}
-    int blockHeight;
-    int blockWidth;
-    int blockDepth;
-    int shaderType;
+    int blockHeight = {0};
+    int blockWidth = {0};
+    int blockDepth = {0};
+    int shaderType = {0};
     ConvParam convParam;
 };
 
 struct GlesCsProgramKeyDepthConv: GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyDepthConv() : GlesCsProgramKeyBasic(OperationType::DEPTHWISE_CONV_2D) {}
-    uint32_t itemZ;
+    uint32_t itemZ = {0};
 };
 
 struct GlesCsProgramKeyLRN: GlesCsProgramKeyBasic
@@ -119,21 +120,21 @@ struct GlesCsProgramKeyLRN: GlesCsProgramKeyBasic
 struct GlesCsProgramKeyAvgPool: GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyAvgPool() : GlesCsProgramKeyBasic(OperationType::AVERAGE_POOL_2D) {}
-    uint32_t itemZ;
-    uint32_t batch;
+    uint32_t itemZ = {0};
+    uint32_t batch = {0};
 };
 
 struct GlesCsProgramKeyMaxPool: GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyMaxPool() : GlesCsProgramKeyBasic(OperationType::MAX_POOL_2D) {}
-    uint32_t itemZ;
-    uint32_t batch;
+    uint32_t itemZ = {0};
+    uint32_t batch = {0};
 };
 
 struct GlesCsProgramKeyMul : GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyMul() : GlesCsProgramKeyBasic(OperationType::MUL) {}
-    bool broadcast;
+    bool broadcast = {false};
 };
 
 }  // namespace implementation

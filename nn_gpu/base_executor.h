@@ -87,7 +87,7 @@ public:
     virtual bool initPerExecThread() { NOT_REACH_HERE; return true; }
     virtual void deinitPerExecThread() { NOT_REACH_HERE; }
 
-    virtual bool run(const Request& request) { NOT_REACH_HERE; UNUSED(request); return true;}
+    virtual bool run(const Request& request) { UNUSED(request); NOT_REACH_HERE; return true;}
     static std::string getOpName(const Operation& op);
 protected:
     const Model& model;

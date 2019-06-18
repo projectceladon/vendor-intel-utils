@@ -1051,7 +1051,6 @@ void GlesCsProgramManager::getShaderSourceCONV_2D(const void* basicKey, std::str
                 break;
             default:
                 NOT_REACH_HERE;
-                break;
         }
     }
 

@@ -136,7 +136,6 @@ void GlesCsProgramManager::getShaderSourceAVERAGE_POOL_2D(const void* progKey, s
             break;
         default:
             NOT_REACH_HERE;
-            break;
     }
 
     ss << mainpart;

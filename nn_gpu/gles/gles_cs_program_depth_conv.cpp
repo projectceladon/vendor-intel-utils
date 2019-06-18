@@ -150,7 +150,6 @@ void GlesCsProgramManager::getShaderSourceDEPTHWISE_CONV_2D(const void* progKey,
             break;
         default:
             NOT_REACH_HERE;
-            break;
     }
 
     ss << mainpart;

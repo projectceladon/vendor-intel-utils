@@ -26,8 +26,7 @@ PreparedModel::PreparedModel(const Model& model)
 
 bool PreparedModel::initialize()
 {
-    exec->initPerModel();
-    return true;
+    return exec->initPerModel();
 }
 
 void PreparedModel::asyncExecute(const Request& request,

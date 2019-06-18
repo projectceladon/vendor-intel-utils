@@ -131,7 +131,6 @@ void GlesCsProgramManager::getShaderSourceMAX_POOL_2D(const void* progKey, std::
             break;
         default:
             NOT_REACH_HERE;
-            break;
     }
 
     ss << mainpart;

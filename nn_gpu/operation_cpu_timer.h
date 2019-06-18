@@ -13,7 +13,7 @@ namespace implementation {
 class OperationCpuTimer
 {
 public:
-    OperationCpuTimer() : avg(0) {}
+    OperationCpuTimer() : avg(0), opIndex(0) {}
     ~OperationCpuTimer() {}
     void add(long diff) { times.push_back(diff); }
     void set(uint32_t index, const std::string& name)

@@ -21,7 +21,7 @@ bool GlesOperand::setArg(const RequestArgument& from)
     }
 
     if (from.hasNoValue) {
-        ASSERT(!"what's happened");
+//        ASSERT(!"what's happened");
         lifetime = OperandLifeTime::NO_VALUE;
     }
     else
@@ -97,7 +97,6 @@ bool GlesOperand::set(const Operand& from, uint8_t* vp, uint32_t index)
             break;
         default:
             NOT_REACH_HERE;
-            break;
     }
 
     return true;

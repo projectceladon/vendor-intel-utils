@@ -69,7 +69,6 @@ void GlesCsProgramManager::getShaderSourceADD(const void* progKey, std::string& 
             break;
         default:
             NOT_REACH_HERE;
-            break;
     }
 
     ss << "layout(local_size_x = " << key->localSizeX << ") in;\n";
