@@ -1,0 +1,246 @@
+From 3551cda6789e154bd4dca67aa6e3c63aa3918d73 Mon Sep 17 00:00:00 2001
+From: Nagamani Chennuboina <nagamani.chennuboina@intel.com>
+Date: Wed, 12 Jun 2019 23:46:01 +0530
+Subject: [PATCH 2/2] openvino klocwork critical fixes
+
+Tracked-On: OAM-81035
+Signed-off-by: Nagamani Chennuboina <nagamani.chennuboina@intel.com>
+Signed-off-by: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+---
+ inference-engine/include/inference_engine.hpp        | 12 ++++++------
+ .../inference_engine/builders/ie_eltwise_layer.cpp   |  2 ++
+ .../inference_engine/builders/ie_pooling_layer.cpp   |  4 ++++
+ .../inference_engine/cnn_network_int8_normalizer.cpp |  2 +-
+ .../impl/ie_infer_request_internal.hpp               |  4 ++--
+ .../src/inference_engine/ie_layer_parsers.cpp        |  9 ++++++---
+ .../src/mkldnn_plugin/mkldnn_primitive.cpp           |  2 ++
+ .../src/mkldnn_plugin/utils/blob_dump.cpp            |  2 ++
+ .../thirdparty/mkl-dnn/include/mkldnn.hpp            | 11 ++++++++++-
+ .../thirdparty/mkl-dnn/src/common/utils.cpp          |  2 +-
+ .../thirdparty/mkl-dnn/src/common/verbose.cpp        |  2 +-
+ .../thirdparty/mkl-dnn/src/cpu/gemm/gemm.cpp         |  4 ++++
+ 12 files changed, 41 insertions(+), 15 deletions(-)
+
+diff --git a/inference-engine/include/inference_engine.hpp b/inference-engine/include/inference_engine.hpp
+index 80065bf..cdc2ace 100644
+--- a/inference-engine/include/inference_engine.hpp
++++ b/inference-engine/include/inference_engine.hpp
+@@ -192,13 +192,13 @@ void copyToFloat(float *dst, const InferenceEngine::Blob *src) {
+ 	#else
+         THROW_IE_EXCEPTION << "input type is " << src->precision() << " but input is not " << typeid(T).name();
+ 	#endif
++    } else {
++        const T *srcPtr = t_blob->readOnly();
++        if (srcPtr == nullptr) {
++            THROW_IE_EXCEPTION << "Input data was not allocated.";
++        }
++        for (size_t i = 0; i < t_blob->size(); i++) dst[i] = srcPtr[i];
+     }
+-
+-    const T *srcPtr = t_blob->readOnly();
+-    if (srcPtr == nullptr) {
+-        THROW_IE_EXCEPTION << "Input data was not allocated.";
+-    }
+-    for (size_t i = 0; i < t_blob->size(); i++) dst[i] = srcPtr[i];
+ }
+ 
+ }  // namespace InferenceEngine
+diff --git a/inference-engine/src/inference_engine/builders/ie_eltwise_layer.cpp b/inference-engine/src/inference_engine/builders/ie_eltwise_layer.cpp
+index cffecaa..9e05f67 100644
+--- a/inference-engine/src/inference_engine/builders/ie_eltwise_layer.cpp
++++ b/inference-engine/src/inference_engine/builders/ie_eltwise_layer.cpp
+@@ -26,6 +26,8 @@ Builder::EltwiseLayer::EltwiseLayer(Layer& genLayer): LayerFragment(genLayer) {
+         type = SUM;
+     } else if (operatorStr == "mul") {
+         type = MUL;
++    } else { //Expecting operatorStr allows only max, sum, mul
++        THROW_IE_EXCEPTION << "Cannot create EltwiseLayer Invalid operatorStr";
+     }
+ }
+ 
+diff --git a/inference-engine/src/inference_engine/builders/ie_pooling_layer.cpp b/inference-engine/src/inference_engine/builders/ie_pooling_layer.cpp
+index 41db6c8..2364760 100644
+--- a/inference-engine/src/inference_engine/builders/ie_pooling_layer.cpp
++++ b/inference-engine/src/inference_engine/builders/ie_pooling_layer.cpp
+@@ -27,12 +27,16 @@ Builder::PoolingLayer::PoolingLayer(Layer& genLayer): LayerFragment(genLayer) {
+         type = MAX;
+     else if (typeStr == "avg")
+         type = AVG;
++    else
++        THROW_IE_EXCEPTION << "Cannot create PoolingLayer decorator - Invalid typeStr ";
+ 
+     typeStr = getLayer().getParameters()["rounding_type"].asString("ceil");
+     if (typeStr == "ceil")
+         roundingType = CEIL;
+     else if (typeStr == "avg")
+         roundingType = FLOOR;
++    else
++        THROW_IE_EXCEPTION << "Cannot create PoolingLayer decorator - Invalid typeStr ";
+ }
+ 
+ Builder::PoolingLayer::operator Builder::Layer() const {
+diff --git a/inference-engine/src/inference_engine/cnn_network_int8_normalizer.cpp b/inference-engine/src/inference_engine/cnn_network_int8_normalizer.cpp
+index 58dd61f..e835690 100644
+--- a/inference-engine/src/inference_engine/cnn_network_int8_normalizer.cpp
++++ b/inference-engine/src/inference_engine/cnn_network_int8_normalizer.cpp
+@@ -881,7 +881,7 @@ void CNNNetworkInt8Normalizer::DefinesExecutionPrecision(CNNNetwork &net, CNNSta
+             ReLULayer *rL = dynamic_cast<ReLULayer *>(iter.get());
+             DataPtr outData = iter->outData.size() ? iter->outData[0] : nullptr;
+             if (iter->insData[0].lock()->creatorLayer.lock()->precision != Precision::FP32
+-                && outData->getPrecision() == Precision::FP32) {
++                && outData != nullptr && outData->getPrecision() == Precision::FP32) {
+                 iter->precision = Precision::I8;
+                 if (rL->negative_slope != 0.0f) {
+                     outData->setPrecision(Precision::I8);
+diff --git a/inference-engine/src/inference_engine/cpp_interfaces/impl/ie_infer_request_internal.hpp b/inference-engine/src/inference_engine/cpp_interfaces/impl/ie_infer_request_internal.hpp
+index c9afe39..f88dae3 100644
+--- a/inference-engine/src/inference_engine/cpp_interfaces/impl/ie_infer_request_internal.hpp
++++ b/inference-engine/src/inference_engine/cpp_interfaces/impl/ie_infer_request_internal.hpp
+@@ -183,8 +183,8 @@ public:
+     }
+ 
+ protected:
+-    InferenceEngine::InputsDataMap _networkInputs;
+-    InferenceEngine::OutputsDataMap _networkOutputs;
++    InferenceEngine::InputsDataMap _networkInputs = {};
++    InferenceEngine::OutputsDataMap _networkOutputs = {};
+     InferenceEngine::BlobMap _inputs;
+     InferenceEngine::BlobMap _outputs;
+     ExecutableNetworkInternalPtr _exeNetwork;
+diff --git a/inference-engine/src/inference_engine/ie_layer_parsers.cpp b/inference-engine/src/inference_engine/ie_layer_parsers.cpp
+index 886c759..fc11368 100644
+--- a/inference-engine/src/inference_engine/ie_layer_parsers.cpp
++++ b/inference-engine/src/inference_engine/ie_layer_parsers.cpp
+@@ -182,12 +182,14 @@ CNNLayer::Ptr TILayerCreator::CreateLayer(pugi::xml_node& node, LayerParseParame
+         int in_indx = 0;
+         FOREACH_CHILD(in, node.child("input"), "port") {
+             int id = GetIntAttr(in, "id");
+-            e2i[id] = in_indx++;
++            if (id >= 0)
++                e2i[id] = in_indx++;
+         }
+         int out_indx = 0;
+         FOREACH_CHILD(in, node.child("output"), "port") {
+             int id = GetIntAttr(in, "id");
+-            e2i[id] = out_indx++;
++            if (id >= 0)
++                e2i[id] = out_indx++;
+         }
+     }
+ 
+@@ -204,7 +206,8 @@ CNNLayer::Ptr TILayerCreator::CreateLayer(pugi::xml_node& node, LayerParseParame
+         int start = GetIntAttr(pm, "start", 0);
+         int end = GetIntAttr(pm, "end", -1);
+ 
+-        TensorIterator::PortMap res;
++        TensorIterator::PortMap res = {};
++        if (external_port_id >= e2i.size()) return res;
+         res.from = e2i[external_port_id];
+         res.to   = p2i[{internal_layer_id, internal_port_id}];
+         res.axis = axis;
+diff --git a/inference-engine/src/mkldnn_plugin/mkldnn_primitive.cpp b/inference-engine/src/mkldnn_plugin/mkldnn_primitive.cpp
+index 4474b0a..c9d6928 100644
+--- a/inference-engine/src/mkldnn_plugin/mkldnn_primitive.cpp
++++ b/inference-engine/src/mkldnn_plugin/mkldnn_primitive.cpp
+@@ -32,6 +32,8 @@ MKLDNNPrimitive &MKLDNNPrimitive::operator=(const std::shared_ptr<mkldnn::primit
+ void MKLDNNPrimitive::setBatchLimit(int batch, size_t inputNum, size_t outputNum) {
+     bool success = true;
+     auto * primDesc = prim->get_primitive_desc();
++    if (primDesc == nullptr) return;
++
+ #ifdef __ANDROID__
+ auto * concatPrimDesc = static_cast<const mkldnn::impl::cpu::cpu_concat_pd_t *>(primDesc);
+ #else
+diff --git a/inference-engine/src/mkldnn_plugin/utils/blob_dump.cpp b/inference-engine/src/mkldnn_plugin/utils/blob_dump.cpp
+index 24d2931..d51cbf1 100644
+--- a/inference-engine/src/mkldnn_plugin/utils/blob_dump.cpp
++++ b/inference-engine/src/mkldnn_plugin/utils/blob_dump.cpp
+@@ -39,6 +39,8 @@ struct IEB_HEADER {
+ static IEB_HEADER prepare_header(const TensorDesc& desc) {
+     IEB_HEADER header;
+ 
++    memset(&header, 0, sizeof(IEB_HEADER));
++
+     header.magic[0] = IEB_MAGIC[0];
+     header.magic[1] = IEB_MAGIC[1];
+     header.magic[2] = IEB_MAGIC[2];
+diff --git a/inference-engine/thirdparty/mkl-dnn/include/mkldnn.hpp b/inference-engine/thirdparty/mkl-dnn/include/mkldnn.hpp
+index b0869e7..6ea419f 100644
+--- a/inference-engine/thirdparty/mkl-dnn/include/mkldnn.hpp
++++ b/inference-engine/thirdparty/mkl-dnn/include/mkldnn.hpp
+@@ -18,6 +18,7 @@
+ #define MKLDNN_HPP
+ 
+ #ifndef DOXYGEN_SHOULD_SKIP_THIS
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <memory>
+ #include <vector>
+@@ -775,6 +776,7 @@ struct memory: public primitive  {
+         ///
+         /// @param adata A C API #mkldnn_memory_desc_t structure.
+         desc(const mkldnn_memory_desc_t &adata): data(adata) {}
++        desc() {}
+     };
+ 
+     /// A memory primitive descriptor.
+@@ -797,7 +799,14 @@ struct memory: public primitive  {
+         /// Returns the memory primitive descriptor.
+         memory::desc desc() {
+             auto memory_d = mkldnn_primitive_desc_query_memory_d(get());
+-            return memory::desc(*memory_d); }
++            memory::desc tempMemory = {};
++            memset(&tempMemory, 0, sizeof(tempMemory));
++            if (memory_d == nullptr) {
++                return memory::desc(tempMemory);
++            } else {
++                return memory::desc(*memory_d);
++            }
++        }
+ 
+         /// Returns the number of bytes required to allocate the memory described
+         /// including the padding area.
+diff --git a/inference-engine/thirdparty/mkl-dnn/src/common/utils.cpp b/inference-engine/thirdparty/mkl-dnn/src/common/utils.cpp
+index 75d588d..246c51b 100644
+--- a/inference-engine/thirdparty/mkl-dnn/src/common/utils.cpp
++++ b/inference-engine/thirdparty/mkl-dnn/src/common/utils.cpp
+@@ -70,7 +70,7 @@ static bool dump_jit_code;
+ bool mkldnn_jit_dump() {
+     static bool initialized = false;
+     if (!initialized) {
+-        const int len = 2;
++        const int len = 5;
+         char env_dump[len] = {0};
+         dump_jit_code =
+             mkldnn_getenv(env_dump, "MKLDNN_JIT_DUMP", len) == 1
+diff --git a/inference-engine/thirdparty/mkl-dnn/src/common/verbose.cpp b/inference-engine/thirdparty/mkl-dnn/src/common/verbose.cpp
+index e1af658..f48ee01 100644
+--- a/inference-engine/thirdparty/mkl-dnn/src/common/verbose.cpp
++++ b/inference-engine/thirdparty/mkl-dnn/src/common/verbose.cpp
+@@ -34,7 +34,7 @@ const verbose_t *mkldnn_verbose() {
+ #if !defined(DISABLE_VERBOSE)
+     static int initialized = 0;
+     if (!initialized) {
+-        const int len = 2;
++        const int len = 5;
+         char val[len] = {0};
+         if (mkldnn_getenv(val, "MKLDNN_VERBOSE", len) == 1)
+             verbose.level = atoi(val);
+diff --git a/inference-engine/thirdparty/mkl-dnn/src/cpu/gemm/gemm.cpp b/inference-engine/thirdparty/mkl-dnn/src/cpu/gemm/gemm.cpp
+index 146e688..1bba467 100644
+--- a/inference-engine/thirdparty/mkl-dnn/src/cpu/gemm/gemm.cpp
++++ b/inference-engine/thirdparty/mkl-dnn/src/cpu/gemm/gemm.cpp
+@@ -99,6 +99,10 @@ struct gemm_impl_t {
+                     transa, transb, zero_beta ? zero : arbitrary_float,
+                     with_bias);
+         }
++        else {
++            isa_ = isa_any;
++            ker_ = nullptr;
++        }
+     }
+ 
+     mkldnn_status_t call(const char *transa, const char *transb, const int *M,
+-- 
+2.17.1
+
