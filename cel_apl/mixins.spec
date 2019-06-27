@@ -1,70 +1,80 @@
 [main]
-mixinsdir: device/intel/project-celadon/mixins/groups
+mixinsdir: ./mixins/groups
 mixinsctl: true
-mixinsrel: true
+mixinsrel: false
 
 [mapping]
 product.mk: device.mk
 
-
 [groups]
-device-specific: cel_apl
-kernel: gmin64(useprebuilt=false,src_path=kernel/4.14, loglevel=7, interactive_governor=false, relative_sleepstates=false, modules_in_bootimg=false, external_modules=,debug_modules=, use_bcmdhd=false, use_iwlwifi=false, extmod_platform=bxt, iwl_defconfig=, cfg_path=kernel/config-lts/v4.14/kbl/android)
-boot-arch: efi(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,data_encryption=true,target=cel_apl,rpmb_simulate=true)
-graphics: mesa(gralloc1=true,gen9+=true,hwc2=true,vulkan=false,drmhwc=false,minigbm=true)
-cpu-arch: slm
-#thermal: dptf_configurable(intel_modem=true,thermal_lite=true,platform=kbl)
-serialport: ttyS1
-#gptbuild: true(size=7G)
-flashfiles: ini(fast_flashfiles=false, oemvars=false,installer=true,flash_dnx_os=false,blank_no_fw=true)
-storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=false)
-sepolicy: permissive
-widevine: L3_Gen
-touch: galax7200
-display-density: medium
-media: mesa(add_sw_msdk=false)
-public-libraries: true
-hdcpd: true
-codecs: configurable(hw_vd_vp9=true, hw_vd_mp2=true, hw_vd_vc1=true, platform=icl)
-usb-audio-init: true
-debug-npk: true(default_cfg=none, console_master_range="57 60", console_channel_range="1 4", user_master_range="72 126", user_channel_range="1 127", platform=icl)
-debug-dvc_desc: npk
-wlan: iwlwifi(iwl_sub_folder=dev,firmware=iwl-fw-celadon,iwl_defconfig=kbl,iwl_platform=celadon)
-bluetooth: btusb(firmware=bt_fw_cel,ivi=true)
+kernel: gmin64(useprebuilt=false,src_path=kernel/lts2018, loglevel=7, interactive_governor=false, relative_sleepstates=false, modules_in_bootimg=false, external_modules=,debug_modules=, use_bcmdhd=false, use_iwlwifi=false, extmod_platform=bxt, iwl_defconfig=, cfg_path=kernel/config-lts/lts2018/bxt/android/non-embargoed)
 disk-bus: auto
-vendor-partition: true
-config-partition: true
-dexpreopt: true
-dalvik-heap: tablet-7in-hdpi-1024
-bugreport: true
-ethernet: dhcp
-rfkill: true(force_disable=)
+boot-arch: project-celadon(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,disk_encryption=false,file_encryption=true,target=cel_apl,rpmb_simulate=true,ignore_not_applicable_reset=true,self_usb_device_mode_protocol=true)
+sepolicy: enforcing
+bluetooth: btusb(ivi=true)
 audio: project-celadon
-camera-ext: ext-camera-only
-usb: host+acc
-usb-gadget: configfs(mtp_adb_pid=0x0a5f,ptp_adb_pid=0x0a61,rndis_pid=0x0a62,rndis_adb_pid=0x0a63,bcdDevice=0x0,bcdUSB=0x200,controller=dwc3.0.auto,f_acm=false,f_dvc_trace=false)
-navigationbar: true
-device-type: car
-gms: default
-debug-tools: true
-debug-logs: true
-debug-crashlogd: true
-debug-coredump: true
-debug-phonedoctor: true
+vendor-partition: true(partition_size=600,partition_name=vendor)
+config-partition: true
+display-density: medium
+dalvik-heap: tablet-10in-xhdpi-2048
+cpu-arch: slm
+allow-missing-dependencies: true
+dexpreopt: true
 pstore: ram_dummy(address=0x50000000,size=0x400000,record_size=0x4000,console_size=0x200000,ftrace_size=0x2000,dump_oops=1)
-fota: true
-trusty: true(enable_hw_sec=true, enable_storage_proxyd=true, ref_target=project-celadon_64)
-factory-scripts: true
-memtrack: true
-security: cse
-debugfs: true
-lights: true
-factory-partition: true
+media: mesa(add_sw_msdk=false, opensource_msdk=true)
+graphics: mesa(gen9+=true,hwc2=true,vulkan=true,drmhwc=false,minigbm=true,gralloc1=true,enable_guc=false)
+storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=true)
+ethernet: dhcp
+camera-ext: ext-camera-only
+rfkill: true(force_disable=)
+wlan: iwlwifi(libwifi-hal=true)
+codecs: configurable(hw_ve_h265=true, hw_vd_vp9=true, hw_vd_mp2=true, hw_vd_vc1=true, platform=bxt)
+usb: host
+usb-gadget: configfs(usb_config=adb,mtp_adb_pid=0x0a5f,ptp_adb_pid=0x0a61,rndis_pid=0x0a62,rndis_adb_pid=0x0a63,bcdDevice=0x0,bcdUSB=0x200,controller=dwc3.0.auto,f_acm=false,f_dvc_trace=true,dvctrace_source_dev=dvcith-0-msc0)
 midi: true
-art-config: true
+touch: galax7200
+navigationbar: true
+device-type: car(vhal-proto-type=google-emulator,aosp_hal=true)
+debug-tools: true
+fota: true
+thermal: thermal-daemon
+serialport: ttyS2
+flashfiles: ini(fast_flashfiles=false, oemvars=false,installer=true,flash_dnx_os=false,blank_no_fw=true,version=3.0)
+net: common
+debug-crashlogd: true
+debug-coredump: false
+debug-phonedoctor: true
+lights: true
+power: true(power_throttle=true)
+debug-usb-config: true(source_dev=dvcith-0-msc0)
+intel_prop: true
+trusty: false
+memtrack: true
+avb: true
+health: true
+slot-ab: true
+abota-fw: true
+firststage-mount: true
 cpuset: autocores
+usb-init: true
+usb-audio-init: true
+usb-otg-switch: true
+vndk: true
+public-libraries: true
+device-specific: cel_apl
+hdcpd: true
+neuralnetworks: false
+treble: true
+swap: zram_auto(size=1073741824,swappiness=true,hardware=gordon_peak)
+warning_disallowed: true
+art-config: true
+psdapp: true
+debugfs: true
 disk-encryption: true
+factory-scripts: true
 filesystem_config: common
 load_modules: true
-mixin-check: true
-debug-kernel: true
+gptbuild: false
+dynamic-partitions: true(super_img_in_flashzip=true)
+dbc: true
+atrace: true

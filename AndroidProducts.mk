@@ -15,9 +15,7 @@
 #
 
 PRODUCT_MAKEFILES := \
-    $(LOCAL_DIR)/cel_apl/cel_apl.mk \
-    $(LOCAL_DIR)/cel_kbl_acrn/cel_kbl_acrn.mk
+    $(LOCAL_DIR)/cel_apl/cel_apl.mk
 
 COMMON_LUNCH_CHOICES += \
-    cel_apl-userdebug \
-    cel_kbl_acrn-userdebug
+    cel_apl-userdebug
