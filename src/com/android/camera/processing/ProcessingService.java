@@ -27,7 +27,7 @@ import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.PowerManager.WakeLock;
 import android.os.Process;
-import android.support.v4.content.LocalBroadcastManager;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
 import com.android.camera.app.CameraServices;
 import com.android.camera.app.CameraServicesImpl;
