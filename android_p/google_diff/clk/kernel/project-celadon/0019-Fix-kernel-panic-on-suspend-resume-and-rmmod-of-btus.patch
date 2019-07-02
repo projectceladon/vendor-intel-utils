@@ -1,0 +1,152 @@
+From 0d4471294c3b14d91d2c01bc3cf0457c8641ab53 Mon Sep 17 00:00:00 2001
+From: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+Date: Tue, 18 Jun 2019 13:24:11 +0530
+Subject: [PATCH] Fix kernel panic on suspend/resume and rmmod of
+ btusb_sco_snd_card
+
+Fixes for kernel panic seen on rmmod
+    - URBs freed
+    - Sound card is disconnected
+    - Release USB interfaces
+
+Fixes for kernel panic on suspend/resume
+    - Provide a dummy implementation for suspend/resume
+
+Tracked-On: OAM-83641
+Signed-off-by: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+---
+ sound/usb/btusb/btusb_sco_snd_card.c | 72 +++++++++++++++++++++++++---
+ 1 file changed, 65 insertions(+), 7 deletions(-)
+
+diff --git a/sound/usb/btusb/btusb_sco_snd_card.c b/sound/usb/btusb/btusb_sco_snd_card.c
+index a043aefc5ef1..100a890eb81e 100644
+--- a/sound/usb/btusb/btusb_sco_snd_card.c
++++ b/sound/usb/btusb/btusb_sco_snd_card.c
+@@ -46,6 +46,8 @@
+ #define PRD_SIZE_MAX	                   PAGE_SIZE  /*4096*/
+ #define MIN_PERIODS	                   4
+ 
++static struct usb_driver btusb_sco_driver;
++
+ struct capture_data_cb {
+ 	unsigned char *buf;
+ 	unsigned int pos;
+@@ -865,9 +867,32 @@ static struct snd_pcm_ops btusb_isoc_playback_ops = {
+ 
+ static int snd_usb_audio_dev_free(struct snd_device *device)
+ {
+-	struct btusb_data *chip = device->device_data;
++	struct btusb_data *data = device->device_data;
++	unsigned long flags;
++
++	if (!data)
++		return 0;
++
++	clear_bit(BTUSB_ISOC_TX_START, &data->flags);
++	if (data->tx_urb) {
++		usb_kill_urb(data->tx_urb);
++		kfree(data->tx_urb->setup_packet);
++		usb_free_urb(data->tx_urb);
++		data->tx_urb = NULL;
++	}
++	spin_lock_irqsave(&data->txlock, flags);
++	data->playback_stream = NULL;
++	data->playback_hwptr_done = 0;
++	data->playback_transfer_done = 0;
++	spin_unlock_irqrestore(&data->txlock, flags);
+ 
+-	return snd_card_free(chip->card);
++	clear_bit(BTUSB_ISOC_RX_START, &data->flags);
++	usb_kill_anchored_urbs(&data->rx_anchor);
++	btusb_free_rx_urbs(data);
++	spin_lock_irqsave(&data->rxlock, flags);
++	data->capture_stream = NULL;
++	data->capture_hwptr_done = 0;
++	spin_unlock_irqrestore(&data->rxlock, flags);
+ }
+ 
+ static int btusb_snd_card_create(struct btusb_data *data)
+@@ -877,7 +902,7 @@ static int btusb_snd_card_create(struct btusb_data *data)
+ 	struct device *dev;
+ 
+ 	static struct snd_device_ops ops = {
+-		.dev_free =	snd_usb_audio_dev_free,
++		.dev_free = snd_usb_audio_dev_free,
+ 	};
+ 	struct snd_pcm *pcm;
+ 
+@@ -889,7 +914,6 @@ static int btusb_snd_card_create(struct btusb_data *data)
+ 	}
+ 	data->card = card;
+ 	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, data, &ops);
+-
+ 	if (err) {
+ 		snd_card_free(card);
+ 		dev_err(dev, "Error in creating the sound device device");
+@@ -911,8 +935,10 @@ static int btusb_snd_card_create(struct btusb_data *data)
+ 					&btusb_isoc_capture_ops);
+ 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK,
+ 					&btusb_isoc_playback_ops);
+-	err = snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_DEV,
+-			NULL, 64 * 1024, 64 * 1024);
++	err = snd_pcm_lib_preallocate_pages_for_all(pcm,
++			SNDRV_DMA_TYPE_CONTINUOUS,
++			snd_dma_continuous_data(GFP_KERNEL),
++			64 * 1024, 64 * 1024);
+ 	if (err) {
+ 		dev_err(dev, "Preallocate pages Failed err:%d\n", err);
+ 		return err;
+@@ -961,8 +987,38 @@ static void btusb_sco_disconnect(struct usb_interface *intf)
+ 
+ 	if (data->intf)
+ 		usb_set_intfdata(data->intf, NULL);
++	usb_driver_release_interface(&btusb_sco_driver, data->intf);
++	snd_card_disconnect(data->card);
+ 
+ 	snd_card_free_when_closed(data->card);
++	/* TODO: Freeing the resource causing kernel panic.Cleanup
++	part needs to be checked.
++	kfree(data);
++	data = NULL; */
++}
++
++static int btusb_sco_suspend(struct usb_interface *intf, pm_message_t message)
++{
++	struct btusb_data *data = usb_get_intfdata(intf);
++
++	if (!data)
++		return;
++
++	// TODO: Do we need to call snd_pcm_suspend_all
++	// snd_pcm_suspend_all(data->pcm);
++	return 0;
++}
++
++static int btusb_sco_resume(struct usb_interface *intf, pm_message_t message)
++{
++	struct btusb_data *data = usb_get_intfdata(intf);
++
++	if (!data)
++		return;
++
++	// TODO: Do we need to call snd_power_change_state
++	// snd_power_change_state(data->card, SNDRV_CTL_POWER_D0);
++	return 0;
+ }
+ 
+ static int btusb_sco_ioctl(struct usb_interface *intf, unsigned int code,
+@@ -992,8 +1048,10 @@ static struct usb_driver btusb_sco_driver = {
+ 	.probe		= btusb_sco_probe,
+ 	.unlocked_ioctl = btusb_sco_ioctl,
+ 	.disconnect	= btusb_sco_disconnect,
++	.suspend	= btusb_sco_suspend,
++	.resume		= btusb_sco_resume,
+ 	.id_table	= btusb_sco_table,
+-
++	.supports_autosuspend = 0
+ };
+ 
+ module_usb_driver(btusb_sco_driver);
+-- 
+2.17.1
+
