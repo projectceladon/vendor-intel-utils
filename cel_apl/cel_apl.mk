@@ -38,7 +38,6 @@ _board_config_mk := $(shell find $(dir $(current_product_makefile)) -maxdepth 2 
 #TARGET_DEVICE_DIR := $(shell dirname $(_board_config_mk))
 TARGET_DEVICE := $(shell basename $(TARGET_DEVICE_DIR))
 
-$(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/core_64_bit.mk)
 $(call inherit-product, $(LOCAL_PATH)/device.mk)
 

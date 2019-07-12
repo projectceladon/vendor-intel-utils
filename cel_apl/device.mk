@@ -977,6 +977,11 @@ PRODUCT_PROPERTY_OVERRIDES += \
 PRODUCT_PACKAGES += \
     android.hardware.atrace@1.0-service
 ##############################################################
+# Source: device/intel/mixins/groups/firmware/true/product.mk
+##############################################################
+FIRMWARES_DIR ?= vendor/linux/firmware
+$(call inherit-product,device/intel/common/firmware.mk)
+##############################################################
 # Source: device/intel/mixins/groups/aosp_carrier-config/default/product.mk
 ##############################################################
 EXT_IMS_PACKAGES_SRC_FILES_PATH ?= $(INTEL_PATH_VENDOR)/featsetclass_tel/telephony/carrier/imsstub/packages/apps/Settings/src
