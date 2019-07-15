@@ -15,7 +15,7 @@
 #
 
 PRODUCT_MAKEFILES := \
-    $(LOCAL_DIR)/cel_apl/cel_apl.mk
+    $(LOCAL_DIR)/celadon_ivi/celadon_ivi.mk
 
 COMMON_LUNCH_CHOICES += \
-    cel_apl-userdebug
+    celadon_ivi-userdebug
