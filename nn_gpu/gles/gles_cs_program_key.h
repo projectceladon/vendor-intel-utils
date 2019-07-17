@@ -33,7 +33,7 @@ struct GlesCsProgramKeyBasic
         opType = type;
     }
     OperationType opType;
-    int32_t activation;
+    int32_t activation = {0};
     uint32_t localSizeX;
     uint32_t localSizeY;
     uint32_t localSizeZ;
