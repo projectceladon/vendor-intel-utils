@@ -278,6 +278,42 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/true/product.mk
+##############################################################
+
+KM_VERSION := 2
+
+ifeq ($(KM_VERSION),2)
+PRODUCT_PACKAGES += \
+	keystore.trusty
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.hardware.keystore=trusty
+endif
+
+ifeq ($(KM_VERSION),1)
+PRODUCT_PACKAGES += \
+	keystore.${TARGET_BOARD_PLATFORM}
+endif
+
+PRODUCT_PACKAGES += \
+	libtrusty \
+	intelstorageproxyd \
+	cp_ss \
+	libinteltrustystorage \
+	libinteltrustystorageinterface \
+	gatekeeper.trusty \
+	android.hardware.gatekeeper@1.0-impl \
+	android.hardware.gatekeeper@1.0-service \
+
+PRODUCT_PACKAGES_DEBUG += \
+	intel-secure-storage-unit-test \
+	gatekeeper-unit-tests \
+	libscrypt_static \
+	scrypt_test \
+
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.hardware.gatekeeper=trusty \
+##############################################################
 # Source: device/intel/mixins/groups/vendor-partition/true/product.mk
 ##############################################################
 
