@@ -4,6 +4,7 @@
 # autopatch.sh: script to manage patches on top of repo
 # Copyright (c) 2018, Intel Corporation.
 # Author: sgnanase <sundar.gnanasekaran@intel.com>
+# Author: Sun, Yi J <yi.j.sun@intel.com>
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,

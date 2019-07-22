@@ -1,7 +1,3 @@
-# Get the AOSP Ring on OneAndroid
-# Should be a comment in the manifest in the form
-# <!-- Celadon_Ring='1' -->
-
 # save the official lunch command to aosp_lunch() and source it
 tmp_lunch=`mktemp`
 sed '/ lunch()/,/^}/!d'  build/envsetup.sh | sed 's/function lunch/function aosp_lunch/' > ${tmp_lunch}
