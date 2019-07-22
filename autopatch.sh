@@ -38,9 +38,6 @@ apply_patch() {
   pl=$1
   pd=$2
 
-  echo ""
-  echo "Applying Patches"
-
   for i in $pl
   do
     current_project=`dirname $i`
@@ -71,15 +68,15 @@ apply_patch() {
     if [[ "$c" == "" ]] ; then
       git am -3 --keep-cr --whitespace=nowarn $pd/$i >& /dev/null
       if [[ $? == 0 ]]; then
-        echo "        Applying          `basename $i`"
+        echo -e "\tApplying\t\t`basename $i`"
       else
-        echo "        Conflicts          `basename $i`"
+        echo -e "\tConflicts\t\t`basename $i`"
         git am --abort >& /dev/null
         conflict="y"
         conflict_list="$current_project $conflict_list"
       fi
     else
-      echo "        Already applied         `basename $i`"
+      echo -e "\tAlready applied\t\t`basename $i`"
       applied_already="y"
     fi
   done
@@ -92,124 +89,90 @@ function fpnat() # find patch files and apply them
     # either aosp_diff/common or aosp_diff/${TARGET_PRODUCT}
     # and bsp_diff/common bsp_diff/${TARGET_PRODUCT} directories.
     cd ${patch_top_dir}
-    patch_list=`find * -iname "*.patch" | sort -u`
-    apply_patch "${patch_list}" "${patch_top_dir}"
-    if [[ $? != 0 ]]; then
-        echo "Apply ${patch_top_dir} patches failure!"
+    patch_file_number=`find . -iname "*.patch" |wc -l`
+    if [[ ${patch_file_number} != 0 ]];then
+        patch_list=`find . -iname "*.patch" | sort -u`
+        apply_patch "${patch_list}" "${patch_top_dir}"
+        if [[ $? != 0 ]]; then
+            echo "Apply ${patch_top_dir} patches failure!"
+        fi
+    else
+        echo "Path: `basename ${patch_top_dir}` has 0 patch file to apply!"
     fi
     unset patch_list patch_top_dir
 }
 
-echo "Apply utils/aosp_diff/common patches:"
+echo -e "\nApply utils/aosp_diff/common patches:"
 fpnat "$patch_dir_aosp/common"
-echo "apply utils/aosp_diff/common done, sleep 60"
-sleep 60
-patch_list=`find * -iname "*.patch" | sort -u`
-apply_patch "$patch_list" "${patch_dir_aosp}/common"
-unset patch_list
 
 if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_aosp}/${TARGET_PRODUCT} ]];then
-        echo "Apply utils/aosp_diff Target ${TARGET_PRODUCT} Patches:"
-        cd ${patch_dir_aosp}/${TARGET_PRODUCT}
-        patch_list=`find * -iname "*.patch" | sort -u`
-        apply_patch "$patch_list" "${patch_dir_aosp}/${TARGET_PRODUCT}"
-        unset patch_list
-        if [[ $? != 0 ]]; then
-            echo "Apply ${patch_dir_aosp}/${TARGET_PRODUCT} patches failure!"
-        fi
+        echo -e "\nApply utils/aosp_diff Target ${TARGET_PRODUCT} Patches:"
+        fpnat "${patch_dir_aosp}/${TARGET_PRODUCT}"
+fi
+
+if [[ -e ${patch_dir_bsp}/common ]] && [[ -d ${patch_dir_bsp}/common ]];then
+        echo -e "\nApply utils/bsp_diff/common Patches:"
+        fpnat "${patch_dir_bsp}/common"
 fi
 
 if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_bsp}/${TARGET_PRODUCT} ]];then
-        echo "Apply utils/bsp_diff Target ${TARGET_PRODUCT} Patches:"
-        cd ${patch_dir_bsp}/${TARGET_PRODUCT}
-        patch_list=`find * -iname "*.patch" | sort -u`
-        apply_patch "$patch_list" "${patch_dir_bsp}/${TARGET_PRODUCT}"
-        unset patch_list
-        if [[ $? != 0 ]]; then
-            echo "Apply ${patch_dir_bsp}/${TARGET_PRODUCT} patches failure!"
-        fi
+        echo -e "\nApply utils/bsp_diff Target ${TARGET_PRODUCT} Patches:"
+        fpnat "${patch_dir_bsp}/${TARGET_PRODUCT}"
 fi
 
-echo ""
 if [[ "$conflict" == "y" ]]; then
-  echo "==========================================================================="
-  echo "           ALERT : Conflicts Observed while patch application !!           "
-  echo "==========================================================================="
+  echo -e "\n\n\t\tALERT : Conflicts Observed while patch application !!           "
   for i in $conflict_list ; do echo $i; done | sort -u
-  echo "==========================================================================="
-  echo -e "Error: Please resolve Conflict(s) and re-run lunch..."
+  echo -e "\n\n\t\tError: Please resolve Conflict(s) and re-run lunch..."
   echo '$(error "Conflicts seen while applying lunch patches !! Resolve and re-trigger")' > $top_dir/vendor/intel/utils/Android.mk
 else
-  echo "==========================================================================="
-  echo -e "SUCCESS : All patches applied fine in: \n$patch_dir_aosp \nand \n${patch_dir_bsp} !!"
-  echo "==========================================================================="
+  echo -e "\n\t\tSUCCESS : All patches applied successfully in: `basename $patch_dir_aosp` and `basename ${patch_dir_bsp}` !!"
   if [[ "$applied_already" == "y" ]]; then
-    echo "==========================================================================="
-    echo "           INFO : SOME PATCHES ARE APPLIED ALREADY  !!                     "
-    echo "==========================================================================="
+    echo -e "\n\t\tINFO : SOME PATCHES ARE APPLIED ALREADY  !!"
   fi
   if [ -f "$top_dir/vendor/intel/utils/Android.mk" ]; then
           sed -i '/^/d' $top_dir/vendor/intel/utils/Android.mk
   fi
 fi
 
-echo ""
-echo "Apply Embargoed patches if exist"
+# Apply Embargoed patches if exist
 if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
+        echo -e "\n============================="
         echo "Embargoed Patches Found"
+        echo "============================="
 
     ## TMEP solution, please remove this part ##
     if [[ -e ${private_patch_dir_aosp}/common ]] && [[ -d ${private_patch_dir_aosp}/common ]];then
-        cd ${private_patch_dir_aosp}/common
-        patch_list=`find * -iname "*.patch" | sort -u`
-        apply_patch "$patch_list" "${private_patch_dir_aosp}/common"
-        unset patch_list
-        if [[ $? != 0 ]]; then
-            echo "Apply ${private_patch_dir_aosp}/common patches failure!"
-        fi
+        echo -e "\nApply utils_priv/aosp_diff/common Patches:"
+        fpnat "${private_patch_dir_aosp}/common"
     fi
     ## TMEP solution, please remove this part ##
 
     if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
-        echo "Apply utils_priv/aosp_diff Target ${TARGET_PRODUCT} Patches:"
-        cd ${private_patch_dir_aosp}/${TARGET_PRODUCT}
-        patch_list=`find * -iname "*.patch" | sort -u`
-        apply_patch "${patch_list}" "$private_patch_dir_aosp/${TARGET_PRODUCT}"
-        unset patch_list
-        if [[ $? != 0 ]]; then
-            echo "Apply ${private_patch_dir_aosp}/${TARGET_PRODUCT} patches failure!"
-        fi
+        echo -e "\nApply utils_priv/aosp_diff Target ${TARGET_PRODUCT} Patches:"
+        fpnat "${private_patch_dir_aosp}/${TARGET_PRODUCT}"
+    fi
+
+    if [[ -e ${private_patch_dir_bsp}/common ]] && [[ -d ${private_patch_dir_bsp}/common ]];then
+        echo -e "\nApply utils_priv/bsp_diff/common Patches:"
+        fpnat "${private_patch_dir_bsp}/common"
     fi
 
     if [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${private_patch_dir_bsp}/${TARGET_PRODUCT} ]];then
-        echo "Apply utils_priv/bsp_diff Target ${TARGET_PRODUCT} Patches:"
-        cd ${private_patch_dir_bsp}/${TARGET_PRODUCT}
-        patch_list=`find * -iname "*.patch" | sort -u`
-        apply_patch "${patch_list}" "${private_patch_dir_bsp}/${TARGET_PRODUCT}"
-        unset patch_list
-        if [[ $? != 0 ]]; then
-            echo "Apply ${private_patch_dir_bsp}/${TARGET_PRODUCT} patches failure!"
-        fi
+        echo -e "\nApply utils_priv/bsp_diff Target ${TARGET_PRODUCT} Patches:"
+        fpnat "${private_patch_dir_bsp}/${TARGET_PRODUCT}"
     fi
 fi
 
-echo ""
 if [[ "$conflict" == "y" ]]; then
-  echo "==========================================================================="
-  echo "           ALERT : Conflicts Observed while patch application !!           "
-  echo "==========================================================================="
+  echo -e "\n\t\tALERT : Conflicts Observed while patch application !!           "
   for i in $conflict_list ; do echo $i; done | sort -u
-  echo "==========================================================================="
-  echo -e "Error: Please resolve Conflict(s) and re-run lunch..."
+  echo -e "\n\t\tError: Please resolve Conflict(s) and re-run lunch..."
   echo '$(error "Conflicts seen while applying lunch patches !! Resolve and re-trigger")' > $top_dir/vendor/intel/utils_priv/Android.mk
 else
-  echo "==========================================================================="
-  echo -e "           SUCCESS : All patches applied fine in \n${private_patch_dir_aosp} \nand \n${private_patch_dir_bsp}"
-  echo "==========================================================================="
+  echo -e "\n\t\tSUCCESS : All patches applied SUCCESSFULLY in `basename ${private_patch_dir_aosp}` and `basename ${private_patch_dir_bsp}`"
   if [[ "$applied_already" == "y" ]]; then
-    echo "==========================================================================="
-    echo "           INFO : SOME PATCHES ARE APPLIED ALREADY  !!                     "
-    echo "==========================================================================="
+    echo -e "\n\t\tINFO : SOME PATCHES ARE APPLIED ALREADY  !!"
   fi
   if [ -f "$top_dir/vendor/intel/utils_priv/Android.mk" ]; then
           sed -i '/^/d' $top_dir/vendor/intel/utils_priv/Android.mk
