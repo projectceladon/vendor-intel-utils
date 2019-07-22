@@ -167,6 +167,7 @@ PRODUCT_PACKAGES += \
     libbt-vendor \
 
 PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-car
+PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/intel/car/overlay
 
 
 ##############################################################
