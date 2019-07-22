@@ -91,7 +91,7 @@ function fpnat() # find patch files and apply them
     cd ${patch_top_dir}
     patch_file_number=`find . -iname "*.patch" |wc -l`
     if [[ ${patch_file_number} != 0 ]];then
-        patch_list=`find . -iname "*.patch" | sort -u`
+        patch_list=`find * -iname "*.patch" | sort -u`
         apply_patch "${patch_list}" "${patch_top_dir}"
         if [[ $? != 0 ]]; then
             echo "Apply ${patch_top_dir} patches failure!"
