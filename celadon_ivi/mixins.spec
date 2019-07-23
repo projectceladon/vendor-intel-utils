@@ -63,7 +63,7 @@ vndk: true
 public-libraries: true
 device-specific: celadon_ivi
 hdcpd: true
-neuralnetworks: false
+neuralnetworks: true
 treble: true
 swap: zram_auto(size=1073741824,swappiness=true,hardware=gordon_peak)
 warning_disallowed: true
