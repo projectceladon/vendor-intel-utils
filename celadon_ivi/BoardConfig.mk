@@ -250,29 +250,6 @@ BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := $(INTEL_PATH_COMMON)/bluetooth/in
 DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-bt-pan
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/bluetooth/common
 ##############################################################
-# Source: device/intel/mixins/groups/audio/project-celadon/BoardConfig.mk
-##############################################################
-BOARD_USES_ALSA_AUDIO := true
-BOARD_USES_TINY_ALSA_AUDIO := true
-BOARD_USES_GENERIC_AUDIO ?= false
-USE_CUSTOM_PARAMETER_FRAMEWORK := false
-ifneq ($(BOARD_USES_GENERIC_AUDIO), true)
-# Audio HAL selection Flag default setting.
-#  INTEL_AUDIO_HAL:= audio     -> baseline HAL
-#  INTEL_AUDIO_HAL:= audio_pfw -> PFW-based HAL
-INTEL_AUDIO_HAL := audio
-else
-INTEL_AUDIO_HAL := stub
-endif
-
-# Use XML audio policy configuration file
-USE_XML_AUDIO_POLICY_CONF := 1
-# Use configurable audio policy
-USE_CONFIGURABLE_AUDIO_POLICY := 0
-
-# Use Baseline Legacy Audio HAL
-USE_LEGACY_BASELINE_AUDIO_HAL := true
-##############################################################
 # Source: device/intel/mixins/groups/device-type/car/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += \
@@ -310,6 +287,29 @@ BOARD_USES_GENERIC_AUDIO := false
 
 DEVICE_MANIFEST_FILE := ${TARGET_DEVICE_DIR}/manifest.xml
 DEVICE_MATRIX_FILE   := ${TARGET_DEVICE_DIR}/compatibility_matrix.xml
+##############################################################
+# Source: device/intel/mixins/groups/audio/project-celadon/BoardConfig.mk
+##############################################################
+BOARD_USES_ALSA_AUDIO := true
+BOARD_USES_TINY_ALSA_AUDIO := true
+BOARD_USES_GENERIC_AUDIO ?= false
+USE_CUSTOM_PARAMETER_FRAMEWORK := false
+ifneq ($(BOARD_USES_GENERIC_AUDIO), true)
+# Audio HAL selection Flag default setting.
+#  INTEL_AUDIO_HAL:= audio     -> baseline HAL
+#  INTEL_AUDIO_HAL:= audio_pfw -> PFW-based HAL
+INTEL_AUDIO_HAL := audio
+else
+INTEL_AUDIO_HAL := stub
+endif
+
+# Use XML audio policy configuration file
+USE_XML_AUDIO_POLICY_CONF := 1
+# Use configurable audio policy
+USE_CONFIGURABLE_AUDIO_POLICY := 0
+
+# Use Baseline Legacy Audio HAL
+USE_LEGACY_BASELINE_AUDIO_HAL := true
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/BoardConfig.mk
 ##############################################################
