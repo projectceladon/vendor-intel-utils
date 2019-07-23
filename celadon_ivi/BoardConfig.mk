@@ -116,7 +116,7 @@ INSTALLED_RADIOIMAGE_TARGET += $(BOARD_GPT_BIN)
 # We offer the possibility to flash from a USB storage device using
 # the "installer" EFI application
 BOARD_FLASHFILES += $(PRODUCT_OUT)/efi/installer.efi
-BOARD_FLASHFILES += $(INTEL_PATH_HARDWARE)/bootctrl/boot/startup.nsh
+BOARD_FLASHFILES += $(PRODUCT_OUT)/efi/startup.nsh
 BOARD_FLASHFILES += $(PRODUCT_OUT)/bootloader.img
 
 

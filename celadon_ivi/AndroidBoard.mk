@@ -47,6 +47,10 @@ GPT_INI2BIN := ./$(INTEL_PATH_COMMON)/gpt_bin/gpt_ini2bin.py
 $(BOARD_GPT_BIN): $(BOARD_GPT_INI)
 	$(hide) $(GPT_INI2BIN) $< > $@
 	$(hide) echo GEN $(notdir $@)
+
+$(PRODUCT_OUT)/efi/startup.nsh: $(TARGET_DEVICE_DIR)/extra_files/boot-arch/$(@F)
+	$(ACP) $(TARGET_DEVICE_DIR)/extra_files/boot-arch/$(@F) $@
+	sed -i '/#/d' $@
 ##############################################################
 # Source: device/intel/mixins/groups/boot-arch/project-celadon/AndroidBoard.mk
 ##############################################################
