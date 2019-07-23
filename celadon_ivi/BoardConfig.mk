@@ -518,10 +518,10 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug-tools/androidterm
 BOARD_SEPOLICY_DIRS += device/intel/sepolicy/thermal
 BOARD_SEPOLICY_DIRS += device/intel/sepolicy/thermal/thermal-daemon
 ##############################################################
-# Source: device/intel/mixins/groups/serialport/ttyS2/BoardConfig.mk
+# Source: device/intel/mixins/groups/serialport/ttyUSB0/BoardConfig.mk
 ##############################################################
 ifneq ($(TARGET_BUILD_VARIANT),user)
-BOARD_KERNEL_CMDLINE += console=ttyS2,115200n8
+BOARD_KERNEL_CMDLINE += console=ttyUSB0,115200n8
 endif
 ##############################################################
 # Source: device/intel/mixins/groups/flashfiles/ini/BoardConfig.mk
