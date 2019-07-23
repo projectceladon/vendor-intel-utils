@@ -86,8 +86,8 @@ function fpnat() # find patch files and apply them
 {
     local patch_top_dir=$1
     # arg #1 should be the .patch files' top directory,
-    # either aosp_diff/common or aosp_diff/${TARGET_PRODUCT}
-    # and bsp_diff/common bsp_diff/${TARGET_PRODUCT} directories.
+    # either aosp_diff/preliminary or aosp_diff/${TARGET_PRODUCT}
+    # and bsp_diff/preliminary bsp_diff/${TARGET_PRODUCT} directories.
     cd ${patch_top_dir}
     patch_file_number=`find . -iname "*.patch" |wc -l`
     echo "Path: `basename ${patch_top_dir}` has ${patch_file_number} patch file(s) to apply!"
@@ -101,8 +101,8 @@ function fpnat() # find patch files and apply them
     unset patch_list patch_top_dir
 }
 
-echo -e "\nApply utils/aosp_diff/common patches:"
-fpnat "$patch_dir_aosp/common"
+echo -e "\nApply utils/aosp_diff/preliminary patches:"
+fpnat "$patch_dir_aosp/preliminary"
 
 if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_aosp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils/aosp_diff Target ${TARGET_PRODUCT} Patches:"
@@ -141,9 +141,9 @@ if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
         echo "============================="
 
     ## TMEP solution, please remove this part ##
-    if [[ -e ${private_patch_dir_aosp}/common ]] && [[ -d ${private_patch_dir_aosp}/common ]];then
-        echo -e "\nApply utils_priv/aosp_diff/common Patches:"
-        fpnat "${private_patch_dir_aosp}/common"
+    if [[ -e ${private_patch_dir_aosp}/preliminary ]] && [[ -d ${private_patch_dir_aosp}/preliminary ]];then
+        echo -e "\nApply utils_priv/aosp_diff/preliminary Patches:"
+        fpnat "${private_patch_dir_aosp}/preliminary"
     fi
     ## TMEP solution, please remove this part ##
 
