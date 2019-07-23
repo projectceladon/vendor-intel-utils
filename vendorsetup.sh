@@ -41,11 +41,13 @@ function lunch
     rm -rf vendor/intel/utils/Android.mk vendor/intel/utils_priv/Android.mk
     vendor/intel/utils/autopatch.sh
 
-    local aosp_patch_folder=vendor/intel/utils_priv/google_diff
-    local bsp_patch_folder=vendor/intel/utils_priv/bsp_diff
-    for file in $aosp_patch_folder $bsp_patch_folder; do
+    if [[ -e vendor/intel/utils_priv/ ]] && [[ -e vendor/intel/utils_priv/autopatch.py ]];then
+        local aosp_patch_folder=vendor/intel/utils_priv/google_diff
+        local bsp_patch_folder=vendor/intel/utils_priv/bsp_diff
+        for file in $aosp_patch_folder $bsp_patch_folder; do
             apply_patch $file
-    done
+        done
+    fi
 
     # check if product configuration files are out of date
     if [[ $(find device/intel -path "*mixins*" -prune -o -name ${TARGET_PRODUCT}.mk -print) ]]; then
