@@ -475,6 +475,13 @@ include $(BUILD_PHONY_PACKAGE)
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/bluetooth/load_bt.in
 ##############################################################
+# Source: device/intel/mixins/groups/audio/project-celadon/AndroidBoard.mk
+##############################################################
+pfw_rebuild_settings := true
+# Target specific audio configuration files
+include $(TARGET_DEVICE_DIR)/audio/AndroidBoard.mk
+
+##############################################################
 # Source: device/intel/mixins/groups/device-type/car/AndroidBoard.mk
 ##############################################################
 # Car device required kernel diff config
@@ -488,13 +495,6 @@ KERNEL_DIFFCONFIG += $(KERNEL_APL_DIFFCONFIG)
 
 # Specify /dev/mmcblk0 size here
 BOARD_MMC_SIZE = 15335424K
-##############################################################
-# Source: device/intel/mixins/groups/audio/project-celadon/AndroidBoard.mk
-##############################################################
-pfw_rebuild_settings := true
-# Target specific audio configuration files
-include $(TARGET_DEVICE_DIR)/audio/AndroidBoard.mk
-
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/AndroidBoard.mk
 ##############################################################
