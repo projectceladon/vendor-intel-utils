@@ -3,7 +3,6 @@
 ##############################################################
 # Source: device/intel/mixins/groups/disk-bus/auto/BoardConfig.mk
 ##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/set_storage
 BOARD_DISK_BUS = ff.ff
 ##############################################################
 # Source: device/intel/mixins/groups/dynamic-partitions/true/BoardConfig.mk
@@ -329,7 +328,7 @@ LKBUILD_X86_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)i386-elf-4.9.1-Linux-x86_64/bin
 LKBUILD_X64_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)x86_64-elf-4.9.1-Linux-x86_64/bin
 TRUSTY_BUILDROOT = $(PWD)/$(PRODUCT_OUT)/obj/trusty/
 
-TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=celadon_apl
+TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=celadon_64
 
 #for trusty lk
 TRUSTY_ENV_VAR += BUILDROOT=$(TRUSTY_BUILDROOT)
