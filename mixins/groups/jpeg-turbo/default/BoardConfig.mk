@@ -1,1 +1,0 @@
-USE_JPEG_TURBO := no

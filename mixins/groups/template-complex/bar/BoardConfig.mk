@@ -1,1 +1,0 @@
-../common/BoardConfig.mk

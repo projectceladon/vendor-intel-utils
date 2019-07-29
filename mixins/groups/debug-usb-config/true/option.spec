@@ -1,2 +1,0 @@
-[defaults]
-protocol = 0

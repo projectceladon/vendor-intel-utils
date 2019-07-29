@@ -1,1 +1,0 @@
-ANDROID_COMPILE_WITH_JACK := false
