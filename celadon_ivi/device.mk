@@ -296,7 +296,7 @@ endif
 
 PRODUCT_PACKAGES += \
 	libtrusty \
-	intelstorageproxyd \
+	storageproxyd \
 	cp_ss \
 	libinteltrustystorage \
 	libinteltrustystorageinterface \
