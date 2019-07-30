@@ -466,19 +466,6 @@ PRODUCT_PACKAGES_DEBUG += TestingCamera
 ##############################################################
 PRODUCT_COPY_FILES += $(INTEL_PATH_COMMON)/rfkill/rfkill-init.sh:vendor/bin/rfkill-init.sh
 ##############################################################
-# Source: device/intel/mixins/groups/codecs/configurable/product.mk
-##############################################################
-# Audio/video codec support.
-PRODUCT_COPY_FILES += \
-    frameworks/av/media/libstagefright/data/media_codecs_google_audio.xml:vendor/etc/media_codecs_google_audio.xml \
-    frameworks/av/media/libstagefright/data/media_codecs_google_video.xml:vendor/etc/media_codecs_google_video.xml \
-    $(LOCAL_PATH)/extra_files/codecs/media_profiles.xml:vendor/etc/media_profiles.xml \
-    $(LOCAL_PATH)/extra_files/codecs/media_codecs.xml:vendor/etc/media_codecs.xml \
-    $(LOCAL_PATH)/extra_files/codecs/mfx_omxil_core.conf:vendor/etc/mfx_omxil_core.conf
-
-PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/extra_files/codecs/media_codecs_performance_bxt.xml:vendor/etc/media_codecs_performance.xml
-##############################################################
 # Source: device/intel/mixins/groups/usb/host/product.mk
 ##############################################################
 PRODUCT_COPY_FILES += frameworks/native/data/etc/android.hardware.usb.host.xml:vendor/etc/permissions/android.hardware.usb.host.xml
