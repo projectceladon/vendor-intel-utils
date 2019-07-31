@@ -21,6 +21,7 @@ cpu-arch: slm
 allow-missing-dependencies: true
 dexpreopt: true
 pstore: ram_dummy(address=0x50000000,size=0x400000,record_size=0x4000,console_size=0x200000,ftrace_size=0x2000,dump_oops=1)
+bugreport: true
 media: mesa(add_sw_msdk=false, opensource_msdk=true)
 graphics: mesa(gen9+=true,hwc2=true,vulkan=true,drmhwc=false,minigbm=true,gralloc1=true,enable_guc=false)
 storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=true)
