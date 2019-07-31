@@ -633,27 +633,4 @@ TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
 # Source: device/intel/mixins/groups/dbc/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/dbc
-##############################################################
-# Source: device/intel/mixins/groups/ioc/default/BoardConfig.mk
-##############################################################
-ifeq (none,cbc)
-IOC_USE_CBC := true
-endif
-##############################################################
-# Source: device/intel/mixins/groups/aosp_carrier-config/default/BoardConfig.mk
-##############################################################
-DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/ims/carrier/res_ims
-##############################################################
-# Source: device/intel/mixins/groups/autodetect/default/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/autodetect/false
-##############################################################
-# Source: device/intel/mixins/groups/embms/default/BoardConfig.mk
-##############################################################
-#setting for embms dep in framework
-TARGET_HAS_EMBMS_ENABLE := false
-##############################################################
-# Source: device/intel/mixins/groups/jpeg-turbo/default/BoardConfig.mk
-##############################################################
-USE_JPEG_TURBO := no
 # ------------------ END MIX-IN DEFINITIONS ------------------
