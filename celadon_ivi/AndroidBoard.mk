@@ -208,6 +208,23 @@ $(call dist-for-goals,droidcore,$(bootloader_bin):$(TARGET_PRODUCT)-bootloader-$
 $(call dist-for-goals,droidcore,$(INTEL_PATH_BUILD)/testkeys/testkeys_lockdown.txt:test-keys_efi_lockdown.txt)
 $(call dist-for-goals,droidcore,$(INTEL_PATH_BUILD)/testkeys/unlock.txt:efi_unlock.txt)
 
+ifeq ($(TARGET_BOOTLOADER_POLICY),$(filter $(TARGET_BOOTLOADER_POLICY),static external))
+# The bootloader policy is not built but is provided statically in the
+# repository or in $(PRODUCT_OUT)/.
+else
+# Bootloader policy values are generated based on the
+# TARGET_BOOTLOADER_POLICY value and the
+# $(INTEL_PATH_BUILD)/testkeys/{odm,OAK} keys.  The OEM must provide
+# its own keys.
+GEN_BLPOLICY_OEMVARS := $(INTEL_PATH_BUILD)/generate_blpolicy_oemvars
+TARGET_ODM_KEY_PAIR := $(INTEL_PATH_BUILD)/testkeys/odm
+TARGET_OAK_KEY_PAIR := $(INTEL_PATH_BUILD)/testkeys/OAK
+
+$(BOOTLOADER_POLICY_OEMVARS):
+	$(GEN_BLPOLICY_OEMVARS) -K $(TARGET_ODM_KEY_PAIR) \
+		-O $(TARGET_OAK_KEY_PAIR).x509.pem -B $(TARGET_BOOTLOADER_POLICY) \
+		$(BOOTLOADER_POLICY_OEMVARS)
+endif
 
 # Used for efi update
 $(PRODUCT_OUT)/vendor.img: $(PRODUCT_OUT)/vendor/firmware/kernelflinger.efi

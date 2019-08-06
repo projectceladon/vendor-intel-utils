@@ -118,6 +118,11 @@ BOARD_FLASHFILES += $(PRODUCT_OUT)/efi/installer.efi
 BOARD_FLASHFILES += $(PRODUCT_OUT)/efi/startup.nsh
 BOARD_FLASHFILES += $(PRODUCT_OUT)/bootloader.img
 
+ifneq (0x0,static)
+BOOTLOADER_POLICY_OEMVARS = $(PRODUCT_OUT)/bootloader_policy-oemvars.txt
+BOARD_FLASHFILES += $(BOOTLOADER_POLICY_OEMVARS):bootloader_policy-oemvars.txt
+BOARD_OEM_VARS += $(BOOTLOADER_POLICY_OEMVARS)
+endif
 
 
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/boot-arch/generic

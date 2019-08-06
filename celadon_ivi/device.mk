@@ -58,9 +58,43 @@ PRODUCT_COPY_FILES += \
 # to get reset and wake source from PMIC for bringup phase if
 # the table reports incorrect data
 KERNELFLINGER_IGNORE_RSCI := true
+# It activates the Bootloader policy and RMA refurbishing
+# features. TARGET_BOOTLOADER_POLICY is the desired bitmask for this
+# device.
+# * bit 0:
+#   - 0: GVB class B.
+#   - 1: GVB class A.  Device unlock is not permitted.  The only way
+#     to unlock is to use the secured force-unlock mechanism.
+# * bit 1 and 2 defines the minimal boot state required to boot the
+#   device:
+#   - 0x0: BOOT_STATE_RED (GVB default behavior)
+#   - 0x1: BOOT_STATE_ORANGE
+#   - 0x2: BOOT_STATE_YELLOW
+#   - 0x3: BOOT_STATE_GREEN
+# If TARGET_BOOTLOADER_POLICY is equal to 'static' the bootloader
+# policy is not built but is provided statically in the repository.
+# If TARGET_BOOTLOADER_POLICY is equal to 'external' the bootloader
+# policy OEMVARS should be installed manually in
+# $(BOOTLOADER_POLICY_OEMVARS).
+TARGET_BOOTLOADER_POLICY := 0x0
+# If the following variable is set to false, the bootloader policy and
+# RMA refurbishing features does not use time-based authenticated EFI
+# variables to store the BPM and OAK values.  The BPM value is defined
+# compilation time by the TARGET_BOOTLOADER_POLICY variable.
+TARGET_BOOTLOADER_POLICY_USE_EFI_VAR := true
+ifeq ($(TARGET_BOOTLOADER_POLICY),$(filter $(TARGET_BOOTLOADER_POLICY),0x0 0x2 0x4 0x6))
 # OEM Unlock reporting
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
 	ro.oem_unlock_supported=1
+endif
+ifeq ($(TARGET_BOOTLOADER_POLICY),$(filter $(TARGET_BOOTLOADER_POLICY),static external))
+# The bootloader policy is not generated build time but is supplied
+# statically in the repository or in $(PRODUCT_OUT)/.  If your
+# bootloader policy allows the device to be unlocked, uncomment the
+# following lines:
+# PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
+# 	ro.oem_unlock_supported=1
+endif
 # Allow Kernelflinger to ignore the RSCI reset source "not_applicable"
 # when setting the bootreason
 KERNELFLINGER_IGNORE_NOT_APPLICABLE_RESET := true
@@ -296,7 +330,7 @@ endif
 
 PRODUCT_PACKAGES += \
 	libtrusty \
-	intelstorageproxyd \
+	storageproxyd \
 	cp_ss \
 	libinteltrustystorage \
 	libinteltrustystorageinterface \
