@@ -74,7 +74,7 @@ disk-encryption: true
 factory-scripts: true
 filesystem_config: common
 load_modules: true
-gptbuild: false
+gptbuild: true(size=16G,generate_craff=false,compress_gptimage=true)
 dynamic-partitions: true(super_img_in_flashzip=true)
 dbc: true
 atrace: true
