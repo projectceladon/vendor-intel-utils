@@ -1,5 +1,11 @@
 #!/vendor/bin/sh
 
+# userdata checkpoint cleanup at postinstall step
+USERDATA_CHECKPOINT_GC=vendor/bin/checkpoint_gc
+if [ -f ${USERDATA_CHECKPOINT_GC} ]; then
+    source ${USERDATA_CHECKPOINT_GC}
+fi
+
 KFLD_UPDATE_FILE="/postinstall/firmware/kfld.efi"
 KF_UPDATE_FILE="/postinstall/firmware/kernelflinger.efi"
 BIOS_UPDATE_FILE="/postinstall/firmware/BIOSUPDATE.fv"

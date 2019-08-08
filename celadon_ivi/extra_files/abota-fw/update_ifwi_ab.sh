@@ -1,5 +1,11 @@
 #!/system/bin/sh
 
+# userdata checkpoint cleanup at postinstall step
+USERDATA_CHECKPOINT_GC=vendor/bin/checkpoint_gc
+if [ -f ${USERDATA_CHECKPOINT_GC} ]; then
+    source ${USERDATA_CHECKPOINT_GC}
+fi
+
 SLOT_SUFFIX=$(getprop ro.boot.slot_suffix)
 
 if [ "$SLOT_SUFFIX" = "_a" ]; then
