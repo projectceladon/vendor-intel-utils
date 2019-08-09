@@ -300,7 +300,7 @@ else
   LOCAL_KERNEL_SRC := kernel/lts2018
   EXT_MODULES := 
   DEBUG_MODULES := 
-  KERNEL_CONFIG_PATH := kernel/config-lts/lts2018/bxt/android/non-embargoed
+  KERNEL_CONFIG_PATH := $(TARGET_DEVICE_DIR)/config-lts/lts2018/bxt/android/non-embargoed
 endif
 
 EXTMOD_SRC := ../modules
