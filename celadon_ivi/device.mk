@@ -658,8 +658,7 @@ PRODUCT_PACKAGES += \
 ##############################################################
 PRODUCT_PACKAGES += health
 
-PRODUCT_PACKAGES += health.$(TARGET_BOARD_PLATFORM) \
-					android.hardware.health@2.0-service.gordon_peak
+PRODUCT_PACKAGES += android.hardware.health@2.0-service.intel
 ##############################################################
 # Source: device/intel/mixins/groups/abota-fw/true/product.mk
 ##############################################################
