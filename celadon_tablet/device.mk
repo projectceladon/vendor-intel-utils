@@ -110,6 +110,8 @@ PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/boot-arch/update_ifwi_ab.sh:vend
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/boot-arch/update_ifwi_ab.sh:recovery/root/vendor/bin/update_ifwi_ab
 
 $(call inherit-product, $(SRC_TARGET_DIR)/product/gsi_keys.mk)
+
+KERNELFLINGER_SUPPORT_KEYBOX_PROVISION := true
 ##############################################################
 # Source: device/intel/mixins/groups/wlan/iwlwifi/product.mk
 ##############################################################
