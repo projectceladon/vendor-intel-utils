@@ -637,6 +637,24 @@ TARGET_BUILD_INTEL_FACTORY_SCRIPTS := true
 ##############################################################
 TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
 ##############################################################
+# Source: device/intel/mixins/groups/gptbuild/true/BoardConfig.mk
+##############################################################
+# can't use := here, as PRODUCT_OUT is not defined yet
+BOARD_BUILD_SUPER_IMAGE_BY_DEFAULT := true
+GPTIMAGE_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT).img
+
+BOARD_FLASHFILES += $(GPTIMAGE_BIN):$(TARGET_PRODUCT).img
+
+ifeq ($(TARGET_USE_TRUSTY),true)
+TRUSTY_ENV_VAR += ENABLE_TRUSTY_SIMICS=true
+endif
+
+COMPRESS_GPTIMAGE ?= true
+
+ifeq ($(COMPRESS_GPTIMAGE), true)
+GPTIMAGE_GZ ?= $(GPTIMAGE_BIN).gz
+endif
+##############################################################
 # Source: device/intel/mixins/groups/dbc/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/dbc

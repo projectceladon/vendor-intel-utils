@@ -708,4 +708,85 @@ $(LOCAL_BUILT_MODULE): $(LOCAL_SRC)
 	cat $(LOAD_MODULES_H_IN) >> $@
 	echo wait >> $@
 	cat $(LOAD_MODULES_IN) >> $@
+##############################################################
+# Source: device/intel/mixins/groups/gptbuild/true/AndroidBoard.mk
+##############################################################
+gptimage_size ?= 16G
+
+raw_config := none
+raw_factory := none
+tos_bin := none
+multiboot_bin := none
+raw_product := none
+raw_odm := none
+raw_acpi := none
+raw_acpio := none
+
+.PHONY: none
+none: ;
+
+.PHONY: $(INSTALLED_CONFIGIMAGE_TARGET).raw
+$(INSTALLED_CONFIGIMAGE_TARGET).raw: $(INSTALLED_CONFIGIMAGE_TARGET) $(SIMG2IMG)
+	$(SIMG2IMG) $< $@
+
+.PHONY: $(INSTALLED_FACTORYIMAGE_TARGET).raw
+$(INSTALLED_FACTORYIMAGE_TARGET).raw: $(INSTALLED_FACTORYIMAGE_TARGET) $(SIMG2IMG)
+	$(SIMG2IMG) $< $@
+
+ifdef INSTALLED_CONFIGIMAGE_TARGET
+raw_config := $(INSTALLED_CONFIGIMAGE_TARGET).raw
+endif
+
+ifdef INSTALLED_FACTORYIMAGE_TARGET
+raw_factory := $(INSTALLED_FACTORYIMAGE_TARGET).raw
+endif
+
+ifdef INSTALLED_PRODUCTIMAGE_TARGET
+raw_product := $(INSTALLED_PRODUCTIMAGE_TARGET).raw
+endif
+
+.PHONY: $(GPTIMAGE_BIN)
+ifeq ($(strip $(TARGET_USE_TRUSTY)),true)
+ifeq ($(strip $(TARGET_USE_MULTIBOOT)),true)
+$(GPTIMAGE_BIN): tosimage multiboot
+multiboot_bin = $(INSTALLED_MULTIBOOT_IMAGE_TARGET)
+else
+$(GPTIMAGE_BIN): tosimage
+endif
+tos_bin = $(INSTALLED_TOS_IMAGE_TARGET)
+endif
+
+
+
+
+$(GPTIMAGE_BIN): \
+	bootloader \
+	bootimage \
+	vbmetaimage \
+	superimage \
+	$(SIMG2IMG) \
+	$(raw_config) \
+	$(raw_factory)
+
+	$(hide) rm -f $(INSTALLED_SYSTEMIMAGE).raw
+	$(hide) rm -f $(INSTALLED_USERDATAIMAGE_TARGET).raw
+
+	$(SIMG2IMG) $(INSTALLED_SUPERIMAGE_TARGET) $(INSTALLED_SUPERIMAGE_TARGET).raw
+
+	$(INTEL_PATH_BUILD)/create_gpt_image.py \
+		--create $@ \
+		--block $(BOARD_FLASH_BLOCK_SIZE) \
+		--table $(BOARD_GPT_INI) \
+		--size $(gptimage_size) \
+		--bootloader $(bootloader_bin) \
+		--tos $(tos_bin) \
+		--multiboot $(multiboot_bin) \
+		--boot $(INSTALLED_BOOTIMAGE_TARGET) \
+		--vbmeta $(INSTALLED_VBMETAIMAGE_TARGET) \
+		--super $(INSTALLED_SUPERIMAGE_TARGET).raw \
+		--config $(raw_config) \
+		--factory $(raw_factory)
+
+.PHONY: gptimage
+gptimage: $(GPTIMAGE_BIN)
 # ------------------ END MIX-IN DEFINITIONS ------------------
