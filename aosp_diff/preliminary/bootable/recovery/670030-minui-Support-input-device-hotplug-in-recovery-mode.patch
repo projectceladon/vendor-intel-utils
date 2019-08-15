@@ -1,0 +1,169 @@
+From 1a7a9a8fa2900dc0c8698be40844d5d46334b080 Mon Sep 17 00:00:00 2001
+From: Liu Shuo A <shuo.a.liu@intel.com>
+Date: Wed, 22 May 2019 15:38:35 +0800
+Subject: [PATCH 2/2] minui: Support input device hotplug in recovery mode.
+
+In the old code, the recovery only enumerated the input devices at the
+startup, and read the input events from these devices.
+So if a USB input device is probed after the recovery startup, then the
+recovery can't read the events from this device.
+This patch use inotify to monitor /dev/input for new added input
+device, then support input device hotplug in recovery mode.
+
+Bug: 111847510
+Test: can use USB keyboard hotplugged in recovery mode
+Change-Id: Ia5035a185845b3df13b77fbf0407ff6ce24e5869
+Signed-off-by: Liu Shuo A <shuo.a.liu@intel.com>
+Signed-off-by: Ming Tan <ming.tan@intel.com>
+---
+ minui/events.cpp | 93 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 93 insertions(+)
+
+diff --git a/minui/events.cpp b/minui/events.cpp
+index 7d0250e9..434b54df 100644
+--- a/minui/events.cpp
++++ b/minui/events.cpp
+@@ -22,6 +22,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/epoll.h>
++#include <sys/inotify.h>
+ #include <sys/ioctl.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+@@ -46,6 +47,7 @@ struct FdInfo {
+   ev_callback cb;
+ };
+
++static ev_callback g_saved_input_cb;
+ static android::base::unique_fd g_epoll_fd;
+ static epoll_event g_polled_events[MAX_DEVICES + MAX_MISC_FDS];
+ static int g_polled_events_count;
+@@ -60,6 +62,79 @@ static bool test_bit(size_t bit, unsigned long* array) { // NOLINT
+   return (array[bit / BITS_PER_LONG] & (1UL << (bit % BITS_PER_LONG))) != 0;
+ }
+
++static int inotify_cb(int fd, __unused uint32_t epevents) {
++  struct inotify_event* pevent;
++  char* buf;
++  DIR* dir;
++  size_t event_len;
++  size_t offset;
++
++  if (g_saved_input_cb == nullptr) return -1;
++
++  // The inotify will put one or several complete events.
++  // Should not read part of one event.
++  int ret = ioctl(fd, FIONREAD, &event_len);
++  if (ret != 0) return -1;
++
++  dir = opendir("/dev/input");
++  if (dir == nullptr) return -1;
++
++  /* The event_len maybe include some mark at the head, so need to filter it*/
++  event_len &= 0xFFFF;
++  buf = (char*)malloc(event_len);
++  if (buf == nullptr) {
++    closedir(dir);
++    return -1;
++  }
++
++  ret = read(fd, buf, event_len);
++  if (ret != (int)event_len) {
++    free(buf);
++    closedir(dir);
++    return -1;
++  }
++
++  offset = 0;
++  while (offset < event_len) {
++    pevent = (struct inotify_event*)(buf + offset);
++    if (offset + sizeof(inotify_event) + pevent->len > event_len) {
++      // The pevent->len is too large and buffer will over flow.
++      // In general, should not happen, just make more stable.
++      free(buf);
++      closedir(dir);
++      return -1;
++    }
++    offset += sizeof(inotify_event) + pevent->len;
++
++    pevent->name[pevent->len] = '\0';
++    if (strncmp(pevent->name, "event", 5)) {
++      continue;
++    }
++
++    android::base::unique_fd dfd(openat(dirfd(dir), pevent->name, O_RDONLY));
++    if (dfd == -1) break;
++
++    // Read the evbits of the input device.
++    unsigned long ev_bits[BITS_TO_LONGS(EV_MAX)];
++    if (ioctl(dfd, EVIOCGBIT(0, sizeof(ev_bits)), ev_bits) == -1) {
++      dfd.reset();
++      continue;
++    }
++    // We assume that only EV_KEY, EV_REL, and EV_SW event types are ever needed.
++    if (!test_bit(EV_KEY, ev_bits) && !test_bit(EV_REL, ev_bits) && !test_bit(EV_SW, ev_bits)) {
++      dfd.reset();
++      continue;
++    }
++
++    // Only add, we assume the user will not plug out and plug in USB device again and again :)
++    ev_add_fd(std::move(dfd), g_saved_input_cb);
++  }
++
++  free(buf);
++  closedir(dir);
++  return 0;
++}
++
+ int ev_init(ev_callback input_cb, bool allow_touch_inputs) {
+   g_epoll_fd.reset();
+
+@@ -68,6 +143,15 @@ int ev_init(ev_callback input_cb, bool allow_touch_inputs) {
+     return -1;
+   }
+
++  android::base::unique_fd inotify_fd(inotify_init());
++  if (inotify_fd.get() == -1) {
++    return -1;
++  }
++
++  if (inotify_add_watch(inotify_fd, "/dev/input", IN_CREATE) < 0) {
++    return -1;
++  }
++
+   std::unique_ptr<DIR, decltype(&closedir)> dir(opendir("/dev/input"), closedir);
+   if (!dir) {
+     return -1;
+@@ -116,6 +200,10 @@ int ev_init(ev_callback input_cb, bool allow_touch_inputs) {
+   }
+
+   g_epoll_fd.reset(epoll_fd.release());
++
++  ev_add_fd(std::move(inotify_fd), inotify_cb);
++  g_saved_input_cb = input_cb;
++
+   return 0;
+ }
+
+@@ -148,6 +236,7 @@ void ev_exit(void) {
+   }
+   g_ev_misc_count = 0;
+   g_ev_dev_count = 0;
++  g_saved_input_cb = nullptr;
+   g_epoll_fd.reset();
+ }
+
+@@ -176,6 +265,10 @@ int ev_get_input(int fd, uint32_t epevents, input_event* ev) {
+             return 0;
+         }
+     }
++    if (epevents & EPOLLHUP) {
++      // Delete this watch
++      epoll_ctl(g_epoll_fd, EPOLL_CTL_DEL, fd, nullptr);
++    }
+     return -1;
+ }
+
+--
+2.21.0

@@ -1,0 +1,421 @@
+From 6d2fef1bfe8075b079d0a537f0237a4ff437476b Mon Sep 17 00:00:00 2001
+From: sheng wei <w.sheng@intel.com>
+Date: Mon, 22 Jul 2019 10:57:45 +0800
+Subject: [PATCH 1/6] Revert "use new heci interface to retrieve encrypted
+ AttKB"
+
+This reverts commit 0f2693a2f1c4a6e8b5bc8bd18019d738067d3bf5.
+
+Signed-off-by: sheng wei <w.sheng@intel.com>
+---
+ include/shared/trusty_device_info.h        |  42 --------
+ lib/heci/cse_msg.h                         |  27 +----
+ lib/heci/heci.c                            | 116 ++++-----------------
+ lib/hwkey_crypt/hwkey_crypt.c              |  15 +--
+ lib/hwkey_crypt/trusty_key_crypt.h         |   2 -
+ lib/hwkey_migration/hwkey_migration.c      |   7 ++
+ lib/hwkey_migration/trusty_key_migration.h |   2 +
+ lib/syscall/syscall_x86.c                  |  26 +----
+ 8 files changed, 39 insertions(+), 198 deletions(-)
+
+diff --git a/include/shared/trusty_device_info.h b/include/shared/trusty_device_info.h
+index 7451aea..d0d80a5 100644
+--- a/include/shared/trusty_device_info.h
++++ b/include/shared/trusty_device_info.h
+@@ -104,48 +104,6 @@ typedef struct {
+ 	uint8_t                attkb[0];
+ } trusty_device_info_t;
+ 
+-enum ATT_KEYBOX_FORMAT
+-{
+-	ATT_KEYBOX_FORMAT_PLAIN = 0x00,
+-	ATT_KEYBOX_FORMAT_LZMA  = 0x01,
+-};
+-
+-#define CIPHER_IV_SIZE        12
+-#define CIPHER_TAG_SIZE       16
+-#define ATT_KEYBOX_VERSION    1
+-
+-#pragma pack (1)
+-typedef struct
+-{
+-	uint8_t  version; // version 1 supports plain and LZMA
+-	uint16_t size;   // decompressed size excluding this header
+-	struct
+-	{
+-		uint8_t compressed : 1; //0- uncompressed 1- LZMA
+-		uint8_t encrypted  : 1;
+-		uint8_t reserved   : 6;
+-	} format;
+-	uint8_t flag; //not used yet
+-	uint16_t reserved; //not used yet
+-} attkb_header_t;
+-
+-typedef struct
+-{
+-	uint16_t      format_version; //1 for now
+-	uint16_t      cipher_blob_size;
+-	uint8_t       iv[CIPHER_IV_SIZE];
+-	uint8_t       tag[CIPHER_TAG_SIZE];
+-	uint8_t       cipher_blob[0];
+-} trusty_cipher_blob_t;
+-
+-typedef struct
+-{
+-	attkb_header_t attkb_header;
+-	trusty_cipher_blob_t trusty_cipher_blob;
+-} trusty_encrypted_attkb_t;
+-
+-#pragma pack ()
+-
+ #define DUMMY_PLATFORM     0
+ #define APL_PLATFORM       1
+ #define ICL_PLATFORM       2
+diff --git a/lib/heci/cse_msg.h b/lib/heci/cse_msg.h
+index 2150c8d..1003fb3 100644
+--- a/lib/heci/cse_msg.h
++++ b/lib/heci/cse_msg.h
+@@ -49,9 +49,8 @@ typedef union _MKHI_MESSAGE_HEADER {
+ /*
+  * for MKHI-MCA client
+  */
+-#define MCA_MKHI_BOOTLOADER_READ_ATTKB_GRP_ID      0x0A
+-#define MCA_MKHI_BOOTLOADER_READ_ATTKB_CMD_REQ     0x19
+-#define MCA_MKHI_BOOTLOADER_READ_ATTKB_EX_CMD_REQ  0x1A
++#define MCA_MKHI_BOOTLOADER_READ_ATTKB_CMD_REQ  0x19
++#define MCA_MKHI_BOOTLOADER_READ_ATTKB_GRP_ID   0x0A
+ #define MAX_ATTKB_SIZE                         (16*1024)
+ 
+ typedef struct
+@@ -70,26 +69,4 @@ typedef struct
+     uint32_t             ReadSize;
+ } MCA_BOOTLOADER_READ_ATTKB_RESP_DATA;
+ 
+-typedef struct
+-{
+-    MKHI_MESSAGE_HEADER    Header;
+-    uint16_t               TotalFileSize; // Size of the whole attkb file, including the added encryption header.
+-    uint16_t               ReadOffset;
+-    uint16_t               ReadSize; // Size in bytes actually read.
+-    uint16_t               Reserved;
+-    uint8_t                FileData[];
+-} MCA_BOOTLOADER_READ_ATTKB_EX_Response;
+-
+-typedef struct
+-{
+-    MKHI_MESSAGE_HEADER    Header;
+-    uint16_t               Offset; // Offset in file in bytes.
+-    uint16_t               Size; // Size in bytes to read
+-    struct
+-    {
+-        uint32_t Encrypt   : 1;
+-        uint32_t Reserved  : 31;
+-    } Flags;
+-} MCA_BOOTLOADER_READ_ATTKB_EX_Request;
+-
+ #endif    // _CSE_MSG_H
+diff --git a/lib/heci/heci.c b/lib/heci/heci.c
+index a87d65b..d244db4 100644
+--- a/lib/heci/heci.c
++++ b/lib/heci/heci.c
+@@ -32,7 +32,6 @@
+ 
+ #include "cse_msg.h"
+ #include "heci_impl.h"
+-#include "trusty_device_info.h"
+ 
+ #ifdef EPT_DEBUG
+ #include <platform/vmcall.h>
+@@ -396,29 +395,28 @@ static int HeciSendwACK(
+     return status;
+ }
+ 
+-#define HECI_MSG_SIZE       ((1 << 9) - 1)
+-#define MAX_TRANSFER_BUFFER (HECI_MSG_SIZE - sizeof(MCA_BOOTLOADER_READ_ATTKB_EX_Response))
+-#define ALIGNED_MAX_TRANSFER_BUFFER (MAX_TRANSFER_BUFFER - MAX_TRANSFER_BUFFER % 4)
+-
+ /* if get failure, return zero */
+-static uint32_t get_attkb_size(void)
++uint32_t get_attkb(uint8_t *attkb)
+ {
+     int status = 0;
+     uint32_t HeciSendLength;
+     uint32_t HeciRecvLength;
+-
+-    MCA_BOOTLOADER_READ_ATTKB_EX_Response *Resp;
+-    MCA_BOOTLOADER_READ_ATTKB_EX_Request *Req;
+-    uint8_t DataBuffer[sizeof(MCA_BOOTLOADER_READ_ATTKB_EX_Request) + ALIGNED_MAX_TRANSFER_BUFFER] = {0};
+-
+-    Req = (MCA_BOOTLOADER_READ_ATTKB_EX_Request*)DataBuffer;
+-    Req->Header.Fields.GroupId = MCA_MKHI_BOOTLOADER_READ_ATTKB_GRP_ID;
+-    Req->Header.Fields.Command = MCA_MKHI_BOOTLOADER_READ_ATTKB_EX_CMD_REQ;
+-    Req->Size = 0; /* Zero size indicates request for attkb size */
+-    Req->Offset = 0;
+-    Req->Flags.Encrypt = 1;
+-
+-    HeciSendLength = sizeof(MCA_BOOTLOADER_READ_ATTKB_EX_Request);
++    MCA_BOOTLOADER_READ_ATTKB_RESP_DATA *Resp;
++    MCA_BOOTLOADER_READ_ATTKB_REQ_DATA *Req;
++    uint8_t DataBuffer[sizeof(MCA_BOOTLOADER_READ_ATTKB_REQ_DATA)];
++    paddr_t pa;
++
++    pa = (uint64_t)vaddr_to_paddr(attkb);
++
++    memset(DataBuffer, 0, sizeof(DataBuffer));
++    Req = (MCA_BOOTLOADER_READ_ATTKB_REQ_DATA*)DataBuffer;
++    Req->MKHIHeader.Fields.GroupId = MCA_MKHI_BOOTLOADER_READ_ATTKB_GRP_ID;
++    Req->MKHIHeader.Fields.Command = MCA_MKHI_BOOTLOADER_READ_ATTKB_CMD_REQ;
++    Req->DstAddrLower = (uint32_t)pa;
++    Req->DstAddrUpper = (uint32_t)(pa >> 32);
++    Req->Size = MAX_ATTKB_SIZE;
++
++    HeciSendLength = sizeof(MCA_BOOTLOADER_READ_ATTKB_REQ_DATA);
+     HeciRecvLength = sizeof(DataBuffer);
+ 
+     status = HeciSendwACK(
+@@ -427,8 +425,8 @@ static uint32_t get_attkb_size(void)
+                  &HeciRecvLength,
+                  BIOS_FIXED_HOST_ADDR,
+                  BIOS_SEC_ADDR);
+-    Resp = (MCA_BOOTLOADER_READ_ATTKB_EX_Response*)DataBuffer;
+-    if ((status < 0) || (Resp->Header.Fields.Result != 0)) {
++    Resp = (MCA_BOOTLOADER_READ_ATTKB_RESP_DATA*)DataBuffer;
++    if((status < 0) || (Resp->Header.Fields.Result != 0)) {
+         dprintf(INFO, "failed to get attkb: status %d, respone %d\n", status, Resp->Header.Fields.Result);
+         return 0;
+     }
+@@ -437,81 +435,8 @@ static uint32_t get_attkb_size(void)
+     DEBUG ("IsRespone= %08x\n", Resp->Header.Fields.IsResponse);
+     DEBUG ("Result   = %08x\n", Resp->Header.Fields.Result);
+     DEBUG ("ReadSize = %08x\n", Resp->ReadSize);
+-    DEBUG ("ReadOffset = %08x\n", Resp->ReadOffset);
+-    DEBUG ("TotalFileSize = %08x\n", Resp->TotalFileSize);
+ 
+-    return Resp->TotalFileSize;
+-}
+-
+-/* if get failure, return zero */
+-uint32_t get_attkb(uint8_t *attkb)
+-{
+-    uint32_t attkb_size = 0;
+-    uint32_t remaining_attkb_size = 0;
+-    int status = 0;
+-    uint32_t HeciSendLength;
+-    uint32_t HeciRecvLength;
+-    MCA_BOOTLOADER_READ_ATTKB_EX_Response *Resp;
+-    MCA_BOOTLOADER_READ_ATTKB_EX_Request *Req;
+-    uint8_t DataBuffer[sizeof(MCA_BOOTLOADER_READ_ATTKB_EX_Response) + ALIGNED_MAX_TRANSFER_BUFFER];
+-    uint32_t offset = 0;
+-    uint32_t req_size = 0;
+-
+-    if (NULL == attkb)
+-        return 0;
+-
+-    attkb_size = get_attkb_size();
+-    if (attkb_size == 0) {
+-        dprintf(INFO, "failed to get_attkb_size.\n");
+-        return 0;
+-    }
+-
+-    remaining_attkb_size = attkb_size;
+-    while (remaining_attkb_size) {
+-        memset(DataBuffer, 0, sizeof(DataBuffer));
+-        Req = (MCA_BOOTLOADER_READ_ATTKB_EX_Request*)DataBuffer;
+-        Req->Header.Fields.GroupId = MCA_MKHI_BOOTLOADER_READ_ATTKB_GRP_ID;
+-        Req->Header.Fields.Command = MCA_MKHI_BOOTLOADER_READ_ATTKB_EX_CMD_REQ;
+-        Req->Size = MIN(remaining_attkb_size, ALIGNED_MAX_TRANSFER_BUFFER);
+-        Req->Offset = offset;
+-        Req->Flags.Encrypt = 1;
+-        req_size = Req->Size;
+-
+-        HeciSendLength = sizeof(MCA_BOOTLOADER_READ_ATTKB_EX_Request);
+-        HeciRecvLength = sizeof(DataBuffer);
+-
+-        status = HeciSendwACK(
+-                     (uint32_t *)DataBuffer,
+-                     HeciSendLength,
+-                     &HeciRecvLength,
+-                     BIOS_FIXED_HOST_ADDR,
+-                     BIOS_SEC_ADDR);
+-        Resp = (MCA_BOOTLOADER_READ_ATTKB_EX_Response*)DataBuffer;
+-        if ((status < 0) || (Resp->Header.Fields.Result != 0)) {
+-            dprintf(INFO, "failed to get attkb: status %d, respone %d.\n", status, Resp->Header.Fields.Result);
+-            return 0;
+-        }
+-
+-        if (Resp->ReadSize > remaining_attkb_size || Resp->ReadSize > req_size) {
+-            dprintf(INFO, "unexpected size: remaining_attkb_size %d, Resp->ReadSize %d, Req->Size %d.",
+-                    remaining_attkb_size, Resp->ReadSize, req_size);
+-            return 0;
+-        }
+-
+-        memcpy_s(attkb + offset, Resp->ReadSize,
+-                 (uint8_t*)DataBuffer + sizeof(MCA_BOOTLOADER_READ_ATTKB_EX_Response), Resp->ReadSize);
+-        offset += Resp->ReadSize;
+-        remaining_attkb_size -= Resp->ReadSize;
+-
+-        DEBUG ("Group    = %08x\n", Resp->Header.Fields.GroupId);
+-        DEBUG ("Command  = %08x\n", Resp->Header.Fields.Command);
+-        DEBUG ("IsRespone= %08x\n", Resp->Header.Fields.IsResponse);
+-        DEBUG ("Result   = %08x\n", Resp->Header.Fields.Result);
+-        DEBUG ("ReadSize = %08x\n", Resp->ReadSize);
+-        DEBUG ("ReadOffset = %08x\n", Resp->ReadOffset);
+-        DEBUG ("TotalFileSize = %08x\n", Resp->TotalFileSize);
+-    }
+-    return attkb_size;
++    return Resp->ReadSize;
+ }
+ 
+ void cse_init(void)
+@@ -546,3 +471,4 @@ void cse_init(void)
+ 
+     return;
+ }
++
+diff --git a/lib/hwkey_crypt/hwkey_crypt.c b/lib/hwkey_crypt/hwkey_crypt.c
+index 4bad416..5a7c044 100644
+--- a/lib/hwkey_crypt/hwkey_crypt.c
++++ b/lib/hwkey_crypt/hwkey_crypt.c
+@@ -27,24 +27,13 @@
+ #include <openssl/evp.h>
+ #include <openssl/mem.h>
+ 
++#include "trusty_key_migration.h"
+ #include "trusty_key_crypt.h"
+ 
+ #define LOG_TAG "libhwkey_crypt"
+ #define TLOGE(fmt, ...) \
+     fprintf(stderr, "%s: %d: " fmt, LOG_TAG, __LINE__,  ## __VA_ARGS__)
+ 
+-#ifdef __clang__
+-#define OPTNONE __attribute__((optnone))
+-#else  // not __clang__
+-#define OPTNONE __attribute__((optimize("O0")))
+-#endif  // not __clang__
+-inline OPTNONE void* secure_memzero(void* s, size_t n) {
+-    if (!s)
+-        return s;
+-    return memset(s, 0, n);
+-}
+-#undef OPTNONE
+-
+ /**
+  * aes_256_gcm_encrypt - Helper function for encrypt.
+  * @key:          Key object.
+@@ -217,7 +206,7 @@ int aes_256_gcm_decrypt(const struct gcm_key *key,
+ 
+ 	/* set to aad info.*/
+ 	if (NULL != aad) {
+-		if (!EVP_DecryptUpdate(ctx, NULL, &out_len, (uint8_t *)aad, aad_size)) {
++		if (!EVP_EncryptUpdate(ctx, NULL, &out_len, (uint8_t *)aad, aad_size)) {
+ 			TLOGE("set aad info fail\n");
+ 			goto exit;
+ 		}
+diff --git a/lib/hwkey_crypt/trusty_key_crypt.h b/lib/hwkey_crypt/trusty_key_crypt.h
+index 2c7b98d..4b17c19 100644
+--- a/lib/hwkey_crypt/trusty_key_crypt.h
++++ b/lib/hwkey_crypt/trusty_key_crypt.h
+@@ -33,8 +33,6 @@ struct gcm_tag {
+ #define AES_GCM_ERR_GENERIC        -1
+ #define AES_GCM_ERR_AUTH_FAILED    -2
+ 
+-void* secure_memzero(void * p, size_t len);
+-
+ int aes_256_gcm_encrypt(const struct gcm_key *key,
+ 		const void *iv, size_t iv_size,
+ 		const void *aad, size_t aad_size,
+diff --git a/lib/hwkey_migration/hwkey_migration.c b/lib/hwkey_migration/hwkey_migration.c
+index 684e3c1..5d8f9f4 100644
+--- a/lib/hwkey_migration/hwkey_migration.c
++++ b/lib/hwkey_migration/hwkey_migration.c
+@@ -24,6 +24,13 @@
+ #define TLOGE(fmt, ...) \
+     fprintf(stderr, "%s: %d: " fmt, LOG_TAG, __LINE__,  ## __VA_ARGS__)
+ 
++static void * (* const volatile memset_ptr)(void *, int, size_t) = memset;
++
++void secure_memzero(void * p, size_t len)
++{
++    (memset_ptr)(p, 0, len);
++}
++
+ /**
+  * long hwkey_err_to_tipc_err() - translates hwkey err value to tipc/lk err value
+  * @hwkey_err: hwkey err value
+diff --git a/lib/hwkey_migration/trusty_key_migration.h b/lib/hwkey_migration/trusty_key_migration.h
+index 35e1b9e..a35ed82 100644
+--- a/lib/hwkey_migration/trusty_key_migration.h
++++ b/lib/hwkey_migration/trusty_key_migration.h
+@@ -55,4 +55,6 @@ long hwkey_exchange_crypto_context(hwkey_session_t session, const uint8_t *src,
+ 
+ long hwkey_get_ssek(hwkey_session_t session, uint8_t *ssek, uint32_t ssek_len);
+ 
++void secure_memzero(void * p, size_t len);
++
+ #endif
+diff --git a/lib/syscall/syscall_x86.c b/lib/syscall/syscall_x86.c
+index a14a53e..d5f1290 100644
+--- a/lib/syscall/syscall_x86.c
++++ b/lib/syscall/syscall_x86.c
+@@ -58,18 +58,6 @@ typedef union hfs1 {
+ 					DEVICE_PLATFORM##_REG)
+ #endif
+ 
+-#ifdef __clang__
+-#define OPTNONE __attribute__((optnone))
+-#else  // not __clang__
+-#define OPTNONE __attribute__((optimize("O0")))
+-#endif  // not __clang__
+-static inline OPTNONE void* secure_memzero(void* s, size_t n) {
+-    if (!s)
+-        return s;
+-    return memset(s, 0, n);
+-}
+-#undef OPTNONE
+-
+ static uint32_t get_ta_permission(void)
+ {
+ 	ta_permission_t ta_permission_matrix[] = {
+@@ -117,7 +105,7 @@ uint32_t copy_attkb_to_user(user_addr_t user_attkb)
+ 	}
+ 
+ 	ret = copy_to_user(user_attkb, attkb, attkb_size);
+-	secure_memzero(attkb, attkb_size);
++	memset(attkb, 0, attkb_size);
+ 
+ 	if (ret != NO_ERROR)
+ 		panic("failed (%ld) to copy structure to user\n", ret);
+@@ -161,12 +149,12 @@ long sys_get_device_info(user_addr_t info)
+ 
+ 	/* seed is the sensitive secret date, do not return to user app if it is not required. */
+ 	if (!(ta_permission & GET_SEED)) {
+-		secure_memzero(dev_info->sec_info.dseed_list, sizeof(dev_info->sec_info.dseed_list));
+-		secure_memzero(dev_info->sec_info.useed_list, sizeof(dev_info->sec_info.useed_list));
++		memset(dev_info->sec_info.dseed_list, 0, sizeof(dev_info->sec_info.dseed_list));
++		memset(dev_info->sec_info.useed_list, 0, sizeof(dev_info->sec_info.useed_list));
+ 	}
+ 
+ 	if (!(ta_permission & GET_RPMB_KEY)) {
+-		secure_memzero(dev_info->sec_info.rpmb_key, sizeof(dev_info->sec_info.rpmb_key));
++		memset(dev_info->sec_info.rpmb_key, 0, sizeof(dev_info->sec_info.rpmb_key));
+ 	}
+ 
+ 	if (ta_permission & GET_ATTKB) {
+@@ -184,13 +172,9 @@ long sys_get_device_info(user_addr_t info)
+ 		dev_info->attkb_size = 0;
+ #endif
+ 	}
+-	else {
+-		secure_memzero(dev_info->sec_info.attkb_enc_key,
+-			sizeof(dev_info->sec_info.attkb_enc_key));
+-	}
+ 
+ 	ret = copy_to_user(info, dev_info, sizeof(trusty_device_info_t));
+-	secure_memzero(dev_info, sizeof(trusty_device_info_t));
++	memset(dev_info, 0, sizeof(trusty_device_info_t));
+ 
+ 	if (ret != NO_ERROR)
+ 		panic("failed (%ld) to copy structure to user\n", ret);
+-- 
+2.22.0
+
