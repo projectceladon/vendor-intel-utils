@@ -254,35 +254,13 @@ PRODUCT_PROPERTY_OVERRIDES += audio.safemedia.bypass=true
 
 PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/audio/overlay-car-legacy
 ##############################################################
-# Source: device/intel/mixins/groups/device-type/car/product.mk
+# Source: device/intel/mixins/groups/device-type/tablet/product.mk
 ##############################################################
+PRODUCT_CHARACTERISTICS := tablet
+
 PRODUCT_COPY_FILES += \
-    frameworks/native/data/etc/car_core_hardware.xml:vendor/etc/permissions/car_core_hardware.xml \
-    frameworks/native/data/etc/android.hardware.type.automotive.xml:vendor/etc/permissions/android.hardware.type.automotive.xml \
-    frameworks/native/data/etc/android.hardware.screen.landscape.xml:vendor/etc/permissions/android.hardware.screen.landscape.xml \
-    frameworks/native/data/etc/android.hardware.ethernet.xml:vendor/etc/permissions/android.hardware.ethernet.xml \
-    frameworks/native/data/etc/android.hardware.broadcastradio.xml:vendor/etc/permissions/android.hardware.broadcastradio.xml \
-    frameworks/native/data/etc/android.software.activities_on_secondary_displays.xml:vendor/etc/permissions/android.software.activities_on_secondary_displays.xml \
-    $(INTEL_PATH_COMMON)/framework/android.software.cant_save_state.xml:vendor/etc/permissions/android.software.cant_save_state.xml
+        frameworks/native/data/etc/tablet_core_hardware.xml:vendor/etc/permissions/tablet_core_hardware.xml
 
-# Make sure vendor car product overlays take precedence than google definition
-# under packages/services/Car/car_product/overlay/
-PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/device-type/overlay-car
-$(call inherit-product, packages/services/Car/car_product/build/car.mk)
-
-PRODUCT_PACKAGES += \
-    radio.fm.default \
-    CarSettings \
-    VmsPublisherClientSample \
-    VmsSubscriberClientSample \
-
-
-PRODUCT_PACKAGES += android.hardware.automotive.audiocontrol@1.0-service.intel
-
-PRODUCT_PACKAGES += android.hardware.automotive.vehicle@2.0-service \
-    android.hardware.automotive.vehicle@2.0-impl
-
-VEHICLE_HAL_PROTO_TYPE := google-emulator
 ##############################################################
 # Source: device/intel/mixins/groups/device-specific/celadon_tablet/product.mk
 ##############################################################

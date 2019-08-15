@@ -332,7 +332,7 @@ KERNEL_MAKE_OPTIONS = \
     O=$(abspath $(LOCAL_KERNEL_PATH)) \
     ARCH=$(TARGET_KERNEL_ARCH) \
     INSTALL_MOD_PATH=$(KERNEL_INSTALL_MOD_PATH) \
-    CROSS_COMPILE="$(KERNEL_CCACHE) $(YOCTO_CROSSCOMPILE)" \
+    CROSS_COMPILE="x86_64-linux-android-" \
     CCACHE_SLOPPINESS=$(KERNEL_CCSLOP)
 
 KERNEL_MAKE_OPTIONS += \
@@ -354,7 +354,7 @@ KERNEL_DEPS := $(shell find $(LOCAL_KERNEL_SRC) \( -name *.git -prune \) -o -pri
 # and stop kernel build.
 # If a .config is already present, save it before processing
 # the check and restore it at the end
-$(CHECK_CONFIG_LOG): $(KERNEL_DEFCONFIG) $(KERNEL_DEPS) | yoctotoolchain
+$(CHECK_CONFIG_LOG): $(KERNEL_DEFCONFIG) $(KERNEL_DEPS)
 	$(hide) mkdir -p $(@D)
 	-$(hide) [[ -e $(KERNEL_CONFIG) ]] && mv -f $(KERNEL_CONFIG) $(KERNEL_CONFIG).save
 	$(hide) rm -f $(KERNEL_CONFIG).old
@@ -383,7 +383,7 @@ menuconfig xconfig gconfig: $(CHECK_CONFIG_LOG)
 	@echo $(KERNEL_DEFCONFIG) has been modified !
 	@echo ===========
 
-$(KERNEL_CONFIG): $(KERNEL_CONFIG_DEPS) | yoctotoolchain $(CHECK_CONFIG_LOG)
+$(KERNEL_CONFIG): $(KERNEL_CONFIG_DEPS) | $(CHECK_CONFIG_LOG)
 	$(hide) cat $(KERNEL_CONFIG_DEPS) > $@
 	@echo "Generating Kernel configuration, using $(KERNEL_CONFIG_DEPS)"
 	$(hide) $(MAKE) $(KERNEL_MAKE_OPTIONS) olddefconfig </dev/null
@@ -425,7 +425,7 @@ $(DM_VERITY_CERT): $(PRODUCTS.$(INTERNAL_PRODUCT).PRODUCT_VERITY_SIGNING_KEY).x5
 $(LOCAL_KERNEL): $(DM_VERITY_CERT)
 endif
 
-$(LOCAL_KERNEL): $(MINIGZIP) $(KERNEL_CONFIG) $(BOARD_DTB) $(KERNEL_DEPS) | yoctotoolchain
+$(LOCAL_KERNEL): $(MINIGZIP) $(KERNEL_CONFIG) $(BOARD_DTB) $(KERNEL_DEPS)
 	$(MAKE) $(KERNEL_MAKE_OPTIONS)
 	$(MAKE) $(KERNEL_MAKE_OPTIONS) modules
 	$(MAKE) $(KERNEL_MAKE_OPTIONS) INSTALL_MOD_STRIP=1 modules_install
@@ -527,11 +527,11 @@ $(LK_ELF):
 	@echo "making lk.elf.."
 	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
 
-$(EVMM_PKG): | yoctotoolchain
+$(EVMM_PKG):
 	@echo "making evmm.."
 	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
 
-$(EVMM_LK_PKG): $(LK_ELF) | yoctotoolchain
+$(EVMM_LK_PKG): $(LK_ELF)
 	@echo "making evmm(packing with lk.elf).."
 	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
 
