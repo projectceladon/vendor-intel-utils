@@ -33,7 +33,7 @@ usb-gadget: configfs(usb_config=adb,mtp_adb_pid=0x0a5f,ptp_adb_pid=0x0a61,rndis_
 midi: true
 touch: galax7200
 navigationbar: true
-device-type: car(vhal-proto-type=google-emulator,aosp_hal=true)
+device-type: tablet
 debug-tools: true
 fota: true
 thermal: thermal-daemon
