@@ -52,7 +52,8 @@ function lunch
     # check if product configuration files are out of date
     if [[ $(find device/intel -path "*mixins*" -prune -o -name ${TARGET_PRODUCT}.mk -print) ]]; then
         product_dir=$(dirname $(find device/intel -path "*mixins*" -prune -o -name ${TARGET_PRODUCT}.mk -print))
-        mixinup -s $product_dir/mixins.spec -d
+	echo "Executing mixin update..."
+        mixinup -s $product_dir/mixins.spec
     fi
 }
 
