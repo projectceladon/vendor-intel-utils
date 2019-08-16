@@ -5,4 +5,4 @@ file: ./mixins.spec
 mixinsctl: true
 
 [groups]
-gms: false
+googleservice: false

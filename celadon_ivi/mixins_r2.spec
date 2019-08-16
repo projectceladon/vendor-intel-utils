@@ -5,4 +5,4 @@ file: ./mixins.spec
 mixinsctl: true
 
 [groups]
-gms: true(car=true)
+googleservice: gas
