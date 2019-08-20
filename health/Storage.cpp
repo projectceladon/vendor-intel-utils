@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#define LOG_TAG "android.hardware.health@2.0-impl.gordon_peak"
+#define LOG_TAG "android.hardware.health@2.0-impl.intel"
 #include <utils/String8.h>
 #include <cutils/properties.h>
 #include <android-base/file.h>
