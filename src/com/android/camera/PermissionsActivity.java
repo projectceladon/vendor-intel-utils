@@ -36,14 +36,17 @@ public class PermissionsActivity extends QuickActivity {
     private int mIndexPermissionRequestMicrophone;
     private int mIndexPermissionRequestLocation;
     private int mIndexPermissionRequestStorage;
+    private int mIndexPermissionRequestWriteStorage;
     private boolean mShouldRequestCameraPermission;
     private boolean mShouldRequestMicrophonePermission;
     private boolean mShouldRequestLocationPermission;
     private boolean mShouldRequestStoragePermission;
+    private boolean mShouldRequestWriteStoragePermission;
     private int mNumPermissionsToRequest;
     private boolean mFlagHasCameraPermission;
     private boolean mFlagHasMicrophonePermission;
     private boolean mFlagHasStoragePermission;
+    private boolean mFlagHasWriteStoragePermission;
     private SettingsManager mSettingsManager;
 
     /**
@@ -121,6 +124,14 @@ public class PermissionsActivity extends QuickActivity {
             mFlagHasStoragePermission = true;
         }
 
+        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+            mNumPermissionsToRequest++;
+            mShouldRequestWriteStoragePermission = true;
+        } else {
+            mFlagHasWriteStoragePermission = true;
+        }
+
         if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
             mNumPermissionsToRequest++;
@@ -158,6 +169,11 @@ public class PermissionsActivity extends QuickActivity {
         if (mShouldRequestStoragePermission) {
             permissionsToRequest[permissionsRequestIndex] = Manifest.permission.READ_EXTERNAL_STORAGE;
             mIndexPermissionRequestStorage = permissionsRequestIndex;
+            permissionsRequestIndex++;
+        }
+        if (mShouldRequestWriteStoragePermission) {
+            permissionsToRequest[permissionsRequestIndex] = Manifest.permission.WRITE_EXTERNAL_STORAGE;
+            mIndexPermissionRequestWriteStorage = permissionsRequestIndex;
             permissionsRequestIndex++;
         }
         if (mShouldRequestLocationPermission) {
@@ -202,6 +218,14 @@ public class PermissionsActivity extends QuickActivity {
                 handlePermissionsFailure();
             }
         }
+        if (mShouldRequestWriteStoragePermission) {
+            if (grantResults.length > 0 && grantResults[mIndexPermissionRequestWriteStorage] ==
+                    PackageManager.PERMISSION_GRANTED) {
+                mFlagHasWriteStoragePermission = true;
+            } else {
+                handlePermissionsFailure();
+            }
+        }
 
         if (mShouldRequestLocationPermission) {
             if (grantResults.length > 0 && grantResults[mIndexPermissionRequestLocation] ==
@@ -212,7 +236,8 @@ public class PermissionsActivity extends QuickActivity {
             }
         }
 
-        if (mFlagHasCameraPermission && mFlagHasMicrophonePermission && mFlagHasStoragePermission) {
+        if (mFlagHasCameraPermission && mFlagHasMicrophonePermission &&
+                mFlagHasStoragePermission && mFlagHasWriteStoragePermission) {
             handlePermissionsSuccess();
         }
     }
