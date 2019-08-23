@@ -80,3 +80,4 @@ dynamic-partitions: true(super_img_in_flashzip=true)
 dbc: true
 atrace: true
 firmware: true
+evs: true
