@@ -46,7 +46,7 @@ net: common
 debug-crashlogd: true
 debug-coredump: false
 debug-phonedoctor: true
-lights: true
+lights: false
 power: true(power_throttle=true)
 debug-usb-config: true(source_dev=dvcith-0-msc0)
 intel_prop: true
