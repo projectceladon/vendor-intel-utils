@@ -576,10 +576,6 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/abota/generic/vendor_prefix
 
 
 ##############################################################
-# Source: device/intel/mixins/groups/cpuset/autocores/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/config_cpuset
-##############################################################
 # Source: device/intel/mixins/groups/usb-init/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/usb-init

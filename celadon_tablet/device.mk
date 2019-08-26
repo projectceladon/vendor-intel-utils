@@ -631,14 +631,6 @@ ABOTA_BOOTARCH=project-celadon
 
 
 ##############################################################
-# Source: device/intel/mixins/groups/cpuset/autocores/product.mk
-##############################################################
-PRODUCT_PACKAGES += \
-    config_cpuset.sh
-
-PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/extra_files/cpuset/config_cpuset.sh:vendor/bin/config_cpuset.sh
-##############################################################
 # Source: device/intel/mixins/groups/usb-otg-switch/true/product.mk
 ##############################################################
 
