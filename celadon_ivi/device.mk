@@ -700,6 +700,12 @@ PRODUCT_PACKAGES += \
 FIRMWARES_DIR ?= vendor/linux/firmware
 $(call inherit-product,device/intel/common/firmware.mk)
 ##############################################################
+# Source: device/intel/mixins/groups/evs/true/product.mk
+##############################################################
+PRODUCT_PACKAGES += android.hardware.automotive.evs@1.0-sample \
+                    evs_app \
+                    evs_app_default_resources
+##############################################################
 # Source: device/intel/mixins/groups/debug-unresponsive/default/product.mk
 ##############################################################
 ifneq ($(TARGET_BUILD_VARIANT),user)

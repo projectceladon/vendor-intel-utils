@@ -772,4 +772,9 @@ $(GPTIMAGE_BIN): \
 
 .PHONY: gptimage
 gptimage: $(GPTIMAGE_BIN)
+##############################################################
+# Source: device/intel/mixins/groups/evs/true/AndroidBoard.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/evs
+
 # ------------------ END MIX-IN DEFINITIONS ------------------
