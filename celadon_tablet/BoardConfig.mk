@@ -370,6 +370,13 @@ BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
 VENDOR_PARTITION_SIZE := $(shell echo 600*1048576 | bc)
 AB_OTA_PARTITIONS += vendor
 ##############################################################
+# Source: device/intel/mixins/groups/acpio-partition/true/BoardConfig.mk
+##############################################################
+TARGET_USE_ACPIO := true
+BOARD_ACPIOIMAGE_PARTITION_SIZE := $$((2 * 1024 *1024))
+
+AB_OTA_PARTITIONS += acpio
+##############################################################
 # Source: device/intel/mixins/groups/config-partition/true/BoardConfig.mk
 ##############################################################
 BOARD_CONFIGIMAGE_PARTITION_SIZE := 8388608
@@ -628,6 +635,24 @@ TARGET_BUILD_INTEL_FACTORY_SCRIPTS := true
 # Source: device/intel/mixins/groups/filesystem_config/common/BoardConfig.mk
 ##############################################################
 TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/filesystem_config/config.fs
+##############################################################
+# Source: device/intel/mixins/groups/gptbuild/true/BoardConfig.mk
+##############################################################
+# can't use := here, as PRODUCT_OUT is not defined yet
+BOARD_BUILD_SUPER_IMAGE_BY_DEFAULT := true
+GPTIMAGE_BIN = $(PRODUCT_OUT)/$(TARGET_PRODUCT).img
+
+BOARD_FLASHFILES += $(GPTIMAGE_BIN):$(TARGET_PRODUCT).img
+
+ifeq ($(TARGET_USE_TRUSTY),true)
+TRUSTY_ENV_VAR += ENABLE_TRUSTY_SIMICS=true
+endif
+
+COMPRESS_GPTIMAGE ?= true
+
+ifeq ($(COMPRESS_GPTIMAGE), true)
+GPTIMAGE_GZ ?= $(GPTIMAGE_BIN).gz
+endif
 ##############################################################
 # Source: device/intel/mixins/groups/dbc/true/BoardConfig.mk
 ##############################################################
