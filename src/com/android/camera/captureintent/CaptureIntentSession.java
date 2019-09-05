@@ -33,6 +33,8 @@ import com.google.common.base.Optional;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import javax.annotation.Nonnull;
 
 /**
@@ -149,7 +151,15 @@ public class CaptureIntentSession implements CaptureSession {
     @Override
     public synchronized ListenableFuture<Optional<Uri>> saveAndFinish(byte[] data, int width,
             int height, int orientation, ExifInterface exif) {
-        mSessionNotifier.notifySessionPictureDataAvailable(data, orientation);
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        try {
+            exif.writeExif(data, byteArrayOutputStream);
+        } catch (IOException e) {
+            Log.e(TAG, "exception while trying to append exif to jpeg data");
+        }
+        byte[] dataWithExif = byteArrayOutputStream.toByteArray();
+        //No need to close byteArrayOutputStream since that has no effect.
+        mSessionNotifier.notifySessionPictureDataAvailable(dataWithExif, orientation);
         return Futures.immediateFuture(Optional.<Uri> absent());
     }
 
