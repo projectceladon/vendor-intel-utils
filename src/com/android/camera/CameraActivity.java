@@ -194,9 +194,6 @@ public class CameraActivity extends QuickActivity
     private static final long SCREEN_DELAY_MS = 2 * 60 * 1000; // 2 mins.
     /** Load metadata for 10 items ahead of our current. */
     private static final int FILMSTRIP_PRELOAD_AHEAD_ITEMS = 10;
-    private static final int PERMISSIONS_ACTIVITY_REQUEST_CODE = 1;
-    private static final int PERMISSIONS_RESULT_CODE_OK = 1;
-    private static final int PERMISSIONS_RESULT_CODE_FAILED = 2;
 
     /** Should be used wherever a context is needed. */
     private Context mAppContext;
@@ -850,6 +847,7 @@ public class CameraActivity extends QuickActivity
                 messageId > 0 ? getString(messageId) : "");
     }
 
+    // Candidate for deletion as Android Beam is deprecated in Android Q
     private void setupNfcBeamPush() {
         NfcAdapter adapter = NfcAdapter.getDefaultAdapter(mAppContext);
         if (adapter == null) {
@@ -1633,6 +1631,7 @@ public class CameraActivity extends QuickActivity
 
         preloadFilmstripItems();
 
+        // Candidate for deletion as Android Beam is deprecated in Android Q
         setupNfcBeamPush();
 
         mLocalImagesObserver = new FilmstripContentObserver();
@@ -1934,10 +1933,14 @@ public class CameraActivity extends QuickActivity
         } else {
             mHasCriticalPermissions = false;
         }
-
-        if ((checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
-                !mSettingsManager.getBoolean(SettingsManager.SCOPE_GLOBAL, Keys.KEY_HAS_SEEN_PERMISSIONS_DIALOGS)) ||
-                !mHasCriticalPermissions) {
+        if (!mHasCriticalPermissions || (mSettingsManager.getBoolean(
+                SettingsManager.SCOPE_GLOBAL, Keys.KEY_RECORD_LOCATION) &&
+                (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                   != PackageManager.PERMISSION_GRANTED) &&
+                !mSettingsManager.getBoolean(SettingsManager.SCOPE_GLOBAL,
+                    Keys.KEY_HAS_SEEN_PERMISSIONS_DIALOGS))) {
+            // TODO: Convert PermissionsActivity into a dialog so we
+            // don't lose the state of CameraActivity.
             Intent intent = new Intent(this, PermissionsActivity.class);
             startActivity(intent);
             finish();

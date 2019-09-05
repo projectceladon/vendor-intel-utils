@@ -16,9 +16,12 @@
 
 package com.android.camera.app;
 
+import android.Manifest;
 import android.app.Dialog;
+import android.app.Activity;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.pm.PackageManager;
 import android.view.ViewGroup;
 
 import com.android.camera.device.CameraId;
@@ -50,6 +53,9 @@ public class FirstRunDialog {
 
     /** The default preference of whether enabling location recording. */
     private static final boolean DEFAULT_LOCATION_RECORDING_ENABLED = true;
+
+    /** Request code to PackageManager */
+    private static final int PERMISSION_REQUEST_CODE = 1;
 
     /** Listener to receive events. */
     private final FirstRunDialogListener mListener;
@@ -203,6 +209,18 @@ public class FirstRunDialog {
         mAspectRatioPreferenceDialog.show();
     }
 
+    private void checkLocationPermission() {
+        if (mContext.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+            Activity activity = (Activity) mContext;
+            activity.requestPermissions(
+                new String[] {Manifest.permission.ACCESS_COARSE_LOCATION},
+                PERMISSION_REQUEST_CODE);
+            mSettingsManager.set(SettingsManager.SCOPE_GLOBAL,
+                Keys.KEY_HAS_SEEN_PERMISSIONS_DIALOGS, true);
+        }
+    }
+
     /**
      * Prompts a dialog to allow people to choose location preference when
      * people open the app for the first time. If the preference has been set,
@@ -220,6 +238,9 @@ public class FirstRunDialog {
                         SettingsManager.SCOPE_GLOBAL,
                         Keys.KEY_RECORD_LOCATION,
                         locationRecordingEnabled);
+                if (locationRecordingEnabled) {
+                    checkLocationPermission();
+                }
 
                 if (shouldShowAspectRatioDialog()) {
                     // Prompt the second dialog about aspect ratio preference.
