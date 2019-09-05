@@ -24,6 +24,9 @@ import com.android.camera2.R;
 
 /**
  * Activity that shows permissions request dialogs and handles lack of critical permissions.
+ * TODO: Convert PermissionsActivity into a dialog to be emitted from
+ * CameraActivity as not to have to restart CameraActivity from
+ * scratch.
  */
 public class PermissionsActivity extends QuickActivity {
     private static final Log.Tag TAG = new Log.Tag("PermissionsActivity");
@@ -132,8 +135,10 @@ public class PermissionsActivity extends QuickActivity {
             mFlagHasWriteStoragePermission = true;
         }
 
-        if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
-                != PackageManager.PERMISSION_GRANTED) {
+        if (mSettingsManager.getBoolean(SettingsManager.SCOPE_GLOBAL,
+            Keys.KEY_RECORD_LOCATION)
+                && (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                != PackageManager.PERMISSION_GRANTED)) {
             mNumPermissionsToRequest++;
             mShouldRequestLocationPermission = true;
         }
