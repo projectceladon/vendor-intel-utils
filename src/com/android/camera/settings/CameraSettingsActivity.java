@@ -16,10 +16,12 @@
 
 package com.android.camera.settings;
 
+import android.Manifest;
 import android.app.ActionBar;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.OnSharedPreferenceChangeListener;
 import android.os.Bundle;
@@ -69,6 +71,7 @@ public class CameraSettingsActivity extends FragmentActivity {
      */
     public static final String PREF_SCREEN_EXTRA = "pref_screen_extra";
     public static final String HIDE_ADVANCED_SCREEN = "hide_advanced";
+    private static final int PERMISSION_REQUEST_CODE = 1;
     private OneCameraManager mOneCameraManager;
 
     @Override
@@ -355,6 +358,15 @@ public class CameraSettingsActivity extends FragmentActivity {
         @Override
         public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
             setSummary(findPreference(key));
+            if (key.equals(Keys.KEY_RECORD_LOCATION)
+                    && sharedPreferences.getString(key, "0").equals("1")) {
+                Context context = this.getActivity().getApplicationContext();
+                if (context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                        != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[] {Manifest.permission.ACCESS_COARSE_LOCATION},
+                        PERMISSION_REQUEST_CODE);
+                }
+            }
         }
 
         /**
