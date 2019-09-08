@@ -1,0 +1,174 @@
+From 150febb8796dda88c4ad56a83af3d9a8c4cab8e2 Mon Sep 17 00:00:00 2001
+From: Ming Tan <ming.tan@intel.com>
+Date: Mon, 2 Sep 2019 22:49:46 +0800
+Subject: [PATCH 7/7] In installer.efi, set do not install to the device which
+ loaded from.
+
+In installer.efi, when call identify_boot_device(),
+set ignore the device which the installer.efi is loaded from.
+Add -i as first command line option to include the device.
+
+Change-Id: I0b32f613368ac83a8637fab9befe823a8e858625
+Tracked-On: OAM-85393
+Signed-off-by: Ming Tan <ming.tan@intel.com>
+---
+ include/libkernelflinger/storage.h |  2 ++
+ installer.c                        | 15 ++++++++++
+ libkernelflinger/storage.c         | 60 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 77 insertions(+)
+
+diff --git a/include/libkernelflinger/storage.h b/include/libkernelflinger/storage.h
+index fb5a0cf..30e206a 100755
+--- a/include/libkernelflinger/storage.h
++++ b/include/libkernelflinger/storage.h
+@@ -73,6 +73,7 @@ struct storage {
+ 
+ #define STORAGE(X) storage_##X
+ 
++BOOLEAN is_same_device(EFI_DEVICE_PATH *p, EFI_DEVICE_PATH *e);
+ EFI_STATUS identify_boot_device(enum storage_type type);
+ PCI_DEVICE_PATH *get_boot_device(void);
+ const char* get_boot_device_var(void);
+@@ -91,5 +92,6 @@ BOOLEAN is_live_boot(void);
+ BOOLEAN is_boot_device_virtual(void);
+ EFI_STATUS set_logical_unit(UINT64 user_lun, UINT64 factory_lun);
+ void print_progress(EFI_LBA done, EFI_LBA total, uint32_t sec, uint32_t *prev_sec, uint32_t *prev);
++void set_exclude_device(EFI_HANDLE device);
+ 
+ #endif	/* _STORAGE_H_ */
+diff --git a/installer.c b/installer.c
+index 1d97986..0166d4a 100644
+--- a/installer.c
++++ b/installer.c
+@@ -942,6 +942,7 @@ static void usage(__attribute__((__unused__)) INTN argc,
+ 	Print(L"Usage: installer [OPTIONS | COMMANDS]\n");
+ 	Print(L"  installer is an EFI application acting like the fastboot command.\n\n");
+ 	Print(L" COMMANDS               fastboot commands (cf. the fastboot manual page)\n");
++	Print(L" -i                     include the device which is loaded from, must be the first option\n");
+ 	Print(L" --help, -h             print this help and exit\n");
+ 	Print(L" --version, -v          print Installer version and exit\n");
+ 	Print(L" --batch, -b FILE       run all the fastboot commands of FILE\n");
+@@ -1041,6 +1042,7 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *_table)
+ 	void *efiimage;
+ 	UINTN imagesize;
+ 	enum boot_target target;
++	BOOLEAN include_self = FALSE;
+ 
+ 	InitializeLib(image, _table);
+ 	g_parent_image = image;
+@@ -1075,10 +1077,23 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *_table)
+ 	if (options)
+ 		skip_whitespace((char **)&options);
+ 
++	/* Check options before build and run commands */
++	if (options) {
++		if (!strncmp(options, "-i", 2)) {
++			include_self = TRUE;
++			options += 2;
++			skip_whitespace((char **)&options);
++		}
++	}
++
+ 	if (!options || *options == '\0')
+ 		options = build_default_options();
+ 	store_command((char *)options, NULL);
+ 
++	/* Set do not install to the device which is loaded from */
++	if (!include_self)
++		set_exclude_device(loaded_img->DeviceHandle);
++
+ 	/* Initialize slot management. */
+ 	ret = slot_init();
+ 	if (EFI_ERROR(ret)) {
+diff --git a/libkernelflinger/storage.c b/libkernelflinger/storage.c
+index a2bdbb8..e654fba 100644
+--- a/libkernelflinger/storage.c
++++ b/libkernelflinger/storage.c
+@@ -42,6 +42,7 @@ static struct storage *cur_storage;
+ static PCI_DEVICE_PATH boot_device = { .Function = -1, .Device = -1 };
+ static enum storage_type boot_device_type;
+ static BOOLEAN initialized = FALSE;
++static EFI_DEVICE_PATH *exclude_device = NULL;
+ 
+ // The EFI_HANDLE of boot device.
+ // It maybe a handle to a partition of the kernelflinger loaded.
+@@ -104,6 +105,44 @@ static EFI_STATUS identify_storage(EFI_DEVICE_PATH *device_path,
+ 	return EFI_UNSUPPORTED;
+ }
+ 
++BOOLEAN is_same_device(EFI_DEVICE_PATH *p, EFI_DEVICE_PATH *e)
++{
++	if (!p)
++		return FALSE;
++	if (!e)
++		return FALSE;
++
++	while (!IsDevicePathEndType(p)) {
++		if (DevicePathType(p) == MEDIA_DEVICE_PATH) {
++			p = NextDevicePathNode(p);
++			continue;
++		}
++		while (!IsDevicePathEndType(e)) {
++			if (DevicePathType(e) == MEDIA_DEVICE_PATH) {
++				e = NextDevicePathNode(e);
++				continue;
++			}
++			break;
++		}
++		if (IsDevicePathEndType(e))
++			return FALSE;
++
++		if (DevicePathNodeLength(p) != DevicePathNodeLength(e))
++			return FALSE;
++		if (memcmp(p, e, DevicePathNodeLength(p)))
++			return FALSE;
++		e = NextDevicePathNode(e);
++		p = NextDevicePathNode(p);
++	}
++	while (!IsDevicePathEndType(e)) {
++		if (DevicePathType(e) != MEDIA_DEVICE_PATH)
++			return FALSE;
++		e = NextDevicePathNode(e);
++	}
++
++	return TRUE;
++}
++
+ EFI_STATUS identify_boot_device(enum storage_type filter)
+ {
+ 	EFI_STATUS ret;
+@@ -137,6 +176,9 @@ EFI_STATUS identify_boot_device(enum storage_type filter)
+ 		if (!pci)
+ 			continue;
+ 
++		if (is_same_device(device_path, exclude_device))
++			continue;
++
+ 		if (new_boot_device.Function == pci->Function &&
+ 				new_boot_device.Device == pci->Device &&
+ 				new_boot_device.Header.Type == pci->Header.Type &&
+@@ -551,3 +593,21 @@ void print_progress(EFI_LBA done, EFI_LBA total, uint32_t sec, uint32_t *print_s
+ 		*prev = print_prev;
+ 	}
+ }
++
++void set_exclude_device(EFI_HANDLE device)
++{
++	CHAR16 *dps;
++
++	if (device == NULL) {
++		exclude_device = NULL;
++		return;
++	}
++
++	exclude_device = DevicePathFromHandle(device);
++	if (exclude_device == NULL)
++		return;
++
++	dps = DevicePathToStr(exclude_device);
++	warning(L"Exclude device from installation: %s", dps);
++	FreePool(dps);
++}
+-- 
+1.9.1
+
