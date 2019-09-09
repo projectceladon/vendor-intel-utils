@@ -20,7 +20,7 @@ echo "patch folder: $patch_folder"
 # Check if there is a list of files to parse and apply patches listed in them if any
 for file in `find $patch_folder -type f -o -type l 2>/dev/null` ; do
     if [[ "$TARGET_PRODUCT" == $(basename $file) ]]; then
-        echo "Applying patche(s) needed for $TARGET_PRODUCT"
+        echo "Applying patch(es) needed for $TARGET_PRODUCT"
         vendor/intel/utils_priv/autopatch.py -f $file --remote=origin
         local ret=$?
         if [ $ret -ne 0 ]; then
