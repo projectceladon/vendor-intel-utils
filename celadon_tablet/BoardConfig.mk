@@ -148,6 +148,7 @@ AB_OTA_PARTITIONS += vbmeta
 AB_OTA_PARTITIONS += tos
 
 
+
 ##############################################################
 # Source: device/intel/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################
