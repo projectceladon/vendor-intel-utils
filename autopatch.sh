@@ -93,7 +93,7 @@ function fpnat() # find patch files and apply them
     unset patch_list patch_top_dir
 }
 
-if [[ "${TARGET_PRODUCT}" != "multidroid_nuc" ]];then
+if [[ "${TARGET_PRODUCT}" != "cic" ]];then
     echo -e "\nApply utils/aosp_diff/preliminary patches:"
     fpnat "$patch_dir_aosp/preliminary"
 fi
@@ -103,7 +103,7 @@ if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_aosp}/${TAR
         fpnat "${patch_dir_aosp}/${TARGET_PRODUCT}"
 fi
 
-if [[ "${TARGET_PRODUCT}" != "multidroid_nuc" ]];then
+if [[ "${TARGET_PRODUCT}" != "cic" ]];then
     if [[ -e ${patch_dir_bsp}/common ]] && [[ -d ${patch_dir_bsp}/common ]];then
             echo -e "\nApply utils/bsp_diff/common Patches:"
             fpnat "${patch_dir_bsp}/common"
