@@ -294,7 +294,8 @@ BOARD_KERNEL_CMDLINE += \
 	noxsaves \
 	reboot_panic=p,w \
 	i915.hpd_sense_invert=0x7 \
-	intel_iommu=off
+	intel_iommu=off \
+	loop.max_part=7
 
 BOARD_FLASHFILES += ${TARGET_DEVICE_DIR}/bldr_utils.img:bldr_utils.img
 
