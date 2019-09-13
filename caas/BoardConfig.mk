@@ -140,10 +140,12 @@ BOARD_VBMETAIMAGE_PARTITION_SIZE := 2097152
 BOARD_FLASHFILES += $(PRODUCT_OUT)/vbmeta.img
 
 AB_OTA_PARTITIONS += vbmeta
+AB_OTA_PARTITIONS += tos
 
 
 KERNELFLINGER_SUPPORT_USB_STORAGE ?= true
 
+KERNELFLINGER_SUPPORT_LIVE_BOOT ?= true
 ##############################################################
 # Source: device/intel/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################
@@ -153,6 +155,8 @@ BOARD_WPA_SUPPLICANT_DRIVER := NL80211
 WPA_SUPPLICANT_VERSION := VER_2_1_DEVEL
 # required for wifi HAL support
 BOARD_WLAN_DEVICE := iwlwifi
+
+BOARD_WPA_SUPPLICANT_PRIVATE_LIB ?= lib_driver_cmd_intc
 
 # Enabling iwlwifi
 BOARD_USING_INTEL_IWL := true
@@ -312,6 +316,53 @@ BOARD_USES_GENERIC_AUDIO := false
 DEVICE_MANIFEST_FILE := ${TARGET_DEVICE_DIR}/manifest.xml
 DEVICE_MATRIX_FILE   := ${TARGET_DEVICE_DIR}/compatibility_matrix.xml
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/true/BoardConfig.mk
+##############################################################
+TARGET_USE_TRUSTY := true
+
+ifneq (, $(filter abl sbl, project-celadon))
+TARGET_USE_MULTIBOOT := true
+endif
+
+BOARD_USES_TRUSTY := true
+BOARD_USES_KEYMASTER1 := true
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty
+BOARD_SEPOLICY_M4DEFS += module_trusty=true
+
+LKBUILD_TOOLCHAIN_ROOT = $(PWD)/$(INTEL_PATH_VENDOR)/external/prebuilts/elf/
+LKBUILD_X86_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)i386-elf-4.9.1-Linux-x86_64/bin
+LKBUILD_X64_TOOLCHAIN = $(LKBUILD_TOOLCHAIN_ROOT)x86_64-elf-4.9.1-Linux-x86_64/bin
+TRUSTY_BUILDROOT = $(PWD)/$(PRODUCT_OUT)/obj/trusty/
+
+TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=celadon_64
+
+#for trusty lk
+TRUSTY_ENV_VAR += BUILDROOT=$(TRUSTY_BUILDROOT)
+TRUSTY_ENV_VAR += PATH=$$PATH:$(LKBUILD_X86_TOOLCHAIN):$(LKBUILD_X64_TOOLCHAIN)
+TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/$(LLVM_PREBUILTS_PATH)
+TRUSTY_ENV_VAR += ARCH_x86_64_TOOLCHAIN_PREFIX=${PWD}/prebuilts/gcc/linux-x86/x86/x86_64-linux-android-${TARGET_GCC_VERSION}/bin/x86_64-linux-android-
+
+#for trusty vmm
+# use same toolchain as android kernel
+TRUSTY_ENV_VAR += COMPILE_TOOLCHAIN=$(YOCTO_CROSSCOMPILE)
+TRUSTY_ENV_VAR += TARGET_BUILD_VARIANT=$(TARGET_BUILD_VARIANT)
+TRUSTY_ENV_VAR += BOOT_ARCH=project-celadon
+
+# output build dir to android out folder
+TRUSTY_ENV_VAR += BUILD_DIR=$(TRUSTY_BUILDROOT)
+TRUSTY_ENV_VAR += LKBIN_DIR=$(TRUSTY_BUILDROOT)/build-sand-x86-64/
+
+#Fix the cpu hotplug fail due to the trusty.
+#Trusty will introduce some delay for cpu_up().
+#Experiment show need wait at least 60us after
+#apic_icr_write(APIC_DM_STARTUP | (start_eip >> 12), phys_apicid);
+#So here override the cpu_init_udelay to have the cpu wait for 300us
+#to guarantee the cpu_up success.
+BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
+
+#TOS_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/tos.img
+#EVMM_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/multiboot.img
+##############################################################
 # Source: device/intel/mixins/groups/firststage-mount/true/BoardConfig.mk
 ##############################################################
 BOARD_FIRSTSTAGE_MOUNT_ENABLE := true
@@ -363,33 +414,6 @@ ALLOW_MISSING_DEPENDENCIES := true
 ##############################################################
 # enable dex-preoptimization.
 WITH_DEXPREOPT := true
-##############################################################
-# Source: device/intel/mixins/groups/pstore/ram_dummy/BoardConfig.mk.1
-##############################################################
-BOARD_KERNEL_CMDLINE += pstore.backend=ramoops
-##############################################################
-# Source: device/intel/mixins/groups/pstore/ram_dummy/BoardConfig.mk.2
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/pstore
-##############################################################
-# Source: device/intel/mixins/groups/pstore/ram_dummy/BoardConfig.mk
-##############################################################
-BOARD_KERNEL_CMDLINE += \
-	memmap=0x400000\$$0x50000000 \
-	ramoops.mem_address=0x50000000 \
-	ramoops.mem_size=0x400000
-BOARD_KERNEL_CMDLINE += \
-	ramoops.record_size=0x4000
-
-BOARD_KERNEL_CMDLINE += \
-	ramoops.console_size=0x200000
-
-BOARD_KERNEL_CMDLINE += \
-	ramoops.ftrace_size=0x2000
-
-BOARD_KERNEL_CMDLINE += \
-	ramoops.dump_oops=1
-
 ##############################################################
 # Source: device/intel/mixins/groups/media/auto/BoardConfig.mk
 ##############################################################
@@ -536,10 +560,6 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/abota/generic/vendor_prefix
 # Source: device/intel/mixins/groups/usb-init/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/usb-init
-##############################################################
-# Source: device/intel/mixins/groups/usb-otg-switch/true/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/usb-role-switch
 ##############################################################
 # Source: device/intel/mixins/groups/vndk/true/BoardConfig.mk
 ##############################################################

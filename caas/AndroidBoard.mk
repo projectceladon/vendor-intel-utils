@@ -502,6 +502,33 @@ KERNEL_DIFFCONFIG += $(KERNEL_caas_DIFFCONFIG)
 # Specify /dev/mmcblk0 size here
 BOARD_MMC_SIZE = 15335424K
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/true/AndroidBoard.mk
+##############################################################
+.PHONY: tosimage multiboot
+
+LK_ELF := $(TOP)/$(PRODUCT_OUT)/obj/trusty/build-sand-x86-64/lk.elf
+EVMM_PKG := $(TOP)/$(PRODUCT_OUT)/obj/trusty/evmm_pkg.bin
+EVMM_LK_PKG := $(TOP)/$(PRODUCT_OUT)/obj/trusty/evmm_lk_pkg.bin
+
+LOCAL_MAKE := make
+
+$(LK_ELF):
+	@echo "making lk.elf.."
+	$(hide) (cd $(TOPDIR)trusty && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE) sand-x86-64)
+
+$(EVMM_PKG):
+	@echo "making evmm.."
+	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
+
+$(EVMM_LK_PKG): $(LK_ELF)
+	@echo "making evmm(packing with lk.elf).."
+	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
+
+# include sub-makefile according to boot_arch
+include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_project-celadon.mk
+
+LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
+##############################################################
 # Source: device/intel/mixins/groups/firststage-mount/true/AndroidBoard.mk
 ##############################################################
 FIRST_STAGE_MOUNT_CFG_FILE := $(TARGET_DEVICE_DIR)/extra_files/firststage-mount/config.asl

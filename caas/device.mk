@@ -278,6 +278,42 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/true/product.mk
+##############################################################
+
+KM_VERSION := 2
+
+ifeq ($(KM_VERSION),2)
+PRODUCT_PACKAGES += \
+	keystore.trusty
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.hardware.keystore=trusty
+endif
+
+ifeq ($(KM_VERSION),1)
+PRODUCT_PACKAGES += \
+	keystore.${TARGET_BOARD_PLATFORM}
+endif
+
+PRODUCT_PACKAGES += \
+	libtrusty \
+	storageproxyd \
+	cp_ss \
+	libinteltrustystorage \
+	libinteltrustystorageinterface \
+	gatekeeper.trusty \
+	android.hardware.gatekeeper@1.0-impl \
+	android.hardware.gatekeeper@1.0-service \
+
+PRODUCT_PACKAGES_DEBUG += \
+	intel-secure-storage-unit-test \
+	gatekeeper-unit-tests \
+	libscrypt_static \
+	scrypt_test \
+
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.hardware.gatekeeper=trusty \
+##############################################################
 # Source: device/intel/mixins/groups/vendor-partition/true/product.mk
 ##############################################################
 
@@ -299,11 +335,6 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.sf.lcd_density=160
 ##############################################################
 include frameworks/native/build/tablet-10in-xhdpi-2048-dalvik-heap.mk
 
-##############################################################
-# Source: device/intel/mixins/groups/pstore/ram_dummy/product.mk
-##############################################################
-PRODUCT_PACKAGES += \
-    pstore-clean
 ##############################################################
 # Source: device/intel/mixins/groups/media/auto/product.mk
 ##############################################################
@@ -599,11 +630,6 @@ ABOTA_BOOTARCH=project-celadon
 
 
 ##############################################################
-# Source: device/intel/mixins/groups/usb-otg-switch/true/product.mk
-##############################################################
-
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/usb-otg-switch/usb_otg_switch.sh:vendor/bin/usb_otg_switch.sh
-##############################################################
 # Source: device/intel/mixins/groups/public-libraries/true/product.mk
 ##############################################################
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/public-libraries/public.libraries.txt:$(TARGET_COPY_OUT_VENDOR)/etc/public.libraries.txt
@@ -676,6 +702,8 @@ PRODUCT_PACKAGES += \
 # Source: device/intel/mixins/groups/firmware/true/product.mk
 ##############################################################
 FIRMWARES_DIR ?= vendor/linux/firmware
+INCLUDE_ALL_FIRMWARE := true
+
 $(call inherit-product,device/intel/common/firmware.mk)
 ##############################################################
 # Source: device/intel/mixins/groups/aaf/true/product.mk
