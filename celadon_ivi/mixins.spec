@@ -82,3 +82,4 @@ dbc: true
 atrace: true
 firmware: true
 evs: true
+default-drm: true
