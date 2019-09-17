@@ -146,6 +146,7 @@ AB_OTA_PARTITIONS += tos
 KERNELFLINGER_SUPPORT_USB_STORAGE ?= true
 
 KERNELFLINGER_SUPPORT_LIVE_BOOT ?= true
+
 ##############################################################
 # Source: device/intel/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################

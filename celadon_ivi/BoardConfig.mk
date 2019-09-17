@@ -146,6 +146,8 @@ AB_OTA_PARTITIONS += tos
 
 
 
+
+ENABLE_GRUB_INSTALLER ?= true
 ##############################################################
 # Source: device/intel/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################
