@@ -496,6 +496,8 @@ PRODUCT_PACKAGES += android.hardware.camera.provider@2.4-external-service \
 
 # Only include test apps in eng or userdebug builds.
 PRODUCT_PACKAGES_DEBUG += TestingCamera
+
+PRODUCT_PACKAGES += MultiCameraApp
 ##############################################################
 # Source: device/intel/mixins/groups/rfkill/true/product.mk
 ##############################################################
