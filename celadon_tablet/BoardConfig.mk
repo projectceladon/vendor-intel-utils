@@ -148,7 +148,9 @@ AB_OTA_PARTITIONS += vbmeta
 AB_OTA_PARTITIONS += tos
 
 
+KERNELFLINGER_SUPPORT_USB_STORAGE ?= true
 
+KERNELFLINGER_SUPPORT_LIVE_BOOT ?= true
 
 ENABLE_GRUB_INSTALLER ?= true
 ##############################################################
