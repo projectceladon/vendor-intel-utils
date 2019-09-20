@@ -167,7 +167,7 @@ public class MainActivity extends AppCompatActivity {
                 Open_BotmLeftCam();
                 Open_BotmRightCam();
             } else {
-                Log.d(TAG,"No CAMERA CONNECTED");
+                Log.d(TAG, "No CAMERA CONNECTED");
                 frameView0.setVisibility(FrameLayout.INVISIBLE);
                 frameView1.setVisibility(FrameLayout.INVISIBLE);
                 frameView2.setVisibility(FrameLayout.INVISIBLE);
@@ -198,7 +198,7 @@ public class MainActivity extends AppCompatActivity {
         if (mTopLeftCam == null) {
             Open_TopLeftCam();
             frameView0.setVisibility(FrameLayout.VISIBLE);
-        } else if(mTopLeftCam_textureView == null) {
+        } else if (mTopLeftCam_textureView == null) {
             mTopLeftCam_textureView = findViewById(R.id.textureview0);
             assert mTopLeftCam_textureView != null;
         }
@@ -220,7 +220,7 @@ public class MainActivity extends AppCompatActivity {
         try {
             numOfCameras = manager.getCameraIdList().length;
             Log.d(TAG, "Total Cameras: " + manager.getCameraIdList().length);
-	} catch (CameraAccessException e) {
+        } catch (CameraAccessException e) {
             e.printStackTrace();
         }
 
@@ -239,7 +239,7 @@ public class MainActivity extends AppCompatActivity {
                 mTopRightCam_textureView.setSurfaceTextureListener(mTopRightCam.textureListener);
             }
         } else {
-            Log.d(TAG,"onResume No CAMERA CONNECTED");
+            Log.d(TAG, "onResume No CAMERA CONNECTED");
             frameView0.setVisibility(FrameLayout.INVISIBLE);
             frameView1.setVisibility(FrameLayout.INVISIBLE);
             frameView2.setVisibility(FrameLayout.INVISIBLE);

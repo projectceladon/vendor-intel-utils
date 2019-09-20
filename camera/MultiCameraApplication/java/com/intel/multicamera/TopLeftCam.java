@@ -136,7 +136,7 @@ public class TopLeftCam {
 
     private void TakePictureOnClicked(Button PictureButton) {
         takePictureButton = PictureButton;
-        assert takePictureButton != null;
+        if (takePictureButton == null) return;
 
         takePictureButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -224,7 +224,7 @@ public class TopLeftCam {
             CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
             StreamConfigurationMap map =
                 characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            assert map != null;
+            if (map == null) return;
 
             // Add permission for camera and let user grant the permission
             if (ActivityCompat.checkSelfPermission(mActivity, Manifest.permission.CAMERA) !=
@@ -241,23 +241,6 @@ public class TopLeftCam {
                     REQUEST_CAMERA_PERMISSION);
                 return;
             }
-
-            imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
-                settings.getString("capture_list", "640x480"));
-
-            String videoQuality = settings.getString("video_list", "medium");
-
-            int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
-            Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
-
-            mProfile = CamcorderProfile.get(0, quality);
-
-            Log.d(TAG, "camera1 final Video width:" + mProfile.videoFrameWidth + " "
-                           + "final Video height: " + mProfile.videoFrameHeight);
-
-            Log.d(TAG, "camera1 final preview width:" + imageDimension.getWidth() + " "
-                           + "final preview height: " + imageDimension.getHeight());
-
             mMediaRecorder = new MediaRecorder();
 
             startBackgroundThread();
@@ -280,7 +263,9 @@ public class TopLeftCam {
         }
         @Override
         public void onDisconnected(CameraDevice camera) {
-            cameraDevice.close();
+            Log.e(TAG, "onDisconnected");
+
+            closeCamera();
         }
         @Override
         public void onError(CameraDevice camera, int error) {
@@ -293,8 +278,26 @@ public class TopLeftCam {
         try {
             closePreviewSession();
             SurfaceTexture texture = textureView.getSurfaceTexture();
-            assert texture != null;
-            texture.setDefaultBufferSize(imageDimension.getWidth(), imageDimension.getHeight());
+            if (texture == null) return;
+            int quality = -1;
+
+            String Key = SettingsActivity.SettingsFragment.getchangedPrefKey();
+            String videoQuality = settings.getString("video_list", "medium");
+
+            imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
+                    settings.getString("capture_list", "640x480"));
+
+            quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
+            Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
+
+            mProfile = CamcorderProfile.get(0, quality);
+
+            if (Key.compareTo("video_list") == 0) {
+                texture.setDefaultBufferSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
+            } else {
+                texture.setDefaultBufferSize(imageDimension.getWidth(), imageDimension.getHeight());
+            }
+
             Surface surface = new Surface(texture);
             captureRequestBuilder =
                 cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
@@ -323,6 +326,7 @@ public class TopLeftCam {
     }
 
     public void closeCamera() {
+        closePreviewSession();
         if (null != cameraDevice) {
             cameraDevice.close();
             cameraDevice = null;
@@ -332,10 +336,10 @@ public class TopLeftCam {
             imageReader = null;
         }
         if (null != mMediaRecorder) {
+            mMediaRecorder.reset();
             mMediaRecorder.release();
             mMediaRecorder = null;
         }
-        closePreviewSession();
         stopBackgroundThread();
     }
 
@@ -390,7 +394,7 @@ public class TopLeftCam {
                 settings.getString("capture_list", "640x480"));
 
             ImageReader reader = ImageReader.newInstance(
-                imageDimension.getWidth(), imageDimension.getHeight(), ImageFormat.JPEG, 1);
+                    imageDimension.getWidth(), imageDimension.getHeight(), ImageFormat.JPEG, 1);
             List<Surface> outputSurfaces = new ArrayList<Surface>(2);
             outputSurfaces.add(reader.getSurface());
             outputSurfaces.add(new Surface(textureView.getSurfaceTexture()));
@@ -505,7 +509,7 @@ public class TopLeftCam {
             closePreviewSession();
             setUpMediaRecorder();
             SurfaceTexture texture = textureView.getSurfaceTexture();
-            assert texture != null;
+            if (texture == null) return;
             texture.setDefaultBufferSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
 
             captureRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
@@ -557,11 +561,10 @@ public class TopLeftCam {
         if (null == mActivity) {
             return;
         }
+
+        mMediaRecorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
         mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
-        mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-        mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
-        mMediaRecorder.setVideoSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
-        mMediaRecorder.setVideoFrameRate(30);
+        mMediaRecorder.setProfile(mProfile);
 
         String fileDetails[] = Utils.generateFileDetails(Utils.MEDIA_TYPE_VIDEO);
         if (fileDetails == null || fileDetails.length < 5) {
@@ -577,10 +580,14 @@ public class TopLeftCam {
          * set output file in media recorder
          */
         mMediaRecorder.setOutputFile(mVideoFilename);
-        mMediaRecorder.setVideoFrameRate(mProfile.videoFrameRate);
-        mMediaRecorder.setVideoEncodingBitRate(10000000);
 
-        mMediaRecorder.prepare();
+        try {
+            mMediaRecorder.prepare();
+        } catch (IOException ex) {
+            Log.e(TAG, "prepare failed for " + mVideoFilename, ex);
+            mMediaRecorder.reset();
+            throw new RuntimeException(ex);
+        }
     }
 
     private void closePreviewSession() {

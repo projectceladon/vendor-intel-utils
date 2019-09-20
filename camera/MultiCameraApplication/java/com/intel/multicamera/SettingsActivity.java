@@ -99,12 +99,15 @@ public class SettingsActivity extends AppCompatActivity {
         public static final String SIZE_MEDIUM = "medium";
         public static final String SIZE_SMALL = "small";
 
+        public static String DEFAULT_KEY = "capture_list";
+
         public String[] mCamcorderProfileNames;
         private static final String SIZE_SETTING_STRING_DIMENSION_DELIMITER = "x";
 
         public static SparseArray<SelectedVideoQualities> sCachedSelectedVideoQualities =
             new SparseArray<SelectedVideoQualities>(3);
-
+        private static String mPrefChangedKey = null;
+        static boolean isPrefChangedKeyChnaged = false;
         /** The selected {@link CamcorderProfile} qualities. */
         public static class SelectedVideoQualities {
             public int large = -1;
@@ -146,6 +149,8 @@ public class SettingsActivity extends AppCompatActivity {
         public void onCreatePreferences(Bundle savedInstanceState, String rootKey) {
             setPreferencesFromResource(R.xml.root_preferences, rootKey);
             mCamcorderProfileNames = getResources().getStringArray(R.array.camcorder_profile_names);
+
+            isPrefChangedKeyChnaged = false;
         }
 
         @Override
@@ -187,6 +192,17 @@ public class SettingsActivity extends AppCompatActivity {
         @Override
         public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String Key) {
             setSummary(findPreference(Key));
+            mPrefChangedKey = Key;
+            isPrefChangedKeyChnaged = true;
+        }
+
+        public static String getchangedPrefKey() {
+            if (isPrefChangedKeyChnaged == true) {
+                isPrefChangedKeyChnaged = false;
+                return mPrefChangedKey;
+            } else {
+                return DEFAULT_KEY;
+            }
         }
 
         /**

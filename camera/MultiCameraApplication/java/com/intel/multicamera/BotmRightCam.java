@@ -117,7 +117,7 @@ public class BotmRightCam {
 
     private void TakePicureOnClicked(Button PictureButton) {
         takePictureButton = PictureButton;
-        assert takePictureButton != null;
+        if (takePictureButton == null) return;
 
         takePictureButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -174,7 +174,7 @@ public class BotmRightCam {
             CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
             StreamConfigurationMap map =
                 characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            assert map != null;
+            if (map == null) return;
 
             // Add permission for camera and let user grant the permission
             if (ActivityCompat.checkSelfPermission(mActivity, Manifest.permission.CAMERA) !=
@@ -191,23 +191,6 @@ public class BotmRightCam {
                     REQUEST_CAMERA_PERMISSION);
                 return;
             }
-
-            imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
-                settings.getString("capture_list", "640x480"));
-
-            String videoQuality = settings.getString("video_list", "medium");
-
-            int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
-            Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
-
-            mProfile = CamcorderProfile.get(0, quality);
-
-            Log.d(TAG, "camera1 final Video width:" + mProfile.videoFrameWidth + " "
-                           + "final Video height: " + mProfile.videoFrameHeight);
-
-            Log.d(TAG, "camera1 final preview width:" + imageDimension.getWidth() + " "
-                           + "final preview height: " + imageDimension.getHeight());
-
             mMediaRecorder = new MediaRecorder();
 
             startBackgroundThread();
@@ -230,7 +213,8 @@ public class BotmRightCam {
         }
         @Override
         public void onDisconnected(CameraDevice camera) {
-            cameraDevice.close();
+            Log.e(TAG, "onDisconnected");
+            closeCamera();
         }
         @Override
         public void onError(CameraDevice camera, int error) {
@@ -243,8 +227,24 @@ public class BotmRightCam {
         try {
             closePreviewSession();
             SurfaceTexture texture = textureView.getSurfaceTexture();
-            assert texture != null;
-            texture.setDefaultBufferSize(imageDimension.getWidth(), imageDimension.getHeight());
+            if (texture == null) return;
+
+            String Key = SettingsActivity.SettingsFragment.getchangedPrefKey();
+            imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
+                    settings.getString("capture_list", "640x480"));
+
+            String videoQuality = settings.getString("video_list", "medium");
+            int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
+            Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
+
+            mProfile = CamcorderProfile.get(0, quality);
+
+            if (Key.compareTo("video_list") == 0) {
+                texture.setDefaultBufferSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
+            } else {
+                texture.setDefaultBufferSize(imageDimension.getWidth(), imageDimension.getHeight());
+            }
+
             Surface surface = new Surface(texture);
             captureRequestBuilder =
                 cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
@@ -273,6 +273,7 @@ public class BotmRightCam {
     }
 
     public void closeCamera() {
+        closePreviewSession();
         if (null != cameraDevice) {
             cameraDevice.close();
             cameraDevice = null;
@@ -282,10 +283,10 @@ public class BotmRightCam {
             imageReader = null;
         }
         if (null != mMediaRecorder) {
+            mMediaRecorder.reset();
             mMediaRecorder.release();
             mMediaRecorder = null;
         }
-        closePreviewSession();
         stopBackgroundThread();
     }
 
@@ -302,13 +303,15 @@ public class BotmRightCam {
      * Stops the background thread and its {@link Handler}.
      */
     private void stopBackgroundThread() {
-        mBackgroundThread.quitSafely();
-        try {
-            mBackgroundThread.join();
-            mBackgroundThread = null;
-            mBackgroundHandler = null;
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+        if (mBackgroundThread != null) {
+            mBackgroundThread.quitSafely();
+            try {
+                mBackgroundThread.join();
+                mBackgroundThread = null;
+                mBackgroundHandler = null;
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
         }
     }
 
@@ -453,7 +456,7 @@ public class BotmRightCam {
             closePreviewSession();
             setUpMediaRecorder();
             SurfaceTexture texture = textureView.getSurfaceTexture();
-            assert texture != null;
+            if (texture == null) return;
             texture.setDefaultBufferSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
 
             captureRequestBuilder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
@@ -505,11 +508,9 @@ public class BotmRightCam {
         if (null == mActivity) {
             return;
         }
+        mMediaRecorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
         mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
-        mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-        mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
-        mMediaRecorder.setVideoSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
-        mMediaRecorder.setVideoFrameRate(30);
+        mMediaRecorder.setProfile(mProfile);
 
         String fileDetails[] = Utils.generateFileDetails(Utils.MEDIA_TYPE_VIDEO);
         if (fileDetails == null || fileDetails.length < 5) {
@@ -525,10 +526,14 @@ public class BotmRightCam {
          * set output file in media recorder
          */
         mMediaRecorder.setOutputFile(mVideoFilename);
-        mMediaRecorder.setVideoFrameRate(mProfile.videoFrameRate);
-        mMediaRecorder.setVideoEncodingBitRate(10000000);
 
-        mMediaRecorder.prepare();
+        try {
+            mMediaRecorder.prepare();
+        } catch (IOException ex) {
+            Log.e(TAG, "prepare failed for " + mVideoFilename, ex);
+            mMediaRecorder.reset();
+            throw new RuntimeException(ex);
+        }
     }
 
     private void closePreviewSession() {
