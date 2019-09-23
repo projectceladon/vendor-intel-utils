@@ -668,4 +668,8 @@ endif
 # Source: device/intel/mixins/groups/dbc/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/dbc
+##############################################################
+# Source: device/intel/mixins/groups/default-drm/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/drm-default
 # ------------------ END MIX-IN DEFINITIONS ------------------
