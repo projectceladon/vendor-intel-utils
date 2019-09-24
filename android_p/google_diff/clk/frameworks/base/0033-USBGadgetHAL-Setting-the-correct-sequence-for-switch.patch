@@ -1,0 +1,93 @@
+From 07115bf5b60189d077c8f776fc1d4bbee1f9176b Mon Sep 17 00:00:00 2001
+From: revatipx <revatix.prasad@intel.com>
+Date: Tue, 24 Sep 2019 12:32:09 +0530
+Subject: [PATCH] USBGadgetHAL: Setting the correct sequence for switching data
+ transfer mode
+
+There is race condition between USB Gadget HAL and adbd without setting
+Usb Gadget HAL to FUNCTION_NONE mode in case of fast switching data
+transfer mode.
+HAL must complete all it's processes before adbd restarting. Now processes
+are started simultaneously, but the setting of Usb functions should occur
+after the readiness of the adbd.
+From:https://android-review.googlesource.com/c/platform/frameworks/base/+/1094109/4/
+
+Tracked-On: OAM-85336
+Signed-off-by: a.lukianenko <a.lukianenko@globallogic.com>
+Signed-off-by: revatipx <revatix.prasad@intel.com>
+---
+ .../com/android/server/usb/UsbDeviceManager.java   | 23 ++++++++++++++++++++--
+ 1 file changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/services/usb/java/com/android/server/usb/UsbDeviceManager.java b/services/usb/java/com/android/server/usb/UsbDeviceManager.java
+index 368dd4c..22d92e8 100644
+--- a/services/usb/java/com/android/server/usb/UsbDeviceManager.java
++++ b/services/usb/java/com/android/server/usb/UsbDeviceManager.java
+@@ -51,6 +51,7 @@ import android.hardware.usb.gadget.V1_0.Status;
+ import android.hidl.manager.V1_0.IServiceManager;
+ import android.hidl.manager.V1_0.IServiceNotification;
+ import android.os.BatteryManager;
++import android.os.ConditionVariable;
+ import android.os.Environment;
+ import android.os.FileUtils;
+ import android.os.Handler;
+@@ -1713,6 +1714,8 @@ public class UsbDeviceManager implements ActivityManagerInternal.ScreenObserver
+ 
+         private final Object mGadgetProxyLock = new Object();
+ 
++        private final ConditionVariable isCbReceived = new ConditionVariable();
++
+         /**
+          * Cookie sent for usb gadget hal death notification.
+          */
+@@ -1906,6 +1909,7 @@ public class UsbDeviceManager implements ActivityManagerInternal.ScreenObserver
+                  */
+                 if ((mCurrentRequest != mRequest) || !hasMessages(MSG_SET_FUNCTIONS_TIMEOUT)
+                         || (mFunctions != functions)) {
++                    isCbReceived.open();
+                     return;
+                 }
+ 
+@@ -1917,6 +1921,7 @@ public class UsbDeviceManager implements ActivityManagerInternal.ScreenObserver
+                     Slog.e(TAG, "Setting default fuctions");
+                     sendEmptyMessage(MSG_SET_CHARGING_FUNCTIONS);
+                 }
++                isCbReceived.open();
+             }
+ 
+             @Override
+@@ -1942,6 +1947,22 @@ public class UsbDeviceManager implements ActivityManagerInternal.ScreenObserver
+                     return;
+                 }
+                 try {
++                    /**
++                     * Usb Gadget HAL must be set to FUNCTION_NONE configuration before setting new
++                     * one. This is necessary because existing HAL must finish it's work before adbd
++                     * restarting.
++                     * This sequence of actions is used in the absence of Usb Gadget HAL.
++                     * It prevents the race condition between Usb Gadget HAL and adbd.
++                     */
++                    UsbGadgetCallback usbGadgetCallback = new UsbGadgetCallback(mCurrentRequest,
++                            config, chargingFunctions);
++                    isCbReceived.close();
++                    mGadgetProxy.setCurrentUsbFunctions(UsbManager.FUNCTION_NONE, usbGadgetCallback,
++                            SET_FUNCTIONS_TIMEOUT_MS - SET_FUNCTIONS_LEEWAY_MS);
++                    if (!(isCbReceived.block(SET_FUNCTIONS_TIMEOUT_MS - SET_FUNCTIONS_LEEWAY_MS))) {
++                        Slog.e(TAG, "Callback was received with unsuccessful status");
++                    }
++
+                     if ((config & UsbManager.FUNCTION_ADB) != 0) {
+                         /**
+                          * Start adbd if ADB function is included in the configuration.
+@@ -1953,8 +1974,6 @@ public class UsbDeviceManager implements ActivityManagerInternal.ScreenObserver
+                          */
+                         setSystemProperty(CTL_STOP, ADBD);
+                     }
+-                    UsbGadgetCallback usbGadgetCallback = new UsbGadgetCallback(mCurrentRequest,
+-                            config, chargingFunctions);
+                     mGadgetProxy.setCurrentUsbFunctions(config, usbGadgetCallback,
+                             SET_FUNCTIONS_TIMEOUT_MS - SET_FUNCTIONS_LEEWAY_MS);
+                     sendMessageDelayed(MSG_SET_FUNCTIONS_TIMEOUT, chargingFunctions,
+-- 
+1.9.1
+
