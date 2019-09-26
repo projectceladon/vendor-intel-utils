@@ -31,7 +31,36 @@ function launch_hwrender(){
 	  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
 	  -device isa-serial,chardev=charserial0,id=serial0 \
 	  -device intel-hda -device hda-duplex \
-	  -drive file=./android.qcow2,if=virtio \
+	  -drive file=./android.qcow2,if=none,id=disk1 \
+	  -device virtio-blk-pci,drive=disk1,bootindex=1 \
+	  -device e1000,netdev=net0 \
+	  -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
+	  -nodefaults
+}
+
+function launch_swrender(){
+	qemu-system-x86_64 \
+	  -m 2048 -smp 2 -M q35 \
+	  -name caas-vm \
+	  -enable-kvm \
+	  -k en-us \
+	  -vga none \
+	  -display gtk,gl=on \
+	  -device qxl-vga,xres=1280,yres=720 \
+	  -machine kernel_irqchip=off \
+	  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
+	  -cpu host \
+	  -device qemu-xhci,id=xhci,addr=0x8 \
+	  -device usb-mouse \
+	  -device usb-kbd \
+	  -bios ./OVMF.fd \
+	  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
+	  -device isa-serial,chardev=charserial0,id=serial0 \
+	  -device intel-hda -device hda-duplex \
+	  -drive file=./android.qcow2,if=none,id=disk1 \
+	  -device virtio-blk-pci,drive=disk1,bootindex=1 \
+	  -device e1000,netdev=net0 \
+	  -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
 	  -nodefaults
 }
 
@@ -47,12 +76,12 @@ if [[ "$vno" > "5.0.0" ]]; then
 	if [[ $? == 0 ]]; then
 		launch_hwrender
 	else
-		echo "E: Failed to create vgpu"
-		exit  -1
+		echo "W: Failed to create vgpu, fall to software rendering"
+		launch_swrender
 	fi
 else
-	echo "E: Detected linux version $vno"
-	echo "E: Please upgrade kernel version newer than 5.0.0!"
-	exit  -1
+	echo "W: Detected linux version $vno, fall to software rendering"
+	echo "W: Please upgrade kernel version newer than 5.0.0 for smoother experience!"
+	launch_swrender
 fi
 
