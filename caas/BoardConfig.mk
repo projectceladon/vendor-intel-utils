@@ -378,6 +378,13 @@ BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
 VENDOR_PARTITION_SIZE := $(shell echo 600*1048576 | bc)
 AB_OTA_PARTITIONS += vendor
 ##############################################################
+# Source: device/intel/mixins/groups/acpio-partition/true/BoardConfig.mk
+##############################################################
+TARGET_USE_ACPIO := true
+BOARD_ACPIOIMAGE_PARTITION_SIZE := $$((2 * 1024 *1024))
+
+AB_OTA_PARTITIONS += acpio
+##############################################################
 # Source: device/intel/mixins/groups/config-partition/true/BoardConfig.mk
 ##############################################################
 BOARD_CONFIGIMAGE_PARTITION_SIZE := 8388608
