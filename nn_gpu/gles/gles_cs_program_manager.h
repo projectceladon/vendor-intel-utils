@@ -1,5 +1,5 @@
-#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CS_PROGRAM_MANAGER_H
-#define ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CS_PROGRAM_MANAGER_H
+#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CS_PROGRAM_MANAGER_H
+#define ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CS_PROGRAM_MANAGER_H
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -9,11 +9,7 @@
 #include "base_executor.h"
 #include "gles_cs_program_key.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 class GlesCsProgramManager
 {
@@ -99,15 +95,11 @@ private:
 #define SETUP_OP(op) \
     void getShaderSource##op(const void* progKey, std::string& src); \
     void getProgName##op(const void* progKey, std::string& name); 
-#include "setup_op.hxx"
+#include "gles_setup_op.hxx"
 #undef SETUP_OP
 
 };
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
 
 #endif

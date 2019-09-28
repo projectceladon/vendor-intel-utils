@@ -1,5 +1,5 @@
-#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_OPERAND_H
-#define ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_OPERAND_H
+#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_OPERAND_H
+#define ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_OPERAND_H
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -8,11 +8,7 @@
 
 #include "base_executor.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 class GlesMemoryManager;
 class GlesPoolInfo;
@@ -50,7 +46,7 @@ public:
     {
         if (idx >= dimensions.size())
         {
-            ALOGW("Invalid dimension idx: %d\n", idx);
+            LOGW("Invalid dimension idx: %d\n", idx);
             return 0;
         }
         return dimensions[idx];
@@ -65,6 +61,9 @@ public:
     {
         return type;
     }
+
+    void dump();
+    void dumpToFile(const char* fileName = "img_data", const int channels = 0);
 
 private:
     size_t getBasicTypeSize();
@@ -87,10 +86,6 @@ private:
     uint32_t operandIndex;
 };
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
 
 #endif

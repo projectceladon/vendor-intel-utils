@@ -1,10 +1,6 @@
 #include "gles_cs_program_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 void GlesCsProgramManager::getProgName(const void* progKey, std::string& name)
 {
@@ -16,7 +12,7 @@ void GlesCsProgramManager::getProgName(const void* progKey, std::string& name)
     case OperationType::op:                     \
         getProgName##op(progKey, name);      \
         break;
-#include "setup_op.hxx"
+#include "gles_setup_op.hxx"
 #undef SETUP_OP
 
         default:
@@ -35,7 +31,7 @@ void GlesCsProgramManager::getShaderSource(const void* progKey, std::string& src
     case OperationType::op:                     \
         getShaderSource##op(progKey, src);      \
         break;
-#include "setup_op.hxx"
+#include "gles_setup_op.hxx"
 #undef SETUP_OP
 
         default:
@@ -64,15 +60,15 @@ GLuint GlesCsProgramManager::createProgram(const char* pSource)
     glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
     if (!compiled)
     {
-        ALOGE("shader is not compiled successfully with following log:");
+        LOGE("shader is not compiled successfully with following log:");
         GLint infoLen = 0;
         glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLen);
         char* buf = (char*) malloc(infoLen);
         glGetShaderInfoLog(shader, infoLen, nullptr, buf);
-        ALOGE("%s\nEND OF LOG", buf);
+        LOGE("%s\nEND OF LOG", buf);
         free(buf);
         glDeleteShader(shader);
-        ALOGV("shader source code:\n%s\nEND OF SOURCE CODE", pSource);
+        LOGI("shader source code:\n%s\nEND OF SOURCE CODE", pSource);
         return 0;
     }
 
@@ -85,15 +81,15 @@ GLuint GlesCsProgramManager::createProgram(const char* pSource)
     glGetProgramiv(program, GL_LINK_STATUS, &linkStatus);
     if (linkStatus != GL_TRUE)
     {
-        ALOGE("program is not linked successfully with following log:");
+        LOGE("program is not linked successfully with following log:");
         GLint bufLength = 0;
         glGetProgramiv(program, GL_INFO_LOG_LENGTH, &bufLength);
         char* buf = (char*) malloc(bufLength);
         glGetProgramInfoLog(program, bufLength, nullptr, buf);
-        ALOGE("%s\nEND OF LOG", buf);
+        LOGE("%s\nEND OF LOG", buf);
         free(buf);
         glDeleteProgram(program);
-        ALOGV("shader source code:\n%s\nEND OF SOURCE CODE", pSource);
+        LOGI("shader source code:\n%s\nEND OF SOURCE CODE", pSource);
         return 0;
     }
 
@@ -128,8 +124,4 @@ void GlesCsProgramManager::deleteProgram(std::string& progName)
     }
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

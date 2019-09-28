@@ -1,14 +1,10 @@
-#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_0_OPERATION_CPU_TIMER_H
-#define ANDROID_HARDWARE_NEURALNETWORKS_V1_0_OPERATION_CPU_TIMER_H
+#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_2_OPERATION_CPU_TIMER_H
+#define ANDROID_HARDWARE_NEURALNETWORKS_V1_2_OPERATION_CPU_TIMER_H
 
 #include <vector>
 #include <string>
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 class OperationCpuTimer
 {
@@ -51,7 +47,7 @@ public:
     }
     long show(long acc, float sum)
     {
-        ALOGI("op %02d (%s): \t%s per run (%.2f%%, %.2f%%)",
+        NN_GPU_PERF("op %02d (%s): \t%s per run (%.2f%%, %.2f%%)",
                opIndex, opName.c_str(),
                getTimeString(avg).c_str(),
                avg*100/sum,(avg+acc)*100/sum);
@@ -82,10 +78,6 @@ private:
     std::string opName;
 };
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
 
 #endif

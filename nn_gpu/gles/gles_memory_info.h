@@ -17,8 +17,8 @@
  * Author: Guo Yejun <yejun.guo@intel.com>
  */
 
-#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_MEMORY_INFO_H
-#define ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_MEMORY_INFO_H
+#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_MEMORY_INFO_H
+#define ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_MEMORY_INFO_H
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -27,11 +27,7 @@
 
 #include "base_executor.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 class GlesMemoryInfo
 {
@@ -45,6 +41,8 @@ public:
     void clean();
     void setNeedSync() { needSync = true; }
     void setNotInUsing();
+    void dump();
+    void dumpToFile(const char* fileName = "img_data", const int channels = 0);
     void incRef() { refCount++; }
     void resetRef() { refCount = 0;}
     void shareFrom(GlesMemoryInfo* from) { ssbo = from->ssbo; from->incRef();}
@@ -59,10 +57,6 @@ private:
     friend class GlesMemoryManager;
 };
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
 
 #endif

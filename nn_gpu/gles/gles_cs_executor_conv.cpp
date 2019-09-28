@@ -2,11 +2,7 @@
 #include <cutils/properties.h>
 #include "gles_cs_executor.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 #define OUTPUT_SIZE(convParam) \
     (convParam.batch * convParam.outH * convParam.outW * convParam.outC)
@@ -59,16 +55,19 @@ struct ShaderConfig
         blockWidth  = bx;
         blockHeight = by;
         blockDepth  = bz;
-    }
-    ShaderConfig(){}
+    };
 
-    int localSizeX = {0};
-    int localSizeY = {0};
-    int localSizeZ= {0};
-    int blockWidth = {0};
-    int blockHeight = {0};
-    int blockDepth = {0};
-    int shaderType = {0};
+    ShaderConfig(): localSizeX(0), localSizeY(0), localSizeZ(0),
+        blockWidth(0), blockHeight(0), blockDepth(0), shaderType(0)
+    {};
+
+    int localSizeX;
+    int localSizeY;
+    int localSizeZ;
+    int blockWidth;
+    int blockHeight;
+    int blockDepth;
+    int shaderType;
 };
 
 // in(inH, inW, inC) out(outH, outW, outC)
@@ -291,6 +290,14 @@ static const char* defaultConfig[] =
     "optype3_batch1_in224_224_4_out112_112_16_filter3_3_pad0_0_stride2_2_activation3_bias1", "type5_lsz1_248_1_block8_4_1",
     "optype3_batch1_in224_224_4_out112_112_64_filter7_7_pad2_2_stride2_2_activation1_bias1", "type5_lsz1_24_1_block8_4_1",
     "optype3_batch1_in224_224_4_out112_112_32_filter3_3_pad0_0_stride2_2_activation3_bias1", "type5_lsz1_56_1_block8_4_1",
+    /* temporarily for unit test purpose */
+    "optype3_batch1_in3_3_4_out3_3_1_filter1_1_pad0_0_stride1_1_activation0_bias1", "type1_lsz1_4_1_block1_1_1",
+    "optype3_batch1_in8_8_4_out6_6_1_filter3_3_pad0_0_stride1_1_activation0_bias1", "type5_lsz4_16_1_block8_4_1",
+    "optype3_batch1_in7_7_1024_out7_7_1_filter1_1_pad0_0_stride1_1_activation0_bias1", "type5_lsz1_1_1_block8_4_1",
+    "optype3_batch1_in8_8_8_out6_6_8_filter3_3_pad0_0_stride1_1_activation0_bias1", "type5_lsz1_1_1_block8_4_1",
+    "optype3_batch1_in7_7_8_out5_5_8_filter3_3_pad0_0_stride1_1_activation0_bias1", "type5_lsz1_1_1_block8_4_1",
+    "optype3_batch1_in8_8_4_out6_6_8_filter3_3_pad0_0_stride1_1_activation0_bias1", "type5_lsz1_256_1_block8_4_1"
+
 #endif
 };
 
@@ -612,7 +619,7 @@ bool chn3ToChn4(ConvParam& convParam,
     prog = progMgr.getProgram(&key);
     if (prog == 0)
     {
-        ALOGV("error: Failed to get program\n");
+        LOGE("error: Failed to get program\n");
         return false;
     }
     glUseProgram(prog);
@@ -624,7 +631,7 @@ bool chn3ToChn4(ConvParam& convParam,
     }
     else
     {
-        ALOGW("glGetProgramResourceLocation(\"num_threads\") returns -1");
+        LOGW("glGetProgramResourceLocation(\"num_threads\") returns -1");
         return false;
     }
 
@@ -654,7 +661,7 @@ bool convolve(ConvParam& convParam,
     prog = progMgr.getProgram(&key);
     if (prog == 0)
     {
-        ALOGE("CONV_2D: failed to get program\n");
+        LOGE("CONV_2D: failed to get program\n");
         return false;
     }
 
@@ -671,11 +678,9 @@ bool convolveTimed(ConvParam& convParam,
                    long& elapsedTime,
                    bool syncPerIter)
 {
-    long t;
-    bool res = true;
-
-    if (iter < 1)
-        return false;
+    bool res = false;
+    long t = 0.0;
+    
     // warm up run
     if (!convolve(convParam, shaderConfig, progMgr))
         return false;
@@ -920,11 +925,11 @@ bool verifyResult(ConvParam &convParam, float* in_buffer, float* filter_buffer, 
                 for (int c = 0; c < output_chn; c++)
                 {
                     int offset = b * (output_chn * output_height * output_width) + h * (output_width * output_chn) + w * output_chn + c;
-                    if (fabs(pOut[offset] - benchmark[offset]) > 0.1 * fabs(benchmark[offset]) &&
-                        !(fabs(benchmark[offset]) < 1.e-3 &&
-                        fabs(pOut[offset] - benchmark[offset]) < 1.e-4))
+
+                    if (fabs(pOut[offset] - benchmark[offset]) > 0.1 * fabs(benchmark[offset]) ||
+                        !(fabs(benchmark[offset]) < 1.e-3 && fabs(pOut[offset] - benchmark[offset]) < 1.e-4))
                     {
-                        ALOGE("CONV_2D: convolution verification failed at (%d, %d, %d, %d), actual: %f, expected: %f\n", 
+                        LOGE("CONV_2D: convolution verification failed at (%d, %d, %d, %d), actual: %f, expected: %f\n",
                               b, h, w, c, pOut[offset], benchmark[offset]);
                         delete[] benchmark;
                         return false;
@@ -1016,7 +1021,7 @@ bool tryShaderConfig(ConvParam& convParam,
         progMgr.deleteProgram(name);
         if (ret)
         {
-            ALOGV("CONV_2D: %s: tune: %8.3f ms, %s\n", __func__, 1.0 * elapsedUS / 1000, name.c_str());
+            NN_GPU_PERF("CONV_2D: %s: tune: %8.3f ms, %s\n", __func__, 1.0 * elapsedUS / 1000, name.c_str());
             std::pair<long, int> entry(elapsedUS, i);
             timedConfig.insert(entry);
         }
@@ -1039,7 +1044,7 @@ bool tryShaderConfig(ConvParam& convParam,
         {
             best = cand;
             ret = true;
-            ALOGV("CONV_2D: %s: tune: Best shader config: %.2f ms, %s\n",
+            NN_GPU_PERF("CONV_2D: %s: tune: Best shader config: %.2f ms, %s\n",
                     __func__, 1.0 * it->first / 1000, name.c_str());
             break;
         }
@@ -1086,7 +1091,7 @@ void tune(ConvParam& convParam,
     if (!succeed)
     {
         std::string sig = genConvSignature(convParam);
-        ALOGV("CONV_2D: %s: %s fallback to basic shader, THIS MAY HAVE POOL PERFORMANCE !\n", __func__, sig.c_str());
+        NN_GPU_PERF("CONV_2D: %s: %s fallback to basic shader, THIS MAY HAVE POOR PERFORMANCE !\n", __func__, sig.c_str());
         configs = genShaderConfigCandidates(convParam, CONV_SHADER_TYPE_BASIC);
         succeed = tryShaderConfig(convParam, conf, progMgr, input, filter, bias, output, configs);
     }
@@ -1103,7 +1108,7 @@ bool storeConfig(std::string& signature, ShaderConfig& conf)
     ss << prop_prefix << signature;
     std::string confString = genShaderConfigString(conf);
     ret = property_set(ss.str().c_str(), confString.c_str()) == 0 ? true : false;
-    ALOGV("CONV_2D: %s: store shader config %s: %s, %s\n",
+    NN_GPU_PERF("CONV_2D: %s: store shader config %s: %s, %s\n",
           __func__,
           ret ? "succeed" : "failed",
           ss.str().c_str(), confString.c_str());
@@ -1122,7 +1127,7 @@ bool loadConfig(std::string signature, ShaderConfig& conf)
     {
         found = true;
         string2Config(prop, conf);
-        ALOGV("CONV_2D: %s: %s, %s\n", __func__, ss.str().c_str(), prop);
+        NN_GPU_PERF("CONV_2D: %s: %s, %s\n", __func__, ss.str().c_str(), prop);
     }
     return found;
 }
@@ -1150,7 +1155,7 @@ void prepareShaderConfig(ConvParam& convParam,
         {
             std::pair<std::string, std::string> entry(defaultConfig[2 * i], defaultConfig[2 * i + 1]);
             shaderConfigMap.insert(entry);
-            ALOGV("CONV_2D: %s: load pre-tuned config: %s, %s\n", __func__, defaultConfig[2 * i], defaultConfig[2 * i + 1]);
+            NN_GPU_PERF("CONV_2D: %s: load pre-tuned config: %s, %s\n", __func__, defaultConfig[2 * i], defaultConfig[2 * i + 1]);
         }
         glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 0, &max_wg_count_x);
         glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_COUNT, 1, &max_wg_count_y);
@@ -1166,7 +1171,7 @@ void prepareShaderConfig(ConvParam& convParam,
     ShaderConfigMap::iterator it = shaderConfigMap.find(sig);
     if (it != shaderConfigMap.end())
     {
-        ALOGV("CONV_2D: %s: found config %s, %s\n", __func__, sig.c_str(), it->second.c_str());
+        NN_GPU_PERF("CONV_2D: %s: found config %s, %s\n", __func__, sig.c_str(), it->second.c_str());
         string2Config(it->second.c_str(), conf);
         mtx.unlock();
         return;
@@ -1182,7 +1187,7 @@ void prepareShaderConfig(ConvParam& convParam,
 
     std::pair<std::string, std::string> entry(sig, genShaderConfigString(conf));
     shaderConfigMap.insert(entry);
-    ALOGV("CONV_2D: %s: cache config in memory: %s, %s\n", __func__, sig.c_str(), genShaderConfigString(conf).c_str());
+    NN_GPU_PERF("CONV_2D: %s: cache config in memory: %s, %s\n", __func__, sig.c_str(), genShaderConfigString(conf).c_str());
 
     if (tuned)
     {
@@ -1274,12 +1279,81 @@ bool GlesCsExecutor::doCONV_2D(const Operation& operation, GlesOperationResource
                 resource.tmpBo.push_back(imageBoChn4);
                 resource.tmpBo.push_back(filterBoChn4);
                 chn3ToChn4(convParam, progMgr, filter.getSSbo(), filterBoChn4, FILTER_SIZE(convParam));
+
+#if 0
+                glBindBuffer(GL_SHADER_STORAGE_BUFFER, filterBoChn4);
+                static uint32_t file_no = 0;
+                std::string file = std::string("/data/") + std::string("gles_") + std::string("filter")
+                                        + std::to_string(file_no) + ".txt";
+                FILE* file_ptr = fopen(file.c_str(), "w+");
+
+                file_no++;
+
+                if (file_ptr == nullptr)
+                {
+                    NN_GPU_DEBUG("create file %s failed", file.c_str());
+                }
+                else
+                {
+
+                    const size_t f_len = 4 * output_chn * filter_height * filter_width;
+                    const float* fp = (float*)glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, f_len, GL_MAP_READ_BIT);
+                    int cur_c = 1;
+
+                    NN_GPU_DEBUG("%s: dumpped file length is %d", __func__, f_len);
+
+                    for (size_t i = 0; i < f_len; i++)
+                    {
+                        fprintf(file_ptr, "%f,", fp[i]);
+                        if (cur_c % 4 == 0) {
+                            fprintf(file_ptr, "\n");
+                        }
+                        ++cur_c;
+                    }
+                    fclose(file_ptr);
+
+                    glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+                }
+#endif
             }
 
             imageBoChn4 = resource.tmpBo[0];
             filterBoChn4 = resource.tmpBo[1];
             chn3ToChn4(convParam, progMgr, input.getSSbo(), imageBoChn4, INPUT_SIZE(convParam));
             glFinish();
+
+#if 0
+            glBindBuffer(GL_SHADER_STORAGE_BUFFER, imageBoChn4);
+            static uint32_t file_no = 0;
+            std::string file = std::string("/data/") + std::string("gles_") + std::string("input")
+                                        + std::to_string(file_no) + ".txt";
+            FILE* file_ptr = fopen(file.c_str(), "w+");
+            file_no++;
+
+            if (file_ptr == nullptr)
+            {
+                NN_GPU_DEBUG("create file %s failed", file.c_str());
+            }
+            else
+            {
+                const size_t f_len = input_height * input_width * 4;
+                const float* fp = (float*)glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0, f_len, GL_MAP_READ_BIT);
+
+                int cur_c = 1;
+                NN_GPU_DEBUG("%s: dumpped file length is %d", __func__, f_len);
+
+                for (size_t i = 0; i < f_len; i++)
+                {
+                    fprintf(file_ptr, "%f,", fp[i]);
+                    if (cur_c % 4 == 0) {
+                        fprintf(file_ptr, "\n");
+                    }
+                    ++cur_c;
+                }
+                fclose(file_ptr);
+                glUnmapBuffer(GL_SHADER_STORAGE_BUFFER);
+            }
+#endif
 
             glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, imageBoChn4);
             glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, filterBoChn4);
@@ -1301,9 +1375,20 @@ bool GlesCsExecutor::doCONV_2D(const Operation& operation, GlesOperationResource
         outSSbo = output.getSSbo();
 
         prepareShaderConfig(convParam, shaderConf, progMgr, inSSbo, filterSSbo, biasSSbo, outSSbo);
+
+        NN_GPU_DEBUG("convParam batch %d, input_height %d, input_width %d, input_chn %d, output_height %d, output_width %d, "
+                "output_chn %d, filter_height %d, filter_width %d, stride_height %d, stride_width %d, padding_height %d, "
+                "padding_width %d, activation %d, has_bias %d",
+                convParam.batch, convParam.inH, convParam.inW, convParam.inC, convParam.outH, convParam.outW,
+                convParam.outC, convParam.filterH, convParam.filterW, convParam.strideH, convParam.strideW,
+                convParam.padH, convParam.padW, convParam.activation, convParam.hasBias);
+
         convolve(convParam, shaderConf, progMgr);
         if (needSync)
             glFinish();
+
+        // output.dumpToFile("out", convParam.outC);
+        output.dump();
     }
     else
     {
@@ -1313,8 +1398,4 @@ bool GlesCsExecutor::doCONV_2D(const Operation& operation, GlesOperationResource
     return true;
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

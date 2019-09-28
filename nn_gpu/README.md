@@ -14,7 +14,7 @@ Supported Operations
 Intel MKL-DNN Neural Networks HAL supports essential Android Neural Networks Operations. Below are the operations supported by Intel Neural Networks GPU HAL:
 
 * ANEURALNETWORKS_ADD
-* ANEURALNETWORKS_MUX
+* ANEURALNETWORKS_MUL
 * ANEURALNETWORKS_LOGISTIC
 * ANEURALNETWORKS_CONV_2D
 * ANEURALNETWORKS_DEPTHWISE_CONV_2D

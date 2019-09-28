@@ -17,8 +17,8 @@
  * Author: Guo Yejun <yejun.guo@intel.com>
  */
 
-#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CS_EXECUTOR_H
-#define ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CS_EXECUTOR_H
+#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CS_EXECUTOR_H
+#define ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CS_EXECUTOR_H
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -31,31 +31,7 @@
 #include "gles_cs_program_manager.h"
 #include "gles_cpu_timer.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
-
-#define CHECKGLERROR()                                      \
-    do {                                                    \
-        GLenum err = glGetError();                          \
-        if (err != GL_NO_ERROR)                             \
-        {                                                   \
-            ALOGE("glGetError returns error 0x%x at %s:%d", err, __FILE__, __LINE__); \
-        }                                                   \
-    } while(0);
-
-#define CHECK_GL_STATE_RET() \
-{\
-    GLenum err = glGetError(); \
-    if (err != GL_NO_ERROR) \
-    {\
-        ALOGE("glGetError returns %d, func:%s, line: %d\n", err, __func__, __LINE__); \
-        return false; \
-    }\
-    return true;\
-}
+NAME_SPACE_BEGIN
 
 struct GlesOperationResource
 {
@@ -68,7 +44,7 @@ class GlesCsExecutor : public GpuExecutor
 public:
     static bool initPerProcess();
     static void deinitPerProcess();
-    static void getCapabilities(Capabilities& cap);
+    static void getCapabilities(V1_0::Capabilities& cap);
     static std::vector<bool> getSupportedOperations(const Model& model);
     static bool checkGroupParam(int* localSize, int* groupCount);
 
@@ -80,6 +56,7 @@ public:
     bool run(const Request& request) override;
     void deinitPerExecThread() override;
     void deinitPerModel() override;
+    std::string getOpName(const Operation& operation);
     static GLint max_wg_count_x;
     static GLint max_wg_count_y;
     static GLint max_wg_count_z;
@@ -102,7 +79,7 @@ private:
     void showEglError()
     {
         EGLint err = eglGetError();
-        ALOGE("eglGetError returns 0x%x", err);
+        LOGE("eglGetError returns 0x%x", err);
     }
 
     void initOperands();
@@ -124,37 +101,10 @@ private:
     bool run(const Operation& operation, OperationCpuTimer* timer, GlesOperationResource& resource);
 
 #define SETUP_OP(op) bool do##op(const Operation& operation, GlesOperationResource& resource);
-#include "setup_op.hxx"
+#include "gles_setup_op.hxx"
 #undef SETUP_OP
 };
 
-enum PaddingScheme
-{
-    kPaddingUnknown = 0,
-    kPaddingSame = 1,
-    kPaddingValid = 2,
-};
-
-inline void calculateExplicitPadding(int32_t in_size, int32_t stride,
-                                     int32_t filter_size, int32_t padding_implicit,
-                                     int32_t* padding_head, int32_t* padding_tail) {
-    *padding_head = 0;
-    *padding_tail = 0;
-
-    if (padding_implicit == kPaddingSame) {
-        int32_t out_size = (in_size + stride - 1) / stride;
-        int32_t tmp = (out_size - 1) * stride + filter_size;
-        if (tmp > in_size) {
-            *padding_head = (tmp - in_size) / 2;
-            *padding_tail = (tmp - in_size) - *padding_head;
-        }
-    }
-}
-
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
 
 #endif

@@ -1,13 +1,9 @@
-#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CS_PROGRAM_KEY_H
-#define ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CS_PROGRAM_KEY_H
+#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CS_PROGRAM_KEY_H
+#define ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CS_PROGRAM_KEY_H
 
 #include "base_executor.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 // should be the same as defined in types.hal
 enum FusedActivationFunctionType { kNone, kRelu, kRelu1, kRelu6 };
@@ -27,9 +23,8 @@ struct GlesCsProgramKeyBasic
 {
     GlesCsProgramKeyBasic(OperationType type)
     {
-        localSizeX = 0;
-        localSizeY = 0;
-        localSizeZ = 0;
+        size_t size = sizeof(struct GlesCsProgramKeyBasic);
+        memset(this, 0xBB, size);
         opType = type;
     }
     OperationType opType;
@@ -41,14 +36,14 @@ struct GlesCsProgramKeyBasic
 
 struct GlesCsProgramKeyAdd : GlesCsProgramKeyBasic
 {
-    GlesCsProgramKeyAdd() : GlesCsProgramKeyBasic(OperationType::ADD) {}
-    bool broadcast = {false};
+    GlesCsProgramKeyAdd() : GlesCsProgramKeyBasic(OperationType::ADD), broadcast(false) {};
+    bool broadcast;
 };
 
 struct GlesCsProgramKeyConcatenation: GlesCsProgramKeyBasic
 {
-    GlesCsProgramKeyConcatenation() : GlesCsProgramKeyBasic(OperationType::CONCATENATION) {}
-    bool lastaxis = {false};
+    GlesCsProgramKeyConcatenation() : GlesCsProgramKeyBasic(OperationType::CONCATENATION), lastaxis(false) {};
+    bool lastaxis;
 };
 
 struct ConvParam
@@ -76,40 +71,46 @@ struct ConvParam
         padW = padw;
         activation = activ;
         hasBias = hasbias;
-    }
-    ConvParam(){}
+    };
 
-    int batch = {0};
-    int inH = {0};
-    int inW = {0};
-    int inC = {0};
-    int outH = {0};
-    int outW = {0};
-    int outC = {0};
-    int filterH = {0};
-    int filterW = {0};
-    int strideH = {0};
-    int strideW = {0};
-    int padH = {0};
-    int padW = {0};
-    int activation = {0};
-    bool hasBias = {false};
+    ConvParam(): batch(0), inH(0), inW(0), inC(0), outH(0), outW(0), outC(0),
+        filterH(0), filterW(0), strideH(0), strideW(0), padH(0), padW(0), activation(0), hasBias(0)
+    {};
+
+    int batch;
+    int inH;
+    int inW;
+    int inC;
+    int outH;
+    int outW;
+    int outC;
+    int filterH;
+    int filterW;
+    int strideH;
+    int strideW;
+    int padH;
+    int padW;
+    int activation;
+    bool hasBias;
 };
 
 struct GlesCsProgramKeyConv: GlesCsProgramKeyBasic
 {
-    GlesCsProgramKeyConv() : GlesCsProgramKeyBasic(OperationType::CONV_2D) {}
-    int blockHeight = {0};
-    int blockWidth = {0};
-    int blockDepth = {0};
-    int shaderType = {0};
+    GlesCsProgramKeyConv() :
+        GlesCsProgramKeyBasic(OperationType::CONV_2D), blockHeight(0), blockWidth(0), blockDepth(0), shaderType(0)
+    {};
+
+    int blockHeight;
+    int blockWidth;
+    int blockDepth;
+    int shaderType;
     ConvParam convParam;
 };
 
 struct GlesCsProgramKeyDepthConv: GlesCsProgramKeyBasic
 {
-    GlesCsProgramKeyDepthConv() : GlesCsProgramKeyBasic(OperationType::DEPTHWISE_CONV_2D) {}
-    uint32_t itemZ = {0};
+    GlesCsProgramKeyDepthConv() : GlesCsProgramKeyBasic(OperationType::DEPTHWISE_CONV_2D), itemZ(0) {};
+    uint32_t itemZ;
 };
 
 struct GlesCsProgramKeyLRN: GlesCsProgramKeyBasic
@@ -119,28 +120,30 @@ struct GlesCsProgramKeyLRN: GlesCsProgramKeyBasic
 
 struct GlesCsProgramKeyAvgPool: GlesCsProgramKeyBasic
 {
-    GlesCsProgramKeyAvgPool() : GlesCsProgramKeyBasic(OperationType::AVERAGE_POOL_2D) {}
-    uint32_t itemZ = {0};
-    uint32_t batch = {0};
+    GlesCsProgramKeyAvgPool() : GlesCsProgramKeyBasic(OperationType::AVERAGE_POOL_2D),
+        itemZ(0), batch(0)
+    {};
+
+    uint32_t itemZ;
+    uint32_t batch;
 };
 
 struct GlesCsProgramKeyMaxPool: GlesCsProgramKeyBasic
 {
-    GlesCsProgramKeyMaxPool() : GlesCsProgramKeyBasic(OperationType::MAX_POOL_2D) {}
-    uint32_t itemZ = {0};
-    uint32_t batch = {0};
+    GlesCsProgramKeyMaxPool() : GlesCsProgramKeyBasic(OperationType::MAX_POOL_2D),
+        itemZ(0), batch(0)
+    {};
+
+    uint32_t itemZ;
+    uint32_t batch;
 };
 
 struct GlesCsProgramKeyMul : GlesCsProgramKeyBasic
 {
-    GlesCsProgramKeyMul() : GlesCsProgramKeyBasic(OperationType::MUL) {}
-    bool broadcast = {false};
+    GlesCsProgramKeyMul() : GlesCsProgramKeyBasic(OperationType::MUL), broadcast(false) {};
+    bool broadcast;
 };
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
 
 #endif

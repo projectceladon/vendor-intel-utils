@@ -1,10 +1,6 @@
 #include "gles_cs_program_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 static const char concatShader[] = 
 "#ifdef LAST_AXIS\n"
@@ -80,8 +76,4 @@ void GlesCsProgramManager::getShaderSourceCONCATENATION(const void* progKey, std
     src = ss.str();
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

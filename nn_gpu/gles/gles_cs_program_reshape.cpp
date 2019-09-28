@@ -1,10 +1,6 @@
 #include "gles_cs_program_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 void GlesCsProgramManager::getProgNameRESHAPE(const void* progKey, std::string& name)
 {
@@ -19,8 +15,4 @@ void GlesCsProgramManager::getShaderSourceRESHAPE(const void* progKey, std::stri
     return;
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

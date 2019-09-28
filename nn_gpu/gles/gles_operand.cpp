@@ -1,11 +1,7 @@
 #include "gles_operand.h"
 #include "gles_memory_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 bool GlesOperand::setArg(const RequestArgument& from)
 {
@@ -21,8 +17,8 @@ bool GlesOperand::setArg(const RequestArgument& from)
     }
 
     if (from.hasNoValue) {
-//        ASSERT(!"what's happened");
         lifetime = OperandLifeTime::NO_VALUE;
+        ASSERT(!"what's happened");
     }
     else
     {
@@ -40,6 +36,16 @@ bool GlesOperand::setArg(const RequestArgument& from)
     }
 
     return true;
+}
+
+void GlesOperand::dump()
+{
+    memInfo->dump();
+}
+
+void GlesOperand::dumpToFile(const char* fileName, const int channels)
+{
+    memInfo->dumpToFile(fileName, channels);
 }
 
 void GlesOperand::restore(const Operand& from)
@@ -97,6 +103,7 @@ bool GlesOperand::set(const Operand& from, uint8_t* vp, uint32_t index)
             break;
         default:
             NOT_REACH_HERE;
+            break;
     }
 
     return true;
@@ -210,8 +217,4 @@ void GlesOperand::markOpFinished()
     }
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

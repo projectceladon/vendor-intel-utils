@@ -1,11 +1,7 @@
 #include <math.h>
 #include "gles_cs_executor.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 bool GlesCsExecutor::doMAX_POOL_2D(const Operation& operation, GlesOperationResource& resource)
 {
@@ -119,8 +115,4 @@ bool GlesCsExecutor::doMAX_POOL_2D(const Operation& operation, GlesOperationReso
     return true;
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

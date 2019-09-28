@@ -1,5 +1,5 @@
-#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CPU_TIMER_H
-#define ANDROID_HARDWARE_NEURALNETWORKS_V1_0_GLES_CPU_TIMER_H
+#ifndef ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CPU_TIMER_H
+#define ANDROID_HARDWARE_NEURALNETWORKS_V1_2_GLES_CPU_TIMER_H
 
 #include <sys/time.h>
 #include <iostream>
@@ -8,11 +8,7 @@
 
 #include "operation_cpu_timer.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 class GlesCpuTimer
 {
@@ -55,7 +51,7 @@ private:
         if (name.size() > 0)
         {
             std::string msg = name + ": " + getTime(diff);
-            ALOGI("%s", msg.c_str());
+            NN_GPU_PERF("%s", msg.c_str());
         }
         else
         {
@@ -79,10 +75,6 @@ private:
     OperationCpuTimer* opTimer;
 };
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
 
 #endif

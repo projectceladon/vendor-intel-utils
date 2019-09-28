@@ -1,6 +1,6 @@
 #include "device.h"
 
-using android::hardware::neuralnetworks::V1_0::implementation::Device;
+using android::hardware::neuralnetworks::V1_2::implementation::Device;
 using android::sp;
 
 int main()

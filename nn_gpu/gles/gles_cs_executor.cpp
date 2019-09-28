@@ -1,11 +1,7 @@
 #include "gles_cs_executor.h"
 #include "gles_memory_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 EGLDisplay GlesCsExecutor::dpy = EGL_NO_DISPLAY;
 EGLConfig GlesCsExecutor::cfg = nullptr;
@@ -22,7 +18,7 @@ bool GlesCsExecutor::initPerProcess()
     dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (dpy == EGL_NO_DISPLAY)
     {
-        ALOGE("eglGetDisplay returned EGL_NO_DISPLAY");
+        LOGE("eglGetDisplay returned EGL_NO_DISPLAY");
         return false;
     }
 
@@ -30,7 +26,7 @@ bool GlesCsExecutor::initPerProcess()
     EGLint minorVersion;
     if (eglInitialize(dpy, &majorVersion, &minorVersion) != EGL_TRUE)
     {
-        ALOGE("eglInitialize failed");
+        LOGE("eglInitialize failed");
         return false;
     }
 
@@ -38,26 +34,26 @@ bool GlesCsExecutor::initPerProcess()
     EGLint cfgAttribs[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR, EGL_NONE };
     if (eglChooseConfig(dpy, cfgAttribs, &cfg, 1, &count) != EGL_TRUE)
     {
-        ALOGE("eglChooseConfig failed");
+        LOGE("eglChooseConfig failed");
         return false;
     }
 
     //then, just have a try
     if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE)
     {
-        ALOGE("eglBindAPI failed");
+        LOGE("eglBindAPI failed");
         return false;
     }
     EGLint ctxAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
     EGLContext ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttribs);
     if (ctx == EGL_NO_CONTEXT)
     {
-        ALOGE("eglCreateContext failed");
+        LOGE("eglCreateContext failed");
         return false;
     }
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx) != EGL_TRUE)
     {
-        ALOGE("eglMakeCurrent failed to set");
+        LOGE("eglMakeCurrent failed to set");
         return false;
     }
 
@@ -68,7 +64,7 @@ bool GlesCsExecutor::initPerProcess()
     glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 1, &max_wg_size_y);
     glGetIntegeri_v(GL_MAX_COMPUTE_WORK_GROUP_SIZE, 2, &max_wg_size_z);
     glGetIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &max_wg_invocations);
-    ALOGV("%s: max_wg_count(%d,%d,%d), max_wg_size(%d,%d,%d), max_wg_invocation %d\n",
+    NN_GPU_DEBUG("%s: max_wg_count(%d,%d,%d), max_wg_size(%d,%d,%d), max_wg_invocation %d\n",
             __func__,
             max_wg_count_x, max_wg_count_y, max_wg_count_z,
             max_wg_size_x, max_wg_size_y, max_wg_size_z,
@@ -76,17 +72,17 @@ bool GlesCsExecutor::initPerProcess()
 
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) != EGL_TRUE)
     {
-        ALOGE("eglMakeCurrent failed to clear");
+        LOGE("eglMakeCurrent failed to clear");
         return false;
     }
     if (eglDestroyContext(dpy, ctx) != EGL_TRUE)
     {
-        ALOGE("eglDestoryContext failed");
+        LOGE("eglDestoryContext failed");
         return false;
     }
     if (eglReleaseThread() != EGL_TRUE)
     {
-        ALOGE("eglReleaseThread failed");
+        LOGE("eglReleaseThread failed");
         return false;
     }
 
@@ -97,7 +93,7 @@ void GlesCsExecutor::deinitPerProcess()
 {
     if (eglTerminate(dpy) != EGL_TRUE)
     {
-        ALOGE("eglTerminate failed");
+        LOGE("eglTerminate failed");
     }
 }
 
@@ -117,7 +113,7 @@ bool GlesCsExecutor::initPerModel()
 {
     if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE)
     {
-        ALOGE("eglBindAPI failed within initPerModel");
+        LOGE("eglBindAPI failed within initPerModel");
         showEglError();
         return false;
     }
@@ -126,7 +122,7 @@ bool GlesCsExecutor::initPerModel()
     _ctx = eglCreateContext(dpy, cfg, EGL_NO_CONTEXT, ctxAttribs);
     if (_ctx == EGL_NO_CONTEXT)
     {
-        ALOGE("eglCreateContext failed within initPerModel");
+        LOGE("eglCreateContext failed within initPerModel");
         showEglError();
         return false;
     }
@@ -182,14 +178,14 @@ void GlesCsExecutor::showOperationTimers()
 
     std::sort(operationTimers.begin(), operationTimers.end(), OperationCpuTimer::sort);
 
-    ALOGI("each operation average CPU time (with glFinish), the first run ignored when run more than once");
+    NN_GPU_PERF("each operation average CPU time (with glFinish), the first run ignored when run more than once");
     long acc = 0;
     for (size_t i = 0; i < operationTimers.size(); ++i)
     {
         OperationCpuTimer& timer = operationTimers[i];
         acc = timer.show(acc, sum);
     }
-    ALOGI("all operations average sum: %f ms", sum/1000.f);
+    NN_GPU_PERF("all operations average sum: %f ms", sum/1000.f);
 }
 
 void GlesCsExecutor::deinitPerModel()
@@ -199,7 +195,7 @@ void GlesCsExecutor::deinitPerModel()
 
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, _ctx) != EGL_TRUE)
     {
-        ALOGE("eglMakeCurrent failed to set within deinitPerModel");
+        LOGE("eglMakeCurrent failed to set within deinitPerModel");
         showEglError();
     }
 
@@ -209,19 +205,19 @@ void GlesCsExecutor::deinitPerModel()
 
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) != EGL_TRUE)
     {
-        ALOGE("eglMakeCurrent failed to clear within deinitPerModel");
+        LOGE("eglMakeCurrent failed to clear within deinitPerModel");
         showEglError();
     }
 
     if (eglDestroyContext(dpy, _ctx) != EGL_TRUE)
     {
-        ALOGE("eglDestoryContext failed within deinitPerModel");
+        LOGE("eglDestoryContext failed within deinitPerModel");
         showEglError();
     }
 
     if (eglReleaseThread() != EGL_TRUE)
     {
-        ALOGE("eglReleaseThread failed within deinitPerModel");
+        LOGE("eglReleaseThread failed within deinitPerModel");
         showEglError();
     }
 }
@@ -230,7 +226,7 @@ bool GlesCsExecutor::initPerExecThread()
 {
     if (eglBindAPI(EGL_OPENGL_ES_API) != EGL_TRUE)
     {
-        ALOGE("eglBindAPI failed within initPerExecThread");
+        LOGE("eglBindAPI failed within initPerExecThread");
         showEglError();
         return false;
     }
@@ -239,7 +235,7 @@ bool GlesCsExecutor::initPerExecThread()
     // carefully use shared context to handle it.
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, _ctx) != EGL_TRUE)
     {
-        ALOGE("eglMakeCurrent failed to set within initPerExecThread");
+        LOGE("eglMakeCurrent failed to set within initPerExecThread");
         showEglError();
         return false;
     }
@@ -251,13 +247,13 @@ void GlesCsExecutor::deinitPerExecThread()
 {
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) != EGL_TRUE)
     {
-        ALOGE("eglMakeCurrent failed to clear within deinitPerExecThread");
+        LOGE("eglMakeCurrent failed to clear within deinitPerExecThread");
         showEglError();
     }
 
     if (eglReleaseThread() != EGL_TRUE)
     {
-        ALOGE("eglReleaseThread failed deinitPerExecThread");
+        LOGE("eglReleaseThread failed deinitPerExecThread");
         showEglError();
     }
 }
@@ -319,9 +315,10 @@ bool GlesCsExecutor::run(const Operation& operation, OperationCpuTimer* timer, G
 
 #define SETUP_OP(op)                \
     case OperationType::op:         \
+        NN_GPU_DEBUG("run operation type with %d", OperationType::op); \
         ret = do##op(operation, resource);    \
         break;
-#include "setup_op.hxx"
+#include "gles_setup_op.hxx"
 #undef SETUP_OP
 
     default:
@@ -373,7 +370,7 @@ void GlesCsExecutor::setUniform1f(GLuint prog, const char* name, GLfloat v)
     }
     else
     {
-        ALOGE("glGetProgramResourceLocation(\"%s\") returns -1", name);
+        LOGE("glGetProgramResourceLocation(\"%s\") returns -1", name);
     }
 }
 
@@ -386,7 +383,7 @@ void GlesCsExecutor::setUniform1ui(GLuint prog, const char* name, GLuint v)
     }
     else
     {
-        ALOGE("glGetProgramResourceLocation(\"%s\") returns -1", name);
+        LOGE("glGetProgramResourceLocation(\"%s\") returns -1", name);
     }
 }
 
@@ -412,10 +409,10 @@ void GlesCsExecutor::bindOperand(GlesOperand& operand, GLuint boindex)
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, boindex, bo);
 }
 
-void GlesCsExecutor::getCapabilities(Capabilities &cap)
+void GlesCsExecutor::getCapabilities(V1_0::Capabilities &cap)
 {
-    cap = {.float32Performance = {.execTime = 1.1f, .powerUsage = 1.1f},
-                                 .quantized8Performance = {.execTime = 1.1f, .powerUsage = 1.1f}};
+    cap = {.float32Performance = {.execTime = 0.91f, .powerUsage = 0.91f},
+                                  .quantized8Performance = {.execTime = 0.91f, .powerUsage = 0.91f}};
 }
 
 std::vector<bool> GlesCsExecutor::getSupportedOperations(const Model& model)
@@ -430,7 +427,7 @@ std::vector<bool> GlesCsExecutor::getSupportedOperations(const Model& model)
         {
             if (model.operands[input].type == OperandType::TENSOR_QUANT8_ASYMM)
             {
-                ALOGW("data type TENSOR_QUANT8_ASYMM not supported.");
+                LOGW("data type TENSOR_QUANT8_ASYMM not supported.");
                 supported[i] = false;
                 break;
             }
@@ -442,8 +439,9 @@ std::vector<bool> GlesCsExecutor::getSupportedOperations(const Model& model)
 #define SETUP_OP(op)                    \
         case OperationType::op:         \
             /* do nothing */            \
+            supported[i] = true; \
             break;
-#include "setup_op.hxx"
+#include "gles_setup_op.hxx"
 #undef SETUP_OP
 
         default:
@@ -466,8 +464,22 @@ bool GlesCsExecutor::checkGroupParam(int* localSize, int* groupCount)
             groupCount[2] < max_wg_count_z);
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+std::string GlesCsExecutor::getOpName(const Operation& operation)
+{
+    switch (operation.type)
+    {
+
+#define SETUP_OP(op)                \
+    case OperationType::op:         \
+        return std::string(#op);    \
+        break;
+#include "gles_setup_op.hxx"
+#undef SETUP_OP
+
+    default:
+        break;
+    }
+    return "unknown";
+}
+
+NAME_SPACE_STOP

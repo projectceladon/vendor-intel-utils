@@ -1,11 +1,7 @@
 #include <sys/mman.h>
 #include "gles_memory_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 GlesMemoryInfo* GlesMemoryManager::createMemoryInfo(std::vector<GlesMemoryInfo>& memInfos, uint8_t* userptr, size_t length) const
 {
@@ -58,7 +54,7 @@ bool GlesMemoryManager::initFromModel(const Model& model)
     {
         if (!modelPoolInfos[i].set(model.pools[i]))
         {
-            ALOGE("Could not map pool");
+            LOGE("Could not map pool");
             return false;
         }
     }
@@ -82,7 +78,7 @@ bool GlesMemoryManager::resetFromRequest(const Request& request)
     {
         if (!requestPoolInfos[i].set(request.pools[i]))
         {
-            ALOGE("Could not map pool");
+            LOGE("Could not map pool");
             return false;
         }
     }
@@ -125,8 +121,4 @@ void GlesMemoryManager::clean()
     }
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

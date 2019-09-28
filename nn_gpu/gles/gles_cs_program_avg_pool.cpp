@@ -1,11 +1,6 @@
 #include "gles_cs_program_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
-
+NAME_SPACE_BEGIN
 
 static const char mainpart[] =
 "#define UINT_0 (uint(0))\n"
@@ -142,8 +137,4 @@ void GlesCsProgramManager::getShaderSourceAVERAGE_POOL_2D(const void* progKey, s
     src = ss.str();
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP

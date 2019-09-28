@@ -1,10 +1,6 @@
 #include "gles_cs_program_manager.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 static const char mainpart[] =
 "#ifdef ACTIVATION_RELU\n"
@@ -89,8 +85,5 @@ void GlesCsProgramManager::getShaderSourceADD(const void* progKey, std::string& 
     src = ss.str();
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
+

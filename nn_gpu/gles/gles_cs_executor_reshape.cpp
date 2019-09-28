@@ -1,11 +1,7 @@
 #include "gles_cs_executor.h"
 #include "gles_cs_program_key.h"
 
-namespace android {
-namespace hardware {
-namespace neuralnetworks {
-namespace V1_0 {
-namespace implementation {
+NAME_SPACE_BEGIN
 
 bool GlesCsExecutor::doRESHAPE(const Operation& operation, GlesOperationResource& resource)
 {
@@ -22,8 +18,4 @@ bool GlesCsExecutor::doRESHAPE(const Operation& operation, GlesOperationResource
     return true;
 }
 
-}  // namespace implementation
-}  // namespace V1_0
-}  // namespace neuralnetworks
-}  // namespace hardware
-}  // namespace android
+NAME_SPACE_STOP
