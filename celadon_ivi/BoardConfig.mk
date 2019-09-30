@@ -394,28 +394,28 @@ BOARD_CONFIGIMAGE_PARTITION_SIZE := 8388608
 BOARD_SEPOLICY_M4DEFS += module_config_partition=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/config-partition
 ##############################################################
-# Source: device/intel/mixins/groups/cpu-arch/slm/BoardConfig.mk.1
+# Source: device/intel/mixins/groups/cpu-arch/x86/BoardConfig.mk
 ##############################################################
+BUILD_CPU_ARCH ?= silvermont
+
+# Items that are common between slm 32b and 64b:
+TARGET_CPU_ABI_LIST_32_BIT := x86
+TARGET_ARCH_VARIANT := $(if $(BUILD_CPU_ARCH),$(BUILD_CPU_ARCH),x86)
+TARGET_CPU_SMP := true
+
 ifeq ($(BOARD_USE_64BIT_USERSPACE),true)
 # 64b-specific items:
 TARGET_ARCH := x86_64
 TARGET_CPU_ABI := x86_64
 TARGET_2ND_CPU_ABI := x86
 TARGET_2ND_ARCH := x86
-TARGET_2ND_ARCH_VARIANT := silvermont
-TARGET_2ND_CPU_VARIANT := silvermont
+TARGET_2ND_ARCH_VARIANT := $(if $(BUILD_CPU_ARCH),$(BUILD_CPU_ARCH))
+TARGET_2ND_CPU_VARIANT := $(if $(BUILD_CPU_ARCH),$(BUILD_CPU_ARCH))
 else
 # 32b-specific items:
 TARGET_ARCH := x86
 TARGET_CPU_ABI := x86
 endif
-##############################################################
-# Source: device/intel/mixins/groups/cpu-arch/slm/BoardConfig.mk
-##############################################################
-# Items that are common between slm 32b and 64b:
-TARGET_CPU_ABI_LIST_32_BIT := x86
-TARGET_ARCH_VARIANT := silvermont
-TARGET_CPU_SMP := true
 ##############################################################
 # Source: device/intel/mixins/groups/allow-missing-dependencies/true/BoardConfig.mk
 ##############################################################
