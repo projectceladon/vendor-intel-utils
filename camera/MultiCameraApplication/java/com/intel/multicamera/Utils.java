@@ -67,8 +67,8 @@ public class Utils {
         }
 
         File mediaStorageDir =
-            new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
-                     "MultiCamera");
+                new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                         "MultiCamera");
         // This location works best if you want the created images to be shared
         // between applications and persist after your app has been uninstalled.
 
@@ -119,6 +119,16 @@ public class Utils {
         }
 
         context.sendBroadcast(new Intent(ACTION_NEW_VIDEO, uri));
+    }
+
+    public static String getFileNameFromUri(Uri uri) {
+        String result = null;
+        result = uri.getPath();
+        int cut = result.lastIndexOf('/');
+        if (cut != -1) {
+            result = result.substring(cut + 1);
+        }
+        return result;
     }
 
     public static String[] generateFileDetails(int type) {
@@ -184,8 +194,10 @@ public class Utils {
                              Long.valueOf(fileDetails[4]) / 1000);
             contentValue.put(MediaStore.Video.Media.MIME_TYPE, fileDetails[2]);
             contentValue.put(MediaStore.Video.Media.DATA, fileDetails[3]);
-            contentValue.put(MediaStore.MediaColumns.WIDTH, width);
-            contentValue.put(MediaStore.MediaColumns.HEIGHT, height);
+            contentValue.put(MediaStore.Video.Media.WIDTH, width);
+            contentValue.put(MediaStore.Video.Media.HEIGHT, height);
+            contentValue.put(MediaStore.Video.Media.RESOLUTION,
+                             Integer.toString(width) + "x" + Integer.toString(height));
         }
         return contentValue;
     }

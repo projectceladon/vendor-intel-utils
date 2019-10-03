@@ -1,4 +1,5 @@
 /*
+ * Copyright 2014 The Android Open Source Project
  * Copyright (c) 2019 Intel Corporation.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,6 +23,8 @@ import android.app.Activity;
 import android.content.*;
 import android.content.pm.PackageManager;
 import android.graphics.ImageFormat;
+import android.graphics.Matrix;
+import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.*;
 import android.hardware.camera2.params.StreamConfigurationMap;
@@ -71,14 +74,15 @@ public class BotmLeftCam {
     protected CameraCaptureSession cameraCaptureSessions;
     protected CaptureRequest captureRequest;
     protected CaptureRequest.Builder captureRequestBuilder;
-    private Size imageDimension;
+    private Size imageDimension, previewSize;
     private ImageReader imageReader;
     private File file;
-    private static final int REQUEST_CAMERA_PERMISSION = 200;
-    private final int PERMISSIONS_REQUEST_SNAPSHOT = 3;
-
     private Handler mBackgroundHandler;
     private HandlerThread mBackgroundThread;
+    private static final int SENSOR_ORIENTATION_DEFAULT_DEGREES = 90;
+    private static final int SENSOR_ORIENTATION_INVERSE_DEGREES = 270;
+    private static final SparseIntArray DEFAULT_ORIENTATIONS = new SparseIntArray();
+    private static final SparseIntArray INVERSE_ORIENTATIONS = new SparseIntArray();
     private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
     private SharedPreferences settings;
     /**
@@ -91,6 +95,11 @@ public class BotmLeftCam {
     private String mVideoFilename, mPictureFilename;
     private ContentValues mCurrentVideoValues, mCurrentPictureValues;
     byte[] jpegLength;
+
+    /**
+     * Orientation of the camera sensor
+     */
+    private int mSensorOrientation;
 
     static {
         ORIENTATIONS.append(Surface.ROTATION_0, 90);
@@ -151,24 +160,31 @@ public class BotmLeftCam {
         @Override
         public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
             // open your camera here
-            openCamera();
+            openCamera(width, height);
         }
         @Override
         public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
             // Transform you image captured size according to the surface width and height
+            configureTransform(width, height);
         }
         @Override
         public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
             return false;
         }
         @Override
-        public void onSurfaceTextureUpdated(SurfaceTexture surface) {}
+        public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+        }
     };
 
-    public void openCamera() {
+    public void openCamera(int width, int height) {
         CameraManager manager = (CameraManager)mActivity.getSystemService(Context.CAMERA_SERVICE);
         Log.e(TAG, "is camera open");
         try {
+            if (!((manager.getCameraIdList().length >= 3) &&
+                  (manager.getCameraIdList().length <= 4))) {
+                Log.e(TAG, "this camera is not connected ");
+                return;
+            }
             cameraId = manager.getCameraIdList()[2];
             Log.e(TAG, "is camera open ID" + cameraId);
             CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
@@ -176,23 +192,29 @@ public class BotmLeftCam {
                     characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             if (map == null) return;
 
-            // Add permission for camera and let user grant the permission
-            if (ActivityCompat.checkSelfPermission(mActivity, Manifest.permission.CAMERA) !=
-                    PackageManager.PERMISSION_GRANTED &&
-                ActivityCompat.checkSelfPermission(mActivity,
-                                                   Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
-                    PackageManager.PERMISSION_GRANTED &&
-                ActivityCompat.checkSelfPermission(mActivity, Manifest.permission.RECORD_AUDIO) !=
-                    PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    mActivity,
-                    new String[] {Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO,
-                                  Manifest.permission.WRITE_EXTERNAL_STORAGE},
-                    REQUEST_CAMERA_PERMISSION);
-                return;
-            }
-            mMediaRecorder = new MediaRecorder();
+            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
+            String Key = SettingsActivity.SettingsFragment.getchangedPrefKey();
 
+            if (Key.compareTo("video_list") == 0) {
+                String videoQuality = settings.getString("video_list", "medium");
+
+                int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
+                Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
+
+                mProfile = CamcorderProfile.get(0, quality);
+                previewSize = new Size(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
+
+                configureTransform(width, height);
+            } else {
+                previewSize = SettingsActivity.SettingsFragment.sizeFromSettingString(
+                        settings.getString("capture_list", "640x480"));
+                Log.d(TAG,
+                      "Selected imageDimension" + previewSize.getWidth() + previewSize.getHeight());
+                configureTransform(width, height);
+            }
+
+            mSensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+            configureTransform(width, height);
             startBackgroundThread();
 
             manager.openCamera(cameraId, stateCallback, null);
@@ -213,21 +235,46 @@ public class BotmLeftCam {
         }
         @Override
         public void onDisconnected(CameraDevice camera) {
-            cameraDevice.close();
+            Log.e(TAG, "onDisconnected");
+            closeCamera();
         }
         @Override
         public void onError(CameraDevice camera, int error) {
-            cameraDevice.close();
-            cameraDevice = null;
+            Log.e(TAG, "onError");
+            closeCamera();
         }
     };
+
+    private void configureTransform(int viewWidth, int viewHeight) {
+        if (null == textureView || null == previewSize) {
+            return;
+        }
+        int rotation = mActivity.getWindowManager().getDefaultDisplay().getRotation();
+        Matrix matrix = new Matrix();
+        RectF viewRect = new RectF(0, 0, viewWidth, viewHeight);
+        Log.e(TAG, "configureTransform() viewWidth: " + viewWidth + " viewHeight: " + viewHeight);
+        RectF bufferRect = new RectF(0, 0, previewSize.getHeight(), previewSize.getWidth());
+        float centerX = viewRect.centerX();
+        float centerY = viewRect.centerY();
+        if (Surface.ROTATION_90 == rotation || Surface.ROTATION_270 == rotation) {
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY());
+            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL);
+            float scale = Math.max((float)viewHeight / previewSize.getHeight(),
+                                   (float)viewWidth / previewSize.getWidth());
+            matrix.postScale(scale, scale, centerX, centerY);
+            matrix.postRotate(90 * (rotation - 2), centerX, centerY);
+        } else if (Surface.ROTATION_180 == rotation) {
+            matrix.postRotate(180, centerX, centerY);
+        }
+        textureView.setTransform(matrix);
+    }
 
     protected void createCameraPreview() {
         try {
             closePreviewSession();
             SurfaceTexture texture = textureView.getSurfaceTexture();
             if (texture == null) return;
-
+            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
             String Key = SettingsActivity.SettingsFragment.getchangedPrefKey();
 
             imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
@@ -246,28 +293,41 @@ public class BotmLeftCam {
 
             Surface surface = new Surface(texture);
             captureRequestBuilder =
-                cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                    cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             captureRequestBuilder.addTarget(surface);
             cameraDevice.createCaptureSession(
-                Arrays.asList(surface), new CameraCaptureSession.StateCallback() {
-                    @Override
-                    public void onConfigured(CameraCaptureSession cameraCaptureSession) {
-                        // The camera is already closed
-                        if (null == cameraDevice) {
-                            return;
+                    Arrays.asList(surface), new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(CameraCaptureSession cameraCaptureSession) {
+                            // The camera is already closed
+                            if (null == cameraDevice) {
+                                return;
+                            }
+                            // When the session is ready, we start displaying the preview.
+                            cameraCaptureSessions = cameraCaptureSession;
+                            updatePreview();
                         }
-                        // When the session is ready, we start displaying the preview.
-                        cameraCaptureSessions = cameraCaptureSession;
-                        updatePreview();
-                    }
-                    @Override
-                    public void onConfigureFailed(CameraCaptureSession cameraCaptureSession) {
-                        Toast.makeText(mActivity, "Configuration change", Toast.LENGTH_SHORT)
-                            .show();
-                    }
-                }, null);
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession cameraCaptureSession) {
+                            Toast.makeText(mActivity, "Configuration change", Toast.LENGTH_SHORT)
+                                    .show();
+                        }
+                    }, null);
         } catch (CameraAccessException e) {
             e.printStackTrace();
+        }
+    }
+
+    public void releaseMedia() {
+        if (null != mMediaRecorder) {
+            try {
+                mMediaRecorder.stop();
+            } catch (IllegalStateException ex) {
+                Log.d(TAG, "Stop called before start");
+            }
+            mMediaRecorder.reset();
+            mMediaRecorder.release();
+            mMediaRecorder = null;
         }
     }
 
@@ -281,11 +341,7 @@ public class BotmLeftCam {
             imageReader.close();
             imageReader = null;
         }
-        if (null != mMediaRecorder) {
-            mMediaRecorder.reset();
-            mMediaRecorder.release();
-            mMediaRecorder = null;
-        }
+        releaseMedia();
         stopBackgroundThread();
     }
 
@@ -293,7 +349,7 @@ public class BotmLeftCam {
      * Starts a background thread and its {@link Handler}.
      */
     private void startBackgroundThread() {
-        mBackgroundThread = new HandlerThread("Camera-$cameraId");
+        mBackgroundThread = new HandlerThread("Camera-3");
         mBackgroundThread.start();
         mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
     }
@@ -329,6 +385,20 @@ public class BotmLeftCam {
         }
     }
 
+    /**
+     * Retrieves the JPEG orientation from the specified screen rotation.
+     *
+     * @param rotation The screen rotation.
+     * @return The JPEG orientation (one of 0, 90, 270, and 360)
+     */
+    private int getOrientation(int rotation) {
+        // Sensor orientation is 90 for most devices, or 270 for some devices (eg. Nexus 5X)
+        // We have to take that into account and rotate JPEG properly.
+        // For devices with orientation of 90, we simply return our mapping from ORIENTATIONS.
+        // For devices with orientation of 270, we need to rotate the JPEG 180 degrees.
+        return (ORIENTATIONS.get(rotation) + mSensorOrientation + 270) % 360;
+    }
+
     protected void takePicture() {
         if (null == cameraDevice) {
             Log.e(TAG, "cameraDevice is null");
@@ -336,32 +406,24 @@ public class BotmLeftCam {
         }
 
         try {
+            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
             imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
-                settings.getString("capture_list", "640x480"));
-
+                    settings.getString("capture_list", "640x480"));
+            Log.d(TAG, "Selected imageDimension" + imageDimension.getWidth() +
+                               imageDimension.getHeight());
             ImageReader reader = ImageReader.newInstance(
-                imageDimension.getWidth(), imageDimension.getHeight(), ImageFormat.JPEG, 1);
+                    imageDimension.getWidth(), imageDimension.getHeight(), ImageFormat.JPEG, 1);
             List<Surface> outputSurfaces = new ArrayList<Surface>(2);
             outputSurfaces.add(reader.getSurface());
             outputSurfaces.add(new Surface(textureView.getSurfaceTexture()));
             captureRequestBuilder =
-                cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+                    cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             captureRequestBuilder.addTarget(reader.getSurface());
             captureRequestBuilder.set(CaptureRequest.CONTROL_MODE,
                                       CameraMetadata.CONTROL_MODE_AUTO);
             // Orientation
             int rotation = mActivity.getWindowManager().getDefaultDisplay().getRotation();
-            captureRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION, ORIENTATIONS.get(rotation));
-
-            // Add permission for camera and let user grant the permission
-            if (ActivityCompat.checkSelfPermission(mActivity,
-                                                   Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
-                PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    mActivity, new String[] {Manifest.permission.WRITE_EXTERNAL_STORAGE},
-                    PERMISSIONS_REQUEST_SNAPSHOT);
-                return;
-            }
+            captureRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION, getOrientation(rotation));
 
             String fileDetails[] = Utils.generateFileDetails(Utils.MEDIA_TYPE_IMAGE);
             if (fileDetails == null || fileDetails.length < 5) {
@@ -370,77 +432,78 @@ public class BotmLeftCam {
             }
             mPictureFilename = fileDetails[3];
             mCurrentPictureValues =
-                Utils.getContentValues(Utils.MEDIA_TYPE_IMAGE, fileDetails,
-                                       imageDimension.getWidth(), imageDimension.getHeight());
+                    Utils.getContentValues(Utils.MEDIA_TYPE_IMAGE, fileDetails,
+                                           imageDimension.getWidth(), imageDimension.getHeight());
 
             file = new File(mPictureFilename);
 
             ImageReader.OnImageAvailableListener readerListener =
-                new ImageReader.OnImageAvailableListener() {
-                    @Override
-                    public void onImageAvailable(ImageReader reader) {
-                        Image image = null;
-                        try {
-                            image = reader.acquireLatestImage();
-                            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                            byte[] bytes = new byte[buffer.capacity()];
-                            buffer.get(bytes);
-                            jpegLength = bytes;
-                            mCurrentPictureValues.put(MediaStore.Images.ImageColumns.SIZE,
-                                                      jpegLength);
+                    new ImageReader.OnImageAvailableListener() {
+                        @Override
+                        public void onImageAvailable(ImageReader reader) {
+                            Image image = null;
+                            try {
+                                image = reader.acquireLatestImage();
+                                ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                                byte[] bytes = new byte[buffer.capacity()];
+                                buffer.get(bytes);
+                                jpegLength = bytes;
+                                mCurrentPictureValues.put(MediaStore.Images.ImageColumns.SIZE,
+                                                          jpegLength);
 
-                            save(bytes);
-                        } catch (FileNotFoundException e) {
-                            e.printStackTrace();
-                        } catch (IOException e) {
-                            e.printStackTrace();
-                        } finally {
-                            if (image != null) {
-                                image.close();
+                                save(bytes);
+                            } catch (FileNotFoundException e) {
+                                e.printStackTrace();
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            } finally {
+                                if (image != null) {
+                                    image.close();
+                                }
                             }
                         }
-                    }
 
-                    private void save(byte[] bytes) throws IOException {
-                        OutputStream output = null;
-                        try {
-                            output = new FileOutputStream(file);
-                            output.write(bytes);
-                        } finally {
-                            if (null != output) {
-                                output.close();
+                        private void save(byte[] bytes) throws IOException {
+                            OutputStream output = null;
+                            try {
+                                output = new FileOutputStream(file);
+                                output.write(bytes);
+                            } finally {
+                                if (null != output) {
+                                    output.close();
+                                }
                             }
                         }
-                    }
-                };
+                    };
             reader.setOnImageAvailableListener(readerListener, mBackgroundHandler);
             final CameraCaptureSession.CaptureCallback captureListener =
-                new CameraCaptureSession.CaptureCallback() {
-                    @Override
-                    public void onCaptureCompleted(CameraCaptureSession session,
-                                                   CaptureRequest request,
-                                                   TotalCaptureResult result) {
-                        super.onCaptureCompleted(session, request, result);
-                        Toast.makeText(mActivity, "Saved:" + file, Toast.LENGTH_SHORT).show();
+                    new CameraCaptureSession.CaptureCallback() {
+                        @Override
+                        public void onCaptureCompleted(CameraCaptureSession session,
+                                                       CaptureRequest request,
+                                                       TotalCaptureResult result) {
+                            super.onCaptureCompleted(session, request, result);
+                            Toast.makeText(mActivity, "Saved:" + file, Toast.LENGTH_SHORT).show();
 
-                        createCameraPreview();
-                    }
-                };
-            cameraDevice.createCaptureSession(
-                outputSurfaces, new CameraCaptureSession.StateCallback() {
-                    @Override
-                    public void onConfigured(CameraCaptureSession session) {
-                        try {
-                            session.capture(captureRequestBuilder.build(), captureListener,
-                                            mBackgroundHandler);
-                        } catch (CameraAccessException e) {
-                            e.printStackTrace();
+                            createCameraPreview();
                         }
-                    }
+                    };
+            cameraDevice.createCaptureSession(
+                    outputSurfaces, new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(CameraCaptureSession session) {
+                            try {
+                                session.capture(captureRequestBuilder.build(), captureListener,
+                                                mBackgroundHandler);
+                            } catch (CameraAccessException e) {
+                                e.printStackTrace();
+                            }
+                        }
 
-                    @Override
-                    public void onConfigureFailed(CameraCaptureSession session) {}
-                }, mBackgroundHandler);
+                        @Override
+                        public void onConfigureFailed(CameraCaptureSession session) {
+                        }
+                    }, mBackgroundHandler);
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
@@ -448,11 +511,18 @@ public class BotmLeftCam {
 
     /* Recording Start*/
     private void startRecordingVideo() {
-        if (null == cameraDevice || !textureView.isAvailable() || null == mProfile) {
+        if (null == cameraDevice || !textureView.isAvailable()) {
             return;
         }
         try {
             closePreviewSession();
+            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
+            String videoQuality = settings.getString("video_list", "medium");
+
+            int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
+            Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
+
+            mProfile = CamcorderProfile.get(0, quality);
             setUpMediaRecorder();
             SurfaceTexture texture = textureView.getSurfaceTexture();
             if (texture == null) return;
@@ -507,9 +577,10 @@ public class BotmLeftCam {
         if (null == mActivity) {
             return;
         }
+
+        mMediaRecorder = new MediaRecorder();
         mMediaRecorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
         mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
-        mMediaRecorder.setProfile(mProfile);
 
         String fileDetails[] = Utils.generateFileDetails(Utils.MEDIA_TYPE_VIDEO);
         if (fileDetails == null || fileDetails.length < 5) {
@@ -518,19 +589,34 @@ public class BotmLeftCam {
         }
         mVideoFilename = fileDetails[3];
         mCurrentVideoValues =
-            Utils.getContentValues(Utils.MEDIA_TYPE_VIDEO, fileDetails, mProfile.videoFrameWidth,
-                                   mProfile.videoFrameHeight);
+                Utils.getContentValues(Utils.MEDIA_TYPE_VIDEO, fileDetails,
+                                       mProfile.videoFrameWidth, mProfile.videoFrameHeight);
 
+        mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
         /**
          * set output file in media recorder
          */
         mMediaRecorder.setOutputFile(mVideoFilename);
+        mMediaRecorder.setVideoEncodingBitRate(10000000);
+        mMediaRecorder.setVideoFrameRate(30);
+        mMediaRecorder.setVideoSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
+        mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+        mMediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
 
+        int rotation = mActivity.getWindowManager().getDefaultDisplay().getRotation();
+        switch (mSensorOrientation) {
+            case SENSOR_ORIENTATION_DEFAULT_DEGREES:
+                mMediaRecorder.setOrientationHint(DEFAULT_ORIENTATIONS.get(rotation));
+                break;
+            case SENSOR_ORIENTATION_INVERSE_DEGREES:
+                mMediaRecorder.setOrientationHint(INVERSE_ORIENTATIONS.get(rotation));
+                break;
+        }
         try {
             mMediaRecorder.prepare();
         } catch (IOException ex) {
             Log.e(TAG, "prepare failed for " + mVideoFilename, ex);
-            mMediaRecorder.reset();
+            releaseMedia();
             throw new RuntimeException(ex);
         }
     }
@@ -546,9 +632,9 @@ public class BotmLeftCam {
     private void stopRecordingVideo() {
         mIsRecordingVideo = false;
         TakeVideoButton.setText(R.string.record);
+
         // Stop recording
-        mMediaRecorder.stop();
-        mMediaRecorder.reset();
+        releaseMedia();
 
         if (null != mActivity) {
             Toast.makeText(mActivity, "Video saved: " + mVideoFilename, Toast.LENGTH_SHORT).show();

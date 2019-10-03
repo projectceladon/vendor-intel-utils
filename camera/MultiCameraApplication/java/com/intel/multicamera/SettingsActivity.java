@@ -64,9 +64,9 @@ public class SettingsActivity extends AppCompatActivity {
         if (GlobalVariable.numOfCameras != 0) getSupportedSize(manager);
 
         getFragmentManager()
-            .beginTransaction()
-            .replace(R.id.settings, new SettingsFragment())
-            .commit();
+                .beginTransaction()
+                .replace(R.id.settings, new SettingsFragment())
+                .commit();
     }
 
     public void getSupportedSize(CameraManager manager) {
@@ -80,12 +80,12 @@ public class SettingsActivity extends AppCompatActivity {
             CameraCharacteristics characteristics = manager.getCameraCharacteristics(camerId);
 
             StreamConfigurationMap map =
-                characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+                    characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             if (map == null) {
             }
 
             GlobalVariable.SupportedSizes =
-                new ArrayList<>(Arrays.asList(map.getOutputSizes(ImageFormat.JPEG)));
+                    new ArrayList<>(Arrays.asList(map.getOutputSizes(ImageFormat.JPEG)));
 
         } catch (CameraAccessException e) {
             e.printStackTrace();
@@ -93,7 +93,7 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     public static class SettingsFragment
-        extends PreferenceFragment implements OnSharedPreferenceChangeListener {
+            extends PreferenceFragment implements OnSharedPreferenceChangeListener {
         public String TAG = "SettingsFragment";
         public static final String SIZE_LARGE = "large";
         public static final String SIZE_MEDIUM = "medium";
@@ -105,9 +105,9 @@ public class SettingsActivity extends AppCompatActivity {
         private static final String SIZE_SETTING_STRING_DIMENSION_DELIMITER = "x";
 
         public static SparseArray<SelectedVideoQualities> sCachedSelectedVideoQualities =
-            new SparseArray<SelectedVideoQualities>(3);
+                new SparseArray<SelectedVideoQualities>(3);
         private static String mPrefChangedKey = null;
-        static boolean isPrefChangedKeyChnaged = false;
+        static boolean isPrefChangedKeyChanged = false;
         /** The selected {@link CamcorderProfile} qualities. */
         public static class SelectedVideoQualities {
             public int large = -1;
@@ -133,11 +133,11 @@ public class SettingsActivity extends AppCompatActivity {
 
         /** Video qualities sorted by size. */
         public static int[] sVideoQualities =
-            new int[] {// CamcorderProfile.QUALITY_HIGH,
-                       CamcorderProfile.QUALITY_1080P, CamcorderProfile.QUALITY_720P,
-                       CamcorderProfile.QUALITY_480P,  CamcorderProfile.QUALITY_CIF,
-                       CamcorderProfile.QUALITY_QVGA,  CamcorderProfile.QUALITY_QCIF,
-                       CamcorderProfile.QUALITY_LOW};
+                new int[] {// CamcorderProfile.QUALITY_HIGH,
+                           CamcorderProfile.QUALITY_1080P, CamcorderProfile.QUALITY_720P,
+                           CamcorderProfile.QUALITY_480P,  CamcorderProfile.QUALITY_CIF,
+                           CamcorderProfile.QUALITY_QVGA,  CamcorderProfile.QUALITY_QCIF,
+                           CamcorderProfile.QUALITY_LOW};
 
         static SelectedVideoQualities VideoQualities;
         public int numOfCameras = GlobalVariable.numOfCameras;
@@ -150,7 +150,7 @@ public class SettingsActivity extends AppCompatActivity {
             setPreferencesFromResource(R.xml.root_preferences, rootKey);
             mCamcorderProfileNames = getResources().getStringArray(R.array.camcorder_profile_names);
 
-            isPrefChangedKeyChnaged = false;
+            isPrefChangedKeyChanged = false;
         }
 
         @Override
@@ -171,7 +171,7 @@ public class SettingsActivity extends AppCompatActivity {
 
                 // Put in the summaries for the currently set values.
                 final PreferenceGroup Prf_Resolution =
-                    (PreferenceGroup)findPreference("pref_resolution");
+                        (PreferenceGroup)findPreference("pref_resolution");
 
                 fillEntriesAndSummaries(Prf_Resolution);
             }
@@ -179,26 +179,25 @@ public class SettingsActivity extends AppCompatActivity {
             Log.d(TAG, "SettingsFragment onResume end");
 
             getPreferenceScreen().getSharedPreferences().registerOnSharedPreferenceChangeListener(
-                this);
+                    this);
         }
 
         @Override
         public void onPause() {
             super.onPause();
             getPreferenceScreen().getSharedPreferences().unregisterOnSharedPreferenceChangeListener(
-                this);
+                    this);
         }
 
         @Override
         public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String Key) {
             setSummary(findPreference(Key));
             mPrefChangedKey = Key;
-            isPrefChangedKeyChnaged = true;
+            isPrefChangedKeyChanged = true;
         }
 
         public static String getchangedPrefKey() {
-            if (isPrefChangedKeyChnaged == true) {
-                isPrefChangedKeyChnaged = false;
+            if (isPrefChangedKeyChanged == true) {
                 return mPrefChangedKey;
             } else {
                 return DEFAULT_KEY;
@@ -302,8 +301,8 @@ public class SettingsActivity extends AppCompatActivity {
         private String getSizeSummaryString(Size size) {
             int width = size.getWidth();
             int height = size.getHeight();
-            String result =
-                getResources().getString(R.string.setting_summary_width_and_height, width, height);
+            String result = getResources().getString(R.string.setting_summary_width_and_height,
+                                                     width, height);
             return result;
         }
 

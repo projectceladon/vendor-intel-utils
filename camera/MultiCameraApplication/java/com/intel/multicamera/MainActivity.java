@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2012 The Android Open Source Project
  * Copyright (c) 2019 Intel Corporation.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +17,7 @@
 
 package com.intel.multicamera;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -34,6 +36,7 @@ import android.widget.FrameLayout;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
+import androidx.core.app.ActivityCompat;
 
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
@@ -41,16 +44,18 @@ public class MainActivity extends AppCompatActivity {
      * An {@link AutoFitTextureView} for camera preview.
      */
     private AutoFitTextureView mTopLeftCam_textureView, mTopRightCam_textureView,
-        mBotmLeftCam_textureView, mBotmRightCam_textureView;
+            mBotmLeftCam_textureView, mBotmRightCam_textureView;
 
     private Button mTopLeftCam_PictureButton, mTopRightCam_PictureButton,
-        mBotmLeftCam_PictureButton, mBotmRightCam_PictureButton, mTopLeftCam_RecordButton,
-        mTopRightCam_RecordButton, mBotmLeftCam_RecordButton, mBotmRightCam_RecordButton;
+            mBotmLeftCam_PictureButton, mBotmRightCam_PictureButton, mTopLeftCam_RecordButton,
+            mTopRightCam_RecordButton, mBotmLeftCam_RecordButton, mBotmRightCam_RecordButton;
 
     private int numOfCameras;
     private static final int REQUEST_CAMERA_PERMISSION = 200;
     private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
     private FrameLayout frameView0, frameView1, frameView2, frameView3;
+
+    private boolean mHasCriticalPermissions = false;
 
     TopLeftCam mTopLeftCam;
     TopRightCam mTopRightCam;
@@ -71,12 +76,19 @@ public class MainActivity extends AppCompatActivity {
         Toolbar toolbar = findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
 
+        checkPermissions();
+        if (!mHasCriticalPermissions) {
+            Log.v(TAG, "onCreate: Missing critical permissions.");
+            finish();
+            return;
+        }
+
         setVisibilityFrameLayout();
     }
 
     public void Open_TopLeftCam() {
         mTopLeftCam_textureView = findViewById(R.id.textureview0);
-        assert mTopLeftCam_textureView != null;
+        if (mTopLeftCam_textureView == null) return;
 
         mTopLeftCam_PictureButton = findViewById(R.id.Picture0);
         mTopLeftCam_RecordButton = findViewById(R.id.Record0);
@@ -92,7 +104,7 @@ public class MainActivity extends AppCompatActivity {
 
     public void Open_TopRightCam() {
         mTopRightCam_textureView = findViewById(R.id.textureview1);
-        assert mTopRightCam_textureView != null;
+        if (mTopRightCam_textureView == null) return;
 
         mTopRightCam_PictureButton = findViewById(R.id.Picture1);
         mTopRightCam_RecordButton = findViewById(R.id.Record1);
@@ -103,7 +115,7 @@ public class MainActivity extends AppCompatActivity {
 
     public void Open_BotmLeftCam() {
         mBotmLeftCam_textureView = findViewById(R.id.textureview2);
-        assert mTopRightCam_textureView != null;
+        if (mBotmLeftCam_textureView == null) return;
 
         mBotmLeftCam_PictureButton = findViewById(R.id.Picture2);
         mBotmLeftCam_RecordButton = findViewById(R.id.Record2);
@@ -114,7 +126,7 @@ public class MainActivity extends AppCompatActivity {
 
     public void Open_BotmRightCam() {
         mBotmRightCam_textureView = findViewById(R.id.textureview3);
-        assert mTopRightCam_textureView != null;
+        if (mBotmRightCam_textureView == null) return;
 
         mBotmRightCam_PictureButton = findViewById(R.id.Picture3);
         mBotmRightCam_RecordButton = findViewById(R.id.Record3);
@@ -144,7 +156,7 @@ public class MainActivity extends AppCompatActivity {
             numOfCameras = manager.getCameraIdList().length;
             // if (numCameras != "") { numOfCameras = Integer.parseInt(numCameras); }
             Log.d(TAG, "onCreate Inside openCamera() Total Cameras: " +
-                           manager.getCameraIdList().length);
+                               manager.getCameraIdList().length);
 
             if (numOfCameras == 1) {
                 frameView1.setVisibility(FrameLayout.INVISIBLE);
@@ -184,11 +196,10 @@ public class MainActivity extends AppCompatActivity {
         if (requestCode == REQUEST_CAMERA_PERMISSION) {
             if (grantResults[0] == PackageManager.PERMISSION_DENIED) {
                 // close the app
-                Toast
-                    .makeText(MainActivity.this,
-                              "Sorry!!!, you can't use this app without granting permission",
-                              Toast.LENGTH_LONG)
-                    .show();
+                Toast.makeText(MainActivity.this,
+                               "Sorry!!!, you can't use this app without granting permission",
+                               Toast.LENGTH_LONG)
+                        .show();
                 finish();
             }
         }
@@ -200,14 +211,102 @@ public class MainActivity extends AppCompatActivity {
             frameView0.setVisibility(FrameLayout.VISIBLE);
         } else if (mTopLeftCam_textureView == null) {
             mTopLeftCam_textureView = findViewById(R.id.textureview0);
-            assert mTopLeftCam_textureView != null;
+            if (mTopLeftCam_textureView == null) return;
         }
 
         if (mTopLeftCam_textureView.isAvailable()) {
             frameView0.setVisibility(FrameLayout.VISIBLE);
-            mTopLeftCam.openCamera();
+            mTopLeftCam.openCamera(mTopLeftCam_textureView.getWidth(),
+                                   mTopLeftCam_textureView.getHeight());
         } else {
             mTopLeftCam_textureView.setSurfaceTextureListener(mTopLeftCam.textureListener);
+        }
+    }
+
+    private void manageTopRightCam() {
+        if (mTopRightCam == null) {
+            Open_TopRightCam();
+            frameView1.setVisibility(FrameLayout.VISIBLE);
+
+        } else if (mTopRightCam_textureView == null) {
+            mTopRightCam_textureView = findViewById(R.id.textureview1);
+            if (mTopRightCam_textureView == null) return;
+        }
+
+        if (mTopRightCam_textureView.isAvailable()) {
+            frameView1.setVisibility(FrameLayout.VISIBLE);
+            mTopRightCam.openCamera(mTopRightCam_textureView.getWidth(),
+                                    mTopRightCam_textureView.getHeight());
+        } else {
+            mTopRightCam_textureView.setSurfaceTextureListener(mTopRightCam.textureListener);
+        }
+    }
+
+    private void manageBotmLeftCam() {
+        if (mBotmLeftCam == null) {
+            Open_BotmLeftCam();
+            frameView2.setVisibility(FrameLayout.VISIBLE);
+
+        } else if (mBotmLeftCam_textureView == null) {
+            mBotmLeftCam_textureView = findViewById(R.id.textureview2);
+            if (mBotmLeftCam_textureView == null) return;
+        }
+
+        if (mBotmLeftCam_textureView.isAvailable()) {
+            frameView2.setVisibility(FrameLayout.VISIBLE);
+            mBotmLeftCam.openCamera(mBotmLeftCam_textureView.getWidth(),
+                                    mBotmLeftCam_textureView.getHeight());
+        } else {
+            mBotmLeftCam_textureView.setSurfaceTextureListener(mBotmLeftCam.textureListener);
+        }
+    }
+
+    private void manageBotmRightCam() {
+        if (mBotmRightCam == null) {
+            Open_BotmRightCam();
+            frameView3.setVisibility(FrameLayout.VISIBLE);
+
+        } else if (mBotmRightCam_textureView == null) {
+            mBotmRightCam_textureView = findViewById(R.id.textureview3);
+            if (mBotmRightCam_textureView == null) return;
+        }
+
+        if (mBotmRightCam_textureView.isAvailable()) {
+            frameView3.setVisibility(FrameLayout.VISIBLE);
+            mBotmRightCam.openCamera(mBotmRightCam_textureView.getWidth(),
+                                     mBotmRightCam_textureView.getHeight());
+        } else {
+            mBotmRightCam_textureView.setSurfaceTextureListener(mBotmRightCam.textureListener);
+        }
+    }
+
+    /**
+     * Checks if any of the needed Android runtime permissions are missing.
+     * If they are, then launch the permissions activity under one of the following conditions:
+     * a) The permissions dialogs have not run yet. We will ask for permission only once.
+     * b) If the missing permissions are critical to the app running, we will display a fatal error
+     * dialog. Critical permissions are: camera, microphone and storage. The app cannot run without
+     * them. Non-critical permission is location.
+     */
+    private void checkPermissions() {
+        if (ActivityCompat.checkSelfPermission(getApplicationContext(),
+                                               Manifest.permission.CAMERA) ==
+                    PackageManager.PERMISSION_GRANTED &&
+            ActivityCompat.checkSelfPermission(getApplicationContext(),
+                                               Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED &&
+            ActivityCompat.checkSelfPermission(getApplicationContext(),
+                                               Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                    PackageManager.PERMISSION_GRANTED) {
+            mHasCriticalPermissions = true;
+        } else {
+            mHasCriticalPermissions = false;
+        }
+
+        if (!mHasCriticalPermissions) {
+            Intent intent = new Intent(this, PermissionsActivity.class);
+            startActivity(intent);
+            finish();
         }
     }
 
@@ -216,10 +315,17 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         Log.e(TAG, "onResume");
 
+        checkPermissions();
+        if (!mHasCriticalPermissions) {
+            Log.v(TAG, "onResume: Missing critical permissions.");
+            finish();
+            return;
+        }
+
         CameraManager manager = (CameraManager)getSystemService(Context.CAMERA_SERVICE);
         try {
             numOfCameras = manager.getCameraIdList().length;
-            Log.d(TAG, "Total Cameras: " + manager.getCameraIdList().length);
+            Log.d(TAG, "onResume Total Cameras: " + manager.getCameraIdList().length);
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
@@ -227,17 +333,17 @@ public class MainActivity extends AppCompatActivity {
         if (numOfCameras == 1) {
             manageTopLeftCam();
         } else if (numOfCameras == 2) {
-            if (mTopLeftCam_textureView.isAvailable()) {
-                mTopLeftCam.openCamera();
-            } else {
-                mTopLeftCam_textureView.setSurfaceTextureListener(mTopLeftCam.textureListener);
-            }
-
-            if (mTopRightCam_textureView.isAvailable()) {
-                mTopRightCam.openCamera();
-            } else {
-                mTopRightCam_textureView.setSurfaceTextureListener(mTopRightCam.textureListener);
-            }
+            manageTopLeftCam();
+            manageTopRightCam();
+        } else if (numOfCameras == 3) {
+            manageTopLeftCam();
+            manageBotmLeftCam();
+            manageTopRightCam();
+        } else if (numOfCameras == 4) {
+            manageTopLeftCam();
+            manageTopRightCam();
+            manageBotmLeftCam();
+            manageBotmRightCam();
         } else {
             Log.d(TAG, "onResume No CAMERA CONNECTED");
             frameView0.setVisibility(FrameLayout.INVISIBLE);
