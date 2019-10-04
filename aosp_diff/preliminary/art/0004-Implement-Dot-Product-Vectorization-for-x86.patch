@@ -1,0 +1,431 @@
+From 7cf5607f472020711e36eedbbfebb25b40d3f90e Mon Sep 17 00:00:00 2001
+From: Vladimir Marko <vmarko@google.com>
+Date: Tue, 29 Oct 2019 10:17:53 +0000
+Subject: [PATCH] Revert^2 "Implement Dot Product Vectorization for x86"
+
+This reverts commit b8c884e5f22390386b202459ab55ef3046631e42.
+
+And fixes a codegen bug (the reason why the original CL was
+reverted).
+
+Test: 684-checker-simd-dotprod
+Test: DEX2OAT_HOST_INSTRUCTION_SET_FEATURES="sse4.1" test.py --host
+Test: test.py --host --jit --gcstress
+Change-Id: Ibef925d1037abc9cb5f3d4dbd79f1d1eceae2f71
+Signed-off-by: Shalini Salomi Bodapati <shalini.salomi.bodapati@intel.com>
+---
+ compiler/optimizing/code_generator_vector_x86.cc   | 31 +++++++-
+ .../optimizing/code_generator_vector_x86_64.cc     | 31 +++++++-
+ compiler/optimizing/loop_optimization.cc           | 12 ++-
+ compiler/utils/x86/assembler_x86.cc                | 14 ++++
+ compiler/utils/x86/assembler_x86.h                 |  1 +
+ compiler/utils/x86/assembler_x86_test.cc           |  5 ++
+ compiler/utils/x86_64/assembler_x86_64.cc          | 33 +++++++-
+ compiler/utils/x86_64/assembler_x86_64.h           |  1 +
+ compiler/utils/x86_64/assembler_x86_64_test.cc     |  5 ++
+ test/684-checker-simd-dotprod/src/Main.java        |  2 +
+ .../src/other/TestFloatDouble.java                 | 93 ++++++++++++++++++++++
+ 11 files changed, 218 insertions(+), 10 deletions(-)
+ create mode 100644 test/684-checker-simd-dotprod/src/other/TestFloatDouble.java
+
+diff --git a/compiler/optimizing/code_generator_vector_x86.cc b/compiler/optimizing/code_generator_vector_x86.cc
+index 68aef77..1390af2 100644
+--- a/compiler/optimizing/code_generator_vector_x86.cc
++++ b/compiler/optimizing/code_generator_vector_x86.cc
+@@ -1201,11 +1201,38 @@ void InstructionCodeGeneratorX86::VisitVecSADAccumulate(HVecSADAccumulate* instr
+ }
+ 
+ void LocationsBuilderX86::VisitVecDotProd(HVecDotProd* instruction) {
+-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
++  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
++  locations->SetInAt(0, Location::RequiresFpuRegister());
++  locations->SetInAt(1, Location::RequiresFpuRegister());
++  locations->SetInAt(2, Location::RequiresFpuRegister());
++  locations->SetOut(Location::SameAsFirstInput());
++  locations->AddTemp(Location::RequiresFpuRegister());
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecDotProd(HVecDotProd* instruction) {
+-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
++  LocationSummary* locations = instruction->GetLocations();
++  XmmRegister acc = locations->InAt(0).AsFpuRegister<XmmRegister>();
++  XmmRegister left = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister right = locations->InAt(2).AsFpuRegister<XmmRegister>();
++  switch (instruction->GetPackedType()) {
++    case DataType::Type::kInt32: {
++      DCHECK_EQ(4u, instruction->GetVectorLength());
++      XmmRegister tmp = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
++      if (!cpu_has_avx) {
++        __ movaps(tmp, right);
++        __ pmaddwd(tmp, left);
++        __ paddd(acc, tmp);
++      } else {
++        __ vpmaddwd(tmp, left, right);
++        __ vpaddd(acc, acc, tmp);
++      }
++      break;
++    }
++    default:
++      LOG(FATAL) << "Unsupported SIMD Type" << instruction->GetPackedType();
++      UNREACHABLE();
++  }
+ }
+ 
+ // Helper to set up locations for vector memory operations.
+diff --git a/compiler/optimizing/code_generator_vector_x86_64.cc b/compiler/optimizing/code_generator_vector_x86_64.cc
+index 19dfd1d..7fac44d 100644
+--- a/compiler/optimizing/code_generator_vector_x86_64.cc
++++ b/compiler/optimizing/code_generator_vector_x86_64.cc
+@@ -1174,11 +1174,38 @@ void InstructionCodeGeneratorX86_64::VisitVecSADAccumulate(HVecSADAccumulate* in
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecDotProd(HVecDotProd* instruction) {
+-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
++  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
++  locations->SetInAt(0, Location::RequiresFpuRegister());
++  locations->SetInAt(1, Location::RequiresFpuRegister());
++  locations->SetInAt(2, Location::RequiresFpuRegister());
++  locations->SetOut(Location::SameAsFirstInput());
++  locations->AddTemp(Location::RequiresFpuRegister());
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecDotProd(HVecDotProd* instruction) {
+-  LOG(FATAL) << "No SIMD for " << instruction->GetId();
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
++  LocationSummary* locations = instruction->GetLocations();
++  XmmRegister acc = locations->InAt(0).AsFpuRegister<XmmRegister>();
++  XmmRegister left = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister right = locations->InAt(2).AsFpuRegister<XmmRegister>();
++  switch (instruction->GetPackedType()) {
++    case DataType::Type::kInt32: {
++      DCHECK_EQ(4u, instruction->GetVectorLength());
++      XmmRegister tmp = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
++      if (!cpu_has_avx) {
++        __ movaps(tmp, right);
++        __ pmaddwd(tmp, left);
++        __ paddd(acc, tmp);
++      } else {
++        __ vpmaddwd(tmp, left, right);
++        __ vpaddd(acc, acc, tmp);
++      }
++      break;
++    }
++    default:
++      LOG(FATAL) << "Unsupported SIMD Type" << instruction->GetPackedType();
++      UNREACHABLE();
++  }
+ }
+ 
+ // Helper to set up locations for vector memory operations.
+diff --git a/compiler/optimizing/loop_optimization.cc b/compiler/optimizing/loop_optimization.cc
+index 9c4e9d2..567a41e 100644
+--- a/compiler/optimizing/loop_optimization.cc
++++ b/compiler/optimizing/loop_optimization.cc
+@@ -1623,14 +1623,20 @@ bool HLoopOptimization::TrySetVectorType(DataType::Type type, uint64_t* restrict
+                              kNoDotProd;
+             return TrySetVectorLength(16);
+           case DataType::Type::kUint16:
+-          case DataType::Type::kInt16:
+             *restrictions |= kNoDiv |
+                              kNoAbs |
+                              kNoSignedHAdd |
+                              kNoUnroundedHAdd |
+-                             kNoSAD|
++                             kNoSAD |
+                              kNoDotProd;
+             return TrySetVectorLength(8);
++          case DataType::Type::kInt16:
++            *restrictions |= kNoDiv |
++                             kNoAbs |
++                             kNoSignedHAdd |
++                             kNoUnroundedHAdd |
++                             kNoSAD;
++            return TrySetVectorLength(8);
+           case DataType::Type::kInt32:
+             *restrictions |= kNoDiv | kNoSAD;
+             return TrySetVectorLength(4);
+@@ -2166,7 +2172,7 @@ bool HLoopOptimization::VectorizeDotProdIdiom(LoopNode* node,
+                                               bool generate_code,
+                                               DataType::Type reduction_type,
+                                               uint64_t restrictions) {
+-  if (!instruction->IsAdd() || (reduction_type != DataType::Type::kInt32)) {
++  if (!instruction->IsAdd() || reduction_type != DataType::Type::kInt32) {
+     return false;
+   }
+ 
+diff --git a/compiler/utils/x86/assembler_x86.cc b/compiler/utils/x86/assembler_x86.cc
+index 166aec8..55f7691 100644
+--- a/compiler/utils/x86/assembler_x86.cc
++++ b/compiler/utils/x86/assembler_x86.cc
+@@ -2268,6 +2268,20 @@ void X86Assembler::pmaddwd(XmmRegister dst, XmmRegister src) {
+ }
+ 
+ 
++void X86Assembler::vpmaddwd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/* is_twobyte_form=*/ true);
++  X86ManagedRegister vvvv_reg = X86ManagedRegister::FromXmmRegister(src1);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(0xF5);
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++
+ void X86Assembler::phaddw(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitUint8(0x66);
+diff --git a/compiler/utils/x86/assembler_x86.h b/compiler/utils/x86/assembler_x86.h
+index 1b6941c..27fde26 100644
+--- a/compiler/utils/x86/assembler_x86.h
++++ b/compiler/utils/x86/assembler_x86.h
+@@ -577,6 +577,7 @@ class X86Assembler final : public Assembler {
+   void pavgw(XmmRegister dst, XmmRegister src);
+   void psadbw(XmmRegister dst, XmmRegister src);
+   void pmaddwd(XmmRegister dst, XmmRegister src);
++  void vpmaddwd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+   void phaddw(XmmRegister dst, XmmRegister src);
+   void phaddd(XmmRegister dst, XmmRegister src);
+   void haddps(XmmRegister dst, XmmRegister src);
+diff --git a/compiler/utils/x86/assembler_x86_test.cc b/compiler/utils/x86/assembler_x86_test.cc
+index 12d9646..9253730 100644
+--- a/compiler/utils/x86/assembler_x86_test.cc
++++ b/compiler/utils/x86/assembler_x86_test.cc
+@@ -965,6 +965,11 @@ TEST_F(AssemblerX86Test, PMAddWD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::pmaddwd, "pmaddwd %{reg2}, %{reg1}"), "pmaddwd");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VPMAddWD) {
++  DriverStr(
++      RepeatFFF(&x86::X86Assembler::vpmaddwd, "vpmaddwd %{reg3}, %{reg2}, %{reg1}"), "vpmaddwd");
++}
++
+ TEST_F(AssemblerX86Test, PHAddW) {
+   DriverStr(RepeatFF(&x86::X86Assembler::phaddw, "phaddw %{reg2}, %{reg1}"), "phaddw");
+ }
+diff --git a/compiler/utils/x86_64/assembler_x86_64.cc b/compiler/utils/x86_64/assembler_x86_64.cc
+index 64246aa..2c5dd9e 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.cc
++++ b/compiler/utils/x86_64/assembler_x86_64.cc
+@@ -71,6 +71,7 @@ bool X86_64Assembler::CpuHasAVXorAVX2FeatureFlag() {
+   return false;
+ }
+ 
++
+ void X86_64Assembler::call(CpuRegister reg) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitOptionalRex32(reg);
+@@ -758,7 +759,6 @@ void X86_64Assembler::movd(CpuRegister dst, XmmRegister src, bool is64bit) {
+   EmitOperand(src.LowBits(), Operand(dst));
+ }
+ 
+-
+ void X86_64Assembler::addss(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitUint8(0xF3);
+@@ -768,7 +768,6 @@ void X86_64Assembler::addss(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
+-
+ void X86_64Assembler::addss(XmmRegister dst, const Address& src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitUint8(0xF3);
+@@ -2633,7 +2632,6 @@ void X86_64Assembler::xorps(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
+-
+ void X86_64Assembler::pxor(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitUint8(0x66);
+@@ -3145,6 +3143,35 @@ void X86_64Assembler::pmaddwd(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++void X86_64Assembler::vpmaddwd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0xF5);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
+ void X86_64Assembler::phaddw(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitUint8(0x66);
+diff --git a/compiler/utils/x86_64/assembler_x86_64.h b/compiler/utils/x86_64/assembler_x86_64.h
+index 15f3ab9..70072d9 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.h
++++ b/compiler/utils/x86_64/assembler_x86_64.h
+@@ -615,6 +615,7 @@ class X86_64Assembler final : public Assembler {
+   void pavgw(XmmRegister dst, XmmRegister src);
+   void psadbw(XmmRegister dst, XmmRegister src);
+   void pmaddwd(XmmRegister dst, XmmRegister src);
++  void vpmaddwd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+   void phaddw(XmmRegister dst, XmmRegister src);
+   void phaddd(XmmRegister dst, XmmRegister src);
+   void haddps(XmmRegister dst, XmmRegister src);
+diff --git a/compiler/utils/x86_64/assembler_x86_64_test.cc b/compiler/utils/x86_64/assembler_x86_64_test.cc
+index e3b8390..3921c4a 100644
+--- a/compiler/utils/x86_64/assembler_x86_64_test.cc
++++ b/compiler/utils/x86_64/assembler_x86_64_test.cc
+@@ -1740,6 +1740,11 @@ TEST_F(AssemblerX86_64Test, Pmaddwd) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pmaddwd, "pmaddwd %{reg2}, %{reg1}"), "pmadwd");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VPmaddwd) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vpmaddwd,
++                      "vpmaddwd %{reg3}, %{reg2}, %{reg1}"), "vpmaddwd");
++}
++
+ TEST_F(AssemblerX86_64Test, Phaddw) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::phaddw, "phaddw %{reg2}, %{reg1}"), "phaddw");
+ }
+diff --git a/test/684-checker-simd-dotprod/src/Main.java b/test/684-checker-simd-dotprod/src/Main.java
+index e0c8716..aa03d1e 100644
+--- a/test/684-checker-simd-dotprod/src/Main.java
++++ b/test/684-checker-simd-dotprod/src/Main.java
+@@ -17,6 +17,7 @@
+ import other.TestByte;
+ import other.TestCharShort;
+ import other.TestVarious;
++import other.TestFloatDouble;
+ 
+ /**
+  * Tests for dot product idiom vectorization.
+@@ -26,6 +27,7 @@ public class Main {
+      TestByte.run();
+      TestCharShort.run();
+      TestVarious.run();
++     TestFloatDouble.run();
+      System.out.println("passed");
+   }
+ }
+diff --git a/test/684-checker-simd-dotprod/src/other/TestFloatDouble.java b/test/684-checker-simd-dotprod/src/other/TestFloatDouble.java
+new file mode 100644
+index 0000000..b155ae1
+--- /dev/null
++++ b/test/684-checker-simd-dotprod/src/other/TestFloatDouble.java
+@@ -0,0 +1,93 @@
++/*
++ * Copyright (C) 2019 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package other;
++
++/**
++ * Tests for dot product idiom vectorization: char and short case.
++ */
++public class TestFloatDouble {
++
++  public static final int ARRAY_SIZE = 1024;
++
++
++  /// CHECK-START-{X86_64}: float other.TestFloatDouble.testDotProdSimpleFloat(float[], float[]) loop_optimization (after)
++  /// CHECK-NOT:                 VecDotProd
++  public static final float testDotProdSimpleFloat(float[] a, float[] b) {
++    float sum = 0;
++    for (int i = 0; i < b.length; i++) {
++      sum += a[i] * b[i];
++    }
++    return sum;
++  }
++
++
++  /// CHECK-START-{X86_64}: double other.TestFloatDouble.testDotProdSimpleDouble(double[], double[]) loop_optimization (after)
++  /// CHECK-NOT:                 VecDotProd
++
++  public static final double testDotProdSimpleDouble(double[] a, double[] b) {
++    double sum = 0;
++    for (int i = 0; i < b.length; i++) {
++      sum += a[i] * b[i];
++    }
++    return sum;
++  }
++
++  private static void expectEquals(float expected, float result) {
++    if (Float.compare(expected, result) != 0) {
++      throw new Error("Expected: " + expected + ", found: " + result);
++    }
++  }
++
++  private static void expectEquals(double expected, double result) {
++    if (Double.compare(expected, result) != 0) {
++      throw new Error("Expected: " + expected + ", found: " + result);
++    }
++  }
++
++  public static void run() {
++    final float MAX_F = Float.MAX_VALUE;
++    final float MIN_F = Float.MIN_VALUE;
++    final double MAX_D = Double.MAX_VALUE;
++    final double MIN_D = Double.MIN_VALUE;
++
++    double[] a = new double[1024];
++    for (int i = 0; i != 1024; ++i) a[i] = MAX_D;
++    double[] b = new double[1024];
++    for (int i = 0; i != 1024; ++i) b[i] = ((i & 1) == 0) ? 1.0 : -1.0;
++    expectEquals(0.0, testDotProdSimpleDouble(a,b));
++
++    float[] f1_1 = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3.33f, 0.125f, 3.0f, 0.25f};
++    float[] f2_1 = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6.125f, 2.25f, 1.213f, 0.5f};
++    expectEquals(24.4415f, testDotProdSimpleFloat(f1_1, f2_1));
++
++    float [] f1_2 = { 0, 0, 0, 0, 0, 0, 0, 0,
++                      0, 0, 0, 0,  0.63671875f, 0.76953125f, 0.22265625f, 1.0f};
++    float [] f2_2 = { 0, 0, 0, 0, 0, 0, 0, 0,
++                      0, 0, 0, 0, MIN_F, MAX_F, MAX_F, MIN_F };
++    expectEquals(3.376239E38f, testDotProdSimpleFloat(f1_2, f2_2));
++
++    float[] f1_3 = { 0xc0000000, 0xc015c28f, 0x411dd42c, 0, 0, 0, 0,
++                     0, 0, 0, 0, 0, 0, 0, MIN_F, MIN_F };
++    float[] f2_3 = { 0x3f4c779a, 0x408820c5, 0, 0, 0, 0, 0,
++                     0, 0, 0, 0, 0, 0x00000000, 0, MAX_F, MAX_F };
++    expectEquals(-2.30124471E18f, testDotProdSimpleFloat(f1_3, f2_3));
++  }
++
++  public static void main(String[] args) {
++    run();
++  }
++}
+-- 
+1.9.1
+
