@@ -1,4 +1,4 @@
-#!/vendor/bin/sh
+#!/system/bin/sh
 
 # userdata checkpoint cleanup at postinstall step
 USERDATA_CHECKPOINT_GC=vendor/bin/checkpoint_gc
