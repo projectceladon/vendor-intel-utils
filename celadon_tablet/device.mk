@@ -151,6 +151,8 @@ PRODUCT_COPY_FILES += \
 
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
     ro.wifi.softap_dualband_allow=false
+
+PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/wlan/overlay-disable_keepalive_offload
 ##############################################################
 # Source: device/intel/mixins/groups/kernel/gmin64/product.mk.1
 ##############################################################
