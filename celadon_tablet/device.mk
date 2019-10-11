@@ -45,6 +45,11 @@ PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/slot-ab/postinstall.sh:recovery/
 # Source: device/intel/mixins/groups/boot-arch/project-celadon/product.mk
 ##############################################################
 TARGET_UEFI_ARCH := x86_64
+
+# Android Kernelflinger uses the OpenSSL library to support the
+# bootloader policy
+KERNELFLINGER_SSL_LIBRARY := openssl
+
 BIOS_VARIANT := release
 
 
@@ -98,9 +103,6 @@ endif
 # Allow Kernelflinger to ignore the RSCI reset source "not_applicable"
 # when setting the bootreason
 KERNELFLINGER_IGNORE_NOT_APPLICABLE_RESET := true
-# Android Kernelflinger uses the OpenSSL library to support the
-# bootloader policy
-KERNELFLINGER_SSL_LIBRARY := openssl
 
 KERNELFLINGER_SUPPORT_SELF_USB_DEVICE_MODE_PROTOCOL := true
 
