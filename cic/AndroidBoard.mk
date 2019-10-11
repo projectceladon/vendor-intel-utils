@@ -58,7 +58,7 @@ multidroid: droid kf4cic-$(TARGET_BUILD_VARIANT)
 	$(hide) cp -r $(PRODUCT_OUT)/efi/kf4cic.efi $(PRODUCT_OUT)/kf4cic.efi
 	$(hide) chmod -R g-w $(PRODUCT_OUT)/docker/android/root
 
-TARGET_AIC_FILE_NAME := $(TARGET_PRODUCT)-aic-$(BUILD_NUMBER_FROM_FILE).tar.gz
+TARGET_AIC_FILE_NAME := $(TARGET_PRODUCT)-$(BUILD_NUMBER_FROM_FILE).tar.gz
 
 .PHONY: aic
 aic: .KATI_NINJA_POOL := console
