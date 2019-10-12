@@ -1,6 +1,8 @@
 #!/bin/bash
 
 g_file="/sys/bus/pci/devices/0000:00:02.0/4ec1ff92-81d7-11e9-aed4-5bf6a9a2bb0a"
+ovmf_file="./OVMF.fd"
+[ ! -f $ovmf_file ] && ovmf_file="/usr/share/qemu/OVMF.fd"
 
 function setup_vgpu(){
 	res=0
@@ -27,7 +29,7 @@ function launch_hwrender(){
 	  -device qemu-xhci,id=xhci,addr=0x8 \
 	  -device usb-mouse \
 	  -device usb-kbd \
-	  -bios ./OVMF.fd \
+	  -drive file=$ovmf_file,format=raw,if=pflash \
 	  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
 	  -device isa-serial,chardev=charserial0,id=serial0 \
 	  -device intel-hda -device hda-duplex \
@@ -53,7 +55,7 @@ function launch_swrender(){
 	  -device qemu-xhci,id=xhci,addr=0x8 \
 	  -device usb-mouse \
 	  -device usb-kbd \
-	  -bios ./OVMF.fd \
+	  -drive file=$ovmf_file,format=raw,if=pflash \
 	  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
 	  -device isa-serial,chardev=charserial0,id=serial0 \
 	  -device intel-hda -device hda-duplex \

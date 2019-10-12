@@ -9,6 +9,7 @@ function ubu_changes_require(){
 	if [ x$res = xn ]; then
 		exit 0
 	fi
+	apt install -y wget mtools ovmf
 }
 
 function ubu_install_qemu(){
@@ -46,24 +47,12 @@ function ubu_enable_host_gvtg(){
 }
 
 function check_network(){
-	wget --timeout=3 --tries=1 https://download.qemu.org/ -q -O /dev/null
+	wget --timeout=3 --tries=1 https://github.com/projectceladon/ -q -O /dev/null
 	if [ $? -ne 0 ]; then
-		echo "access https://download.qemu.org/ failed!"
+		echo "access https://github.com/projectceladon/ failed!"
 		echo "please make sure network is working"
 		exit -1
 	fi
-}
-
-function ubu_build_bios(){
-	apt install -y build-essential git uuid-dev iasl nasm git iasl
-	wget https://github.com/tianocore/edk2/archive/edk2-stable201808.tar.gz
-	tar zxvf edk2-stable201808.tar.gz
-	cd edk2-edk2-stable201808/
-	source ./edksetup.sh
-	make -C BaseTools/
-	build -a X64 -t GCC48 -p OvmfPkg/OvmfPkgX64.dsc
-	find . -name OVMF.fd -exec cp {} .. \;
-	cd ..
 }
 
 function ask_reboot(){
@@ -94,10 +83,7 @@ function check_kernel(){
 function clr_changes_require(){
 	echo "Please make sure your bundle is working"
 	echo "If you run the installation first time, reboot is required"
-}
-
-function clr_install_qemu(){
-	swupd bundle-add kvm-host
+	swupd bundle-add wget storage-utils kvm-host
 }
 
 function clr_enable_host_gvtg(){
@@ -106,18 +92,6 @@ function clr_enable_host_gvtg(){
 	&& echo "i915.enable_gvt=1 kvm.ignore_msrs=1 intel_iommu=on" > /etc/kernel/cmdline.d/gvtg.conf \
 	&& clr-boot-manager update \
 	&& reboot_required=1
-}
-
-function clr_build_bios(){
-	swupd bundle-add nasm devpkg-util-linux acpica-unix2 git
-	wget https://github.com/tianocore/edk2/archive/edk2-stable201808.tar.gz
-	tar zxvf edk2-stable201808.tar.gz
-	cd edk2-edk2-stable201808/
-	source ./edksetup.sh
-	make -C BaseTools/
-	build -a X64 -t GCC48 -p OvmfPkg/OvmfPkgX64.dsc
-	find . -name OVMF.fd -exec cp {} .. \;
-	cd ..
 }
 
 function get_required_scripts(){
@@ -133,7 +107,6 @@ if [[ $version =~ "Ubuntu" ]]; then
 	check_network
 	ubu_changes_require
 	ubu_install_qemu
-	ubu_build_bios
 	ubu_enable_host_gvtg
 	get_required_scripts
 	check_kernel
@@ -141,8 +114,6 @@ if [[ $version =~ "Ubuntu" ]]; then
 elif [[ $version =~ "Clear Linux OS" ]]; then
 	check_network
 	clr_changes_require
-	clr_install_qemu
-	clr_build_bios
 	clr_enable_host_gvtg
 	get_required_scripts
 	check_kernel
