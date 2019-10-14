@@ -40,10 +40,15 @@ function ubu_install_qemu(){
 }
 
 function ubu_enable_host_gvtg(){
-	[[ ! `cat /etc/default/grub` =~ "i915.enable_gvt=1 intel_iommu=on" ]] \
-	&& sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"i915.enable_gvt=1 intel_iommu=on /g" /etc/default/grub \
-	&& update-grub \
-	&& reboot_required=1
+	if [[ ! `cat /etc/default/grub` =~ "i915.enable_gvt=1 intel_iommu=on" ]]; then
+		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-g, do you want to continue? [Y/n]" res
+		if [ x$res = xn ]; then
+			exit 0
+		fi
+		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"i915.enable_gvt=1 intel_iommu=on /g" /etc/default/grub
+		update-grub
+		reboot_required=1
+	fi
 }
 
 function check_network(){
@@ -75,8 +80,8 @@ function check_kernel(){
 	if [[ "$version" > "5.0.0" ]]; then 
 		echo "hardware rendering is supported in current kernel"
 	else
-		echo "W: Detected linux version $version, software rendering will be used"
-		echo "W: Please upgrade kernel version newer than 5.0.0 for smoother experience!"
+		echo "W: Detected linux version $version"
+		echo "W: Please upgrade kernel version newer than 5.0.0!"
 	fi
 }
 
@@ -87,11 +92,16 @@ function clr_changes_require(){
 }
 
 function clr_enable_host_gvtg(){
-	[[ ! -f /etc/kernel/cmdline.d/gvtg.conf ]] \
-	&& mkdir -p /etc/kernel/cmdline.d/ \
-	&& echo "i915.enable_gvt=1 kvm.ignore_msrs=1 intel_iommu=on" > /etc/kernel/cmdline.d/gvtg.conf \
-	&& clr-boot-manager update \
-	&& reboot_required=1
+	if [[ ! -f /etc/kernel/cmdline.d/gvtg.conf ]]; then
+		read -p "File '/etc/kernel/cmdline.d/gvtg.conf' will be created for enabling GVT-g, do you want to continue? [Y/n]" res
+		if [ x$res = xn ]; then
+			exit 0
+		fi
+		mkdir -p /etc/kernel/cmdline.d/
+		echo "i915.enable_gvt=1 kvm.ignore_msrs=1 intel_iommu=on" > /etc/kernel/cmdline.d/gvtg.conf
+		clr-boot-manager update
+		reboot_required=1
+	fi
 }
 
 function get_required_scripts(){

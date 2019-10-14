@@ -82,8 +82,8 @@ if [[ "$vno" > "5.0.0" ]]; then
 		launch_swrender
 	fi
 else
-	echo "W: Detected linux version $vno, fall to software rendering"
-	echo "W: Please upgrade kernel version newer than 5.0.0 for smoother experience!"
-	launch_swrender
+	echo "E: Detected linux version $vno"
+	echo "E: Please upgrade kernel version newer than 5.0.0!"
+	exit -1
 fi
 
