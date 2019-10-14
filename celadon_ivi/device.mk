@@ -322,7 +322,6 @@ endif
 PRODUCT_PACKAGES += \
 	libtrusty \
 	storageproxyd \
-	cp_ss \
 	libinteltrustystorage \
 	libinteltrustystorageinterface \
 	gatekeeper.trusty \
