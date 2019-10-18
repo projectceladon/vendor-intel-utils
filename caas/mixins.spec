@@ -11,7 +11,7 @@ kernel: gmin64(useprebuilt=false,src_path=kernel/lts2018, loglevel=7, interactiv
 disk-bus: auto
 boot-arch: project-celadon(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,disk_encryption=false,file_encryption=false,target=caas,rpmb_simulate=true,ignore_not_applicable_reset=true,self_usb_device_mode_protocol=true,usb_storage=true,live_boot=true)
 sepolicy: permissive
-bluetooth: btusb(ivi=true)
+bluetooth: auto(ivi=false)
 audio: project-celadon
 vendor-partition: true(partition_size=600,partition_name=vendor)
 acpio-partition: true(partition_size=2)
@@ -28,7 +28,7 @@ storage: sdcard-mmc0-usb-sd(adoptablesd=true,adoptableusb=true)
 ethernet: dhcp
 camera-ext: ext-camera-only
 rfkill: true(force_disable=)
-wlan: iwlwifi(libwifi-hal=true)
+wlan: auto
 codecs: configurable(hw_ve_h265=true, hw_vd_vp9=true, hw_vd_mp2=true, hw_vd_vc1=false, platform=bxt)
 codec2: true
 usb: host
