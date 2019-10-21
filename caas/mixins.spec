@@ -60,7 +60,7 @@ firststage-mount: true
 cpuset: autocores
 usb-init: true
 usb-audio-init: true
-usb-otg-switch: false
+usb-otg-switch: true
 vndk: true
 public-libraries: true
 device-specific: caas
