@@ -573,6 +573,10 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/abota/generic/vendor_prefix
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/usb-init
 ##############################################################
+# Source: device/intel/mixins/groups/usb-otg-switch/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/usb-role-switch
+##############################################################
 # Source: device/intel/mixins/groups/vndk/true/BoardConfig.mk
 ##############################################################
 BOARD_VNDK_VERSION := current
