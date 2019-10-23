@@ -81,7 +81,7 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/gsi_keys.mk)
 
 KERNELFLINGER_SUPPORT_KEYBOX_PROVISION := true
 ##############################################################
-# Source: device/intel/mixins/groups/wlan/iwlwifi/product.mk
+# Source: device/intel/mixins/groups/wlan/auto/product.mk
 ##############################################################
 PRODUCT_PACKAGES += \
     hostapd \
@@ -93,32 +93,15 @@ PRODUCT_PACKAGES += \
     iw
 
 PRODUCT_PACKAGES += \
-  android.hardware.wifi@1.0-service
-
-# FW and PNVM
-PRODUCT_PACKAGES += \
-    iwl-nvm
-
-# iwlwifi USC
-PRODUCT_PACKAGES += \
-    wifi_intel_usc
-
-#copy iwlwifi wpa config files
-PRODUCT_COPY_FILES += \
-        $(INTEL_PATH_COMMON)/wlan/wpa_supplicant-common.conf:vendor/etc/wifi/wpa_supplicant.conf \
-        $(INTEL_PATH_COMMON)/wlan/iwlwifi/wpa_supplicant_overlay.conf:vendor/etc/wifi/wpa_supplicant_overlay.conf \
-        $(INTEL_PATH_COMMON)/wlan/iwlwifi/p2p_supplicant_overlay.conf:vendor/etc/wifi/p2p_supplicant_overlay.conf \
-        frameworks/native/data/etc/android.hardware.wifi.xml:vendor/etc/permissions/android.hardware.wifi.xml \
-        frameworks/native/data/etc/android.hardware.wifi.direct.xml:vendor/etc/permissions/android.hardware.wifi.direct.xml
+    android.hardware.wifi@1.0-service
 
 PRODUCT_COPY_FILES += \
-    vendor/linux/firmware/iwlwifi-9260-th-b0-jf-b0-43.ucode:$(TARGET_COPY_OUT_VENDOR)/firmware/iwlwifi-9260-th-b0-jf-b0-43.ucode \
-    vendor/linux/firmware/iwlwifi-3168-29.ucode:$(TARGET_COPY_OUT_VENDOR)/firmware/iwlwifi-3168-29.ucode \
-    vendor/linux/firmware/iwlwifi-8265-36.ucode:$(TARGET_COPY_OUT_VENDOR)/firmware/iwlwifi-8265-36.ucode
-
-
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
-    ro.wifi.softap_dualband_allow=false
+    $(INTEL_PATH_COMMON)/wlan/wpa_supplicant-common.conf:vendor/etc/wifi/wpa_supplicant.conf \
+    $(INTEL_PATH_COMMON)/wlan/wpa_supplicant_overlay.conf:vendor/etc/wifi/wpa_supplicant_overlay.conf \
+    $(INTEL_PATH_COMMON)/wlan/p2p_supplicant_overlay.conf:vendor/etc/wifi/p2p_supplicant_overlay.conf \
+    $(INTEL_PATH_COMMON)/wlan/wlan.conf:system/etc/modprobe.d/wlan.conf \
+    frameworks/native/data/etc/android.hardware.wifi.xml:vendor/etc/permissions/android.hardware.wifi.xml \
+    frameworks/native/data/etc/android.hardware.wifi.direct.xml:vendor/etc/permissions/android.hardware.wifi.direct.xml
 
 PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/wlan/overlay-disable_keepalive_offload
 ##############################################################
@@ -138,12 +121,14 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_M
 ##############################################################
 PRODUCT_PACKAGES += sepolicy-areq-checker
 ##############################################################
-# Source: device/intel/mixins/groups/bluetooth/btusb/product.mk
+# Source: device/intel/mixins/groups/bluetooth/auto/product.mk
 ##############################################################
+PRODUCT_PACKAGES += \
+    hciconfig
+
 # Bluetooth tools eng / userdebug
 ifneq ($(TARGET_BUILD_VARIANT),user)
 PRODUCT_PACKAGES += \
-    hciconfig \
     btmon \
     hcitool
 endif
@@ -152,27 +137,14 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.bluetooth.xml:vendor/etc/permissions/android.hardware.bluetooth.xml \
     frameworks/native/data/etc/android.hardware.bluetooth_le.xml:vendor/etc/permissions/android.hardware.bluetooth_le.xml
 
-PRODUCT_COPY_FILES += \
-    vendor/linux/firmware/intel/ibt-18-16-1.ddc:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-16-1.ddc \
-    vendor/linux/firmware/intel/ibt-18-16-1.sfi:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-16-1.sfi \
-    vendor/linux/firmware/intel/ibt-18-2.ddc:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-2.ddc \
-    vendor/linux/firmware/intel/ibt-18-2.sfi:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-2.sfi \
-    vendor/linux/firmware/intel/ibt-12-16.ddc:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-12-16.ddc \
-    vendor/linux/firmware/intel/ibt-12-16.sfi:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-12-16.sfi \
-    vendor/linux/firmware/intel/ibt-hw-37.8.10-fw-22.50.19.14.f.bseq:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-hw-37.8.10-fw-22.50.19.14.f.bseq
-
-PRODUCT_COPY_FILES += \
-	$(LOCAL_PATH)/extra_files/bluetooth/bluetooth_auto_detection.sh:vendor/bin/bluetooth_auto_detection.sh
-
 PRODUCT_PROPERTY_OVERRIDES += bluetooth.rfkill=1
 
 PRODUCT_PACKAGES += \
     android.hardware.bluetooth@1.0-service.vbt \
     libbt-vendor \
 
-PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-car
-PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/intel/car/overlay
 
+PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-tablet
 
 ##############################################################
 # Source: device/intel/mixins/groups/audio/project-celadon/product.mk
@@ -265,8 +237,6 @@ PRODUCT_COPY_FILES += \
 
 PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.keymaster@3.0-service \
-                    android.hardware.wifi@1.0-service \
-                    android.hardware.bluetooth@1.0-service.vbt \
                     android.hardware.usb@1.0-impl \
                     android.hardware.usb@1.0-service \
                     android.hardware.dumpstate@1.0-impl \
@@ -279,8 +249,7 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.graphics.allocator@2.0-service \
                     android.hardware.renderscript@1.0-impl \
                     android.hardware.graphics.composer@2.1-impl \
-                    android.hardware.graphics.composer@2.1-service \
-                    libbt-vendor
+                    android.hardware.graphics.composer@2.1-service
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 ##############################################################

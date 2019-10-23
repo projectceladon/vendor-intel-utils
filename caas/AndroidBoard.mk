@@ -220,10 +220,6 @@ make_bootloader_dir:
 $(PRODUCT_OUT)/ramdisk.img: make_bootloader_dir
 
 ##############################################################
-# Source: device/intel/mixins/groups/wlan/iwlwifi/AndroidBoard.mk
-##############################################################
-LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/wlan/load_legacy_iwlwifi.in
-##############################################################
 # Source: device/intel/mixins/groups/kernel/gmin64/AndroidBoard.mk.1
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/kernel/load_kernel_modules.in
@@ -481,9 +477,9 @@ LOCAL_POST_INSTALL_CMD := $(INTEL_PATH_SEPOLICY)/tools/capchecker $(LOCAL_USER_O
 
 include $(BUILD_PHONY_PACKAGE)
 ##############################################################
-# Source: device/intel/mixins/groups/bluetooth/btusb/AndroidBoard.mk
+# Source: device/intel/mixins/groups/bluetooth/auto/AndroidBoard.mk
 ##############################################################
-LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/bluetooth/load_bt.in
+AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/bluetooth/auto_hal.in
 ##############################################################
 # Source: device/intel/mixins/groups/audio/project-celadon/AndroidBoard.mk
 ##############################################################
