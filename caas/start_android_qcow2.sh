@@ -27,6 +27,7 @@ function launch_hwrender(){
 	  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
 	  -cpu host \
 	  -device qemu-xhci,id=xhci,addr=0x8 \
+	  -device usb-host,vendorid=0x8087,productid=0x0a2b \
 	  -device usb-mouse \
 	  -device usb-kbd \
 	  -drive file=$ovmf_file,format=raw,if=pflash \
