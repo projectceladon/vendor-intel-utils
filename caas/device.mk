@@ -118,7 +118,7 @@ KERNEL_MODULES_ROOT_PATH ?= vendor/lib/modules
 KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
 ##############################################################
-# Source: device/intel/mixins/groups/sepolicy/permissive/product.mk
+# Source: device/intel/mixins/groups/sepolicy/enforcing/product.mk
 ##############################################################
 PRODUCT_PACKAGES += sepolicy-areq-checker
 ##############################################################
