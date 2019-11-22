@@ -27,6 +27,10 @@ function launch_hwrender(){
 	  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
 	  -cpu host \
 	  -device qemu-xhci,id=xhci,addr=0x8 \
+	  -device usb-host,vendorid=0x03eb,productid=0x8a6e \
+	  -device usb-host,vendorid=0x0eef,productid=0x7200 \
+	  -device usb-host,vendorid=0x222a,productid=0x0141 \
+	  -device usb-host,vendorid=0x222a,productid=0x0088 \
 	  -device usb-host,vendorid=0x8087,productid=0x0a2b \
 	  -device usb-host,vendorid=0x046d,productid=0x082d \
 	  -device usb-host,vendorid=0x046d,productid=0x085c \
@@ -57,6 +61,10 @@ function launch_swrender(){
 	  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
 	  -cpu host \
 	  -device qemu-xhci,id=xhci,addr=0x8 \
+	  -device usb-host,vendorid=0x03eb,productid=0x8a6e \
+	  -device usb-host,vendorid=0x0eef,productid=0x7200 \
+	  -device usb-host,vendorid=0x222a,productid=0x0141 \
+	  -device usb-host,vendorid=0x222a,productid=0x0088 \
 	  -device usb-host,vendorid=0x046d,productid=0x082d \
 	  -device usb-host,vendorid=0x046d,productid=0x085c \
 	  -device usb-mouse \
