@@ -1,4 +1,5 @@
 /*
+ * Copyright (C) 2014 The Android Open Source Project
  * Copyright (c) 2019 Intel Corporation.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,28 +17,29 @@
 
 package com.intel.multicamera;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.*;
-import android.content.pm.PackageManager;
-import android.graphics.ImageFormat;
-import android.hardware.camera2.*;
-import android.hardware.camera2.params.StreamConfigurationMap;
-import android.media.CamcorderProfile;
+import android.content.res.Resources;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.graphics.Point;
 import android.net.Uri;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.util.Log;
-import android.util.Size;
-import android.util.SparseIntArray;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.InputStream;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Date;
-import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import javax.microedition.khronos.opengles.GL11;
 
 public class Utils {
     private static final String TAG = "Utils";
@@ -48,12 +50,27 @@ public class Utils {
     public static final String IMAGE_FILE_NAME_FORMAT = "'IMG'_yyyyMMdd_HHmmss";
     public static final String VIDEO_FILE_NAME_FORMAT = "'VID'_yyyyMMdd_HHmmss";
 
-    /** See android.hardware.Camera.ACTION_NEW_PICTURE. */
+    /**
+     * See android.hardware.Camera.ACTION_NEW_PICTURE.
+     */
     public static final String ACTION_NEW_PICTURE = "android.hardware.action.NEW_PICTURE";
-    /** See android.hardware.Camera.ACTION_NEW_VIDEO. */
+    /**
+     * See android.hardware.Camera.ACTION_NEW_VIDEO.
+     */
     public static final String ACTION_NEW_VIDEO = "android.hardware.action.NEW_VIDEO";
 
     private static final String VIDEO_BASE_URI = "content://media/external/video/media";
+
+    private static final int MAX_PEEK_BITMAP_PIXELS = 1600000;  // 1.6 * 4 MBs.
+
+    private static Uri mCurrentPictureUri, mCurrentVideoUri;
+
+    /**
+     * Has to be in sync with the receiving MovieActivity.
+     */
+    public static final String KEY_TREAT_UP_AS_BACK = "treat-up-as-back";
+
+    private static final int DOWN_SAMPLE_FACTOR = 4;
 
     @SuppressLint("SimpleDateFormat")
     public static File createOutputmediaStorageDir() {
@@ -100,7 +117,17 @@ public class Utils {
             Log.v(TAG, "Current Picture URI: " + uri);
         }
 
+        mCurrentPictureUri = uri;
+
         context.sendBroadcast(new Intent(ACTION_NEW_PICTURE, uri));
+    }
+
+    public static Uri getCurrentPictureUri() {
+        return mCurrentPictureUri;
+    }
+
+    public static Uri getCurrentVideoUri() {
+        return mCurrentVideoUri;
     }
 
     public static void broadcastNewVideo(Context context, ContentValues values) {
@@ -117,6 +144,7 @@ public class Utils {
         } finally {
             Log.v(TAG, "Current video URI: " + uri);
         }
+        mCurrentVideoUri = uri;
 
         context.sendBroadcast(new Intent(ACTION_NEW_VIDEO, uri));
     }
@@ -164,7 +192,7 @@ public class Utils {
     }
 
     public static ContentValues getContentValues(int type, String fileDetails[], int width,
-                                                 int height) {
+                                                 int height, long duration, long size) {
         if (fileDetails.length < 5) {
             Log.e(TAG, "Invalid file details");
             return null;
@@ -185,6 +213,8 @@ public class Utils {
             contentValue.put(MediaStore.Images.ImageColumns.DATA, fileDetails[3]);
             contentValue.put(MediaStore.MediaColumns.WIDTH, width);
             contentValue.put(MediaStore.MediaColumns.HEIGHT, height);
+            contentValue.put(MediaStore.Images.ImageColumns.SIZE, size);
+
         } else if (MEDIA_TYPE_VIDEO == type) {
             contentValue = new ContentValues(9);
             contentValue.put(MediaStore.Video.Media.TITLE, fileDetails[0]);
@@ -198,7 +228,329 @@ public class Utils {
             contentValue.put(MediaStore.Video.Media.HEIGHT, height);
             contentValue.put(MediaStore.Video.Media.RESOLUTION,
                              Integer.toString(width) + "x" + Integer.toString(height));
+            contentValue.put(MediaStore.Video.Media.DURATION, duration);
+            contentValue.put(MediaStore.Video.Media.SIZE, size);
         }
         return contentValue;
+    }
+
+    /**
+     * Returns the maximum video recording duration (in milliseconds).
+     */
+    public static int getMaxVideoDuration(Context context) {
+        int duration = 0;  // in milliseconds, 0 means unlimited.
+        try {
+            duration =
+                    0;  // context.getResources().getInteger(R.integer.max_video_recording_length);
+        } catch (Resources.NotFoundException ex) {
+        }
+        return duration;
+    }
+
+    public static String millisecondToTimeString(long milliSeconds, boolean displayCentiSeconds) {
+        long seconds = milliSeconds / 1000;  // round down to compute seconds
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        long remainderMinutes = minutes - (hours * 60);
+        long remainderSeconds = seconds - (minutes * 60);
+
+        StringBuilder timeStringBuilder = new StringBuilder();
+
+        // Hours
+        if (hours > 0) {
+            if (hours < 10) {
+                timeStringBuilder.append('0');
+            }
+            timeStringBuilder.append(hours);
+
+            timeStringBuilder.append(':');
+        }
+
+        // Minutes
+        if (remainderMinutes < 10) {
+            timeStringBuilder.append('0');
+        }
+        timeStringBuilder.append(remainderMinutes);
+        timeStringBuilder.append(':');
+
+        // Seconds
+        if (remainderSeconds < 10) {
+            timeStringBuilder.append('0');
+        }
+        timeStringBuilder.append(remainderSeconds);
+
+        // Centi seconds
+        if (displayCentiSeconds) {
+            timeStringBuilder.append('.');
+            long remainderCentiSeconds = (milliSeconds - seconds * 1000) / 10;
+            if (remainderCentiSeconds < 10) {
+                timeStringBuilder.append('0');
+            }
+            timeStringBuilder.append(remainderCentiSeconds);
+        }
+
+        return timeStringBuilder.toString();
+    }
+
+    /**
+     * Load the thumbnail of an image from an {@link InputStream}.
+     *
+     * @param stream        The input stream of the image.
+     * @param imageWidth    Image width.
+     * @param imageHeight   Image height.
+     * @param widthBound    The bound of the width of the decoded image.
+     * @param heightBound   The bound of the height of the decoded image.
+     * @param orientation   The orientation of the image. The image will be rotated
+     *                      clockwise in degrees.
+     * @param maximumPixels The bound for the number of pixels of the decoded image.
+     * @return {@code null} if the decoding failed.
+     */
+    public static Bitmap loadImageThumbnailFromStream(InputStream stream, int imageWidth,
+                                                      int imageHeight, int widthBound,
+                                                      int heightBound, int orientation,
+                                                      int maximumPixels) {
+        /** 32K buffer. */
+        byte[] decodeBuffer = new byte[32 * 1024];
+
+        if (orientation % 180 != 0) {
+            int dummy = imageHeight;
+            imageHeight = imageWidth;
+            imageWidth = dummy;
+        }
+
+        // Generate Bitmap of maximum size that fits into widthBound x heightBound.
+        // Algorithm: start with full size and step down in powers of 2.
+        int targetWidth = imageWidth;
+        int targetHeight = imageHeight;
+        int sampleSize = 1;
+        while (targetHeight > heightBound || targetWidth > widthBound ||
+               targetHeight > GL11.GL_MAX_TEXTURE_SIZE || targetWidth > GL11.GL_MAX_TEXTURE_SIZE ||
+               targetHeight * targetWidth > maximumPixels) {
+            sampleSize <<= 1;
+            targetWidth = imageWidth / sampleSize;
+            targetHeight = imageWidth / sampleSize;
+        }
+
+        // For large (> MAXIMUM_TEXTURE_SIZE) high aspect ratio (panorama)
+        // Bitmap requests:
+        //   Step 1: ask for double size.
+        //   Step 2: scale maximum edge down to MAXIMUM_TEXTURE_SIZE.
+        //
+        // Here's the step 1: double size.
+        if ((heightBound > GL11.GL_MAX_TEXTURE_SIZE || widthBound > GL11.GL_MAX_TEXTURE_SIZE) &&
+            targetWidth * targetHeight < maximumPixels / 4 && sampleSize > 1) {
+            sampleSize >>= 2;
+        }
+
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inSampleSize = sampleSize;
+        opts.inTempStorage = decodeBuffer;
+        Bitmap b = BitmapFactory.decodeStream(stream, null, opts);
+
+        if (b == null) {
+            return null;
+        }
+
+        // Step 2: scale maximum edge down to maximum texture size.
+        // If Bitmap maximum edge > MAXIMUM_TEXTURE_SIZE, which can happen for panoramas,
+        // scale to fit in MAXIMUM_TEXTURE_SIZE.
+        if (b.getWidth() > GL11.GL_MAX_TEXTURE_SIZE || b.getHeight() > GL11.GL_MAX_TEXTURE_SIZE) {
+            int maxEdge = Math.max(b.getWidth(), b.getHeight());
+            b = Bitmap.createScaledBitmap(b, b.getWidth() * GL11.GL_MAX_TEXTURE_SIZE / maxEdge,
+                                          b.getHeight() * GL11.GL_MAX_TEXTURE_SIZE / maxEdge,
+                                          false);
+        }
+
+        // Not called often because most modes save image data non-rotated.
+        if (orientation != 0 && b != null) {
+            Matrix m = new Matrix();
+            m.setRotate(orientation);
+            b = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, false);
+        }
+
+        return b;
+    }
+
+    public static Optional<Bitmap> generateThumbnail(File path, int boundingWidthPx,
+                                                     int boundingHeightPx) {
+        final Bitmap bitmap;
+
+        /*if (getAttributes().isRendering()) {
+            return Storage.getPlaceholderForSession(data.getUri());
+        } else {*/
+
+        FileInputStream stream;
+
+        try {
+            stream = new FileInputStream(path);
+        } catch (FileNotFoundException e) {
+            Log.e(TAG, "### File not found ###:" + path.getPath());
+            return Optional.empty();
+        }
+        int width = 1280;
+        int height = 720;  //.getDimensions().getHeight();
+        int orientation = 0;
+
+        Point dim = resizeToFill(width, height, orientation, boundingWidthPx, boundingHeightPx);
+
+        // If the orientation is not vertical
+        if (orientation % 180 != 0) {
+            int dummy = dim.x;
+            dim.x = dim.y;
+            dim.y = dummy;
+        }
+
+        bitmap = loadImageThumbnailFromStream(stream, width, height, (int)(dim.x * 0.7f),
+                                              (int)(dim.y * 0.7), 0, MAX_PEEK_BITMAP_PIXELS);
+
+        return Optional.ofNullable(bitmap);
+        //}
+    }
+
+    /**
+     * Calculates a new dimension to fill the bound with the original aspect
+     * ratio preserved.
+     *
+     * @param imageWidth    The original width.
+     * @param imageHeight   The original height.
+     * @param imageRotation The clockwise rotation in degrees of the image which
+     *                      the original dimension comes from.
+     * @param boundWidth    The width of the bound.
+     * @param boundHeight   The height of the bound.
+     * @returns The final width/height stored in Point.x/Point.y to fill the
+     * bounds and preserve image aspect ratio.
+     */
+    public static Point resizeToFill(int imageWidth, int imageHeight, int imageRotation,
+                                     int boundWidth, int boundHeight) {
+        if (imageRotation % 180 != 0) {
+            // Swap width and height.
+            int savedWidth = imageWidth;
+            imageWidth = imageHeight;
+            imageHeight = savedWidth;
+        }
+
+        Point p = new Point();
+        p.x = boundWidth;
+        p.y = boundHeight;
+
+        // In some cases like automated testing, image height/width may not be
+        // loaded, to avoid divide by zero fall back to provided bounds.
+        if (imageWidth != 0 && imageHeight != 0) {
+            if (imageWidth * boundHeight > boundWidth * imageHeight) {
+                p.y = imageHeight * p.x / imageWidth;
+            } else {
+                p.x = imageWidth * p.y / imageHeight;
+            }
+        } else {
+            Log.w(TAG, "zero width/height, falling back to bounds (w|h|bw|bh):" + imageWidth + "|" +
+                               imageHeight + "|" + boundWidth + "|" + boundHeight);
+        }
+
+        return p;
+    }
+
+    /**
+     * Rotates and/or mirrors the bitmap. If a new bitmap is created, the
+     * original bitmap is recycled.
+     */
+    public static Bitmap rotateAndMirror(Bitmap b, int degrees, boolean mirror) {
+        if ((degrees != 0 || mirror) && b != null) {
+            Matrix m = new Matrix();
+            // Mirror first.
+            // horizontal flip + rotation = -rotation + horizontal flip
+            if (mirror) {
+                m.postScale(-1, 1);
+                degrees = (degrees + 360) % 360;
+                if (degrees == 0 || degrees == 180) {
+                    m.postTranslate(b.getWidth(), 0);
+                } else if (degrees == 90 || degrees == 270) {
+                    m.postTranslate(b.getHeight(), 0);
+                } else {
+                    throw new IllegalArgumentException("Invalid degrees=" + degrees);
+                }
+            }
+            if (degrees != 0) {
+                // clockwise
+                m.postRotate(degrees, (float)b.getWidth() / 2, (float)b.getHeight() / 2);
+            }
+
+            try {
+                Bitmap b2 = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+                if (b != b2) {
+                    b.recycle();
+                    b = b2;
+                }
+            } catch (OutOfMemoryError ex) {
+                // We have no memory to rotate. Return the original bitmap.
+            }
+        }
+        return b;
+    }
+
+    public static Optional<Bitmap> getVideoThumbnail(ContentResolver mContentResolver, Uri uri) {
+        Bitmap bitmap = null;
+        ParcelFileDescriptor mVideoFileDescriptor;
+
+        try {
+            mVideoFileDescriptor = mContentResolver.openFileDescriptor(uri, "r");
+            bitmap = Thumbnail.createVideoThumbnailBitmap(mVideoFileDescriptor.getFileDescriptor(),
+                                                          720);
+        } catch (java.io.FileNotFoundException ex) {
+            // invalid uri
+            Log.e(TAG, ex.toString());
+        }
+
+        if (bitmap != null) {
+            // MetadataRetriever already rotates the thumbnail. We should rotate
+            // it to match the UI orientation (and mirror if it is front-facing camera).
+            bitmap = rotateAndMirror(bitmap, 0, false);
+        }
+        return Optional.ofNullable(bitmap);
+    }
+
+    public static Intent getVideoPlayerIntent(Uri uri) {
+        return new Intent(Intent.ACTION_VIEW).setDataAndType(uri, "video/*");
+    }
+
+    public static void playVideo(Activity activity, Uri uri, String title) {
+        try {
+            Intent intent = getVideoPlayerIntent(uri)
+                                    .putExtra(Intent.EXTRA_TITLE, title)
+                                    .putExtra(KEY_TREAT_UP_AS_BACK, true);
+            activity.startActivity(intent);
+
+        } catch (ActivityNotFoundException e) {
+            Log.e(TAG, "cant play video");
+        }
+    }
+
+    public static String getRealPathFromURI(Context context, Uri contentUri) {
+        Cursor cursor = null;
+        int column_index;
+        try {
+            String[] proj = {MediaStore.Images.Media.DATA, MediaStore.Video.Media.DATA};
+            cursor = context.getContentResolver().query(contentUri, proj, null, null, null);
+
+            if (getMimeTypeFromURI(context, contentUri).compareTo("video/mp4") == 0) {
+                column_index = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA);
+                cursor.moveToFirst();
+
+            } else {
+                column_index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA);
+                cursor.moveToFirst();
+            }
+
+            return cursor.getString(column_index);
+        } finally {
+            if (cursor != null) {
+                cursor.close();
+            }
+        }
+    }
+
+    public static String getMimeTypeFromURI(Context context, Uri uri) {
+        ContentResolver cR = context.getContentResolver();
+        String type = cR.getType(uri);
+        return type;
     }
 }

@@ -53,12 +53,18 @@ import android.util.Log;
 public abstract class QuickActivity extends Activity {
     private String TAG = "QuickActivity";
 
-    /** onResume tasks delay from secure lockscreen. */
+    /**
+     * onResume tasks delay from secure lockscreen.
+     */
     private static final long ON_RESUME_DELAY_SECURE_MILLIS = 30;
-    /** onResume tasks delay from non-secure lockscreen. */
+    /**
+     * onResume tasks delay from non-secure lockscreen.
+     */
     private static final long ON_RESUME_DELAY_NON_SECURE_MILLIS = 15;
 
-    /** A reference to the main handler on which to run lifecycle methods. */
+    /**
+     * A reference to the main handler on which to run lifecycle methods.
+     */
     private Handler mMainHandler;
 
     /**
@@ -67,9 +73,13 @@ public abstract class QuickActivity extends Activity {
      */
     private boolean mSkippedFirstOnResume = false;
 
-    /** When application execution started in SystemClock.elapsedRealtimeNanos(). */
+    /**
+     * When application execution started in SystemClock.elapsedRealtimeNanos().
+     */
     protected long mExecutionStartNanoTime = 0;
-    /** Was this session started with onCreate(). */
+    /**
+     * Was this session started with onCreate().
+     */
     protected boolean mStartupOnCreate = false;
 
     /**

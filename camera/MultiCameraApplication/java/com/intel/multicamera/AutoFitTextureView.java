@@ -26,12 +26,15 @@ import android.view.TextureView;
 public class AutoFitTextureView extends TextureView {
     private int mRatioWidth = 0;
     private int mRatioHeight = 0;
+
     public AutoFitTextureView(Context context) {
         this(context, null);
     }
+
     public AutoFitTextureView(Context context, AttributeSet attrs) {
         this(context, attrs, 0);
     }
+
     public AutoFitTextureView(Context context, AttributeSet attrs, int defStyle) {
         super(context, attrs, defStyle);
     }
@@ -41,6 +44,7 @@ public class AutoFitTextureView extends TextureView {
      * on the ratio calculated from the parameters. Note that the actual sizes of parameters
      * don't matter, that is, calling setAspectRatio(2, 3) and setAspectRatio(4, 6) make the
      * same result.
+     *
      * @param width  Relative horizontal size
      * @param height Relative vertical size
      */
