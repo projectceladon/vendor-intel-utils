@@ -99,13 +99,16 @@ public class MultiViewActivity extends AppCompatActivity {
 
         FullScrn_Init();
 
-        setVisibilityFrameLayout();
-
         set_FrameVisibilities();
     }
 
     private void set_FrameVisibilities() {
         FrameVisibility = new int[4];
+
+        frameView0 = findViewById(R.id.control1);
+        frameView1 = findViewById(R.id.control2);
+        frameView2 = findViewById(R.id.control3);
+        frameView3 = findViewById(R.id.control4);
 
         FrameVisibility[0] = frameView0.getVisibility();
         FrameVisibility[1] = frameView1.getVisibility();
@@ -292,48 +295,11 @@ public class MultiViewActivity extends AppCompatActivity {
                                        mRecordingTimeView2, Data, roundedThumbnailView);
     }
 
-    public void setVisibilityFrameLayout() {
-        frameView0 = findViewById(R.id.control1);
-        frameView1 = findViewById(R.id.control2);
-        frameView2 = findViewById(R.id.control3);
-        frameView3 = findViewById(R.id.control4);
-
-        GetCameraCnt();
-        Log.d(TAG, "onCreate Total Cameras: " + numOfCameras);
-
-        if (numOfCameras == 1) {
-            frameView1.setVisibility(FrameLayout.INVISIBLE);
-            frameView2.setVisibility(FrameLayout.INVISIBLE);
-            frameView3.setVisibility(FrameLayout.INVISIBLE);
-            Open_TopLeftCam();
-        } else if (numOfCameras == 2) {
-            frameView2.setVisibility(FrameLayout.INVISIBLE);
-            frameView3.setVisibility(FrameLayout.INVISIBLE);
-            Open_TopLeftCam();
-        } else if (numOfCameras == 3) {
-            frameView3.setVisibility(FrameLayout.INVISIBLE);
-            Open_TopLeftCam();
-            Open_TopRightCam();
-            Open_BotmLeftCam();
-        } else if (numOfCameras == 4) {
-            Open_TopLeftCam();
-            Open_TopRightCam();
-            Open_BotmLeftCam();
-            Open_BotmRightCam();
-        } else {
-            Log.d(TAG, "No CAMERA CONNECTED");
-            frameView0.setVisibility(FrameLayout.INVISIBLE);
-            frameView1.setVisibility(FrameLayout.INVISIBLE);
-            frameView2.setVisibility(FrameLayout.INVISIBLE);
-            frameView3.setVisibility(FrameLayout.INVISIBLE);
-        }
-    }
-
     private void manageTopLeftCam() {
+        frameView0.setVisibility(FrameLayout.VISIBLE);
+        FrameVisibility[0] = frameView0.getVisibility();
         if (mTopLeftCam == null) {
             Open_TopLeftCam();
-            frameView0.setVisibility(FrameLayout.VISIBLE);
-            FrameVisibility[0] = frameView0.getVisibility();
         } else if (mTopLeftCam_textureView == null) {
             mTopLeftCam_textureView = findViewById(R.id.textureview0);
         }
@@ -348,10 +314,10 @@ public class MultiViewActivity extends AppCompatActivity {
     }
 
     private void manageTopRightCam() {
+        frameView1.setVisibility(FrameLayout.VISIBLE);
+        FrameVisibility[1] = frameView1.getVisibility();
         if (mTopRightCam == null) {
             Open_TopRightCam();
-            frameView1.setVisibility(FrameLayout.VISIBLE);
-            FrameVisibility[1] = frameView1.getVisibility();
 
         } else if (mTopRightCam_textureView == null) {
             mTopRightCam_textureView = findViewById(R.id.textureview1);
@@ -367,10 +333,10 @@ public class MultiViewActivity extends AppCompatActivity {
     }
 
     private void manageBotmLeftCam() {
+        frameView2.setVisibility(FrameLayout.VISIBLE);
+        FrameVisibility[2] = frameView2.getVisibility();
         if (mBotmLeftCam == null) {
             Open_BotmLeftCam();
-            frameView2.setVisibility(FrameLayout.VISIBLE);
-            FrameVisibility[2] = frameView2.getVisibility();
 
         } else if (mBotmLeftCam_textureView == null) {
             mBotmLeftCam_textureView = findViewById(R.id.textureview2);
@@ -386,10 +352,10 @@ public class MultiViewActivity extends AppCompatActivity {
     }
 
     private void manageBotmRightCam() {
+        frameView3.setVisibility(FrameLayout.VISIBLE);
+        FrameVisibility[3] = frameView3.getVisibility();
         if (mBotmRightCam == null) {
             Open_BotmRightCam();
-            frameView3.setVisibility(FrameLayout.VISIBLE);
-            FrameVisibility[3] = frameView3.getVisibility();
 
         } else if (mBotmRightCam_textureView == null) {
             mBotmRightCam_textureView = findViewById(R.id.textureview3);
@@ -428,15 +394,6 @@ public class MultiViewActivity extends AppCompatActivity {
 
         } else {
             Log.d(TAG, "onResume No CAMERA CONNECTED");
-            frameView0.setVisibility(FrameLayout.INVISIBLE);
-            frameView1.setVisibility(FrameLayout.INVISIBLE);
-            frameView2.setVisibility(FrameLayout.INVISIBLE);
-            frameView3.setVisibility(FrameLayout.INVISIBLE);
-
-            FrameVisibility[0] = frameView0.getVisibility();
-            FrameVisibility[1] = frameView1.getVisibility();
-            FrameVisibility[2] = frameView2.getVisibility();
-            FrameVisibility[3] = frameView3.getVisibility();
         }
     }
 

@@ -49,7 +49,6 @@ public class PermissionsActivity extends QuickActivity {
     private boolean mFlagHasMicrophonePermission;
     private boolean mFlagHasStoragePermission;
 
- 
     @Override
     protected void onCreateTasks(Bundle savedInstanceState) {
         setContentView(R.layout.permissions);
@@ -67,7 +66,6 @@ public class PermissionsActivity extends QuickActivity {
     @Override
     protected void onDestroyTasks() {
         Log.v(TAG, "onDestroy: unregistering receivers");
-
     }
 
     /**

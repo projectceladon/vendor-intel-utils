@@ -28,6 +28,8 @@ import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.*;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.media.CamcorderProfile;
 import android.media.Image;
 import android.media.ImageReader;
@@ -90,6 +92,7 @@ public class CameraBase {
     private long mRecordingStartTime;
     private boolean mRecordingTimeCountsDown = false;
     private static final int MSG_UPDATE_RECORD_TIME = 5;
+    private static final String SIZE_HD = "HD 720p";
 
     /**
      * Whether the app is recording video now
@@ -391,13 +394,13 @@ public class CameraBase {
 
             if (Key.compareTo(Capture_Key) == 0) {
                 previewSize = SettingsPrefUtil.sizeFromSettingString(
-                        settings.getString(Capture_Key, "640x480"));
+                        settings.getString(Capture_Key, "1280x720"));
                 Log.d(TAG,
                       "Selected imageDimension" + previewSize.getWidth() + previewSize.getHeight());
             } else {
-                String videoQuality = settings.getString(Video_key, "medium");
+                String videoQuality = settings.getString(Video_key, SIZE_HD);
 
-                int quality = SettingsPrefUtil.getVideoQuality(0, videoQuality);
+                int quality = SettingsPrefUtil.getFromSetting(videoQuality);
                 Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
 
                 mProfile = CamcorderProfile.get(0, quality);
@@ -429,8 +432,6 @@ public class CameraBase {
         @Override
         public void onDisconnected(CameraDevice camera) {
             Log.e(TAG, "onDisconnected");
-            frameView0 = mActivity.findViewById(R.id.control2);
-            frameView0.setVisibility(FrameLayout.INVISIBLE);
             closeCamera();
             Ui_Enable(false);
         }
@@ -448,8 +449,16 @@ public class CameraBase {
             super.onClosed(camera);
             SurfaceUtil.clear(mSurfaceTexture);
             Ui_Enable(false);
+            ResetResolutionSettings();
         }
     };
+
+    private void ResetResolutionSettings() {
+        SharedPreferences.Editor edit = settings.edit();
+        edit.remove(Capture_Key);
+        edit.remove(Video_key);
+        edit.commit();
+    }
 
     private void Ui_Enable(boolean flag) {
         TakeVideoButton.setEnabled(flag);
@@ -549,10 +558,10 @@ public class CameraBase {
             String Key = GetChnagedPrefKey();
 
             imageDimension = SettingsPrefUtil.sizeFromSettingString(
-                    settings.getString(Capture_Key, "640x480"));
-            String videoQuality = settings.getString(Video_key, "medium");
+                    settings.getString(Capture_Key, "1280x720"));
+            String videoQuality = settings.getString(Video_key, SIZE_HD);
 
-            int quality = SettingsPrefUtil.getVideoQuality(0, videoQuality);
+            int quality = SettingsPrefUtil.getFromSetting(videoQuality);
             Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
 
             mProfile = CamcorderProfile.get(0, quality);
@@ -671,7 +680,7 @@ public class CameraBase {
         try {
             settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
             imageDimension = SettingsPrefUtil.sizeFromSettingString(
-                    settings.getString(Capture_Key, "640x480"));
+                    settings.getString(Capture_Key, "1280x720"));
             Log.d(TAG, "Selected imageDimension" + imageDimension.getWidth() +
                                imageDimension.getHeight());
             ImageReader reader = ImageReader.newInstance(
@@ -693,15 +702,12 @@ public class CameraBase {
             final int mRotation = rotation;
             captureRequestBuilder.set(CaptureRequest.JPEG_ORIENTATION, getOrientation(rotation));
 
-            String fileDetails[] = Utils.generateFileDetails(Utils.MEDIA_TYPE_IMAGE);
+            final String fileDetails[] = Utils.generateFileDetails(Utils.MEDIA_TYPE_IMAGE);
             if (fileDetails == null || fileDetails.length < 5) {
                 Log.e(TAG, "Invalid file details");
                 return;
             }
             mPictureFilename = fileDetails[3];
-            mCurrentPictureValues = Utils.getContentValues(
-                    Utils.MEDIA_TYPE_IMAGE, fileDetails, imageDimension.getWidth(),
-                    imageDimension.getHeight(), 0, new File(mPictureFilename).length());
 
             file = new File(mPictureFilename);
 
@@ -715,9 +721,6 @@ public class CameraBase {
                                 ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                                 byte[] bytes = new byte[buffer.capacity()];
                                 buffer.get(bytes);
-                                jpegLength = bytes;
-                                mCurrentPictureValues.put(MediaStore.Images.ImageColumns.SIZE,
-                                                          jpegLength);
 
                                 save(bytes);
                             } catch (FileNotFoundException e) {
@@ -752,12 +755,14 @@ public class CameraBase {
                                                        TotalCaptureResult result) {
                             super.onCaptureCompleted(session, request, result);
 
+                            mCurrentPictureValues = Utils.getContentValues(
+                                    Utils.MEDIA_TYPE_IMAGE, fileDetails, imageDimension.getWidth(),
+                                    imageDimension.getHeight(), 0, file.length());
+
                             Utils.broadcastNewPicture(mActivity.getApplicationContext(),
                                                       mCurrentPictureValues);
 
                             mCurrentUri = Utils.getCurrentPictureUri();
-
-                            mRoundedThumbnailView.startRevealThumbnailAnimation("photo taken");
 
                             final Optional<Bitmap> bitmap = Utils.generateThumbnail(
                                     file, roundedThumbnailViewControlLayout.getWidth(),
@@ -767,6 +772,8 @@ public class CameraBase {
                                 mActivity.runOnUiThread(new Runnable() {
                                     @Override
                                     public void run() {
+                                        mRoundedThumbnailView.startRevealThumbnailAnimation(
+                                                "photo taken");
                                         mRoundedThumbnailView.setThumbnail(
                                                 bitmap.get(), getOrientation(mRotation));
                                     }
@@ -808,9 +815,9 @@ public class CameraBase {
         try {
             closePreviewSession();
             settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
-            String videoQuality = settings.getString(Video_key, "medium");
+            String videoQuality = settings.getString(Video_key, SIZE_HD);
 
-            int quality = SettingsPrefUtil.getVideoQuality(0, videoQuality);
+            int quality = SettingsPrefUtil.getFromSetting(videoQuality);
             Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
 
             mProfile = CamcorderProfile.get(0, quality);
@@ -881,6 +888,20 @@ public class CameraBase {
         mMediaRecorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
         mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
 
+        {
+            Context mContext = mActivity.getApplicationContext();
+            AudioManager mAudioManager =
+                    (AudioManager)mContext.getSystemService(Context.AUDIO_SERVICE);
+            AudioDeviceInfo[] deviceList =
+                    mAudioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
+            for (int index = 0; index < deviceList.length; index++) {
+                if (deviceList[index].getType() == AudioDeviceInfo.TYPE_USB_DEVICE) {
+                    mMediaRecorder.setPreferredDevice(deviceList[index]);
+                    break;
+                }
+            }
+        }
+
         VideofileDetails = Utils.generateFileDetails(Utils.MEDIA_TYPE_VIDEO);
         if (VideofileDetails == null || VideofileDetails.length < 5) {
             Log.e(TAG, "Invalid file details");
@@ -897,7 +918,7 @@ public class CameraBase {
         mMediaRecorder.setOutputFile(mVideoFilename);
 
         mMediaRecorder.setVideoEncodingBitRate(10000000);
-        mMediaRecorder.setVideoFrameRate(30);
+        mMediaRecorder.setVideoFrameRate(mProfile.videoFrameRate);
         mMediaRecorder.setVideoSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
         mMediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
         mMediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);

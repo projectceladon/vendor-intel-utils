@@ -44,51 +44,41 @@ public class SettingsPrefUtil
         extends PreferenceFragment implements SharedPreferences.OnSharedPreferenceChangeListener {
     public static String TAG = "SettingsPrefUtil";
 
-    public static final String SIZE_LARGE = "large";
-    public static final String SIZE_MEDIUM = "medium";
-    public static final String SIZE_SMALL = "small";
+    public static final String SIZE_UHD4K = "UHD 4K";
+    public static final String SIZE_FHD = "FHD 1080p";
+    public static final String SIZE_HD = "HD 720p";
+    public static final String SIZE_VGA = "SD 480p";
 
     public String[] mCamcorderProfileNames;
     private static final String SIZE_SETTING_STRING_DIMENSION_DELIMITER = "x";
-
-    public static SparseArray<SelectedVideoQualities> sCachedSelectedVideoQualities =
-            new SparseArray<>(3);
 
     private String CameraId;
     private int root_preferences;
     private String pref_resolution;
     private String video_list, capture_list;
     public List<Size> PictureSizes;
+    private ArrayList<String> VideoEntries;
     static final Size SIZE_4K = new Size(3840, 2160);
     static final Size SIZE_1080P = new Size(1920, 1080);
     static final Size SIZE_720P = new Size(1280, 720);
     static final Size SIZE_480P = new Size(640, 480);
     static final Size SIZE_240P = new Size(320, 240);
 
-    /**
-     * The selected {@link CamcorderProfile} qualities.
-     */
+    public static int getFromSetting(String videoQuality) {
+        // Sanitize the value to be either small, medium or large. Default
+        // to the latter.
 
-    public static class SelectedVideoQualities {
-        public int large = -1;
-        public int medium = -1;
-        public int small = -1;
-
-        public int getFromSetting(String sizeSetting) {
-            // Sanitize the value to be either small, medium or large. Default
-            // to the latter.
-            if (!SIZE_SMALL.equals(sizeSetting) && !SIZE_MEDIUM.equals(sizeSetting)) {
-                sizeSetting = SIZE_LARGE;
-            }
-
-            if (SIZE_LARGE.equals(sizeSetting)) {
-                return large;
-            } else if (SIZE_MEDIUM.equals(sizeSetting)) {
-                return medium;
-            } else {
-                return small;
-            }
+        if (SIZE_UHD4K.equals(videoQuality)) {
+            return CamcorderProfile.QUALITY_2160P;
+        } else if (SIZE_FHD.equals(videoQuality)) {
+            return CamcorderProfile.QUALITY_1080P;
+        } else if (SIZE_HD.equals(videoQuality)) {
+            return CamcorderProfile.QUALITY_720P;
+        } else if (SIZE_VGA.equals(videoQuality)) {
+            return CamcorderProfile.QUALITY_480P;
         }
+
+        return CamcorderProfile.QUALITY_480P;
     }
 
     public void getSupportedSize(String camerId) {
@@ -108,6 +98,7 @@ public class SettingsPrefUtil
             ImageDimentions = new ArrayList<>(Arrays.asList(map.getOutputSizes(ImageFormat.JPEG)));
 
             PictureSizes = new ArrayList<Size>(Arrays.<Size>asList());
+            VideoEntries = new ArrayList<>();
 
             Log.d(TAG, " @@ getSupportedSize onResume @@" + CameraId);
 
@@ -117,15 +108,27 @@ public class SettingsPrefUtil
 
                 } else if (size.equals(SIZE_480P)) {
                     PictureSizes.add(SIZE_480P);
+                    if (CamcorderProfile.hasProfile(0, sVideoQualities[3])) {
+                        VideoEntries.add(mCamcorderProfileNames[sVideoQualities[3]]);
+                    }
 
                 } else if (size.equals(SIZE_720P)) {
                     PictureSizes.add(SIZE_720P);
+                    if (CamcorderProfile.hasProfile(0, sVideoQualities[2])) {
+                        VideoEntries.add(mCamcorderProfileNames[sVideoQualities[2]]);
+                    }
 
                 } else if (size.equals(SIZE_1080P)) {
                     PictureSizes.add(SIZE_1080P);
+                    if (CamcorderProfile.hasProfile(0, sVideoQualities[1])) {
+                        VideoEntries.add(mCamcorderProfileNames[sVideoQualities[1]]);
+                    }
 
                 } else if (size.equals(SIZE_4K)) {
                     PictureSizes.add(SIZE_4K);
+                    if (CamcorderProfile.hasProfile(0, sVideoQualities[0])) {
+                        VideoEntries.add(mCamcorderProfileNames[sVideoQualities[0]]);
+                    }
                 }
             }
 
@@ -139,12 +142,10 @@ public class SettingsPrefUtil
      */
     public static int[] sVideoQualities =
             new int[] {// CamcorderProfile.QUALITY_HIGH,
-                       CamcorderProfile.QUALITY_1080P, CamcorderProfile.QUALITY_720P,
-                       CamcorderProfile.QUALITY_480P,  CamcorderProfile.QUALITY_CIF,
-                       CamcorderProfile.QUALITY_QVGA,  CamcorderProfile.QUALITY_QCIF,
-                       CamcorderProfile.QUALITY_LOW};
-
-    static SelectedVideoQualities VideoQualities;
+                       CamcorderProfile.QUALITY_2160P, CamcorderProfile.QUALITY_1080P,
+                       CamcorderProfile.QUALITY_720P,  CamcorderProfile.QUALITY_480P,
+                       CamcorderProfile.QUALITY_CIF,   CamcorderProfile.QUALITY_QVGA,
+                       CamcorderProfile.QUALITY_QCIF,  CamcorderProfile.QUALITY_LOW};
 
     @Override
     public void onCreatePreferences(Bundle savedInstanceState, String rootKey) {
@@ -231,8 +232,6 @@ public class SettingsPrefUtil
                 break;
         }
 
-        VideoQualities = getSelectedVideoQualities(0);
-
         getSupportedSize(CameraId);
 
         // Put in the summaries for the currently set values.
@@ -246,10 +245,8 @@ public class SettingsPrefUtil
     @Override
     public void onResume() {
         super.onResume();
-        // final Activity activity = this.getActivity();
-        Log.d(TAG, " @@ SettingsFragment onResume @@" + CameraId);
 
-        VideoQualities = getSelectedVideoQualities(0);
+        Log.d(TAG, " @@ SettingsFragment onResume @@" + CameraId);
 
         getSupportedSize(CameraId);
 
@@ -266,7 +263,7 @@ public class SettingsPrefUtil
     @Override
     public void onPause() {
         super.onPause();
-        // final Activity activity = this.getActivity();
+
         Log.d(TAG, " @@ SettingsFragment onPause @@" + CameraId);
         getPreferenceScreen().getSharedPreferences().unregisterOnSharedPreferenceChangeListener(
                 this);
@@ -325,7 +322,7 @@ public class SettingsPrefUtil
         if (listPreference.getKey().equals(capture_list)) {
             setSummaryForSelection(PictureSizes, listPreference);
         } else if (listPreference.getKey().equals(video_list)) {
-            setSummaryForSelection(VideoQualities, listPreference);
+            setSummaryForSelection(listPreference);
         } else {
             listPreference.setSummary(listPreference.getEntry());
         }
@@ -362,16 +359,15 @@ public class SettingsPrefUtil
     /**
      * Sets the summary for the given list preference.
      *
-     * @param selectedQualities The selected video qualities.
+     *
      * @param preference        The preference for which to set the summary.
      */
-    private void setSummaryForSelection(SelectedVideoQualities selectedQualities,
-                                        ListPreference preference) {
-        if (selectedQualities == null) {
+    private void setSummaryForSelection(ListPreference preference) {
+        if (preference == null) {
             return;
         }
 
-        int selectedQuality = selectedQualities.getFromSetting(preference.getValue());
+        int selectedQuality = getFromSetting(preference.getValue());
         Log.d(TAG, "SettingsFragment selectedQuality " + selectedQuality);
         preference.setSummary(mCamcorderProfileNames[selectedQuality]);
     }
@@ -414,23 +410,6 @@ public class SettingsPrefUtil
     }
 
     /**
-     * Depending on camera availability on the device, this removes settings
-     * for cameras the device doesn't have.
-     */
-    private void setVisibilities() {
-        Log.d(TAG, "SettingsFragment setVisibilities");
-
-        PreferenceGroup Prf_Resolution = (PreferenceGroup)findPreference("pref_resolution");
-        PreferenceGroup Prf_Src = (PreferenceGroup)findPreference("pref_Source");
-        if (CameraId == null) {
-            recursiveDelete(Prf_Resolution, findPreference("capture_list"));
-            recursiveDelete(Prf_Resolution, findPreference("video_list"));
-
-            recursiveDelete(Prf_Src, findPreference("multi_usb_cam_list"));
-        }
-    }
-
-    /**
      * Recursively go through settings and fill entries and summaries of our
      * preferences.
      */
@@ -447,38 +426,6 @@ public class SettingsPrefUtil
     }
 
     /**
-     * Recursively traverses the tree from the given group as the route and
-     * tries to delete the preference. Traversal stops once the preference
-     * was found and removed.
-     */
-    private boolean recursiveDelete(PreferenceGroup group, Preference preference) {
-        Log.d(TAG, "SettingsFragment recursiveDelete");
-
-        if (group == null) {
-            Log.d(TAG, "attempting to delete from null preference group");
-            return false;
-        }
-        if (preference == null) {
-            Log.d(TAG, "attempting to delete null preference");
-            return false;
-        }
-        if (group.removePreference(preference)) {
-            Log.d(TAG, "Removal was successful.");
-            return true;
-        }
-
-        for (int i = 0; i < group.getPreferenceCount(); ++i) {
-            Preference pref = group.getPreference(i);
-            if (pref instanceof PreferenceGroup) {
-                if (recursiveDelete((PreferenceGroup)pref, preference)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /**
      * Set the entries for the given preference. The given preference needs
      * to be a {@link ListPreference}
      */
@@ -491,7 +438,7 @@ public class SettingsPrefUtil
         if (listPreference.getKey().equals(capture_list)) {
             setEntriesForSelection(PictureSizes, listPreference);
         } else if (listPreference.getKey().equals(video_list)) {
-            setEntriesForSelection(VideoQualities, listPreference);
+            setEntriesForSelection(VideoEntries, listPreference);
         }
     }
 
@@ -521,86 +468,15 @@ public class SettingsPrefUtil
     /**
      * Sets the entries for the given list preference.
      *
-     * @param selectedQualities The possible S,M,L entries the user can
+     * @param entries The possible S,M,L entries the user can
      *                          choose from.
      * @param preference        The preference to set the entries for.
      */
-    private void setEntriesForSelection(SelectedVideoQualities selectedQualities,
-                                        ListPreference preference) {
-        if (selectedQualities == null) {
+    private void setEntriesForSelection(ArrayList<String> entries, ListPreference preference) {
+        if (entries == null) {
             return;
         }
 
-        // Avoid adding double entries at the bottom of the list which
-        // indicates that not at least 3 qualities are supported.
-        ArrayList<String> entries = new ArrayList<String>();
-        entries.add(mCamcorderProfileNames[selectedQualities.large]);
-        if (selectedQualities.medium != selectedQualities.large) {
-            entries.add(mCamcorderProfileNames[selectedQualities.medium]);
-        }
-        if (selectedQualities.small != selectedQualities.medium) {
-            entries.add(mCamcorderProfileNames[selectedQualities.small]);
-        }
         preference.setEntries(entries.toArray(new String[0]));
-    }
-
-    /**
-     * Determines the video quality for large/medium/small for the given camera.
-     * Returns the one matching the given setting. Defaults to 'large' of the
-     * qualitySetting does not match either large. medium or small.
-     *
-     * @param qualitySetting One of 'large', 'medium', 'small'.
-     * @param cameraId       The ID of the camera for which to get the quality
-     *                       setting.
-     * @return The CamcorderProfile quality setting.}
-     */
-
-    static int getVideoQuality(int cameraId, String qualitySetting) {
-        return getSelectedVideoQualities(cameraId).getFromSetting(qualitySetting);
-    }
-
-    static SelectedVideoQualities getSelectedVideoQualities(int cameraId) {
-        if (sCachedSelectedVideoQualities.get(cameraId) != null) {
-            return sCachedSelectedVideoQualities.get(cameraId);
-        }
-
-        // Go through the sizes in descending order, see if they are supported,
-        // and set large/medium/small accordingly.
-        // If no quality is supported at all, the first call to
-        // getNextSupportedQuality will throw an exception.
-        // If only one quality is supported, then all three selected qualities
-        // will be the same.
-        int largeIndex = getNextSupportedVideoQualityIndex(cameraId, -1);
-        int mediumIndex = getNextSupportedVideoQualityIndex(cameraId, largeIndex);
-        int smallIndex = getNextSupportedVideoQualityIndex(cameraId, mediumIndex);
-        VideoQualities = new SelectedVideoQualities();
-        VideoQualities.large = sVideoQualities[largeIndex];
-        VideoQualities.medium = sVideoQualities[mediumIndex];
-        VideoQualities.small = sVideoQualities[smallIndex];
-        sCachedSelectedVideoQualities.put(cameraId, VideoQualities);
-        return VideoQualities;
-    }
-
-    /*
-     * Starting from 'start' this method returns the next supported video
-     * quality.
-     */
-    static int getNextSupportedVideoQualityIndex(int cameraId, int start) {
-        for (int i = start + 1; i < sVideoQualities.length; ++i) {
-            if (CamcorderProfile.hasProfile(cameraId, sVideoQualities[i])) {
-                // We found a new supported quality.
-                return i;
-            }
-        }
-
-        // Failed to find another supported quality.
-        if (start < 0 || start >= sVideoQualities.length) {
-            // This means we couldn't find any supported quality.
-            throw new IllegalArgumentException("Could not find supported video qualities.");
-        }
-
-        // We previously found a larger supported size. In this edge case, just
-        // return the same index as the previous size.
-        return start;
     }
 }

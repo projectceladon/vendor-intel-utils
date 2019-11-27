@@ -454,7 +454,6 @@ public class RoundedThumbnailView extends View {
      * Hide the thumbnail.
      */
     public void hideThumbnail() {
-
         setVisibility(GONE);
 
         clearAnimations();
