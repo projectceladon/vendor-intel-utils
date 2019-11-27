@@ -37,43 +37,22 @@ public class PermissionsActivity extends QuickActivity {
     private String TAG = "PermissionsActivity";
 
     private static int PERMISSION_REQUEST_CODE = 1;
-    private static int RESULT_CODE_OK = 1;
-    private static int RESULT_CODE_FAILED = 2;
 
     private int mIndexPermissionRequestCamera;
     private int mIndexPermissionRequestMicrophone;
-    private int mIndexPermissionRequestLocation;
     private int mIndexPermissionRequestStorage;
     private boolean mShouldRequestCameraPermission;
     private boolean mShouldRequestMicrophonePermission;
-    private boolean mShouldRequestLocationPermission;
     private boolean mShouldRequestStoragePermission;
     private int mNumPermissionsToRequest;
     private boolean mFlagHasCameraPermission;
     private boolean mFlagHasMicrophonePermission;
     private boolean mFlagHasStoragePermission;
 
-    /**
-     * Close activity when secure app passes lock screen or screen turns
-     * off.
-
-    private final BroadcastReceiver mShutdownReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            Log.v(TAG, "received intent, finishing: " + intent.getAction());
-            finish();
-        }
-    };
-  */
-
+ 
     @Override
     protected void onCreateTasks(Bundle savedInstanceState) {
         setContentView(R.layout.permissions);
-
-        // Filter for screen off so that we can finish permissions activity
-        // when screen is off.
-        // IntentFilter filter_screen_off = new IntentFilter(Intent.ACTION_SCREEN_OFF);
-        // registerReceiver(mShutdownReceiver, filter_screen_off);
 
         Window win = getWindow();
         win.clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
@@ -89,7 +68,6 @@ public class PermissionsActivity extends QuickActivity {
     protected void onDestroyTasks() {
         Log.v(TAG, "onDestroy: unregistering receivers");
 
-        // unregisterReceiver(mShutdownReceiver);
     }
 
     /**
@@ -104,10 +82,8 @@ public class PermissionsActivity extends QuickActivity {
 
         if (value.compareTo("false") == 0) {
             ret = false;
-            Log.d(TAG, "####FALSE");
 
         } else if (value.compareTo("true") == 0) {
-            Log.d(TAG, "####TRUE");
             ret = true;
         }
 
@@ -123,7 +99,7 @@ public class PermissionsActivity extends QuickActivity {
         try {
             return preferences.getString(key, defaultValue);
         } catch (ClassCastException e) {
-            Log.w(TAG, "existing preference with invalid type, removing and returning default", e);
+            Log.w(TAG, "existing preference with invalid type,removing and returning default", e);
             preferences.edit().remove(key).apply();
             return defaultValue;
         }
@@ -149,7 +125,7 @@ public class PermissionsActivity extends QuickActivity {
         }
 
         if (ActivityCompat.checkSelfPermission(getApplicationContext(),
-                                               Manifest.permission.READ_EXTERNAL_STORAGE) !=
+                                               Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
             PackageManager.PERMISSION_GRANTED) {
             mNumPermissionsToRequest++;
             mShouldRequestStoragePermission = true;
@@ -160,11 +136,13 @@ public class PermissionsActivity extends QuickActivity {
         if (mNumPermissionsToRequest != 0) {
             if (!convertToBoolean(getString("pref_has_seen_permissions_dialogs", "false"))) {
                 buildPermissionsRequest();
+
             } else {
                 // Permissions dialog has already been shown, or we're on
                 // lockscreen, and we're still missing permissions.
                 handlePermissionsFailure();
             }
+
         } else {
             handlePermissionsSuccess();
         }
@@ -238,7 +216,7 @@ public class PermissionsActivity extends QuickActivity {
     }
 
     private void handlePermissionsSuccess() {
-        Intent intent = new Intent(this, MainActivity.class);
+        Intent intent = new Intent(this, MultiViewActivity.class);
         startActivity(intent);
         finish();
     }

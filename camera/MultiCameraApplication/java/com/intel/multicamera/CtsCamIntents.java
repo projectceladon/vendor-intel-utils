@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
  * Copyright (c) 2019 Intel Corporation.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,11 +17,9 @@
 
 package com.intel.multicamera;
 
-import android.Manifest;
-import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.*;
-import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
 import android.graphics.Matrix;
 import android.graphics.RectF;
@@ -33,9 +31,12 @@ import android.media.Image;
 import android.media.ImageReader;
 import android.media.MediaRecorder;
 import android.net.Uri;
-import android.os.Environment;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Message;
+import android.os.ParcelFileDescriptor;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Log;
 import android.util.Size;
@@ -43,38 +44,36 @@ import android.util.SparseIntArray;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
-import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.ImageView;
+import android.widget.TextView;
 import android.widget.Toast;
 import androidx.annotation.NonNull;
-import androidx.core.app.ActivityCompat;
 import androidx.preference.PreferenceManager;
 import java.io.*;
 import java.nio.ByteBuffer;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Date;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.Optional;
 
-public class TopRightCam {
+public class CtsCamIntents {
     Activity mActivity;
-    private static final String TAG = "TopRightCam";
-    private String mNextVideoAbsolutePath;
+    private static final String TAG = "CtsCamIntents";
     private CamcorderProfile mProfile;
     /**
      * An {@link AutoFitTextureView} for camera preview.
      */
     private AutoFitTextureView textureView;
-    private Button takePictureButton, TakeVideoButton;
+    private ImageView takePictureButton, TakeVideoButton;
 
     private MediaRecorder mMediaRecorder;
     private String cameraId;
     protected CameraDevice cameraDevice;
     protected CameraCaptureSession cameraCaptureSessions;
-    protected CaptureRequest captureRequest;
     protected CaptureRequest.Builder captureRequestBuilder;
-    private Size imageDimension, previewSize;
+    private Size previewSize;
     private ImageReader imageReader;
     private File file;
     private Handler mBackgroundHandler;
@@ -85,6 +84,17 @@ public class TopRightCam {
     private static final SparseIntArray INVERSE_ORIENTATIONS = new SparseIntArray();
     private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
     private SharedPreferences settings;
+    private Uri mCurrentVideoUri = null;
+    private ParcelFileDescriptor mVideoFileDescriptor = null;
+    private SurfaceTexture mSurfaceTexture;
+    private Surface mOutPutSurface;
+    private FrameLayout frameView0;
+    private long mRecordingStartTime;
+    private boolean mRecordingTimeCountsDown = false;
+    private static final int MSG_UPDATE_RECORD_TIME = 5;
+    private TextView mRecordingTimeView;
+    private final Handler mHandler;
+
     /**
      * Whether the app is recording video now
      */
@@ -96,6 +106,7 @@ public class TopRightCam {
     private ContentValues mCurrentVideoValues, mCurrentPictureValues;
     byte[] jpegLength;
 
+    private boolean mIsVideoCaptureIntent, mIsImageCaptureIntent;
     /**
      * Orientation of the camera sensor
      */
@@ -108,23 +119,126 @@ public class TopRightCam {
         ORIENTATIONS.append(Surface.ROTATION_270, 180);
     }
 
-    public TopRightCam(Activity activity, AutoFitTextureView textureView, Button PictureButton,
-                       Button RecordButton) {
+    private String[] VideofileDetails;
+
+    public CtsCamIntents(Activity activity, AutoFitTextureView mtextureView,
+                         ImageView PictureButton, ImageView RecordButton,
+                         TextView RecordingTimeView) {
         Log.e(TAG, "constructor called");
         this.mActivity = activity;
-        this.textureView = textureView;
-        this.textureView.setSurfaceTextureListener(textureListener);
+
+        mIsRecordingVideo = false;
+
+        mIsVideoCaptureIntent = isVideoCaptureIntent();
+        mIsImageCaptureIntent = isImageCaptureIntent();
+
+        this.textureView = mtextureView;
         this.ClickListeners(PictureButton, RecordButton);
         this.settings = PreferenceManager.getDefaultSharedPreferences(activity);
+        mRecordingTimeView = RecordingTimeView;
+        mHandler = new MainHandler();
     }
 
-    public void ClickListeners(Button PictureButton, Button RecordButton) {
-        TakePicureOnClicked(PictureButton);
+    /**
+     * This Handler is used to post message back onto the main thread of the
+     * application.
+     */
+    private class MainHandler extends Handler {
+        @Override
+        public void handleMessage(Message msg) {
+            switch (msg.what) {
+                case MSG_UPDATE_RECORD_TIME: {
+                    updateRecordingTime();
+                    break;
+                }
+
+                default:
+                    Log.v(TAG, "Unhandled message: " + msg.what);
+                    break;
+            }
+        }
+    }
+
+    private void updateRecordingTime() {
+        if (!mIsRecordingVideo) {
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        long delta = now - mRecordingStartTime;
+        long mMaxVideoDurationInMs;
+        mMaxVideoDurationInMs = Utils.getMaxVideoDuration(mActivity);
+
+        // Starting a minute before reaching the max duration
+        // limit, we'll countdown the remaining time instead.
+        boolean countdownRemainingTime =
+                (mMaxVideoDurationInMs != 0 && delta >= mMaxVideoDurationInMs - 60000);
+
+        long deltaAdjusted = delta;
+        if (countdownRemainingTime) {
+            deltaAdjusted = Math.max(0, mMaxVideoDurationInMs - deltaAdjusted) + 999;
+        }
+        String text;
+
+        long targetNextUpdateDelay;
+
+        text = Utils.millisecondToTimeString(deltaAdjusted, false);
+        targetNextUpdateDelay = 1000;
+
+        setRecordingTime(text);
+
+        if (mRecordingTimeCountsDown != countdownRemainingTime) {
+            // Avoid setting the color on every update, do it only
+            // when it needs changing.
+            mRecordingTimeCountsDown = countdownRemainingTime;
+
+            int color = mActivity.getResources().getColor(R.color.recording_time_remaining_text);
+
+            setRecordingTimeTextColor(color);
+        }
+
+        long actualNextUpdateDelay = targetNextUpdateDelay - (delta % targetNextUpdateDelay);
+        mHandler.sendEmptyMessageDelayed(MSG_UPDATE_RECORD_TIME, actualNextUpdateDelay);
+    }
+
+    public void setRecordingTime(String text) {
+        mRecordingTimeView.setText(text);
+    }
+
+    public void setRecordingTimeTextColor(int color) {
+        mRecordingTimeView.setTextColor(color);
+    }
+
+    public void showRecordingUI(boolean recording) {
+        if (recording) {
+            mRecordingTimeView.announceForAccessibility(
+                    mActivity.getResources().getString(R.string.video_recording_stopped));
+            mRecordingTimeView.setVisibility(View.GONE);
+
+        } else {
+            mRecordingTimeView.setText("");
+            mRecordingTimeView.setVisibility(View.VISIBLE);
+            mRecordingTimeView.announceForAccessibility(
+                    mActivity.getResources().getString(R.string.video_recording_started));
+        }
+    }
+
+    public boolean isVideoCaptureIntent() {
+        String action = mActivity.getIntent().getAction();
+        return (MediaStore.ACTION_VIDEO_CAPTURE.equals(action));
+    }
+
+    public boolean isImageCaptureIntent() {
+        String action = mActivity.getIntent().getAction();
+        return (MediaStore.ACTION_IMAGE_CAPTURE.equals(action));
+    }
+
+    public void ClickListeners(ImageView PictureButton, ImageView RecordButton) {
+        TakePictureOnClicked(PictureButton);
 
         StartVideoRecording(RecordButton);
     }
 
-    private void TakePicureOnClicked(Button PictureButton) {
+    private void TakePictureOnClicked(ImageView PictureButton) {
         takePictureButton = PictureButton;
         if (takePictureButton == null) return;
 
@@ -132,45 +246,105 @@ public class TopRightCam {
             @Override
             public void onClick(View v) {
                 takePicture();
-                Utils.broadcastNewPicture(mActivity.getApplicationContext(), mCurrentPictureValues);
+
+                if (!mIsImageCaptureIntent) {
+                    Utils.broadcastNewPicture(mActivity.getApplicationContext(),
+                                              mCurrentPictureValues);
+                } else {
+                    mIsImageCaptureIntent = false;
+                }
             }
         });
     }
 
-    private void StartVideoRecording(Button RecordButton) {
+    private void StartVideoRecording(ImageView RecordButton) {
         TakeVideoButton = RecordButton;
         TakeVideoButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                // Intent i = new Intent(HomeScreenActivity.this, CameraActivity.class);
-                System.out.println(" onCreate Record0");
-                if (mIsRecordingVideo) {
+                if (mIsRecordingVideo == true) {
+                    showRecordingUI(mIsRecordingVideo);
                     stopRecordingVideo();
-                    Utils.broadcastNewVideo(mActivity.getApplicationContext(), mCurrentVideoValues);
-                    takePictureButton.setVisibility(View.VISIBLE);
-                } else {
+
+                    if (mIsVideoCaptureIntent) {
+                        FrameLayout previewLayout =
+                                mActivity.findViewById(R.id.intentPreviewLayout);
+                        previewLayout.setVisibility(View.VISIBLE);
+                        VideoPreview((ImageView)mActivity.findViewById(R.id.IntentPreview));
+
+                        ImageButton IntentDone = mActivity.findViewById(R.id.IntentDone);
+
+                        IntentDone.setOnClickListener(new View.OnClickListener() {
+                            @Override
+                            public void onClick(View view) {
+                                doReturnToCaller(true);
+                            }
+                        });
+                        mIsVideoCaptureIntent = false;
+                    }
+
+                } else if (mIsRecordingVideo == false) {
+                    TakeVideoButton.setImageResource(R.drawable.ic_stop_normal);
                     startRecordingVideo();
+                    showRecordingUI(mIsRecordingVideo);
                     takePictureButton.setVisibility(View.GONE);
                 }
             }
         });
     }
 
+    private void VideoPreview(ImageView preView) {
+        final Optional<Bitmap> bitmap =
+                Utils.getVideoThumbnail(mActivity.getContentResolver(), mCurrentVideoUri);
+
+        preView.setVisibility(View.VISIBLE);
+        preView.setImageBitmap(bitmap.get());
+    }
+
+    private void photoPreview(ImageView preView, Uri PhotoUri) {
+        preView.setVisibility(View.VISIBLE);
+        preView.setImageURI(PhotoUri);
+    }
+
+    private void doReturnToCaller(boolean valid) {
+        Intent resultIntent = new Intent();
+        int resultCode;
+        if (mIsVideoCaptureIntent) {
+            mIsVideoCaptureIntent = false;
+            resultCode = Activity.RESULT_OK;
+            resultIntent.setData(mCurrentVideoUri);
+            resultIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            mActivity.setResult(resultCode, resultIntent);
+        } else if (mIsImageCaptureIntent) {
+            mIsImageCaptureIntent = false;
+            resultCode = Activity.RESULT_OK;
+            mActivity.setResult(resultCode);
+        }
+
+        mActivity.finish();
+    }
+
     TextureView.SurfaceTextureListener textureListener = new TextureView.SurfaceTextureListener() {
         @Override
         public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
             // open your camera here
+            mSurfaceTexture = surface;
+            // Surface mSurface = new Surface(mSurfaceTexture);
+            // mSurface.release();
             openCamera(width, height);
         }
+
         @Override
         public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
             // Transform you image captured size according to the surface width and height
             configureTransform(width, height);
         }
+
         @Override
         public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
             return false;
         }
+
         @Override
         public void onSurfaceTextureUpdated(SurfaceTexture surface) {
         }
@@ -178,41 +352,21 @@ public class TopRightCam {
 
     public void openCamera(int width, int height) {
         CameraManager manager = (CameraManager)mActivity.getSystemService(Context.CAMERA_SERVICE);
-        Log.e(TAG, "is camera open");
         try {
-            if (!((manager.getCameraIdList().length >= 2) &&
-                  (manager.getCameraIdList().length <= 4))) {
-                Log.e(TAG, "this camera is not connected ");
-                return;
-            }
-            cameraId = manager.getCameraIdList()[1];
-            Log.e(TAG, "is camera open ID" + cameraId);
+            cameraId = manager.getCameraIdList()[0];
             CameraCharacteristics characteristics = manager.getCameraCharacteristics(cameraId);
             StreamConfigurationMap map =
                     characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             if (map == null) return;
-            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
-            String Key = SettingsActivity.SettingsFragment.getchangedPrefKey();
 
-            if (Key.compareTo("video_list") == 0) {
-                String videoQuality = settings.getString("video_list", "medium");
+            int total_psizes = map.getOutputSizes(ImageFormat.JPEG).length;
 
-                int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
-                Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
-
-                mProfile = CamcorderProfile.get(0, quality);
-                previewSize = new Size(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
-
-                configureTransform(width, height);
-            } else {
-                previewSize = SettingsActivity.SettingsFragment.sizeFromSettingString(
-                        settings.getString("capture_list", "640x480"));
-                Log.d(TAG,
-                      "Selected imageDimension" + previewSize.getWidth() + previewSize.getHeight());
-                configureTransform(width, height);
-            }
+            previewSize = map.getOutputSizes(SurfaceTexture.class)[total_psizes - 1];
+            Log.d(TAG, "camera preview width: " + previewSize.getWidth() +
+                               " preview height: " + previewSize.getHeight());
 
             mSensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+
             configureTransform(width, height);
             startBackgroundThread();
 
@@ -221,7 +375,7 @@ public class TopRightCam {
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
-        Log.e(TAG, "openCamera X");
+        Log.e(TAG, "openCamera");
     }
 
     private final CameraDevice.StateCallback stateCallback = new CameraDevice.StateCallback() {
@@ -232,15 +386,27 @@ public class TopRightCam {
             cameraDevice = camera;
             createCameraPreview();
         }
+
         @Override
         public void onDisconnected(CameraDevice camera) {
             Log.e(TAG, "onDisconnected");
+
+            frameView0 = mActivity.findViewById(R.id.control1);
+            frameView0.setVisibility(FrameLayout.INVISIBLE);
             closeCamera();
         }
+
         @Override
         public void onError(CameraDevice camera, int error) {
             Log.e(TAG, "onError");
             closeCamera();
+        }
+
+        @Override
+        public void onClosed(@NonNull CameraDevice camera) {
+            Log.e(TAG, "onClose");
+            super.onClosed(camera);
+            SurfaceUtil.clear(mSurfaceTexture);
         }
     };
 
@@ -251,7 +417,9 @@ public class TopRightCam {
         int rotation = mActivity.getWindowManager().getDefaultDisplay().getRotation();
         Matrix matrix = new Matrix();
         RectF viewRect = new RectF(0, 0, viewWidth, viewHeight);
-        Log.e(TAG, "configureTransform() viewWidth: " + viewWidth + " viewHeight: " + viewHeight);
+        Log.e(TAG, "configureTransform() viewWidth: " + viewWidth + " viewHeight: " + viewHeight +
+                           "previewWidth: " + previewSize.getWidth() +
+                           "previewHeight:" + previewSize.getHeight());
         RectF bufferRect = new RectF(0, 0, previewSize.getHeight(), previewSize.getWidth());
         float centerX = viewRect.centerX();
         float centerY = viewRect.centerY();
@@ -274,25 +442,10 @@ public class TopRightCam {
             SurfaceTexture texture = textureView.getSurfaceTexture();
             if (texture == null) return;
 
-            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
-            String Key = SettingsActivity.SettingsFragment.getchangedPrefKey();
-
-            imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
-                    settings.getString("capture_list", "640x480"));
-            String videoQuality = settings.getString("video_list", "medium");
-
-            int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
-            Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
-
-            mProfile = CamcorderProfile.get(0, quality);
-
-            if (Key.compareTo("video_list") == 0) {
-                texture.setDefaultBufferSize(mProfile.videoFrameWidth, mProfile.videoFrameHeight);
-            } else {
-                texture.setDefaultBufferSize(imageDimension.getWidth(), imageDimension.getHeight());
-            }
+            texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
 
             Surface surface = new Surface(texture);
+            mOutPutSurface = surface;
             captureRequestBuilder =
                     cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             captureRequestBuilder.addTarget(surface);
@@ -308,27 +461,16 @@ public class TopRightCam {
                             cameraCaptureSessions = cameraCaptureSession;
                             updatePreview();
                         }
+
                         @Override
                         public void onConfigureFailed(CameraCaptureSession cameraCaptureSession) {
+                            closeCamera();
                             Toast.makeText(mActivity, "Configuration change", Toast.LENGTH_SHORT)
                                     .show();
                         }
                     }, null);
         } catch (CameraAccessException e) {
             e.printStackTrace();
-        }
-    }
-
-    public void releaseMedia() {
-        if (null != mMediaRecorder) {
-            try {
-                mMediaRecorder.stop();
-            } catch (IllegalStateException ex) {
-                Log.d(TAG, "Stop called before start");
-            }
-            mMediaRecorder.reset();
-            mMediaRecorder.release();
-            mMediaRecorder = null;
         }
     }
 
@@ -342,7 +484,10 @@ public class TopRightCam {
             imageReader.close();
             imageReader = null;
         }
-        releaseMedia();
+        if (null != mMediaRecorder) {
+            releaseMedia();
+        }
+        closeVideoFileDescriptor();
         stopBackgroundThread();
     }
 
@@ -350,7 +495,7 @@ public class TopRightCam {
      * Starts a background thread and its {@link Handler}.
      */
     private void startBackgroundThread() {
-        mBackgroundThread = new HandlerThread("Camera_1");
+        mBackgroundThread = new HandlerThread("Camera_0");
         mBackgroundThread.start();
         mBackgroundHandler = new Handler(mBackgroundThread.getLooper());
     }
@@ -407,13 +552,11 @@ public class TopRightCam {
         }
 
         try {
-            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
-            imageDimension = SettingsActivity.SettingsFragment.sizeFromSettingString(
-                    settings.getString("capture_list", "640x480"));
-            Log.d(TAG, "Selected imageDimension: " + imageDimension.getWidth() +
-                               imageDimension.getHeight());
+            Log.d(TAG,
+                  "Selected imageDimension" + previewSize.getWidth() + previewSize.getHeight());
+
             ImageReader reader = ImageReader.newInstance(
-                    imageDimension.getWidth(), imageDimension.getHeight(), ImageFormat.JPEG, 1);
+                    previewSize.getWidth(), previewSize.getHeight(), ImageFormat.JPEG, 1);
             List<Surface> outputSurfaces = new ArrayList<Surface>(2);
             outputSurfaces.add(reader.getSurface());
             outputSurfaces.add(new Surface(textureView.getSurfaceTexture()));
@@ -432,10 +575,12 @@ public class TopRightCam {
                 return;
             }
             mPictureFilename = fileDetails[3];
-            mCurrentPictureValues =
-                    Utils.getContentValues(Utils.MEDIA_TYPE_IMAGE, fileDetails,
-                                           imageDimension.getWidth(), imageDimension.getHeight());
-
+            mCurrentPictureValues = Utils.getContentValues(
+                    Utils.MEDIA_TYPE_IMAGE, fileDetails, previewSize.getWidth(),
+                    previewSize.getHeight(), 0, new File(mPictureFilename).length());
+            ContentResolver resolver = mActivity.getContentResolver();
+            final Uri uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                            new ContentValues(mCurrentPictureValues));
             file = new File(mPictureFilename);
 
             ImageReader.OnImageAvailableListener readerListener =
@@ -484,9 +629,27 @@ public class TopRightCam {
                                                        CaptureRequest request,
                                                        TotalCaptureResult result) {
                             super.onCaptureCompleted(session, request, result);
-                            Toast.makeText(mActivity, "Saved:" + file, Toast.LENGTH_SHORT).show();
+                            mActivity.runOnUiThread(new Runnable() {
+                                @Override
+                                public void run() {
+                                    FrameLayout previewLayout =
+                                            mActivity.findViewById(R.id.intentPreviewLayout);
+                                    previewLayout.setVisibility(View.VISIBLE);
+                                    photoPreview(
+                                            (ImageView)mActivity.findViewById(R.id.IntentPreview),
+                                            uri);
 
-                            createCameraPreview();
+                                    ImageButton IntentDone =
+                                            mActivity.findViewById(R.id.IntentDone);
+
+                                    IntentDone.setOnClickListener(new View.OnClickListener() {
+                                        @Override
+                                        public void onClick(View view) {
+                                            doReturnToCaller(true);
+                                        }
+                                    });
+                                }
+                            });
                         }
                     };
             cameraDevice.createCaptureSession(
@@ -517,13 +680,9 @@ public class TopRightCam {
         }
         try {
             closePreviewSession();
-            settings = PreferenceManager.getDefaultSharedPreferences(mActivity);
-            String videoQuality = settings.getString("video_list", "medium");
 
-            int quality = SettingsActivity.SettingsFragment.getVideoQuality(0, videoQuality);
-            Log.d(TAG, "Selected video quality for '" + videoQuality + "' is " + quality);
+            mProfile = CamcorderProfile.get(0, CamcorderProfile.QUALITY_HIGH);
 
-            mProfile = CamcorderProfile.get(0, quality);
             setUpMediaRecorder();
             SurfaceTexture texture = textureView.getSurfaceTexture();
             if (texture == null) return;
@@ -553,9 +712,9 @@ public class TopRightCam {
                         @Override
                         public void run() {
                             // UI
-                            TakeVideoButton.setText(R.string.stop);
                             mIsRecordingVideo = true;
-
+                            mRecordingStartTime = SystemClock.uptimeMillis();
+                            updateRecordingTime();
                             // Start recording
                             mMediaRecorder.start();
                         }
@@ -567,6 +726,8 @@ public class TopRightCam {
                     if (null != mActivity) {
                         Toast.makeText(mActivity, "Failed", Toast.LENGTH_SHORT).show();
                     }
+
+                    releaseMedia();
                 }
             }, mBackgroundHandler);
         } catch (CameraAccessException | IOException e) {
@@ -578,26 +739,38 @@ public class TopRightCam {
         if (null == mActivity) {
             return;
         }
+        String result = null;
+        ContentResolver mContentResolver = mActivity.getContentResolver();
+
+        Intent intent = mActivity.getIntent();
+        Bundle myExtras = intent.getExtras();
+
+        closeVideoFileDescriptor();
+
+        if (mIsVideoCaptureIntent && myExtras != null) {
+            Uri saveUri = myExtras.getParcelable(MediaStore.EXTRA_OUTPUT);
+            if (saveUri != null) {
+                try {
+                    mVideoFileDescriptor = mContentResolver.openFileDescriptor(saveUri, "rw");
+                    mCurrentVideoUri = saveUri;
+                    mVideoFilename = Utils.getFileNameFromUri(saveUri);
+
+                } catch (java.io.FileNotFoundException ex) {
+                    // invalid uri
+                    Log.e(TAG, ex.toString());
+                }
+            }
+        }
 
         mMediaRecorder = new MediaRecorder();
         mMediaRecorder.setAudioSource(MediaRecorder.AudioSource.CAMCORDER);
         mMediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
 
-        String fileDetails[] = Utils.generateFileDetails(Utils.MEDIA_TYPE_VIDEO);
-        if (fileDetails == null || fileDetails.length < 5) {
-            Log.e(TAG, "Invalid file details");
-            return;
+        if (mVideoFileDescriptor != null) {
+            mMediaRecorder.setOutputFile(mVideoFileDescriptor.getFileDescriptor());
         }
-        mVideoFilename = fileDetails[3];
-        mCurrentVideoValues =
-                Utils.getContentValues(Utils.MEDIA_TYPE_VIDEO, fileDetails,
-                                       mProfile.videoFrameWidth, mProfile.videoFrameHeight);
 
         mMediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
-        /**
-         * set output file in media recorder
-         */
-        mMediaRecorder.setOutputFile(mVideoFilename);
 
         mMediaRecorder.setVideoEncodingBitRate(10000000);
         mMediaRecorder.setVideoFrameRate(30);
@@ -631,19 +804,47 @@ public class TopRightCam {
         }
     }
 
-    private void stopRecordingVideo() {
-        mIsRecordingVideo = false;
-        TakeVideoButton.setText(R.string.record);
-
-        // Stop recording
-        releaseMedia();
-
-        if (null != mActivity) {
-            Toast.makeText(mActivity, "Video saved: " + mVideoFilename, Toast.LENGTH_SHORT).show();
-            Log.d(TAG, "Video saved: " + mVideoFilename);
+    private void saveVideo() {
+        long duration = SystemClock.uptimeMillis() - mRecordingStartTime;
+        if (duration > 0) {
+            //
+        } else {
+            Log.w(TAG, "Video duration <= 0 : " + duration);
         }
-        mVideoFilename = null;
+    }
 
+    public void releaseMedia() {
+        if (null != mMediaRecorder) {
+            try {
+                mMediaRecorder.stop();
+            } catch (IllegalStateException ex) {
+                Log.d(TAG, "Stop called before start");
+            }
+            mMediaRecorder.reset();
+            mMediaRecorder.release();
+            mMediaRecorder = null;
+        }
+    }
+
+    private void stopRecordingVideo() {
+        mHandler.removeMessages(MSG_UPDATE_RECORD_TIME);
+
+        mIsRecordingVideo = false;
+
+        releaseMedia();
+        mVideoFilename = null;
+        closeVideoFileDescriptor();
         createCameraPreview();
+    }
+
+    private void closeVideoFileDescriptor() {
+        if (mVideoFileDescriptor != null) {
+            try {
+                mVideoFileDescriptor.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Fail to close fd", e);
+            }
+            mVideoFileDescriptor = null;
+        }
     }
 }
