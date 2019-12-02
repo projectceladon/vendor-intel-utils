@@ -39,6 +39,7 @@ import com.android.camera.one.v2.core.FrameServer;
 import com.android.camera.one.v2.core.RequestBuilder;
 import com.android.camera.one.v2.core.RequestTemplate;
 import com.android.camera.one.v2.face.FaceDetect;
+import com.android.camera.util.ApiHelper;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -113,8 +114,16 @@ public class BasicCameraFactory {
         requestTemplate.setParam(CaptureRequest.STATISTICS_FACE_DETECT_MODE,
               new StatisticsFaceDetectMode(faceDetectMode));
 
-        Supplier<Rect> cropRegion = new ZoomedCropRegion(
-                cameraCharacteristics.getSensorInfoActiveArraySize(), zoom);
+        Supplier<Rect> cropRegion;
+        if (ApiHelper.HAS_ZOOM_RATIO_CONTROL) {
+            cropRegion = new ZoomedCropRegion(
+                    cameraCharacteristics.getSensorInfoActiveArraySize(),
+                    Suppliers.ofInstance(1.0f));
+            requestTemplate.setParam(CaptureRequest.CONTROL_ZOOM_RATIO, zoom);
+        } else {
+            cropRegion = new ZoomedCropRegion(
+                    cameraCharacteristics.getSensorInfoActiveArraySize(), zoom);
+        }
         requestTemplate.setParam(CaptureRequest.SCALER_CROP_REGION, cropRegion);
 
         CameraCommand previewUpdaterCommand =
