@@ -196,17 +196,15 @@ bool VkCsExecutor::depthConvolve(const Operation& operation, ShaderConfig& confi
         opBase->createPipeline(sizeof(PushConst), &spec_info);
     }
 
-    if (spec_const.local_sz_x != 0 && spec_const.local_sz_y != 0 && spec_const.local_sz_z != 0)
-    {
-        opBase->group_x = ceil(static_cast<float>(spec_const.out_w) / spec_const.local_sz_x);
-        opBase->group_y = ceil(static_cast<float>(spec_const.out_h) / spec_const.local_sz_y);
-        opBase->group_z = ceil(static_cast<float>
+    ASSERT(spec_const.local_sz_x != 0);
+    ASSERT(spec_const.local_sz_y != 0);
+    ASSERT(spec_const.local_sz_z != 0);
+    ASSERT(spec_const.depth_multiplier != 0);
+
+    opBase->group_x = ceil(static_cast<float>(spec_const.out_w) / spec_const.local_sz_x);
+    opBase->group_y = ceil(static_cast<float>(spec_const.out_h) / spec_const.local_sz_y);
+    opBase->group_z = ceil(static_cast<float>
             ((ceil(static_cast<float>(N) * in_shape[kShapeIdxBatch] / spec_const.depth_multiplier))) / spec_const.local_sz_z);
-    }
-    else
-    {
-        NOT_REACH_HERE;
-    }
 
     NN_GPU_DEBUG("VkCsExecutor::doDEPTHWISE_CONV_2D: lsx %d, lsy %d, lsz %d, group_x %d, group_y %d, group_z %d, "
         "in_h %d, in_w %d, out_h %d, out_w %d, stride_h %d, stride_w %d, dilation_h %d, dilation_w %d, pad_h %d, pad_w %d"
@@ -224,6 +222,7 @@ bool VkCsExecutor::depthConvolve(const Operation& operation, ShaderConfig& confi
     opBase->bindOperand(out, 3, opBase->descriptor_set);
 
     int partition_num = 1;
+    ASSERT(opBase->group_y != 0);
     partition_num = (int)ceil(1.0 * N / opBase->group_y);
 
     for (uint32_t b = 0;  b < in_shape[kShapeIdxBatch]; b++)
