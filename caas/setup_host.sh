@@ -20,6 +20,14 @@ function ubu_install_qemu(){
 	wget https://download.qemu.org/qemu-3.0.0.tar.xz
 	tar -xf qemu-3.0.0.tar.xz
 	cd qemu-3.0.0/
+	wget https://patchwork.kernel.org/patch/10678791/raw/ -O Audio_fix.patch &&  patch -p1 < Audio_fix.patch
+	if [ $? != "0" ]; then
+		echo "Patch didn't apply"
+		echo "Please check ..."
+		exit 1
+	else
+		echo "Patch applied"
+	fi
 	./configure --prefix=/usr \
 	    --enable-kvm \
 	    --disable-xen \
@@ -33,7 +41,7 @@ function ubu_install_qemu(){
 	    --enable-opengl \
 	    --enable-gtk \
 	    --target-list=x86_64-softmmu \
-	    --audio-drv-list=alsa
+	    --audio-drv-list=pa
 	make -j24
 	make install
 	cd ../
