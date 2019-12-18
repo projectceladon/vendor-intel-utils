@@ -34,7 +34,7 @@ codec2: true
 usb: host
 usb-gadget: configfs(usb_config=adb,mtp_adb_pid=0x0a5f,ptp_adb_pid=0x0a61,rndis_pid=0x0a62,rndis_adb_pid=0x0a63,bcdDevice=0x0,bcdUSB=0x200,controller=dwc3.0.auto,f_acm=false,f_dvc_trace=true,dvctrace_source_dev=dvcith-0-msc0)
 midi: true
-touch: galax7200
+touch: cvt0f21
 navigationbar: true
 device-type: tablet
 debug-tools: true
