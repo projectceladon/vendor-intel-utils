@@ -58,8 +58,6 @@ public class ApiHelper {
 
     public static final boolean HAS_HIDEYBARS = isKitKatOrHigher();
 
-    public static final boolean HAS_ZOOM_RATIO_CONTROL = isROrHigher();
-
     // Don't use renderscript for x86 K, L is OK. See b/18435492
     public static final boolean HAS_RENDERSCRIPT =
             !(Build.VERSION.SDK_INT == Build.VERSION_CODES.KITKAT && X86ABI.equals(Build.CPU_ABI));
@@ -118,10 +116,5 @@ public class ApiHelper {
     public static boolean isMOrHigher() {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 || "MNC".equals(Build.VERSION.CODENAME);
-    }
-
-    public static boolean isROrHigher() {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-                || "R".equals(Build.VERSION.CODENAME);
     }
 }
