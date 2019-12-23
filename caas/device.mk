@@ -492,11 +492,12 @@ endif
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.software.midi.xml:vendor/etc/permissions/android.software.midi.xml
 ##############################################################
-# Source: device/intel/mixins/groups/touch/galax7200/product.mk
+# Source: device/intel/mixins/groups/touch/cvt0f21/product.mk
 ##############################################################
 PRODUCT_COPY_FILES += \
         frameworks/native/data/etc/android.hardware.touchscreen.multitouch.jazzhand.xml:vendor/etc/permissions/android.hardware.touchscreen.multitouch.jazzhand.xml\
-        $(INTEL_PATH_COMMON)/touch/Vendor_0eef_Product_7200.idc:system/usr/idc/Vendor_0eef_Product_7200.idc
+        $(INTEL_PATH_COMMON)/touch/Vendor_1ff7_Product_0f21.idc:system/usr/idc/Vendor_1ff7_Product_0f21.idc
+
 ##############################################################
 # Source: device/intel/mixins/groups/debug-tools/true/product.mk
 ##############################################################
