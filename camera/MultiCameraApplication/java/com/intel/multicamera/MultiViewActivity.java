@@ -23,6 +23,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraManager;
+import android.os.AsyncTask;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.SparseIntArray;
@@ -31,6 +32,7 @@ import android.widget.*;
 import androidx.appcompat.app.ActionBar;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+import java.io.IOException;
 
 public class MultiViewActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
@@ -61,6 +63,9 @@ public class MultiViewActivity extends AppCompatActivity {
 
     public String[] CameraIds;
     private boolean mHasCriticalPermissions;
+
+    private static final Object mStorageSpaceLock = new Object();
+    private static long mStorageSpaceBytes = Utils.LOW_STORAGE_THRESHOLD_BYTES;
 
     static {
         ORIENTATIONS.append(Surface.ROTATION_0, 90);
@@ -125,19 +130,16 @@ public class MultiViewActivity extends AppCompatActivity {
      * them. Non-critical permission is location.
      */
     private void checkPermissions() {
-        if (ActivityCompat.checkSelfPermission(getApplicationContext(),
-                                               Manifest.permission.CAMERA) ==
-                    PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(getApplicationContext(),
-                                               Manifest.permission.RECORD_AUDIO) ==
-                    PackageManager.PERMISSION_GRANTED &&
-            ActivityCompat.checkSelfPermission(getApplicationContext(),
-                                               Manifest.permission.READ_EXTERNAL_STORAGE) ==
-                    PackageManager.PERMISSION_GRANTED) {
-            mHasCriticalPermissions = true;
-        } else {
-            mHasCriticalPermissions = false;
-        }
+        mHasCriticalPermissions =
+                ActivityCompat.checkSelfPermission(getApplicationContext(),
+                                                   Manifest.permission.CAMERA) ==
+                        PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(getApplicationContext(),
+                                                   Manifest.permission.RECORD_AUDIO) ==
+                        PackageManager.PERMISSION_GRANTED &&
+                ActivityCompat.checkSelfPermission(getApplicationContext(),
+                                                   Manifest.permission.READ_EXTERNAL_STORAGE) ==
+                        PackageManager.PERMISSION_GRANTED;
 
         if (!mHasCriticalPermissions) {
             Intent intent = new Intent(this, PermissionsActivity.class);
@@ -376,6 +378,7 @@ public class MultiViewActivity extends AppCompatActivity {
         Log.e(TAG, "onResume");
 
         GetCameraCnt();
+        updateStorageSpace(null);
 
         if (numOfCameras == 1) {
             manageTopLeftCam();
@@ -583,7 +586,7 @@ public class MultiViewActivity extends AppCompatActivity {
                 getFragmentManager().beginTransaction().remove(Fragment2).commit();
 
                 frameLayout.setVisibility(View.GONE);
-                view.setVisibility(view.GONE);
+                view.setVisibility(View.GONE);
                 SettingView2.setVisibility(View.VISIBLE);
 
                 if (!exitScrnFlag)
@@ -788,5 +791,58 @@ public class MultiViewActivity extends AppCompatActivity {
             default:
                 break;
         }
+    }
+
+    protected static long getStorageSpaceBytes() {
+        synchronized (mStorageSpaceLock) {
+            return mStorageSpaceBytes;
+        }
+    }
+
+    protected interface OnStorageUpdateDoneListener {
+        void onStorageUpdateDone(long bytes) throws IOException, CameraAccessException;
+    }
+
+    protected static void updateStorageSpace(final OnStorageUpdateDoneListener callback) {
+        /*
+         * We execute disk operations on a background thread in order to
+         * free up the UI thread.  Synchronizing on the lock below ensures
+         * that when getStorageSpaceBytes is called, the main thread waits
+         * until this method has completed.
+         *
+         * However, .execute() does not ensure this execution block will be
+         * run right away (.execute() schedules this AsyncTask for sometime
+         * in the future. executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR)
+         * tries to execute the task in parellel with other AsyncTasks, but
+         * there's still no guarantee).
+         * e.g. don't call this then immediately call getStorageSpaceBytes().
+         * Instead, pass in an OnStorageUpdateDoneListener.
+         */
+        (new AsyncTask<Void, Void, Long>() {
+            @Override
+            protected Long doInBackground(Void... arg) {
+                synchronized (mStorageSpaceLock) {
+                    mStorageSpaceBytes = Utils.getAvailableSpace();
+                    return mStorageSpaceBytes;
+                }
+            }
+
+            @Override
+            protected void onPostExecute(Long bytes) {
+                // This callback returns after I/O to check disk, so we could be
+                // pausing and shutting down. If so, don't bother invoking.
+                if (callback != null) {
+                    try {
+                        callback.onStorageUpdateDone(bytes);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    } catch (CameraAccessException e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    Log.v(TAG, "ignoring storage callback after activity pause");
+                }
+            }
+        }).executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
     }
 }

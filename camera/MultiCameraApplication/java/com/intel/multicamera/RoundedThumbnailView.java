@@ -593,9 +593,6 @@ public class RoundedThumbnailView extends View {
         // Start ripple animation after delay.
         mRippleAnimator.setStartDelay(mRippleStartDelayMs);
         mRippleAnimator.start();
-
-        // Announce the accessibility string.
-        // announceForAccessibility(mForegroundRequest.getAccessibilityString());
     }
 
     private void processRevealRequests() {

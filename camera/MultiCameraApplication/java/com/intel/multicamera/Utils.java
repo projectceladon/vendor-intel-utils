@@ -29,12 +29,15 @@ import android.graphics.Point;
 import android.net.Uri;
 import android.os.Environment;
 import android.os.ParcelFileDescriptor;
+import android.os.StatFs;
 import android.provider.MediaStore;
+import android.text.format.DateUtils;
 import android.util.Log;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
+import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Optional;
@@ -43,6 +46,10 @@ import javax.microedition.khronos.opengles.GL11;
 
 public class Utils {
     private static final String TAG = "Utils";
+
+    public static final String DCIM =
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM).toString();
+    public static final String DIRECTORY = DCIM + "/MultiCamera";
 
     public static final int MEDIA_TYPE_IMAGE = 0;
     public static final int MEDIA_TYPE_VIDEO = 1;
@@ -62,6 +69,10 @@ public class Utils {
     private static final String VIDEO_BASE_URI = "content://media/external/video/media";
 
     private static final int MAX_PEEK_BITMAP_PIXELS = 1600000;  // 1.6 * 4 MBs.
+    public static final long UNAVAILABLE = -1L;
+    public static final long PREPARING = -2L;
+    public static final long UNKNOWN_SIZE = -3L;
+    public static final long LOW_STORAGE_THRESHOLD_BYTES = 50000000;
 
     private static Uri mCurrentPictureUri, mCurrentVideoUri;
 
@@ -71,6 +82,7 @@ public class Utils {
     public static final String KEY_TREAT_UP_AS_BACK = "treat-up-as-back";
 
     private static final int DOWN_SAMPLE_FACTOR = 4;
+    private static ContentValues mCurrentPicInfo, mCurrentVideoInfo;
 
     @SuppressLint("SimpleDateFormat")
     public static File createOutputmediaStorageDir() {
@@ -83,16 +95,14 @@ public class Utils {
             return null;
         }
 
-        File mediaStorageDir =
-                new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
-                         "MultiCamera");
+        File mediaStorageDir = new File(DIRECTORY);
         // This location works best if you want the created images to be shared
         // between applications and persist after your app has been uninstalled.
 
         // Create the storage directory if it does not exist
         if (!mediaStorageDir.exists()) {
             if (!mediaStorageDir.mkdirs()) {
-                Log.e(TAG, "Failed to create directory for DCIM/MultiCamera");
+                Log.e(TAG, "Failed to create directory for " + DIRECTORY);
                 return null;
             }
         }
@@ -100,7 +110,7 @@ public class Utils {
         return mediaStorageDir;
     }
 
-    public static void broadcastNewPicture(Context context, ContentValues values) {
+    public static Uri broadcastNewPicture(Context context, ContentValues values) {
         Uri uri = null;
         ContentResolver resolver = context.getContentResolver();
         try {
@@ -117,20 +127,11 @@ public class Utils {
             Log.v(TAG, "Current Picture URI: " + uri);
         }
 
-        mCurrentPictureUri = uri;
-
         context.sendBroadcast(new Intent(ACTION_NEW_PICTURE, uri));
+        return uri;
     }
 
-    public static Uri getCurrentPictureUri() {
-        return mCurrentPictureUri;
-    }
-
-    public static Uri getCurrentVideoUri() {
-        return mCurrentVideoUri;
-    }
-
-    public static void broadcastNewVideo(Context context, ContentValues values) {
+    public static Uri broadcastNewVideo(Context context, ContentValues values) {
         Uri uri = null;
         ContentResolver resolver = context.getContentResolver();
         try {
@@ -144,9 +145,9 @@ public class Utils {
         } finally {
             Log.v(TAG, "Current video URI: " + uri);
         }
-        mCurrentVideoUri = uri;
 
         context.sendBroadcast(new Intent(ACTION_NEW_VIDEO, uri));
+        return uri;
     }
 
     public static String getFileNameFromUri(Uri uri) {
@@ -191,7 +192,7 @@ public class Utils {
         return fileDetails;
     }
 
-    public static ContentValues getContentValues(int type, String fileDetails[], int width,
+    public static ContentValues getContentValues(int type, String[] fileDetails, int width,
                                                  int height, long duration, long size) {
         if (fileDetails.length < 5) {
             Log.e(TAG, "Invalid file details");
@@ -552,5 +553,95 @@ public class Utils {
         ContentResolver cR = context.getContentResolver();
         String type = cR.getType(uri);
         return type;
+    }
+
+    public static Optional<MediaDetails> getMediaDetails(Context mContext, ContentValues info) {
+        MediaDetails mediaDetails = new MediaDetails();
+        final DateFormat mDateFormatter = DateFormat.getDateTimeInstance();
+
+        if (info.get(MediaStore.Video.Media.MIME_TYPE).equals("video/mp4") == true) {
+            File file = new File(info.getAsString(MediaStore.Video.Media.DATA));
+
+            mediaDetails.addDetail(MediaDetails.INDEX_TITLE,
+                                   info.get(MediaStore.Video.Media.TITLE));
+            mediaDetails.addDetail(MediaDetails.INDEX_PATH, info.get(MediaStore.Video.Media.DATA));
+            long mSizeInBytes = info.getAsLong(MediaStore.Video.Media.SIZE);
+            if (mSizeInBytes > 0) {
+                mediaDetails.addDetail(MediaDetails.INDEX_SIZE, mSizeInBytes);
+            }
+
+            String Dimensions = MediaDetails.getDimentions(
+                    mContext, info.getAsInteger(MediaStore.Video.Media.WIDTH),
+                    info.getAsInteger(MediaStore.Video.Media.HEIGHT));
+
+            mediaDetails.addDetail(MediaDetails.INDEX_DIMENSIONS, Dimensions);
+
+            mediaDetails.addDetail(MediaDetails.INDEX_TYPE,
+                                   info.get(MediaStore.Video.Media.MIME_TYPE));
+
+            String dateModified = DateUtils.formatDateTime(
+                    mContext, info.getAsLong(MediaStore.Video.Media.DATE_TAKEN),
+                    DateUtils.FORMAT_SHOW_TIME | DateUtils.FORMAT_SHOW_DATE |
+                            DateUtils.FORMAT_SHOW_YEAR | DateUtils.FORMAT_ABBREV_ALL);
+
+            mediaDetails.addDetail(MediaDetails.INDEX_DATETIME, dateModified);
+
+            String duration = MediaDetails.formatDuration(
+                    mContext, TimeUnit.MILLISECONDS.toSeconds(
+                                      (Long)info.get(MediaStore.Video.Media.DURATION)));
+            mediaDetails.addDetail(MediaDetails.INDEX_DURATION, duration);
+
+        } else if (info.get(MediaStore.Video.Media.MIME_TYPE).equals("image/jpeg") == true) {
+            File file = new File(info.getAsString(MediaStore.Images.ImageColumns.DATA));
+            mediaDetails.addDetail(MediaDetails.INDEX_TITLE,
+                                   info.get(MediaStore.Images.ImageColumns.TITLE));
+            mediaDetails.addDetail(MediaDetails.INDEX_PATH,
+                                   info.get(MediaStore.Images.ImageColumns.DATA));
+            String Dimensions = MediaDetails.getDimentions(
+                    mContext, info.getAsInteger(MediaStore.MediaColumns.WIDTH),
+                    info.getAsInteger(MediaStore.MediaColumns.HEIGHT));
+
+            mediaDetails.addDetail(MediaDetails.INDEX_DIMENSIONS, Dimensions);
+
+            mediaDetails.addDetail(MediaDetails.INDEX_TYPE,
+                                   info.get(MediaStore.Images.ImageColumns.MIME_TYPE));
+
+            String dateModified = DateUtils.formatDateTime(
+                    mContext, info.getAsLong(MediaStore.Images.ImageColumns.DATE_TAKEN),
+                    DateUtils.FORMAT_SHOW_TIME | DateUtils.FORMAT_SHOW_DATE |
+                            DateUtils.FORMAT_SHOW_YEAR | DateUtils.FORMAT_ABBREV_ALL);
+            mediaDetails.addDetail(MediaDetails.INDEX_DATETIME, dateModified);
+
+            long mSizeInBytes = info.getAsLong(MediaStore.Images.ImageColumns.SIZE);
+            if (mSizeInBytes > 0) {
+                mediaDetails.addDetail(MediaDetails.INDEX_SIZE, mSizeInBytes);
+            }
+        }
+
+        return Optional.of(mediaDetails);
+    }
+
+    public static long getAvailableSpace() {
+        String state = Environment.getExternalStorageState();
+        Log.d(TAG, "External storage state=" + state);
+        if (Environment.MEDIA_CHECKING.equals(state)) {
+            return PREPARING;
+        }
+        if (!Environment.MEDIA_MOUNTED.equals(state)) {
+            return UNAVAILABLE;
+        }
+
+        File dir = createOutputmediaStorageDir();
+        if (!dir.isDirectory() || !dir.canWrite()) {
+            return UNAVAILABLE;
+        }
+
+        try {
+            StatFs stat = new StatFs(DIRECTORY);
+            return stat.getAvailableBlocksLong() * stat.getBlockSizeLong();
+        } catch (Exception e) {
+            Log.i(TAG, "Fail to access external storage", e);
+        }
+        return UNKNOWN_SIZE;
     }
 }

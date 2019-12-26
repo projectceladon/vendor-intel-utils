@@ -27,6 +27,7 @@ import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.CamcorderProfile;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.Rational;
 import android.util.Size;
 import android.util.SparseArray;
 import android.view.LayoutInflater;
@@ -36,6 +37,8 @@ import androidx.preference.ListPreference;
 import androidx.preference.Preference;
 import androidx.preference.PreferenceFragment;
 import androidx.preference.PreferenceGroup;
+import java.math.BigInteger;
+import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -397,19 +400,6 @@ public class SettingsPrefUtil
     }
 
     /**
-     * @param size The photo resolution.
-     * @return A human readable and translated string for labeling the
-     * picture size in megapixels.
-     */
-    private String getSizeSummaryString(Size size) {
-        int width = size.getWidth();
-        int height = size.getHeight();
-        String result =
-                getResources().getString(R.string.setting_summary_width_and_height, width, height);
-        return result;
-    }
-
-    /**
      * Recursively go through settings and fill entries and summaries of our
      * preferences.
      */
@@ -478,5 +468,115 @@ public class SettingsPrefUtil
         }
 
         preference.setEntries(entries.toArray(new String[0]));
+    }
+
+    /**
+     * Different aspect ratio constants.
+     */
+    public static final Rational ASPECT_RATIO_16x9 = new Rational(16, 9);
+    public static final Rational ASPECT_RATIO_4x3 = new Rational(4, 3);
+    private static final double ASPECT_RATIO_TOLERANCE = 0.05;
+
+    /**
+     * These are the preferred aspect ratios for the settings. We will take HAL
+     * supported aspect ratios that are within ASPECT_RATIO_TOLERANCE of these values.
+     * We will also take the maximum supported resolution for full sensor image.
+     */
+    private static Float[] sDesiredAspectRatios = {16.0f / 9.0f, 4.0f / 3.0f};
+
+    private static Size[] sDesiredAspectRatioSizes = {new Size(16, 9), new Size(4, 3)};
+
+    /**
+     * Take an aspect ratio and squish it into a nearby desired aspect ratio, if
+     * possible.
+     *
+     * @param aspectRatio the aspect ratio to fuzz
+     * @return the closest desiredAspectRatio within ASPECT_RATIO_TOLERANCE, or the
+     *         original ratio
+     */
+    private static float fuzzAspectRatio(float aspectRatio) {
+        for (float desiredAspectRatio : sDesiredAspectRatios) {
+            if ((Math.abs(aspectRatio - desiredAspectRatio)) < ASPECT_RATIO_TOLERANCE) {
+                return desiredAspectRatio;
+            }
+        }
+        return aspectRatio;
+    }
+
+    /**
+     * Reduce an aspect ratio to its lowest common denominator. The ratio of the
+     * input and output sizes is guaranteed to be the same.
+     *
+     * @param aspectRatio the aspect ratio to reduce
+     * @return The reduced aspect ratio which may equal the original.
+     */
+    public static Size reduce(Size aspectRatio) {
+        BigInteger width = BigInteger.valueOf(aspectRatio.getWidth());
+        BigInteger height = BigInteger.valueOf(aspectRatio.getHeight());
+        BigInteger gcd = width.gcd(height);
+        int numerator = Math.max(width.intValue(), height.intValue()) / gcd.intValue();
+        int denominator = Math.min(width.intValue(), height.intValue()) / gcd.intValue();
+        return new Size(numerator, denominator);
+    }
+
+    /**
+     * Given a size, return the closest aspect ratio that falls close to the
+     * given size.
+     *
+     * @param size the size to approximate
+     * @return the closest desired aspect ratio, or the original aspect ratio if
+     *         none were close enough
+     */
+    public static Size getApproximateSize(Size size) {
+        Size aspectRatio = reduce(size);
+        float fuzzy = fuzzAspectRatio(size.getWidth() / (float)size.getHeight());
+        int index = Arrays.asList(sDesiredAspectRatios).indexOf(fuzzy);
+        if (index != -1) {
+            aspectRatio = sDesiredAspectRatioSizes[index];
+        }
+        return aspectRatio;
+    }
+
+    private static DecimalFormat sMegaPixelFormat = new DecimalFormat("##0.0");
+
+    /**
+     * Given a size return the numerator of its aspect ratio
+     *
+     * @param size the size to measure
+     * @return the numerator
+     */
+    public static int aspectRatioNumerator(Size size) {
+        Size aspectRatio = reduce(size);
+        return aspectRatio.getWidth();
+    }
+
+    /**
+     * Given a size return the numerator of its aspect ratio
+     *
+     * @param size
+     * @return the denominator
+     */
+    public static int aspectRatioDenominator(Size size) {
+        BigInteger width = BigInteger.valueOf(size.getWidth());
+        BigInteger height = BigInteger.valueOf(size.getHeight());
+        BigInteger gcd = width.gcd(height);
+        int denominator = Math.min(width.intValue(), height.intValue()) / gcd.intValue();
+        return denominator;
+    }
+
+    /**
+     * @param size The photo resolution.
+     * @return A human readable and translated string for labeling the
+     *         picture size in megapixels.
+     */
+    private String getSizeSummaryString(Size size) {
+        Size approximateSize = getApproximateSize(size);
+        String megaPixels = sMegaPixelFormat.format((size.getWidth() * size.getHeight()) / 1e6);
+        int numerator = aspectRatioNumerator(approximateSize);
+        int denominator = aspectRatioDenominator(approximateSize);
+        String result =
+                getResources().getString(R.string.setting_summary_aspect_ratio_and_megapixels,
+                                         numerator, denominator, megaPixels);
+        return result;
     }
 }
