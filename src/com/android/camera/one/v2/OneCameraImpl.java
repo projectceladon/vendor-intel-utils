@@ -162,7 +162,7 @@ public class OneCameraImpl extends AbstractOneCamera {
     }
 
     /** Directory to store raw DNG files in. */
-    private static final File RAW_DIRECTORY = new File(Storage.DIRECTORY, "DNG");
+    private final File mRawDirectory;
 
     /** Current CONTROL_AF_MODE request to Camera2 API. */
     private int mControlAFMode = CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE;
@@ -322,6 +322,7 @@ public class OneCameraImpl extends AbstractOneCamera {
         mLensRange = LensRangeCalculator.getDiopterToRatioCalculator(characteristics);
         mDirectionProvider = new CameraDirectionProvider(characteristics);
         mFullSizeAspectRatio = calculateFullSizeAspectRatio(characteristics);
+        mRawDirectory = new File(Storage.instance().DIRECTORY, "DNG");
 
         // Override pictureSize for RAW (our picture size settings don't include
         // RAW, which typically only supports one size (sensor size). This also
@@ -766,12 +767,12 @@ public class OneCameraImpl extends AbstractOneCamera {
         // TODO: If we make this a real feature we should probably put the DNGs
         // into the Camera directly.
         if (sCaptureImageFormat == ImageFormat.RAW_SENSOR) {
-            if (!RAW_DIRECTORY.exists()) {
-                if (!RAW_DIRECTORY.mkdirs()) {
+            if (!mRawDirectory.exists()) {
+                if (!mRawDirectory.mkdirs()) {
                     throw new RuntimeException("Could not create RAW directory.");
                 }
             }
-            File dngFile = new File(RAW_DIRECTORY, capture.session.getTitle() + ".dng");
+            File dngFile = new File(mRawDirectory, capture.session.getTitle() + ".dng");
             writeDngBytesAndClose(capture.image, capture.totalCaptureResult,
                     mCharacteristics, dngFile);
         } else {

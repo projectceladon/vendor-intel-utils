@@ -222,7 +222,7 @@ public class PhotoItem extends FilmstripItemBase<FilmstripItemData> {
         final Bitmap bitmap;
 
         if (getAttributes().isRendering()) {
-            return Storage.getPlaceholderForSession(data.getUri());
+            return Storage.instance().getPlaceholderForSession(data.getUri());
         } else {
 
             FileInputStream stream;

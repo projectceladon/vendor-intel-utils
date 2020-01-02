@@ -350,7 +350,7 @@ public class CameraFilmstripDataAdapter implements LocalFilmstripDataAdapter {
             // We may add data that is already present, but if we do, it will be deduped in addOrUpdate.
             // addOrUpdate does not dedupe session items, so we ignore them here
             for (FilmstripItem filmstripItem : newPhotoData) {
-                Uri sessionUri = Storage.getSessionUriFromContentUri(
+                Uri sessionUri = Storage.instance().getSessionUriFromContentUri(
                       filmstripItem.getData().getUri());
                 if (sessionUri == null) {
                     addOrUpdate(filmstripItem);

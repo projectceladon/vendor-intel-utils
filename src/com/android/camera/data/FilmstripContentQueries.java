@@ -32,7 +32,6 @@ import java.util.List;
  */
 public class FilmstripContentQueries {
     private static final Log.Tag TAG = new Log.Tag("LocalDataQuery");
-    private static final String CAMERA_PATH = Storage.DIRECTORY + "%";
     private static final String SELECT_BY_PATH = MediaStore.MediaColumns.DATA + " LIKE ?";
 
     public interface CursorToFilmstripItemFactory<I extends FilmstripItem> {
@@ -62,7 +61,8 @@ public class FilmstripContentQueries {
           Uri contentUri, String[] projection, long minimumId, String orderBy,
           CursorToFilmstripItemFactory<I> factory) {
         String selection = SELECT_BY_PATH + " AND " + MediaStore.MediaColumns._ID + " > ?";
-        String[] selectionArgs = new String[] { CAMERA_PATH, Long.toString(minimumId) };
+        String cameraPath = Storage.instance().DIRECTORY + "%";
+        String[] selectionArgs = new String[] { cameraPath, Long.toString(minimumId) };
 
         Cursor cursor = contentResolver.query(contentUri, projection,
               selection, selectionArgs, orderBy);
