@@ -47,6 +47,7 @@ common_options="\
  -device e1000,netdev=net0 \
  -netdev user,id=net0,hostfwd=tcp::5555-:5555 \
  -device intel-iommu,device-iotlb=off \
+ -full-screen \
  -nodefaults
 "
 
