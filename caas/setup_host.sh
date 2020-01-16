@@ -1,6 +1,7 @@
 #!/bin/bash
 
 reboot_required=0
+QEMU_REL=qemu-4.2.0
 
 function ubu_changes_require(){
 	echo "Please make sure your apt is working"
@@ -17,17 +18,9 @@ function ubu_install_qemu(){
 	apt autoremove -y
 	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl1.2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc libsdl1.2-dev uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison
 
-	wget https://download.qemu.org/qemu-3.0.0.tar.xz
-	tar -xf qemu-3.0.0.tar.xz
-	cd qemu-3.0.0/
-	wget https://patchwork.kernel.org/patch/10678791/raw/ -O Audio_fix.patch &&  patch -p1 < Audio_fix.patch
-	if [ $? != "0" ]; then
-		echo "Patch didn't apply"
-		echo "Please check ..."
-		exit 1
-	else
-		echo "Patch applied"
-	fi
+	wget https://download.qemu.org/$QEMU_REL.tar.xz
+	tar -xf $QEMU_REL.tar.xz
+	cd $QEMU_REL/
 	./configure --prefix=/usr \
 	    --enable-kvm \
 	    --disable-xen \
@@ -41,10 +34,20 @@ function ubu_install_qemu(){
 	    --enable-opengl \
 	    --enable-gtk \
 	    --target-list=x86_64-softmmu \
-	    --audio-drv-list=pa
+	    --audio-drv-list=alsa
 	make -j24
 	make install
 	cd ../
+}
+
+function ubu_build_ovmf(){
+	sudo apt install -y uuid-dev nasm acpidump iasl
+	cd $QEMU_REL/roms/edk2
+	source ./edksetup.sh
+	make -C BaseTools/
+	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE
+	cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd ../../../OVMF.fd
+	cd ../../../
 }
 
 function ubu_enable_host_gvtg(){
@@ -125,6 +128,7 @@ if [[ $version =~ "Ubuntu" ]]; then
 	check_network
 	ubu_changes_require
 	ubu_install_qemu
+	ubu_build_ovmf
 	ubu_enable_host_gvtg
 	get_required_scripts
 	check_kernel
