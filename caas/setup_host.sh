@@ -34,7 +34,7 @@ function ubu_install_qemu(){
 	    --enable-opengl \
 	    --enable-gtk \
 	    --target-list=x86_64-softmmu \
-	    --audio-drv-list=alsa
+	    --audio-drv-list=pa
 	make -j24
 	make install
 	cd ../
