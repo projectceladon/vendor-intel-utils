@@ -42,6 +42,7 @@ common_options="\
  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
  -device isa-serial,chardev=charserial0,id=serial0 \
  -device intel-hda -device hda-duplex \
+ -audiodev id=android_spk,timer-period=5000,driver=pa \
  -drive file=$caas_image,if=none,id=disk1 \
  -device virtio-blk-pci,drive=disk1,bootindex=1 \
  -device e1000,netdev=net0 \
