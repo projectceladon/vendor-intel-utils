@@ -1,19 +1,37 @@
 #!/bin/bash
 
-[ $# -ne 1 ] && echo "Usage: $0 caas-flashfiles-eng-<user>.zip" && exit -1
-[ -f "./android.qcow2" ] && echo "android.qcow2 already exsited, please backup/remove it before generating" && exit -1
+[ $# -lt 1 ] && echo "Usage: $0 caas-flashfiles-eng-<user>.zip" && exit -1
+
+if [ -f android.qcow2 ]
+then
+	echo -n "android.qcow2 already exsited, Do you want to flash new one(y/N):"
+	read option
+	if [ "$option" == 'y' ]
+	then
+		rm android.qcow2
+	else
+		exit 1
+	fi
+fi
 
 qemu-img create -f qcow2 android.qcow2 16G
 
 [ -d "./flashfiles_decompress" ] && rm -rf "./flashfiles_decompress"
 mkdir ./flashfiles_decompress
-unzip $@ -d ./flashfiles_decompress
+unzip $1 -d ./flashfiles_decompress
 dd if=/dev/zero of=./flash.vfat bs=63M count=160
 mkfs.vfat ./flash.vfat
 mcopy -i flash.vfat flashfiles_decompress/* ::
 
 ovmf_file="./OVMF.fd"
 [ ! -f $ovmf_file ] && ovmf_file="/usr/share/qemu/OVMF.fd"
+
+if [[ $2 == "--display-off" ]]
+then
+	display_type="none"
+else
+	display_type="gtk,gl=on"
+fi
 
 qemu-system-x86_64 \
   -m 2048 -smp 2 -M q35 \
@@ -32,5 +50,7 @@ qemu-system-x86_64 \
   -device scsi-hd,drive=scsidisk1,bus=scsi0.0 \
   -drive file=$ovmf_file,format=raw,if=pflash \
   -no-reboot \
+  -display $display_type \
   -boot menu=on,splash-time=5000,strict=on \
 
+echo "Flashing is completed"

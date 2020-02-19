@@ -2,6 +2,7 @@
 
 reboot_required=0
 QEMU_REL=qemu-4.2.0
+a=`grep -rn CIV_WORK_DIR /etc/environment`
 
 function ubu_changes_require(){
 	echo "Please make sure your apt is working"
@@ -122,6 +123,15 @@ function get_required_scripts(){
 	chmod +x start_android_qcow2.sh
 }
 
+function save_env(){
+	if [ -z "$a" ]; then
+		echo "export CIV_WORK_DIR=$(pwd)" | tee -a /etc/environment
+	else
+		sed -i "s|export CIV_WORK_DIR.*||g" /etc/environment
+		echo "export CIV_WORK_DIR=$(pwd)" | tee -a /etc/environment
+	fi
+}
+
 version=`cat /proc/version`
 
 if [[ $version =~ "Ubuntu" ]]; then
@@ -132,6 +142,7 @@ if [[ $version =~ "Ubuntu" ]]; then
 	ubu_enable_host_gvtg
 	get_required_scripts
 	check_kernel
+	save_env
 	ask_reboot
 elif [[ $version =~ "Clear Linux OS" ]]; then
 	check_network
@@ -139,6 +150,7 @@ elif [[ $version =~ "Clear Linux OS" ]]; then
 	clr_enable_host_gvtg
 	get_required_scripts
 	check_kernel
+	save_env
 	ask_reboot
 else
 	echo "only clearlinux or Ubuntu is supported"
