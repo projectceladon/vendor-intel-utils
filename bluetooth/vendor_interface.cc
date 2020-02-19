@@ -214,8 +214,6 @@ bool VendorInterface::Open(InitializeCompleteCallback initialize_complete_cb,
     return false;
   }
 
-  old_coding_format = ESCO_CODING_FORMAT_MSBC;
-
   // Get the local BD address
 
   uint8_t local_bda[BluetoothAddress::kBytes];
@@ -333,33 +331,6 @@ size_t VendorInterface::Send(uint8_t type, const uint8_t* data, size_t length) {
     lib_interface_->op(BT_VND_OP_LPM_WAKE_SET_STATE, &wakeState);
     ALOGV("%s: Sent wake before (%02x)", __func__, data[0] | (data[1] << 8));
   }
-  if (type == HCI_PACKET_TYPE_COMMAND) {
-      uint8_t* p;
-      uint16_t command;
-      uint8_t coding_format = 0;
-      int codec = 0x02;
-      p = (uint8_t*)data;
-      STREAM_TO_UINT16(command, p);
-
-      if (command == HCI_ENH_ACCEPT_ESCO_CONNECTION) {
-          p += 15; // Increment stream pointer to point to the coding format byte
-          STREAM_TO_UINT8(coding_format, p);
-      } else if (command == HCI_ENH_SETUP_ESCO_CONNECTION) {
-          p += 11; // Increment stream pointer to point to the coding format byte
-          STREAM_TO_UINT8(coding_format, p);
-      }
-      if (coding_format != 0 && coding_format != old_coding_format) {
-          if (coding_format == ESCO_CODING_FORMAT_MSBC) {
-              codec = 0x02;
-          } else if (coding_format == ESCO_CODING_FORMAT_CVSD) {
-              codec = 0x01;
-          }
-
-          old_coding_format = coding_format;
-          lib_interface_->op(BT_VND_OP_SET_AUDIO_STATE, (int*)&codec);
-      }
-  }
-
   return hci_->Send(type, data, length);
 }
 

@@ -15,7 +15,6 @@
 //
 
 #include "h4_protocol.h"
-#include "esco_parameters.h"
 #include "hcidefs.h"
 
 #define LOG_TAG "android.hardware.bluetooth-hci-h4"
@@ -25,17 +24,6 @@
 #include <asm/byteorder.h>
 #include <linux/usb/ch9.h>
 #include <libusb/libusb.h>
-
-typedef uint8_t UINT8;
-typedef uint16_t UINT16;
-
-#define UINT16_TO_STREAM(p, u16) {*(p)++ = (UINT8)(u16); *(p)++ = (UINT8)((u16) >> 8);}
-#define UINT8_TO_STREAM(p, u8)   {*(p)++ = (UINT8)(u8);}
-#define STREAM_TO_UINT8(u8, p)   {u8 = (UINT8)(*(p)); (p) += 1;}
-#define STREAM_TO_UINT16(u16, p) {u16 = ((UINT16)(*(p)) + (((UINT16)(*((p) + 1))) << 8)); (p) += 2;}
-
-#define T2_MAXIMUM_LATENCY                        0x000D
-#define HCIC_PARAM_SIZE_ENH_ACC_ESCO_CONN         63
 
 #define INTEL_VID 0x8087
 #define INTEL_PID_8265 0x0a2b // Windstorm peak
@@ -66,66 +54,6 @@ size_t H4Protocol::Send(uint8_t type, const uint8_t* data, size_t length){
     iov[0].iov_len = sizeof(type);
     iov[1].iov_base = (void *)data;
     iov[1].iov_len = length;
-
-    if (type == HCI_PACKET_TYPE_COMMAND) {
-        uint8_t* p;
-        void* r;
-        uint8_t* q;
-        uint16_t command;
-        uint8_t coding_format;
-        /* Marvell specific  Configuration */
-        const uint16_t input_coded_data_size = 8;
-        const uint16_t output_coded_data_size = 8;
-        const uint8_t input_transport_unit_size = 16;
-        const uint8_t output_transport_unit_size = 16;
-        const uint8_t packet_size = HCIC_PREAMBLE_SIZE + HCIC_PARAM_SIZE_ENH_ACC_ESCO_CONN;
-        const uint16_t max_latency_ms = 13;
-
-        p = (uint8_t*)data;
-        STREAM_TO_UINT16(command, p);
-        p += 15; // Increment stream pinter to point coding format byte
-        STREAM_TO_UINT8(coding_format, p);
-
-        if ((command == HCI_ENH_ACCEPT_ESCO_CONNECTION) &&
-                                           (coding_format == ESCO_CODING_FORMAT_MSBC)) {
-            ALOGV("%s accept esco", __func__);
-            q = (uint8_t*)malloc(packet_size);
-
-            if (q == NULL) {
-                ALOGE("%s Memory allocation for SCO config parameters failed", __func__);
-            } else {
-                r = q;
-                memcpy(q, data, packet_size);
-                q += 49; // Increment stream pointer to point to input_coded_data_size
-                UINT16_TO_STREAM(q, input_coded_data_size);
-                UINT16_TO_STREAM(q, output_coded_data_size);
-                q += 6; // Increment stream pointer to point to input_transport_unit_size
-                UINT8_TO_STREAM(q, input_transport_unit_size);
-                UINT8_TO_STREAM(q, output_transport_unit_size);
-                UINT16_TO_STREAM(q, max_latency_ms);
-                /* Write T2 specific Settings */
-                UINT16_TO_STREAM(q, (ESCO_PKT_TYPES_MASK_EV3 | ESCO_PKT_TYPES_MASK_NO_3_EV3 |
-                      ESCO_PKT_TYPES_MASK_NO_2_EV5 | ESCO_PKT_TYPES_MASK_NO_3_EV5));
-
-                iov[1].iov_base = r;
-            }
-            while (1) {
-                ret = TEMP_FAILURE_RETRY(writev(uart_fd_, iov, 2));
-                if (ret == -1) {
-                    if (errno == EAGAIN) {
-                        ALOGE("%s error writing to UART (%s)", __func__, strerror(errno));
-                        continue;
-                    }
-                } else if (ret == 0) {
-                    ALOGE("%s zero bytes written - something went wrong...", __func__);
-                    break;
-                }
-                break;
-            }
-            free (q);
-            return ret;
-        }
-    }
 
     ALOGV("%x %x %x", data[0],data[1],data[2]);
     while (1) {

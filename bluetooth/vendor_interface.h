@@ -67,7 +67,6 @@ class VendorInterface {
   PacketReadCallback event_cb_;
 
   FirmwareStartupTimer *firmware_startup_timer_;
-  uint8_t old_coding_format;
 };
 
 }  // namespace implementation
