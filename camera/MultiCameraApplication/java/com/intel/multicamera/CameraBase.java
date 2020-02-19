@@ -404,6 +404,8 @@ public class CameraBase implements MediaRecorder.OnErrorListener, MediaRecorder.
             if (map == null) return;
 
             String Key = GetChnagedPrefKey();
+            if (Key == null)
+                return;
 
             previewSize = getSelectedDimension(Key);
 
@@ -584,8 +586,12 @@ public class CameraBase implements MediaRecorder.OnErrorListener, MediaRecorder.
             Surface surface = new Surface(texture);
 
             String Key = GetChnagedPrefKey();
+            if (Key == null)
+                return;
 
             previewSize = getSelectedDimension(Key);
+            if (previewSize == null)
+                return;
 
             if (previewSize.getWidth() == 640 || previewSize.getWidth() == 320) {
                 previewSize = SIZE_480P;
@@ -757,6 +763,10 @@ public class CameraBase implements MediaRecorder.OnErrorListener, MediaRecorder.
 
         try {
             final Size imageDimension = getSelectedDimension(Capture_Key);
+            if (imageDimension == null) {
+                Log.i(TAG, "Fail to get Dimension");
+                return;
+            }
 
             Log.i(TAG, "Still Capture imageDimension " + imageDimension.getWidth() + " x " +
                                imageDimension.getHeight());

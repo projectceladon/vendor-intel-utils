@@ -404,6 +404,12 @@ public class Utils {
         bitmap = loadImageThumbnailFromStream(stream, width, height, (int)(dim.x * 0.7f),
                                               (int)(dim.y * 0.7), 0, MAX_PEEK_BITMAP_PIXELS);
 
+        try {
+            stream.close();
+        } catch (Exception e) {
+            Log.e(TAG, "Fail to close stream");
+        }
+
         return Optional.ofNullable(bitmap);
         //}
     }
@@ -632,6 +638,8 @@ public class Utils {
         }
 
         File dir = createOutputmediaStorageDir();
+        if (dir == null)
+            return UNAVAILABLE;
         if (!dir.isDirectory() || !dir.canWrite()) {
             return UNAVAILABLE;
         }

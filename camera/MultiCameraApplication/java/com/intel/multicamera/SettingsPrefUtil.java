@@ -96,6 +96,8 @@ public class SettingsPrefUtil
             StreamConfigurationMap map =
                     characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             if (map == null) {
+                Log.d(TAG, "fail to get supported size");
+                return;
             }
 
             ImageDimentions = new ArrayList<>(Arrays.asList(map.getOutputSizes(ImageFormat.JPEG)));
