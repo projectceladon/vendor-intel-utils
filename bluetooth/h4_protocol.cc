@@ -82,9 +82,9 @@ bool H4Protocol::IsIntelController(uint16_t vid, uint16_t pid) {
 	return false;
 }
 
-void H4Protocol::GetUsbpath(void) {
+int H4Protocol::GetUsbpath(void) {
     size_t count, i;
-    int ret, busnum, devnum;
+    int ret = 0, busnum, devnum;
     struct libusb_device **dev_list = NULL;
     struct libusb_context *ctx;
     uint16_t vid = 0, pid = 0;
@@ -92,7 +92,7 @@ void H4Protocol::GetUsbpath(void) {
     ret = libusb_init(&ctx);
     if (ret < 0) {
         ALOGE("libusb failed to initialize: %d\n", ret);
-        return;
+        return ret;
     }
     count = libusb_get_device_list(ctx, &dev_list);
     if (count <= 0) {
@@ -121,13 +121,15 @@ void H4Protocol::GetUsbpath(void) {
 exit:
     libusb_free_device_list(dev_list, count);
     libusb_exit(ctx);
+    return ret;
 }
 
-void H4Protocol::SendHandle(void) {
-    int fd,ret;
+int H4Protocol::SendHandle(void) {
+    int fd, ret = 0;
     fd = open(dev_address,O_WRONLY|O_NONBLOCK);
     if (fd < 0) {
         ALOGE("Fail to open USB device %s, value of fd= %d", dev_address, fd);
+        return -1;
     } else {
         struct usbdevfs_ioctl   wrapper;
         wrapper.ifno = 1;
@@ -137,30 +139,37 @@ void H4Protocol::SendHandle(void) {
         if (ret < 0)
             ALOGE("Failed to send SCO handle err = %d", ret);
         close(fd);
+        return ret;
     }
 }
 
 void H4Protocol::OnPacketReady() {
+  int ret = 0;
   switch (hci_packet_type_) {
     case HCI_PACKET_TYPE_EVENT:
-        if ((hci_packetizer_.GetPacket())[0] == HCI_COMMAND_COMPLETE_EVT) {
-                unsigned int cmd, lsb, msb;
-                msb = hci_packetizer_.GetPacket()[4] ;
-                lsb = hci_packetizer_.GetPacket()[3];
-                cmd = msb << 8 | lsb ;
-
-                if (cmd == HCI_RESET) {
-                    event_cb_(hci_packetizer_.GetPacket());
-                    hci_packet_type_ = HCI_PACKET_TYPE_UNKNOWN;
-                    H4Protocol::GetUsbpath();
-                    return;
-                }
-        } else if ((hci_packetizer_.GetPacket())[0] == HCI_ESCO_CONNECTION_COMP_EVT) {
-             const unsigned char *handle = hci_packetizer_.GetPacket().data() + 3;
-             memcpy(sco_handle, handle, 2);
-             ALOGI("Value of SCO handle = %x, %x", handle[0], handle[1]);
-             H4Protocol::SendHandle();
-        }
+      if (hci_packetizer_.GetPacket() != NULL) {
+          if ((hci_packetizer_.GetPacket())[0] == HCI_COMMAND_COMPLETE_EVT) {
+              unsigned int cmd, lsb, msb;
+              msb = hci_packetizer_.GetPacket()[4] ;
+              lsb = hci_packetizer_.GetPacket()[3];
+              cmd = msb << 8 | lsb ;
+              if (cmd == HCI_RESET) {
+                  event_cb_(hci_packetizer_.GetPacket());
+                  hci_packet_type_ = HCI_PACKET_TYPE_UNKNOWN;
+                  ret = H4Protocol::GetUsbpath();
+                  if (ret < 0)
+                      ALOGE("Failed to get the USB path for btusb-sound-card");
+                  break;
+              }
+          } else if ((hci_packetizer_.GetPacket())[0] == HCI_ESCO_CONNECTION_COMP_EVT) {
+              const unsigned char *handle = hci_packetizer_.GetPacket().data() + 3;
+              memcpy(sco_handle, handle, 2);
+              ALOGI("Value of SCO handle = %x, %x", handle[0], handle[1]);
+              ret = H4Protocol::SendHandle();
+              if (ret < 0)
+                  ALOGE("Failed to send SCO handle to btusb-sound-card driver");
+          }
+      }
 
       event_cb_(hci_packetizer_.GetPacket());
       break;

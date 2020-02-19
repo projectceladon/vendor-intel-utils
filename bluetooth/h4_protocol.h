@@ -46,9 +46,9 @@ class H4Protocol : public HciProtocol {
 
   bool IsIntelController(uint16_t vid, uint16_t pid);
 
-  void GetUsbpath(void);
+  int GetUsbpath(void);
 
-  void SendHandle(void);
+  int SendHandle(void);
 
  private:
   int uart_fd_;
