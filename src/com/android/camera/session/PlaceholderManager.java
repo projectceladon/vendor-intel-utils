@@ -69,7 +69,7 @@ public class PlaceholderManager {
      * @return A session instance representing the new placeholder.
      */
     public Placeholder insertEmptyPlaceholder(String title, Size size, long timestamp) {
-        Uri uri =  Storage.addEmptyPlaceholder(size);
+        Uri uri =  Storage.instance().addEmptyPlaceholder(size);
         return new Placeholder(title, uri, timestamp);
     }
 
@@ -91,7 +91,7 @@ public class PlaceholderManager {
             throw new IllegalArgumentException("Image had bad height/width");
         }
 
-        Uri uri =  Storage.addPlaceholder(placeholder);
+        Uri uri =  Storage.instance().addPlaceholder(placeholder);
         if (uri == null) {
             return null;
         }
@@ -134,7 +134,7 @@ public class PlaceholderManager {
      */
     public Uri finishPlaceholder(Placeholder placeholder, Location location, int orientation,
             ExifInterface exif, byte[] jpeg, int width, int height, String mimeType) throws IOException {
-        Uri resultUri = Storage.updateImage(placeholder.outputUri, mContext.getContentResolver(),
+        Uri resultUri = Storage.instance().updateImage(placeholder.outputUri, mContext.getContentResolver(),
                 placeholder.outputTitle, placeholder.time, location, orientation, exif, jpeg, width,
                 height, mimeType);
         CameraUtil.broadcastNewPicture(mContext, resultUri);
@@ -148,7 +148,7 @@ public class PlaceholderManager {
      * @param placeholder the placeholder bitmap
      */
     public void replacePlaceholder(Placeholder session, Bitmap placeholder) {
-        Storage.replacePlaceholder(session.outputUri, placeholder);
+        Storage.instance().replacePlaceholder(session.outputUri, placeholder);
         CameraUtil.broadcastNewPicture(mContext, session.outputUri);
     }
 
@@ -158,7 +158,7 @@ public class PlaceholderManager {
      * @param placeholder the session for which to retrieve bitmap placeholder
      */
     public Optional<Bitmap> getPlaceholder(Placeholder placeholder) {
-        return Storage.getPlaceholderForSession(placeholder.outputUri);
+        return Storage.instance().getPlaceholderForSession(placeholder.outputUri);
     }
 
 
@@ -168,7 +168,7 @@ public class PlaceholderManager {
      * @param placeholder the session for which to remove the bitmap placeholder.
      */
     public void removePlaceholder(Placeholder placeholder) {
-        Storage.removePlaceholder(placeholder.outputUri);
+        Storage.instance().removePlaceholder(placeholder.outputUri);
     }
 
     /**

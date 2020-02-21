@@ -727,7 +727,7 @@ public class PhotoModule
         queue.addIdleHandler(new MessageQueue.IdleHandler() {
             @Override
             public boolean queueIdle() {
-                Storage.ensureOSXCompatible();
+                Storage.instance().ensureOSXCompatible();
                 return false;
             }
         });
