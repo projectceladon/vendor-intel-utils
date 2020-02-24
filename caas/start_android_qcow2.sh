@@ -18,6 +18,9 @@ function setup_vgpu(){
 	return $res
 }
 
+function create_snd_dummy(){
+	modprobe snd-dummy
+}
 if [[ $1 == "--display-off" ]]
 then
         display_type="none"
@@ -118,6 +121,7 @@ if [[ "$vno" > "5.0.0" ]]; then
 		modprobe kvmgt
 	fi
 	check_nested_vt
+	create_snd_dummy
 	setup_vgpu
 	if [[ $? == 0 ]]; then
 		launch_hwrender $1
