@@ -59,6 +59,10 @@ function ubu_enable_host_gvtg(){
 		fi
 		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"i915.enable_gvt=1 intel_iommu=on /g" /etc/default/grub
 		update-grub
+
+		echo -e "\nkvmgt\nvfio-iommu-type1\nvfio-mdev\n" >> /etc/initramfs-tools/modules
+		update-initramfs -u -k all
+
 		reboot_required=1
 	fi
 }

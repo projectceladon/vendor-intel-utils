@@ -117,9 +117,6 @@ vno=$(echo $version | \
 	}'
 )
 if [[ "$vno" > "5.0.0" ]]; then
-	if [[ "$vno" > "5.3.0" ]]; then
-		modprobe kvmgt
-	fi
 	check_nested_vt
 	create_snd_dummy
 	setup_vgpu
