@@ -1,0 +1,502 @@
+From 54b5198fb13ee2a430ec0c44eec282250d93bf1f Mon Sep 17 00:00:00 2001
+From: Marc Mao <marc.mao@intel.com>
+Date: Thu, 22 Aug 2019 13:20:09 +0800
+Subject: [PATCH] Add RemoteInput support
+
+Change-Id: I03fd4e105fdd6f5a23c4e4ee59c9ac5825b812d9
+Tracked-On:
+Signed-off-by: Marc Mao <marc.mao@intel.com>
+---
+ services/inputflinger/Android.bp      |   1 +
+ services/inputflinger/EventHub.cpp    |  14 +-
+ services/inputflinger/EventHub.h      |   8 +
+ services/inputflinger/RemoteInput.cpp | 400 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 422 insertions(+), 1 deletion(-)
+ create mode 100644 services/inputflinger/RemoteInput.cpp
+
+diff --git a/services/inputflinger/Android.bp b/services/inputflinger/Android.bp
+index a9e5a43..3129272 100644
+--- a/services/inputflinger/Android.bp
++++ b/services/inputflinger/Android.bp
+@@ -23,6 +23,7 @@ cc_library_shared {
+         "InputManager.cpp",
+         "InputReader.cpp",
+         "InputWindow.cpp",
++        "RemoteInput.cpp",
+     ],
+ 
+     shared_libs: [
+diff --git a/services/inputflinger/EventHub.cpp b/services/inputflinger/EventHub.cpp
+index 4d9a2a0..1efca3f 100644
+--- a/services/inputflinger/EventHub.cpp
++++ b/services/inputflinger/EventHub.cpp
+@@ -33,7 +33,7 @@
+ 
+ #define LOG_TAG "EventHub"
+ 
+-// #define LOG_NDEBUG 0
++//#define LOG_NDEBUG 0
+ 
+ #include "EventHub.h"
+ 
+@@ -303,6 +303,10 @@ status_t EventHub::getAbsoluteAxisInfo(int32_t deviceId, int axis,
+         AutoMutex _l(mLock);
+ 
+         Device* device = getDeviceLocked(deviceId);
++        if (isRemoteInputDevice(device)) {
++            return getRemoteAbsoluteAxisInfoLocked(device, axis, outAxisInfo);
++        }
++        else
+         if (device && device->hasValidFd() && test_bit(axis, device->absBitmask)) {
+             struct input_absinfo info;
+             if(ioctl(device->fd, EVIOCGABS(axis), &info)) {
+@@ -412,6 +416,10 @@ status_t EventHub::getAbsoluteAxisValue(int32_t deviceId, int32_t axis, int32_t*
+         AutoMutex _l(mLock);
+ 
+         Device* device = getDeviceLocked(deviceId);
++        if (isRemoteInputDevice(device)) {
++            return getRemoteAbsoluteAxisValueLocked(device, axis, outValue);
++        }
++        else
+         if (device && device->hasValidFd() && test_bit(axis, device->absBitmask)) {
+             struct input_absinfo info;
+             if(ioctl(device->fd, EVIOCGABS(axis), &info)) {
+@@ -1058,6 +1066,10 @@ void EventHub::scanDevicesLocked() {
+     if (mDevices.indexOfKey(VIRTUAL_KEYBOARD_ID) < 0) {
+         createVirtualKeyboardLocked();
+     }
++    const char *kRemoteInput = "/ipc/input-pipe";
++    if (openRemoteDeviceLocked(kRemoteInput) < 0) {
++        ALOGE("Failed to open remote device %s\n", kRemoteInput);
++    }
+ }
+ 
+ // ----------------------------------------------------------------------------
+diff --git a/services/inputflinger/EventHub.h b/services/inputflinger/EventHub.h
+index 66bc294..c1a52c2 100644
+--- a/services/inputflinger/EventHub.h
++++ b/services/inputflinger/EventHub.h
+@@ -339,6 +339,14 @@ protected:
+     virtual ~EventHub();
+ 
+ private:
++    struct Device;
++    bool isRemoteInputDevice(Device* device) const;
++    status_t openRemoteDeviceLocked(const char *devicePath);
++    status_t getRemoteAbsoluteAxisValueLocked(Device* device, int32_t axis, int32_t* outValue) const;
++    status_t getRemoteAbsoluteAxisInfoLocked(Device* device, int axis,
++            RawAbsoluteAxisInfo* outAxisInfo) const;
++
++private:
+     struct Device {
+         Device* next;
+ 
+diff --git a/services/inputflinger/RemoteInput.cpp b/services/inputflinger/RemoteInput.cpp
+new file mode 100644
+index 0000000..d730a71
+--- /dev/null
++++ b/services/inputflinger/RemoteInput.cpp
+@@ -0,0 +1,400 @@
++
++#define LOG_TAG "EventHub"
++#define LOG_NDEBUG 0
++
++#include <sys/stat.h>
++#include "EventHub.h"
++
++#define set_bit(bit, array) ((array)[(bit) / 8] |= (1 << ((bit) % 8)))
++#define test_bit(bit, array) ((array)[(bit) / 8] & (1 << ((bit) % 8)))
++#define sizeof_bit_array(bits) (((bits) + 7) / 8)
++
++#define PRODUCT_REMOTE_INPUT  0x1111
++
++namespace android {
++
++static inline const char* toString(bool value) {
++    return value ? "true" : "false";
++}
++
++static bool containsNonZeroByte(const uint8_t* array, uint32_t startIndex, uint32_t endIndex) {
++    const uint8_t* end = array + endIndex;
++    array += startIndex;
++    while (array != end) {
++        if (*(array++) != 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static const int32_t GAMEPAD_KEYCODES[] = {
++        AKEYCODE_BUTTON_A,     AKEYCODE_BUTTON_B,      AKEYCODE_BUTTON_C,
++        AKEYCODE_BUTTON_X,     AKEYCODE_BUTTON_Y,      AKEYCODE_BUTTON_Z,
++        AKEYCODE_BUTTON_L1,    AKEYCODE_BUTTON_R1,     AKEYCODE_BUTTON_L2,
++        AKEYCODE_BUTTON_R2,    AKEYCODE_BUTTON_THUMBL, AKEYCODE_BUTTON_THUMBR,
++        AKEYCODE_BUTTON_START, AKEYCODE_BUTTON_SELECT, AKEYCODE_BUTTON_MODE,
++};
++
++bool EventHub::isRemoteInputDevice(Device* device) const {
++    return (device && device->identifier.product == PRODUCT_REMOTE_INPUT);
++}
++
++status_t EventHub::openRemoteDeviceLocked(const char* devicePath) {
++    ALOGV("Opening remote device: %s", devicePath);
++
++    if (mkfifo(devicePath, S_IFIFO | 0666) < 0 && errno != EEXIST) {
++        ALOGE("Failed to create input pipe %s", devicePath);
++        return -1;
++    }
++
++    int fd = open(devicePath, O_RDWR | O_CLOEXEC | O_NONBLOCK);
++    if (fd < 0) {
++        ALOGE("could not open %s, %s\n", devicePath, strerror(errno));
++        return -1;
++    }
++
++    struct stat st;
++    __mode_t mod = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
++    if (fstat(fd, &st) == 0) {
++        mod |= st.st_mode;
++    }
++    chmod(devicePath, mod);
++
++    int driverVersion = 0x00010000;
++    InputDeviceIdentifier identifier;
++
++    // Get device identifier.
++    identifier.name.setTo("remote-input");
++    identifier.bus = BUS_USB;
++    identifier.product = PRODUCT_REMOTE_INPUT;
++    identifier.vendor = 0x8086;
++    identifier.version = 4;
++    identifier.location.setTo("/ipc/remote-input");
++    identifier.uniqueId.setTo("remote-input-0-0");
++    assignDescriptorLocked(identifier);
++
++    // Allocate device.  (The device object takes ownership of the fd at this point.)
++    int32_t deviceId = mNextDeviceId++;
++    Device* device = new Device(fd, deviceId, String8(devicePath), identifier);
++
++    ALOGV("add device %d: %s\n", deviceId, devicePath);
++    ALOGV("  bus:        %04x\n"
++          "  vendor      %04x\n"
++          "  product     %04x\n"
++          "  version     %04x\n",
++          identifier.bus, identifier.vendor, identifier.product, identifier.version);
++    ALOGV("  name:       \"%s\"\n", identifier.name.string());
++    ALOGV("  location:   \"%s\"\n", identifier.location.string());
++    ALOGV("  unique id:  \"%s\"\n", identifier.uniqueId.string());
++    ALOGV("  descriptor: \"%s\"\n", identifier.descriptor.string());
++    ALOGV("  driver:     v%d.%d.%d\n", driverVersion >> 16, (driverVersion >> 8) & 0xff,
++          driverVersion & 0xff);
++
++    // Load the configuration file for the device.
++    loadConfigurationLocked(device);
++
++    bool enableMouse = false;
++    bool enableKeyboard = true;
++
++    // USB Optical Mouse --
++    if (enableMouse) {
++        set_bit(BTN_LEFT, device->keyBitmask);
++        set_bit(BTN_RIGHT, device->keyBitmask);
++        set_bit(BTN_MIDDLE, device->keyBitmask);
++        set_bit(ABS_X, device->relBitmask);
++        set_bit(ABS_Y, device->relBitmask);
++        set_bit(ABS_WHEEL, device->relBitmask);
++    }
++
++    // Lite-On Technology Corp. HP Basic USB Keyboard
++    if (enableKeyboard) {
++        const uint8_t keyBitmask[] = {
++                0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
++                0xEF, 0xFF, 0xDF, 0xFF, 0xBF, 0xFE, 0xFF, 0x57, 0x40, 0xC1,
++                0x7A, 0x20, 0x9F, 0xFF, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00,
++                0x01 };
++        memcpy(device->keyBitmask, keyBitmask, sizeof(keyBitmask));
++    }
++
++    // MT touch device
++    set_bit(ABS_MT_TOUCH_MAJOR, device->absBitmask);
++    set_bit(ABS_MT_WIDTH_MAJOR, device->absBitmask);
++    set_bit(ABS_MT_POSITION_X, device->absBitmask);
++    set_bit(ABS_MT_POSITION_Y, device->absBitmask);
++    set_bit(INPUT_PROP_DIRECT, device->propBitmask);
++    // type-B
++    set_bit(BTN_TOUCH, device->keyBitmask);
++    set_bit(ABS_MT_SLOT, device->absBitmask);
++    set_bit(ABS_MT_TRACKING_ID, device->absBitmask);
++    set_bit(ABS_MT_PRESSURE, device->absBitmask);
++
++    // See if this is a keyboard.  Ignore everything in the button range except for
++    // joystick and gamepad buttons which are handled like keyboards for the most part.
++    bool haveKeyboardKeys =
++            containsNonZeroByte(device->keyBitmask, 0, sizeof_bit_array(BTN_MISC)) ||
++            containsNonZeroByte(device->keyBitmask, sizeof_bit_array(KEY_OK),
++                                sizeof_bit_array(KEY_MAX + 1));
++    bool haveGamepadButtons = containsNonZeroByte(device->keyBitmask, sizeof_bit_array(BTN_MISC),
++                                                  sizeof_bit_array(BTN_MOUSE)) ||
++            containsNonZeroByte(device->keyBitmask, sizeof_bit_array(BTN_JOYSTICK),
++                                sizeof_bit_array(BTN_DIGI));
++    if (haveKeyboardKeys || haveGamepadButtons) {
++        device->classes |= INPUT_DEVICE_CLASS_KEYBOARD;
++    }
++
++    // See if this is a cursor device such as a trackball or mouse.
++    if (test_bit(BTN_MOUSE, device->keyBitmask) && test_bit(REL_X, device->relBitmask) &&
++        test_bit(REL_Y, device->relBitmask)) {
++        device->classes |= INPUT_DEVICE_CLASS_CURSOR;
++    }
++
++    // See if this is a rotary encoder type device.
++    String8 deviceType = String8();
++    if (device->configuration &&
++        device->configuration->tryGetProperty(String8("device.type"), deviceType)) {
++        if (!deviceType.compare(String8("rotaryEncoder"))) {
++            device->classes |= INPUT_DEVICE_CLASS_ROTARY_ENCODER;
++        }
++    }
++
++    // See if this is a touch pad.
++    // Is this a new modern multi-touch driver?
++    if (test_bit(ABS_MT_POSITION_X, device->absBitmask) &&
++        test_bit(ABS_MT_POSITION_Y, device->absBitmask)) {
++        // Some joysticks such as the PS3 controller report axes that conflict
++        // with the ABS_MT range.  Try to confirm that the device really is
++        // a touch screen.
++        if (test_bit(BTN_TOUCH, device->keyBitmask) || !haveGamepadButtons) {
++            device->classes |= INPUT_DEVICE_CLASS_TOUCH | INPUT_DEVICE_CLASS_TOUCH_MT;
++        }
++        // Is this an old style single-touch driver?
++    } else if (test_bit(BTN_TOUCH, device->keyBitmask) && test_bit(ABS_X, device->absBitmask) &&
++               test_bit(ABS_Y, device->absBitmask)) {
++        device->classes |= INPUT_DEVICE_CLASS_TOUCH;
++        // Is this a BT stylus?
++    } else if ((test_bit(ABS_PRESSURE, device->absBitmask) ||
++                test_bit(BTN_TOUCH, device->keyBitmask)) &&
++               !test_bit(ABS_X, device->absBitmask) && !test_bit(ABS_Y, device->absBitmask)) {
++        device->classes |= INPUT_DEVICE_CLASS_EXTERNAL_STYLUS;
++        // Keyboard will try to claim some of the buttons but we really want to reserve those so we
++        // can fuse it with the touch screen data, so just take them back. Note this means an
++        // external stylus cannot also be a keyboard device.
++        device->classes &= ~INPUT_DEVICE_CLASS_KEYBOARD;
++    }
++
++    // See if this device is a joystick.
++    // Assumes that joysticks always have gamepad buttons in order to distinguish them
++    // from other devices such as accelerometers that also have absolute axes.
++    if (haveGamepadButtons) {
++        uint32_t assumedClasses = device->classes | INPUT_DEVICE_CLASS_JOYSTICK;
++        for (int i = 0; i <= ABS_MAX; i++) {
++            if (test_bit(i, device->absBitmask) &&
++                (getAbsAxisUsage(i, assumedClasses) & INPUT_DEVICE_CLASS_JOYSTICK)) {
++                device->classes = assumedClasses;
++                break;
++            }
++        }
++    }
++
++    // Check whether this device has switches.
++    for (int i = 0; i <= SW_MAX; i++) {
++        if (test_bit(i, device->swBitmask)) {
++            device->classes |= INPUT_DEVICE_CLASS_SWITCH;
++            break;
++        }
++    }
++
++    // Check whether this device supports the vibrator.
++    if (test_bit(FF_RUMBLE, device->ffBitmask)) {
++        device->classes |= INPUT_DEVICE_CLASS_VIBRATOR;
++    }
++
++    // Configure virtual keys.
++    if ((device->classes & INPUT_DEVICE_CLASS_TOUCH)) {
++        // Load the virtual keys for the touch screen, if any.
++        // We do this now so that we can make sure to load the keymap if necessary.
++        status_t status = loadVirtualKeyMapLocked(device);
++        if (!status) {
++            device->classes |= INPUT_DEVICE_CLASS_KEYBOARD;
++        }
++    }
++
++    // Load the key map.
++    // We need to do this for joysticks too because the key layout may specify axes.
++    status_t keyMapStatus = NAME_NOT_FOUND;
++    if (device->classes & (INPUT_DEVICE_CLASS_KEYBOARD | INPUT_DEVICE_CLASS_JOYSTICK)) {
++        // Load the keymap for the device.
++        keyMapStatus = loadKeyMapLocked(device);
++    }
++
++    // Configure the keyboard, gamepad or virtual keyboard.
++    if (device->classes & INPUT_DEVICE_CLASS_KEYBOARD) {
++        // Register the keyboard as a built-in keyboard if it is eligible.
++        if (!keyMapStatus && mBuiltInKeyboardId == NO_BUILT_IN_KEYBOARD &&
++            isEligibleBuiltInKeyboard(device->identifier, device->configuration, &device->keyMap)) {
++            mBuiltInKeyboardId = device->id;
++        }
++
++        // 'Q' key support = cheap test of whether this is an alpha-capable kbd
++        if (hasKeycodeLocked(device, AKEYCODE_Q)) {
++            device->classes |= INPUT_DEVICE_CLASS_ALPHAKEY;
++        }
++
++        // See if this device has a DPAD.
++        if (hasKeycodeLocked(device, AKEYCODE_DPAD_UP) &&
++            hasKeycodeLocked(device, AKEYCODE_DPAD_DOWN) &&
++            hasKeycodeLocked(device, AKEYCODE_DPAD_LEFT) &&
++            hasKeycodeLocked(device, AKEYCODE_DPAD_RIGHT) &&
++            hasKeycodeLocked(device, AKEYCODE_DPAD_CENTER)) {
++            device->classes |= INPUT_DEVICE_CLASS_DPAD;
++        }
++
++        // See if this device has a gamepad.
++        for (size_t i = 0; i < sizeof(GAMEPAD_KEYCODES) / sizeof(GAMEPAD_KEYCODES[0]); i++) {
++            if (hasKeycodeLocked(device, GAMEPAD_KEYCODES[i])) {
++                device->classes |= INPUT_DEVICE_CLASS_GAMEPAD;
++                break;
++            }
++        }
++    }
++
++    // If the device isn't recognized as something we handle, don't monitor it.
++    if (device->classes == 0) {
++        ALOGV("Dropping device: id=%d, path='%s', name='%s'", deviceId, devicePath,
++              device->identifier.name.string());
++        delete device;
++        return -1;
++    }
++
++    // Determine whether the device has a mic.
++    if (deviceHasMicLocked(device)) {
++        device->classes |= INPUT_DEVICE_CLASS_MIC;
++    }
++
++    // Determine whether the device is external or internal.
++    if (isExternalDeviceLocked(device)) {
++        device->classes |= INPUT_DEVICE_CLASS_EXTERNAL;
++    }
++
++    if (device->classes & (INPUT_DEVICE_CLASS_JOYSTICK | INPUT_DEVICE_CLASS_DPAD) &&
++        device->classes & INPUT_DEVICE_CLASS_GAMEPAD) {
++        device->controllerNumber = getNextControllerNumberLocked(device);
++        setLedForControllerLocked(device);
++    }
++
++    if (registerDeviceForEpollLocked(device) != OK) {
++        delete device;
++        return -1;
++    }
++
++    configureFd(device);
++
++    ALOGI("New device: id=%d, fd=%d, path='%s', name='%s', classes=0x%x, "
++          "configuration='%s', keyLayout='%s', keyCharacterMap='%s', builtinKeyboard=%s, ",
++          deviceId, fd, devicePath, device->identifier.name.string(), device->classes,
++          device->configurationFile.string(), device->keyMap.keyLayoutFile.string(),
++          device->keyMap.keyCharacterMapFile.string(), toString(mBuiltInKeyboardId == deviceId));
++
++    addDeviceLocked(device);
++    return OK;
++}
++
++status_t EventHub::getRemoteAbsoluteAxisValueLocked(Device* device, int32_t axis,
++                                                    int32_t* outValue) const {
++    ALOGV("%s:deviceId=%d, axis=%d", __func__, (device ? device->id : -1), axis);
++
++    *outValue = 0;
++
++    if (device && device->hasValidFd() && test_bit(axis, device->absBitmask)) {
++        switch (axis) {
++            case ABS_MT_SLOT:
++                *outValue = 0;
++                break;
++            case ABS_MT_TOUCH_MAJOR:
++                *outValue = 0;
++                break;
++            case ABS_MT_POSITION_X:
++                *outValue = 0;
++                break;
++            case ABS_MT_POSITION_Y:
++                *outValue = 0;
++                break;
++            case ABS_MT_TRACKING_ID:
++                *outValue = 0;
++                break;
++            case ABS_MT_PRESSURE:
++                *outValue = 0;
++                break;
++            default:
++                ALOGW("Unhandled reading absolute controller %d for device %s fd %d, errno=%d",
++                      axis, device->identifier.name.string(), device->fd, errno);
++                return -errno;
++                break;
++        }
++        return OK;
++    }
++    return -1;
++}
++
++status_t EventHub::getRemoteAbsoluteAxisInfoLocked(Device* device, int axis,
++                                       RawAbsoluteAxisInfo* outAxisInfo) const {
++    ALOGV("%s:deviceId=%d axis=%d", __func__, (device ? device->id : -1), axis);
++    outAxisInfo->clear();
++
++    if (device && device->hasValidFd() && test_bit(axis, device->absBitmask)) {
++        switch(axis) {
++            case ABS_MT_SLOT:
++                outAxisInfo->valid = true;
++                outAxisInfo->maxValue = 9;
++                break;
++            case ABS_MT_TOUCH_MAJOR:
++                outAxisInfo->valid = true;
++                outAxisInfo->maxValue = 255;
++                break;
++            case ABS_MT_TOUCH_MINOR:
++                break;
++            case ABS_MT_WIDTH_MAJOR:
++                outAxisInfo->valid = true;
++                outAxisInfo->maxValue = 255;
++                break;
++            case ABS_MT_WIDTH_MINOR:
++                break;
++            case ABS_MT_ORIENTATION:
++                break;
++            case ABS_MT_POSITION_X:
++                outAxisInfo->valid = true;
++                outAxisInfo->maxValue = 719;
++                break;
++            case ABS_MT_POSITION_Y:
++                outAxisInfo->valid = true;
++                outAxisInfo->maxValue = 1279;
++                break;
++            case ABS_MT_TOOL_TYPE:
++                break;
++            case ABS_MT_BLOB_ID:
++                break;
++            case ABS_MT_TRACKING_ID:
++                outAxisInfo->valid = true;
++                outAxisInfo->maxValue = 65535;
++                break;
++            case ABS_MT_PRESSURE:
++                outAxisInfo->valid = true;
++                outAxisInfo->maxValue = 255;
++                break;
++            case ABS_MT_DISTANCE:
++                break;
++            case ABS_MT_TOOL_X:
++                break;
++            case ABS_MT_TOOL_Y:
++                break;
++            default:
++                ALOGE("unhandled %s:deviceId=%d axis=%d", __func__, device->id, axis);
++                break;
++        }
++    }
++
++    return OK;
++}
++
++} // namespace android
+-- 
+2.7.4
+

@@ -1,0 +1,110 @@
+From d10907e7923df0bb2c7efca067c42615ed21c467 Mon Sep 17 00:00:00 2001
+From: Rander Wang <rander.wang@linux.intel.com>
+Date: Wed, 3 Jul 2019 10:16:23 +0800
+Subject: [PATCH] FROMGIT: ASoC: SOF: hda: fix link DMA config
+
+In ASoC, hda codec and SOF driver set the same stream tag to
+hardware for a pcm stream and this stream tag should be restored
+to hardware after resuming from system suspend. For this bug,
+there are two capture pcm streams active before doing system
+suspend and one is terminated by user for the stream is unused
+and its stream tag is released. Later after doing system suspend
+the stream tag for remained active stream is released by SOF driver.
+After system resume, hda codec driver restores the stream tag for
+the active pcm stream, but SOF goes to assign a new one, which now
+doesn't match with the stream tag used by codec driver, and this makes
+controller don't get any capture data, then infinite XRUN happens in FW.
+
+For stream tag is stored in both hda codec and SOF driver, it
+shouldn't be released only in SOF driver. This patch just keeps the
+stream information in dma data and checks whether there is a stored
+DMA data for stream resuming from S3 and restores it. And it also
+removes DMA data when the stream is released.
+
+Tested on Whiskey Lake platform.
+
+GitHub issue: https://github.com/thesofproject/sof/issues/1594
+Signed-off-by: Rander Wang <rander.wang@linux.intel.com>
+---
+ sound/soc/sof/intel/hda-dai.c | 15 +++++++++------
+ sound/soc/sof/intel/hda-dsp.c | 10 ++++------
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/sound/soc/sof/intel/hda-dai.c b/sound/soc/sof/intel/hda-dai.c
+index a514f9cf5c9a..5b83387af6ca 100644
+--- a/sound/soc/sof/intel/hda-dai.c
++++ b/sound/soc/sof/intel/hda-dai.c
+@@ -210,9 +210,13 @@ static int hda_link_hw_params(struct snd_pcm_substream *substream,
+ 	int stream_tag;
+ 	int ret;
+ 
+-	link_dev = hda_link_stream_assign(bus, substream);
+-	if (!link_dev)
+-		return -EBUSY;
++	/* get stored dma data if resuming from system suspend */
++	link_dev = snd_soc_dai_get_dma_data(dai, substream);
++	if (!link_dev) {
++		link_dev = hda_link_stream_assign(bus, substream);
++		if (!link_dev)
++			return -EBUSY;
++	}
+ 
+ 	stream_tag = hdac_stream(link_dev)->stream_tag;
+ 
+@@ -318,7 +322,7 @@ static int hda_link_pcm_trigger(struct snd_pcm_substream *substream,
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
+ 		/*
+-		 * clear and release link DMA channel. It will be assigned when
++		 * clear link DMA channel. It will be restored when
+ 		 * hw_params is set up again after resume.
+ 		 */
+ 		ret = hda_link_config_ipc(hda_stream, dai->name,
+@@ -327,8 +331,6 @@ static int hda_link_pcm_trigger(struct snd_pcm_substream *substream,
+ 			return ret;
+ 		stream_tag = hdac_stream(link_dev)->stream_tag;
+ 		snd_hdac_ext_link_clear_stream_id(link, stream_tag);
+-		snd_hdac_ext_stream_release(link_dev,
+-					    HDAC_EXT_STREAM_TYPE_LINK);
+ 
+ 		/* fallthrough */
+ 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+@@ -372,6 +374,7 @@ static int hda_link_hw_free(struct snd_pcm_substream *substream,
+ 	stream_tag = hdac_stream(link_dev)->stream_tag;
+ 	snd_hdac_ext_link_clear_stream_id(link, stream_tag);
+ 	snd_hdac_ext_stream_release(link_dev, HDAC_EXT_STREAM_TYPE_LINK);
++	snd_soc_dai_set_dma_data(dai, substream, NULL);
+ 	link_dev->link_prepared = 0;
+ 
+ 	/* free the host DMA channel reserved by hostless streams */
+diff --git a/sound/soc/sof/intel/hda-dsp.c b/sound/soc/sof/intel/hda-dsp.c
+index e4f3e856a513..edb6d56c77a4 100644
+--- a/sound/soc/sof/intel/hda-dsp.c
++++ b/sound/soc/sof/intel/hda-dsp.c
+@@ -489,10 +489,10 @@ int hda_dsp_set_hw_params_upon_resume(struct snd_sof_dev *sdev)
+ 		hda_stream->hw_params_upon_resume = 1;
+ #if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA)
+ 		/*
+-		 * clear and release stream. This should already be taken care
+-		 * for running streams when the SUSPEND trigger is called.
+-		 * But paused streams do not get suspended, so this needs to be
+-		 * done explicitly during suspend.
++		 * clear stream. This should already be taken care for running
++		 * streams when the SUSPEND trigger is called. But paused
++		 * streams do not get suspended, so this needs to be done
++		 * explicitly during suspend.
+ 		 */
+ 		if (stream->link_substream) {
+ 			rtd = snd_pcm_substream_chip(stream->link_substream);
+@@ -502,8 +502,6 @@ int hda_dsp_set_hw_params_upon_resume(struct snd_sof_dev *sdev)
+ 				return -EINVAL;
+ 			stream_tag = hdac_stream(stream)->stream_tag;
+ 			snd_hdac_ext_link_clear_stream_id(link, stream_tag);
+-			snd_hdac_ext_stream_release(stream,
+-						    HDAC_EXT_STREAM_TYPE_LINK);
+ 		}
+ #endif
+ 	}
+-- 
+2.17.1
+

@@ -1,0 +1,239 @@
+From 520ad49bab026e4fd566e2dcb14623bf78eca3ed Mon Sep 17 00:00:00 2001
+From: Takashi Sakamoto <o-takashi@sakamocchi.jp>
+Date: Sun, 16 Dec 2018 17:32:32 +0900
+Subject: [PATCH] FROMGIT: ALSA: fireface: add support for packet streaming on Fireface
+ 800
+
+This commit adds a functionality to multiplex PCM frames into isochronous
+packets and demultiplex PCM frames from isochronous packets for ALSA PCM
+applications.
+
+Fireface 800 voluntarily maintains resources for tx isochronous
+communication.  It performs reservation of isochronous channel and
+allocation/update of bandwidth in some cases below:
+ - at a first request to allocation after bus resets
+ - at requests to allocation when further bandwidth is required
+
+When request is grant and the unit is prepared, read data from
+0x0000801c0008 represents isochronous channel for tx stream, then
+the unit can handle requests to start communication. If driver
+send the request without checking the register, the unit takes
+panic to continue bus resets. The unit starts transmission of
+tx packets after receiving several rx packets from driver.
+
+I note that the unit can process tx/rx packets and generate/record
+sound regardless of HOST LED.
+
+Signed-off-by: Takashi Sakamoto <o-takashi@sakamocchi.jp>
+Signed-off-by: Takashi Iwai <tiwai@suse.de>
+---
+ sound/firewire/fireface/ff-protocol-ff800.c | 116 ++++++++++++++++++++
+ sound/firewire/fireface/ff.c                |  29 +++--
+ 2 files changed, 129 insertions(+), 16 deletions(-)
+
+diff --git a/sound/firewire/fireface/ff-protocol-ff800.c b/sound/firewire/fireface/ff-protocol-ff800.c
+index d24439734304..2acbf6039770 100644
+--- a/sound/firewire/fireface/ff-protocol-ff800.c
++++ b/sound/firewire/fireface/ff-protocol-ff800.c
+@@ -6,8 +6,122 @@
+  * Licensed under the terms of the GNU General Public License, version 2.
+  */
+ 
++#include <linux/delay.h>
++
+ #include "ff.h"
+ 
++#define FF800_STF		0x0000fc88f000
++#define FF800_RX_PACKET_FORMAT	0x0000fc88f004
++#define FF800_ALLOC_TX_STREAM	0x0000fc88f008
++#define FF800_ISOC_COMM_START	0x0000fc88f00c
++#define   FF800_TX_S800_FLAG	0x00000800
++#define FF800_ISOC_COMM_STOP	0x0000fc88f010
++
++#define FF800_TX_PACKET_ISOC_CH	0x0000801c0008
++
++static int allocate_rx_resources(struct snd_ff *ff)
++{
++	u32 data;
++	__le32 reg;
++	int err;
++
++	// Controllers should allocate isochronous resources for rx stream.
++	err = fw_iso_resources_allocate(&ff->rx_resources,
++				amdtp_stream_get_max_payload(&ff->rx_stream),
++				fw_parent_device(ff->unit)->max_speed);
++	if (err < 0)
++		return err;
++
++	// Set isochronous channel and the number of quadlets of rx packets.
++	data = ff->rx_stream.data_block_quadlets << 3;
++	data = (data << 8) | ff->rx_resources.channel;
++	reg = cpu_to_le32(data);
++	return snd_fw_transaction(ff->unit, TCODE_WRITE_QUADLET_REQUEST,
++				FF800_RX_PACKET_FORMAT, &reg, sizeof(reg), 0);
++}
++
++static int allocate_tx_resources(struct snd_ff *ff)
++{
++	__le32 reg;
++	unsigned int count;
++	unsigned int tx_isoc_channel;
++	int err;
++
++	reg = cpu_to_le32(ff->tx_stream.data_block_quadlets);
++	err = snd_fw_transaction(ff->unit, TCODE_WRITE_QUADLET_REQUEST,
++				 FF800_ALLOC_TX_STREAM, &reg, sizeof(reg), 0);
++	if (err < 0)
++		return err;
++
++	// Wait till the format of tx packet is available.
++	count = 0;
++	while (count++ < 10) {
++		u32 data;
++		err = snd_fw_transaction(ff->unit, TCODE_READ_QUADLET_REQUEST,
++				FF800_TX_PACKET_ISOC_CH, &reg, sizeof(reg), 0);
++		if (err < 0)
++			return err;
++
++		data = le32_to_cpu(reg);
++		if (data != 0xffffffff) {
++			tx_isoc_channel = data;
++			break;
++		}
++
++		msleep(50);
++	}
++	if (count >= 10)
++		return -ETIMEDOUT;
++
++	// NOTE: this is a makeshift to start OHCI 1394 IR context in the
++	// channel. On the other hand, 'struct fw_iso_resources.allocated' is
++	// not true and it's not deallocated at stop.
++	ff->tx_resources.channel = tx_isoc_channel;
++
++	return 0;
++}
++
++static int ff800_begin_session(struct snd_ff *ff, unsigned int rate)
++{
++	__le32 reg;
++	int err;
++
++	reg = cpu_to_le32(rate);
++	err = snd_fw_transaction(ff->unit, TCODE_WRITE_QUADLET_REQUEST,
++				 FF800_STF, &reg, sizeof(reg), 0);
++	if (err < 0)
++		return err;
++
++	// If starting isochronous communication immediately, change of STF has
++	// no effect. In this case, the communication runs based on former STF.
++	// Let's sleep for a bit.
++	msleep(100);
++
++	err = allocate_rx_resources(ff);
++	if (err < 0)
++		return err;
++
++	err = allocate_tx_resources(ff);
++	if (err < 0)
++		return err;
++
++	reg = cpu_to_le32(0x80000000);
++	reg |= cpu_to_le32(ff->tx_stream.data_block_quadlets);
++	if (fw_parent_device(ff->unit)->max_speed == SCODE_800)
++		reg |= cpu_to_le32(FF800_TX_S800_FLAG);
++	return snd_fw_transaction(ff->unit, TCODE_WRITE_QUADLET_REQUEST,
++				 FF800_ISOC_COMM_START, &reg, sizeof(reg), 0);
++}
++
++static void ff800_finish_session(struct snd_ff *ff)
++{
++	__le32 reg;
++
++	reg = cpu_to_le32(0x80000000);
++	snd_fw_transaction(ff->unit, TCODE_WRITE_QUADLET_REQUEST,
++			   FF800_ISOC_COMM_STOP, &reg, sizeof(reg), 0);
++}
++
+ static void ff800_handle_midi_msg(struct snd_ff *ff, __le32 *buf, size_t length)
+ {
+ 	int i;
+@@ -24,4 +138,6 @@ static void ff800_handle_midi_msg(struct snd_ff *ff, __le32 *buf, size_t length)
+ 
+ const struct snd_ff_protocol snd_ff_protocol_ff800 = {
+ 	.handle_midi_msg	= ff800_handle_midi_msg,
++	.begin_session		= ff800_begin_session,
++	.finish_session		= ff800_finish_session,
+ };
+diff --git a/sound/firewire/fireface/ff.c b/sound/firewire/fireface/ff.c
+index d486984c0e5b..f7a752930060 100644
+--- a/sound/firewire/fireface/ff.c
++++ b/sound/firewire/fireface/ff.c
+@@ -31,8 +31,7 @@ static void ff_card_free(struct snd_card *card)
+ {
+ 	struct snd_ff *ff = card->private_data;
+ 
+-	if (ff->spec->protocol->begin_session)
+-		snd_ff_stream_destroy_duplex(ff);
++	snd_ff_stream_destroy_duplex(ff);
+ 	snd_ff_transaction_unregister(ff);
+ }
+ 
+@@ -57,11 +56,9 @@ static void do_registration(struct work_struct *work)
+ 
+ 	name_card(ff);
+ 
+-	if (ff->spec->protocol->begin_session) {
+-		err = snd_ff_stream_init_duplex(ff);
+-		if (err < 0)
+-			goto error;
+-	}
++	err = snd_ff_stream_init_duplex(ff);
++	if (err < 0)
++		goto error;
+ 
+ 	snd_ff_proc_init(ff);
+ 
+@@ -69,15 +66,13 @@ static void do_registration(struct work_struct *work)
+ 	if (err < 0)
+ 		goto error;
+ 
+-	if (ff->spec->protocol->begin_session) {
+-		err = snd_ff_create_pcm_devices(ff);
+-		if (err < 0)
+-			goto error;
++	err = snd_ff_create_pcm_devices(ff);
++	if (err < 0)
++		goto error;
+ 
+-		err = snd_ff_create_hwdep_devices(ff);
+-		if (err < 0)
+-			goto error;
+-	}
++	err = snd_ff_create_hwdep_devices(ff);
++	if (err < 0)
++		goto error;
+ 
+ 	err = snd_card_register(ff->card);
+ 	if (err < 0)
+@@ -126,7 +121,7 @@ static void snd_ff_update(struct fw_unit *unit)
+ 
+ 	snd_ff_transaction_reregister(ff);
+ 
+-	if (ff->registered && ff->spec->protocol->begin_session)
++	if (ff->registered)
+ 		snd_ff_stream_update_duplex(ff);
+ }
+ 
+@@ -152,6 +147,8 @@ static void snd_ff_remove(struct fw_unit *unit)
+ 
+ static const struct snd_ff_spec spec_ff800 = {
+ 	.name = "Fireface800",
++	.pcm_capture_channels = {28, 20, 12},
++	.pcm_playback_channels = {28, 20, 12},
+ 	.midi_in_ports = 1,
+ 	.midi_out_ports = 1,
+ 	.protocol = &snd_ff_protocol_ff800,
+-- 
+2.17.1
+
