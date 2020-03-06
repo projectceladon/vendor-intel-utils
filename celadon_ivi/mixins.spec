@@ -9,7 +9,7 @@ product.mk: device.mk
 [groups]
 kernel: gmin64(useprebuilt=false,src_path=kernel/lts2018, loglevel=7, interactive_governor=false, relative_sleepstates=false, modules_in_bootimg=false, external_modules=,debug_modules=, use_bcmdhd=false, use_iwlwifi=false, extmod_platform=bxt, iwl_defconfig=, cfg_path=config-lts/lts2018/bxt/android/non-embargoed)
 disk-bus: auto
-boot-arch: project-celadon(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,disk_encryption=false,file_encryption=true,target=celadon_ivi,rpmb_simulate=true,ignore_not_applicable_reset=true,self_usb_device_mode_protocol=true,userdata_checkpoint=true,grub_installer=true,live_boot=true,usb_storage=true)
+boot-arch: project-celadon(uefi_arch=x86_64,fastboot=efi,ignore_rsci=true,disable_watchdog=true,watchdog_parameters=10 30,verity_warning=false,txe_bind_root_of_trust=false,bootloader_block_size=4096,verity_mode=false,disk_encryption=false,file_encryption=true,target=celadon_ivi,rpmb_simulate=true,ignore_not_applicable_reset=true,self_usb_device_mode_protocol=true,userdata_checkpoint=true,grub_installer=false,live_boot=true,usb_storage=true)
 sepolicy: enforcing
 bluetooth: btusb(ivi=true)
 audio: project-celadon
