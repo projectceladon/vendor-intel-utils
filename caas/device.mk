@@ -226,6 +226,9 @@ PRODUCT_CHARACTERISTICS := tablet
 PRODUCT_COPY_FILES += \
         frameworks/native/data/etc/tablet_core_hardware.xml:vendor/etc/permissions/tablet_core_hardware.xml
 
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.software.freeform_window_management.xml:vendor/etc/permissions/android.software.freeform_window_management.xml
+
 ##############################################################
 # Source: device/intel/mixins/groups/device-specific/caas/product.mk
 ##############################################################
@@ -253,6 +256,7 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.graphics.composer@2.1-service
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/file_share.sh:$(TARGET_COPY_OUT_VENDOR)/bin/file_share.sh
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/product.mk
 ##############################################################
@@ -636,8 +640,8 @@ PRODUCT_PACKAGES += hdcpd
 ##############################################################
 # neuralnetworks HAL
 PRODUCT_PACKAGES += \
-    android.hardware.neuralnetworks@1.1-generic-service \
-    android.hardware.neuralnetworks@1.1-generic-impl \
+    android.hardware.neuralnetworks@1.2-generic-service \
+    android.hardware.neuralnetworks@1.2-generic-impl \
     android.hardware.neuralnetworks@1.2-service-gpgpu
 
 PRODUCT_PACKAGES += \

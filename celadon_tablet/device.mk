@@ -287,6 +287,9 @@ PRODUCT_CHARACTERISTICS := tablet
 PRODUCT_COPY_FILES += \
         frameworks/native/data/etc/tablet_core_hardware.xml:vendor/etc/permissions/tablet_core_hardware.xml
 
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.software.freeform_window_management.xml:vendor/etc/permissions/android.software.freeform_window_management.xml
+
 ##############################################################
 # Source: device/intel/mixins/groups/device-specific/celadon_tablet/product.mk
 ##############################################################
@@ -690,8 +693,8 @@ PRODUCT_PACKAGES += hdcpd
 ##############################################################
 # neuralnetworks HAL
 PRODUCT_PACKAGES += \
-    android.hardware.neuralnetworks@1.1-generic-service \
-    android.hardware.neuralnetworks@1.1-generic-impl \
+    android.hardware.neuralnetworks@1.2-generic-service \
+    android.hardware.neuralnetworks@1.2-generic-impl \
     android.hardware.neuralnetworks@1.2-service-gpgpu
 
 PRODUCT_PACKAGES += \

@@ -63,23 +63,70 @@ common_options="\
  -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=tcp::5554-:5554 \
  -device intel-iommu,device-iotlb=off,caching-mode=on \
  -full-screen \
- -pidfile android_vm.pid \
+ -fsdev local,security_model=none,id=fsdev0,path=./share_folder \
+ -device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare \
  -nodefaults
 "
+function wifi_passthrough(){
+        if [ `find /etc/modprobe.d/ -iname vfio.conf` ]
+        then
+                echo "File exists"
+        else
+                echo "options vfio-pci ids=`lspci -nn  | grep -oP 'Network controller.*\[\K[\w:]+'`" | sudo tee -a /etc/modprobe.d/vfio.conf
+        fi
+
+
+        if [ `find /etc/modules-load.d/ -iname vfio-pci.conf` ]
+        then
+                echo "File exists"
+        else
+                echo "vfio-pci" | sudo tee -a /etc/modules-load.d/vfio-pci.conf
+        fi
+}
 
 function launch_hwrender(){
+
+	wifi_passthrough
+
 	if [[ $1 == "--display-off" ]]
 	then
 		qemu-system-x86_64 \
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
+		-pidfile android_vm.pid \
 		$common_options &
 		sleep 5
 		echo -n "Android started successfully and is running in background, pid of the process is:"
 		cat android_vm.pid
 		echo -ne '\n'
+	elif [[ ($1 == "--display-off") && ($2 == "--usb-adb") ]]
+	then
+		echo device > /sys/class/usb_role/intel_xhci_usb_sw-role-switch/role
+		echo 0000:00:14.1 > /sys/bus/pci/devices/0000\:00\:14.1/driver/unbind
+		modprobe vfio-pci
+		echo 8086 9d30 > /sys/bus/pci/drivers/vfio-pci/new_id
+		sh adb.sh &
+		qemu-system-x86_64 \
+                -device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
+		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
+                $common_options &
+                sleep 5
+                echo -n "Android started successfully and is running in background, pid of the process is:"
+                cat android_vm.pid
+	elif [[ $1 == "--usb-adb" ]]
+	then
+		echo device > /sys/class/usb_role/intel_xhci_usb_sw-role-switch/role
+		echo 0000:00:14.1 > /sys/bus/pci/devices/0000\:00\:14.1/driver/unbind
+		modprobe vfio-pci
+		echo 8086 9d30 > /sys/bus/pci/drivers/vfio-pci/new_id
+		sh adb.sh &
+		qemu-system-x86_64 \
+		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
+		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
+		$common_options
 	else
 		qemu-system-x86_64 \
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
+		-device vfio-pci,host=01:00.0 \
 		$common_options
 	fi
 }
@@ -89,6 +136,7 @@ function launch_swrender(){
         then
 		qemu-system-x86_64 \
 		-device qxl-vga,xres=1280,yres=720 \
+		-pidfile android_vm.pid \
 		$common_options &
 		sleep 5
 		echo -n "Android started successfully and is running in background, pid of the process is:"

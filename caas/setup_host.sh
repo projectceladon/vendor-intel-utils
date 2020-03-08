@@ -17,7 +17,7 @@ function ubu_changes_require(){
 function ubu_install_qemu(){
 	apt purge -y "qemu*"
 	apt autoremove -y
-	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison
+	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev
 
 	wget https://download.qemu.org/$QEMU_REL.tar.xz
 	tar -xf $QEMU_REL.tar.xz
@@ -34,6 +34,7 @@ function ubu_install_qemu(){
 	    --disable-debug-tcg \
 	    --enable-opengl \
 	    --enable-gtk \
+	    --enable-virtfs \
 	    --target-list=x86_64-softmmu \
 	    --audio-drv-list=pa
 	make -j24
@@ -41,12 +42,20 @@ function ubu_install_qemu(){
 	cd ../
 }
 
+function install_9p_module(){
+	echo "installing 9p kernel modules for file-sharing"
+	sudo modprobe 9pnet
+	sudo modprobe 9pnet_virtio
+	sudo modprobe 9p
+	mkdir ./share_folder
+}
+
 function ubu_build_ovmf(){
 	sudo apt install -y uuid-dev nasm acpidump iasl
 	cd $QEMU_REL/roms/edk2
 	source ./edksetup.sh
 	make -C BaseTools/
-	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE
+	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE -DTPM2_ENABLE=TRUE
 	cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd ../../../OVMF.fd
 	cd ../../../
 }
@@ -147,6 +156,7 @@ if [[ $version =~ "Ubuntu" ]]; then
 	get_required_scripts
 	check_kernel
 	save_env
+	install_9p_module
 	ask_reboot
 elif [[ $version =~ "Clear Linux OS" ]]; then
 	check_network
@@ -155,6 +165,7 @@ elif [[ $version =~ "Clear Linux OS" ]]; then
 	get_required_scripts
 	check_kernel
 	save_env
+	install_9p_module
 	ask_reboot
 else
 	echo "only clearlinux or Ubuntu is supported"
