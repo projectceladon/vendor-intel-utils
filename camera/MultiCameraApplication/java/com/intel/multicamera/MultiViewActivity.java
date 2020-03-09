@@ -18,11 +18,17 @@
 package com.intel.multicamera;
 
 import android.Manifest;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraManager;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbManager;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.util.Log;
@@ -33,6 +39,10 @@ import androidx.appcompat.app.ActionBar;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import java.io.IOException;
+import java.util.HashMap;
+
+import static android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED;
+import static android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED;
 
 public class MultiViewActivity extends AppCompatActivity {
     private static final String TAG = "MainActivity";
@@ -66,6 +76,8 @@ public class MultiViewActivity extends AppCompatActivity {
 
     private static final Object mStorageSpaceLock = new Object();
     private static long mStorageSpaceBytes = Utils.LOW_STORAGE_THRESHOLD_BYTES;
+
+    String usbStateChangeAction = "android.hardware.usb.action.USB_STATE";
 
     static {
         ORIENTATIONS.append(Surface.ROTATION_0, 90);
@@ -105,11 +117,65 @@ public class MultiViewActivity extends AppCompatActivity {
         FullScrn_Init();
 
         set_FrameVisibilities();
+        
+        startCamera();
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+
+        // BroadcastReceiver when insert/remove the device USB plug into/from a USB port
+        BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                System.out.println("BroadcastReceiver Event");
+                if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
+                    System.out.println("BroadcastReceiver USB Connected");
+                    startCamera();
+                } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                    System.out.println("BroadcastReceiver USB Disconnected");
+                    startCamera();
+                }
+            }
+        };
+        registerReceiver(mUsbReceiver , filter);
     }
 
+    void startCamera() {
+        closeCamera();
+        GetCameraCnt();
+        updateStorageSpace(null);
+        LinearLayout LinLayout1 = findViewById(R.id.TopLayout);
+        LinearLayout LinLayout2 = findViewById(R.id.BtmLayout);
+        LinLayout1.setVisibility(View.GONE);
+        LinLayout2.setVisibility(View.GONE);
+        if (numOfCameras == 1) {
+            frameView1.setVisibility(FrameLayout.GONE);
+            LinLayout1.setVisibility(View.VISIBLE);
+            manageTopLeftCam();
+        } else if (numOfCameras == 2) {
+            LinLayout1.setVisibility(View.VISIBLE);
+            frameView1.setVisibility(FrameLayout.VISIBLE);
+            manageTopLeftCam();
+            manageTopRightCam();
+        } else if (numOfCameras == 3) {
+            LinLayout1.setVisibility(View.VISIBLE);
+            LinLayout2.setVisibility(View.VISIBLE);
+            manageTopLeftCam();
+            manageBotmLeftCam();
+            manageTopRightCam();
+        } else if (numOfCameras == 4) {
+            LinLayout1.setVisibility(View.VISIBLE);
+            LinLayout2.setVisibility(View.VISIBLE);
+            manageTopLeftCam();
+            manageTopRightCam();
+            manageBotmLeftCam();
+            manageBotmRightCam();
+        } else {
+            Log.d(TAG, "onResume No CAMERA CONNECTED");
+        }
+    }
     private void set_FrameVisibilities() {
         FrameVisibility = new int[4];
-
         frameView0 = findViewById(R.id.control1);
         frameView1 = findViewById(R.id.control2);
         frameView2 = findViewById(R.id.control3);
@@ -178,7 +244,7 @@ public class MultiViewActivity extends AppCompatActivity {
         try {
             CameraIds = manager.getCameraIdList();
             numOfCameras = manager.getCameraIdList().length;
-            Log.d(TAG, "Inside Settings Total Cameras: " + manager.getCameraIdList().length);
+            Log.d(TAG, "Get total number of cameras present: " + manager.getCameraIdList().length);
         } catch (CameraAccessException e) {
             e.printStackTrace();
         }
@@ -377,27 +443,7 @@ public class MultiViewActivity extends AppCompatActivity {
         super.onResume();
         Log.e(TAG, "onResume");
 
-        GetCameraCnt();
-        updateStorageSpace(null);
 
-        if (numOfCameras == 1) {
-            manageTopLeftCam();
-        } else if (numOfCameras == 2) {
-            manageTopLeftCam();
-            manageTopRightCam();
-        } else if (numOfCameras == 3) {
-            manageTopLeftCam();
-            manageBotmLeftCam();
-            manageTopRightCam();
-        } else if (numOfCameras == 4) {
-            manageTopLeftCam();
-            manageTopRightCam();
-            manageBotmLeftCam();
-            manageBotmRightCam();
-
-        } else {
-            Log.d(TAG, "onResume No CAMERA CONNECTED");
-        }
     }
 
     private void closeCamera() {
