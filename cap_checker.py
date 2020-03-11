@@ -1,11 +1,4 @@
 #!/usr/bin/env python
-
-# autopatch.sh: script to manage patches on top of repo
-# Copyright (C) 2019 Intel Corporation. All rights reserved.
-# Author: Sun, Yi J <yi.j.sun@intel.com>
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
 '''
 This tool tests that the following AREQs are not violated:
 https://jira01.devtools.intel.com/browse/AREQ-22708 (No setuid/setgid)
@@ -13,7 +6,10 @@ https://jira01.devtools.intel.com/browse/AREQ-21996 (No dangerous caps)
 '''
 
 import argparse
-import ConfigParser as configparser #Python 3 renamed this
+if sys.version_info < (3, 0, 1):
+    import ConfigParser as configparser
+else:
+    import configparser as configparser #Python 3 renamed this
 import os
 import re
 import subprocess
@@ -27,7 +23,10 @@ class CapabiltyChecker():
         '''Initializes a CapabiltyChecker'''
 
         self._config_file = config_file
-        self._config = configparser.ConfigParser()
+        if sys.version_info < (3, 0, 1):
+            self._config = configparser.ConfigParser()
+        else:
+            self._config = configparser.ConfigParser(strict=False)
 
         self._dissallowed_caps = None
         self._aosp_ignored = None
@@ -235,7 +234,7 @@ def main():
     cap_checker = CapabiltyChecker(args.policy)
 
     if args.show_bug:
-        print 'Current known bugs: %s' % cap_checker.device_bug
+        print('Current known bugs: %s' % cap_checker.device_bug)
         sys.exit(0)
 
     found = cap_checker.search(args.sepolicy, args.include_bug)
@@ -255,9 +254,9 @@ def main():
                 'contact William Roberts <william.c.roberts@intel.com> for help.\n'
                 '\n\nSecurity Violations:')
 
-        for domain, report in found.iteritems():
+        for domain, report in found.items():
             if args.train:
-                print("'%s' : %s" % (domain, ' '.join(report['violators'][0])))
+                print(("'%s' : %s" % (domain, ' '.join(report['violators'][0]))))
             else:
                 msg = ("Domain: '%s'\n"
                        "Violations:\n"
