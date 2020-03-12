@@ -52,7 +52,7 @@ public class SessionItem implements FilmstripItem {
      * @return If the session was found, a new SessionItem is returned.
      */
     public static Optional<SessionItem> create(Context context, Uri uri) {
-        if (!Storage.instance().containsPlaceholderSize(uri)) {
+        if (!Storage.containsPlaceholderSize(uri)) {
             return Optional.absent();
         }
         Size dimension = getSessionSize(uri);
@@ -82,7 +82,7 @@ public class SessionItem implements FilmstripItem {
     }
 
     private static Size getSessionSize(Uri uri) {
-        Point size = Storage.instance().getSizeForSession(uri);
+        Point size = Storage.getSizeForSession(uri);
         if (size == null) {
             return null;
         }
@@ -101,7 +101,7 @@ public class SessionItem implements FilmstripItem {
             imageView.setTag(R.id.mediadata_tag_viewtype, getItemViewType().ordinal());
         }
 
-        Optional<Bitmap> placeholder = Storage.instance().getPlaceholderForSession(mData.getUri());
+        Optional<Bitmap> placeholder = Storage.getPlaceholderForSession(mData.getUri());
         if (placeholder.isPresent()) {
             imageView.setImageBitmap(placeholder.get());
         } else {
@@ -171,7 +171,7 @@ public class SessionItem implements FilmstripItem {
 
     @Override
     public Optional<Bitmap> generateThumbnail(int boundingWidthPx, int boundingHeightPx) {
-        return Storage.instance().getPlaceholderForSession(mUri);
+        return Storage.getPlaceholderForSession(mUri);
     }
 
     @Override

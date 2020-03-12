@@ -179,7 +179,7 @@ public class MediaSaverImpl implements MediaSaver {
                 height = options.outHeight;
             }
             try {
-                return Storage.instance().addImage(
+                return Storage.addImage(
                         resolver, title, date, loc, orientation, exif, data, width, height,
                         mimeType);
             } catch (IOException e) {
