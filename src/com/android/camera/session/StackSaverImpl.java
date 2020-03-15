@@ -62,17 +62,16 @@ public class StackSaverImpl implements StackSaver {
     public Uri saveStackedImage(File inputImagePath, String title, int width, int height,
             int imageOrientation, long captureTimeEpoch, String mimeType) {
         String filePath =
-                Storage.instance().generateFilepath(mStackDirectory.getAbsolutePath(),
-                title, mimeType);
+                Storage.generateFilepath(mStackDirectory.getAbsolutePath(), title, mimeType);
         Log.d(TAG, "Saving using stack image saver: " + filePath);
         File outputImagePath = new File(filePath);
 
-        if (Storage.instance().renameFile(inputImagePath, outputImagePath)) {
+        if (Storage.renameFile(inputImagePath, outputImagePath)) {
             long fileLength = outputImagePath.length();
             if (fileLength > 0) {
-                return Storage.instance().addImageToMediaStore(mContentResolver, title,
-                        captureTimeEpoch, mGpsLocation, imageOrientation, fileLength, filePath,
-                        width, height, mimeType);
+                return Storage.addImageToMediaStore(mContentResolver, title, captureTimeEpoch,
+                        mGpsLocation, imageOrientation, fileLength, filePath, width, height,
+                        mimeType);
             }
         }
 
