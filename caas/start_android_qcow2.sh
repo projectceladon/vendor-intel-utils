@@ -32,6 +32,8 @@ else
         display_state="on"
 fi
 
+smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
+
 common_options="\
  -m 2048 -smp 2 -M q35 \
  -name caas-vm \
@@ -66,6 +68,7 @@ common_options="\
  -full-screen \
  -fsdev local,security_model=none,id=fsdev0,path=./share_folder \
  -device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare \
+ -smbios "type=2,serial=$smbios_serialno"
  -nodefaults
 "
 function wifi_passthrough(){

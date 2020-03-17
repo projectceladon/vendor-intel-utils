@@ -11,7 +11,7 @@ function ubu_changes_require(){
 	if [ x$res = xn ]; then
 		exit 0
 	fi
-	apt install -y wget mtools ovmf
+	apt install -y wget mtools ovmf dmidecode
 }
 
 function ubu_install_qemu(){

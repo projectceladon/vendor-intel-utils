@@ -48,7 +48,7 @@ TARGET_UEFI_ARCH := x86_64
 
 # Android Kernelflinger uses the OpenSSL library to support the
 # bootloader policy
-KERNELFLINGER_SSL_LIBRARY := openssl
+KERNELFLINGER_SSL_LIBRARY := boringssl
 
 BIOS_VARIANT := release
 
