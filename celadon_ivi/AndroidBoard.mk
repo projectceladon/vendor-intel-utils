@@ -254,6 +254,20 @@ kernel: $(PRODUCT_OUT)/kernel
 
 else
 
+TARGET_KERNEL_CLANG_VERSION := r365631
+CLANG_PREBUILTS_PATH := $(abspath $(INTEL_PATH_DEVICE)/../../../prebuilts/clang)
+
+ifneq ($(TARGET_KERNEL_CLANG_VERSION),)
+    # Find the clang-* directory containing the specified version
+    KERNEL_CLANG_VERSION := $(shell find $(CLANG_PREBUILTS_PATH)/host/$(HOST_OS)-x86/ -name AndroidVersion.txt -exec grep -l $(TARGET_KERNEL_CLANG_VERSION) "{}" \; | sed -e 's|/AndroidVersion.txt$$||g;s|^.*/||g')
+else
+    # Only set the latest version of clang if TARGET_KERNEL_CLANG_VERSION hasn't been set by the device con    fig
+    KERNEL_CLANG_VERSION := $(shell ls -d $(CLANG_PREBUILTS_PATH)/host/$(HOST_OS)-x86/clang-* | xargs -n 1     basename | tail -1)
+endif
+TARGET_KERNEL_CLANG_PATH ?= $(CLANG_PREBUILTS_PATH)/host/$(HOST_OS)-x86/$(KERNEL_CLANG_VERSION)/bin
+KERNEL_CLANG_TRIPLE ?= CLANG_TRIPLE=x86_64-linux-gnu-
+KERNEL_CC ?= CC="$(ccache) $(TARGET_KERNEL_CLANG_PATH)/clang"
+
 LOCAL_KERNEL_PATH := $(PRODUCT_OUT)/obj/kernel
 KERNEL_INSTALL_MOD_PATH := .
 LOCAL_KERNEL := $(LOCAL_KERNEL_PATH)/arch/x86/boot/bzImage
@@ -315,8 +329,10 @@ KERNEL_MAKE_OPTIONS = \
     O=$(abspath $(LOCAL_KERNEL_PATH)) \
     ARCH=$(TARGET_KERNEL_ARCH) \
     INSTALL_MOD_PATH=$(KERNEL_INSTALL_MOD_PATH) \
-    CROSS_COMPILE="x86_64-linux-android-" \
-    CCACHE_SLOPPINESS=$(KERNEL_CCSLOP)
+    CROSS_COMPILE="x86_64-linux-androidkernel-" \
+    CCACHE_SLOPPINESS=$(KERNEL_CCSLOP) \
+    $(KERNEL_CLANG_TRIPLE) \
+    $(KERNEL_CC)
 
 KERNEL_MAKE_OPTIONS += \
     EXTRA_FW="$(_EXTRA_FW_)" \

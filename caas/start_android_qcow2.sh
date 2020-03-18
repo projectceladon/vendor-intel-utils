@@ -108,7 +108,6 @@ function launch_hwrender(){
 		echo 0000:00:14.1 > /sys/bus/pci/devices/0000\:00\:14.1/driver/unbind
 		modprobe vfio-pci
 		echo 8086 9d30 > /sys/bus/pci/drivers/vfio-pci/new_id
-		sh adb.sh &
 		qemu-system-x86_64 \
                 -device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
@@ -122,7 +121,6 @@ function launch_hwrender(){
 		echo 0000:00:14.1 > /sys/bus/pci/devices/0000\:00\:14.1/driver/unbind
 		modprobe vfio-pci
 		echo 8086 9d30 > /sys/bus/pci/drivers/vfio-pci/new_id
-		sh adb.sh &
 		qemu-system-x86_64 \
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
