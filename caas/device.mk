@@ -343,6 +343,8 @@ endif
 
 BOARD_HAVE_MEDIASDK_OPEN_SOURCE := true
 
+BOARD_HAVE_OMX_SRC := true
+
 PRODUCT_PACKAGES += \
     libpciaccess
 ##############################################################
