@@ -11,7 +11,7 @@ function ubu_changes_require(){
 	if [ x$res = xn ]; then
 		exit 0
 	fi
-	apt install -y wget mtools ovmf dmidecode
+	apt install -y wget mtools ovmf dmidecode python3-usb python3-pyudev
 }
 
 function ubu_install_qemu(){
@@ -132,6 +132,10 @@ function clr_enable_host_gvtg(){
 function get_required_scripts(){
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/start_flash_usb.sh
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/start_android_qcow2.sh
+	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/auto_switch_pt_usb_vms.sh
+	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/findall.py
+	chmod +x auto_switch_pt_usb_vms.sh
+	chmod +x findall.py
 	chmod +x start_flash_usb.sh
 	chmod +x start_android_qcow2.sh
 }

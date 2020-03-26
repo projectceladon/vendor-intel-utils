@@ -2,6 +2,8 @@
 
 work_dir=$PWD
 caas_image=$work_dir/android.qcow2
+usb_switch=$work_dir/auto_switch_pt_usb_vms.sh
+find_port=$work_dir/findall.py
 
 ovmf_file="./OVMF.fd"
 [ ! -f $ovmf_file ] && ovmf_file="/usr/share/qemu/OVMF.fd"
@@ -34,6 +36,7 @@ fi
 
 smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
 
+
 common_options="\
  -m 2048 -smp 2 -M q35 \
  -name caas-vm \
@@ -45,8 +48,7 @@ common_options="\
  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
  -cpu host \
  -device qemu-xhci,id=xhci,addr=0x8 \
- -device usb-host,vendorid=0x046d,productid=0x082d \
- -device usb-host,vendorid=0x046d,productid=0x085c \
+ `/bin/bash $usb_switch` \
  -device usb-host,vendorid=0x03eb,productid=0x8a6e \
  -device usb-host,vendorid=0x0eef,productid=0x7200 \
  -device usb-host,vendorid=0x222a,productid=0x0141 \
