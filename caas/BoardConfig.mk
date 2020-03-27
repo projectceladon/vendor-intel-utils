@@ -286,7 +286,11 @@ TRUSTY_ENV_VAR += BOOT_ARCH=project-celadon
 
 # output build dir to android out folder
 TRUSTY_ENV_VAR += BUILD_DIR=$(TRUSTY_BUILDROOT)
+ifeq ($(LKDEBUG),2)
+TRUSTY_ENV_VAR += LKBIN_DIR=$(PWD)/vendor/intel/fw/trusty-release-binaries/debug/
+else
 TRUSTY_ENV_VAR += LKBIN_DIR=$(PWD)/vendor/intel/fw/trusty-release-binaries/
+endif
 
 #Fix the cpu hotplug fail due to the trusty.
 #Trusty will introduce some delay for cpu_up().
