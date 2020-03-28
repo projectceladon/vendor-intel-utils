@@ -34,6 +34,18 @@ else
         display_state="on"
 fi
 
+WIFI_PT="false"
+
+for each in $@
+        do
+        if [[ $each == "--wifi-passthrough" ]]
+                then
+                WIFI_PT="true"
+                echo WIFI_PT: $WIFI_PT
+                break
+	fi
+done
+
 smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
 
 
@@ -91,14 +103,18 @@ function wifi_passthrough(){
 }
 
 function launch_hwrender(){
-
-	wifi_passthrough
+	if [ $WIFI_PT = "true" ]
+	then
+		wifi_passthrough
+		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
+	fi
 
 	if [[ $1 == "--display-off" ]]
 	then
 		qemu-system-x86_64 \
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-pidfile android_vm.pid \
+		$WIFI_VFIO_OPTIONS \
 		$common_options &
 		sleep 5
 		echo -n "Android started successfully and is running in background, pid of the process is:"
@@ -111,12 +127,13 @@ function launch_hwrender(){
 		modprobe vfio-pci
 		echo 8086 9d30 > /sys/bus/pci/drivers/vfio-pci/new_id
 		qemu-system-x86_64 \
-                -device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
+		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
-                $common_options &
-                sleep 5
-                echo -n "Android started successfully and is running in background, pid of the process is:"
-                cat android_vm.pid
+		$WIFI_VFIO_OPTIONS \
+		$common_options &
+		sleep 5
+		echo -n "Android started successfully and is running in background, pid of the process is:"
+		cat android_vm.pid
 	elif [[ $1 == "--usb-adb" ]]
 	then
 		echo device > /sys/class/usb_role/intel_xhci_usb_sw-role-switch/role
@@ -126,11 +143,12 @@ function launch_hwrender(){
 		qemu-system-x86_64 \
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
+		$WIFI_VFIO_OPTIONS \
 		$common_options
 	else
 		qemu-system-x86_64 \
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
-		-device vfio-pci,host=01:00.0 \
+		$WIFI_VFIO_OPTIONS \
 		$common_options
 	fi
 }
