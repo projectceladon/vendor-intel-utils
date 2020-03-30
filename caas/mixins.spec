@@ -16,6 +16,8 @@ audio: project-celadon
 vendor-partition: true(partition_size=600,partition_name=vendor)
 acpio-partition: true(partition_size=2)
 config-partition: true
+product-partition: true
+odm-partition: true
 display-density: medium
 dalvik-heap: tablet-10in-xhdpi-2048
 cpu-arch: x86
