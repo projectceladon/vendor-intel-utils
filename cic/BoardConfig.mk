@@ -131,9 +131,7 @@ SF_VSYNC_EVENT_PHASE_OFFSET_NS := 5000000
 ##############################################################
 # Source: device/intel/mixins/groups/wlan/mac80211_hwsim/BoardConfig.mk
 ##############################################################
-BOARD_WLAN_DEVICE           := emulator
 BOARD_WPA_SUPPLICANT_DRIVER := NL80211
-BOARD_WPA_SUPPLICANT_PRIVATE_LIB := lib_driver_cmd_simulated
 WPA_SUPPLICANT_VERSION      := VER_0_8_X
 WIFI_DRIVER_FW_PATH_PARAM   := "/dev/null"
 WIFI_DRIVER_FW_PATH_STA     := "/dev/null"
