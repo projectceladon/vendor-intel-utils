@@ -281,18 +281,12 @@ KERNEL_CCSLOP := $(filter-out time_macros,$(subst $(comma), ,$(CCACHE_SLOPPINESS
 KERNEL_CCSLOP := $(subst $(space),$(comma),$(KERNEL_CCSLOP))
 
 
-ifeq ($(DEV_BKC_KERNEL), true)
+ifeq ($(BASE_CHROMIUM_KERNEL), true)
   LOCAL_KERNEL_SRC := 
-  KERNEL_CONFIG_PATH := 
-  EXT_MODULES := 
-  DEBUG_MODULES := 
-
-else ifeq ($(MLT_KERNEL), true)
+  KERNEL_CONFIG_PATH := $(TARGET_DEVICE_DIR)/
+else ifeq ($(BASE_YOCTO_KERNEL), true)
   LOCAL_KERNEL_SRC := 
-  KERNEL_CONFIG_PATH := 
-  EXT_MODULES := 
-  DEBUG_MODULES := 
-
+  KERNEL_CONFIG_PATH := $(TARGET_DEVICE_DIR)/
 else
   LOCAL_KERNEL_SRC := kernel/lts2018
   EXT_MODULES := 
