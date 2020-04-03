@@ -45,6 +45,28 @@ for each in $@
                 break
 	fi
 done
+BT_PT="true"
+
+for each in $@
+	do
+	if [[ $each == "--bt-host" ]]
+	then
+		BT_PT="false"
+		echo BT_PT: $BT_PT
+		break
+	fi
+done
+
+if [ $BT_PT = "true" ]
+then
+	bt_passthrough="-device usb-host,vendorid=0x8087,productid=0x0a2b \
+	-device usb-host,vendorid=0x8087,productid=0x0025 \
+	-device usb-host,vendorid=0x8087,productid=0x0026 \
+	-device usb-host,vendorid=0x8087,productid=0x0029 \
+	-device usb-host,vendorid=0x8087,productid=0x0aaa \
+	-device usb-host,vendorid=0x8087,productid=0x0aa7
+	"
+fi
 
 smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
 
@@ -65,7 +87,7 @@ common_options="\
  -device usb-host,vendorid=0x0eef,productid=0x7200 \
  -device usb-host,vendorid=0x222a,productid=0x0141 \
  -device usb-host,vendorid=0x222a,productid=0x0088 \
- -device usb-host,vendorid=0x8087,productid=0x0a2b \
+ $bt_passthrough \
  -device usb-mouse \
  -device usb-kbd \
  -drive file=$ovmf_file,format=raw,if=pflash \
