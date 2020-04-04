@@ -284,10 +284,10 @@ else ifeq ($(BASE_YOCTO_KERNEL), true)
   LOCAL_KERNEL_SRC := kernel/lts2019-yocto
   KERNEL_CONFIG_PATH := $(TARGET_DEVICE_DIR)/config-lts/lts2019-yocto
 else
-  LOCAL_KERNEL_SRC := kernel/lts2019-yocto
+  LOCAL_KERNEL_SRC := kernel/lts2019-chromium
   EXT_MODULES := 
   DEBUG_MODULES := 
-  KERNEL_CONFIG_PATH := $(TARGET_DEVICE_DIR)/config-lts/lts2019-yocto
+  KERNEL_CONFIG_PATH := $(TARGET_DEVICE_DIR)/config-lts/lts2019-chromium
 endif
 
 EXTMOD_SRC := ../modules

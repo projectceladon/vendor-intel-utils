@@ -164,7 +164,7 @@ TARGET_USES_64_BIT_BINDER := true
 # Source: device/intel/mixins/groups/kernel/gmin64/BoardConfig.mk
 ##############################################################
 # Specify location of board-specific kernel headers
-TARGET_BOARD_KERNEL_HEADERS := $(INTEL_PATH_COMMON)/kernel/lts2019-yocto/kernel-headers
+TARGET_BOARD_KERNEL_HEADERS := $(INTEL_PATH_COMMON)/kernel/lts2019-chromium/kernel-headers
 
 ifneq ($(TARGET_BUILD_VARIANT),user)
 KERNEL_LOGLEVEL ?= 7
