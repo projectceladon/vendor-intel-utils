@@ -10,6 +10,12 @@ ovmf_file="./OVMF.fd"
 
 GVTg_DEV_PATH="/sys/bus/pci/devices/0000:00:02.0"
 GVTg_VGPU_UUID="4ec1ff92-81d7-11e9-aed4-5bf6a9a2bb0a"
+
+function network_setup(){
+	#setup unprivileged ICMP on the host for ping to work on guest side.
+	sysctl -w net.ipv4.ping_group_range='0 2147483647'
+}
+
 function setup_vgpu(){
 	res=0
 	if [ ! -d $GVTg_DEV_PATH/$GVTg_VGPU_UUID ]; then
@@ -212,6 +218,7 @@ if [[ "$vno" > "5.0.0" ]]; then
 	check_nested_vt
 	create_snd_dummy
 	setup_vgpu
+	network_setup
 	if [[ $? == 0 ]]; then
 		launch_hwrender $1
 	else
