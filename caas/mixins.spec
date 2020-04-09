@@ -47,7 +47,6 @@ flashfiles: ini(fast_flashfiles=false, oemvars=false,installer=true,flash_dnx_os
 net: common
 debug-crashlogd: true
 debug-coredump: false
-debug-phonedoctor: true
 lights: true
 power: true(power_throttle=true)
 debug-usb-config: true(source_dev=dvcith-0-msc0)
