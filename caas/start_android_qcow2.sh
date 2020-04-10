@@ -26,6 +26,20 @@ function setup_vgpu(){
 	return $res
 }
 
+function setup_gvtd(){
+	res=0
+	if [ ! -d $GVTg_DEV_PATH/$GVTg_VGPU_UUID ]; then
+		echo "Unbinding GPU to the host and binding dedicated GPU to the guest..."
+		sudo sh -c "modprobe vfio"
+		sudo sh -c "modprobe vfio_pci"
+		intelVGA_id=`sudo sh -c "lspci -D -nn |grep '02.0 VGA' |grep -o 8086:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"`
+		sudo sh -c "echo 0000:00:02.0 > /sys/bus/pci/devices/0000:00:02.0/driver/unbind"
+		sudo sh -c "echo ${intelVGA_id/:/ } > /sys/bus/pci/drivers/vfio-pci/new_id"
+		res=$?
+	fi
+	return $res
+}
+
 function create_snd_dummy(){
 	modprobe snd-dummy
 }
@@ -181,6 +195,13 @@ function launch_hwrender(){
 	fi
 }
 
+function launch_hwrender_gvtd(){
+	common_options=${common_options/-display $display_type /}
+	qemu-system-x86_64 \
+	-device vfio-pci,host=00:02.0,x-igd-gms=2,id=hostdev0,bus=pcie.0,addr=0x2,x-igd-opregion=on \
+	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /}
+}
+
 function launch_swrender(){
 	if [[ $1 == "--display-off" ]]
         then
@@ -217,12 +238,20 @@ vno=$(echo $version | \
 if [[ "$vno" > "5.0.0" ]]; then
 	check_nested_vt
 	create_snd_dummy
-	setup_vgpu
+	if [[ $1 == "--gvtd" ]]; then
+		setup_gvtd
+	else
+		setup_vgpu
+	fi
 	network_setup
 	if [[ $? == 0 ]]; then
-		launch_hwrender $1
+		if [[ $1 == "--gvtd" ]]; then
+			launch_hwrender_gvtd
+		else
+			launch_hwrender $1
+		fi
 	else
-		echo "W: Failed to create vgpu, fall to software rendering"
+		echo "W: Failed to create vgpu or bind dedicated GPU to the guest, fall to software rendering"
 		launch_swrender $1
 	fi
 else

@@ -614,12 +614,6 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.logd.logpersistd.count=20
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.logd.logpersistd.rotate_kbytes=5000
 endif
 ##############################################################
-# Source: device/intel/mixins/groups/debug-phonedoctor/true/product.mk
-##############################################################
-ifeq ($(MIXIN_DEBUG_LOGS),true)
-PRODUCT_PACKAGES += crash_package
-endif
-##############################################################
 # Source: device/intel/mixins/groups/lights/true/product.mk
 ##############################################################
 # Lights HAL

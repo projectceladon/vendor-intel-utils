@@ -554,11 +554,6 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/crashlogd
 BOARD_SEPOLICY_M4DEFS += module_debug_crashlogd=true
 endif
 ##############################################################
-# Source: device/intel/mixins/groups/debug-phonedoctor/true/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_M4DEFS += module_debug_phonedoctor=true
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug-phonedoctor
-##############################################################
 # Source: device/intel/mixins/groups/power/true/BoardConfig.mk
 ##############################################################
 

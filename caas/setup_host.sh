@@ -11,7 +11,7 @@ function ubu_changes_require(){
 	if [ x$res = xn ]; then
 		exit 0
 	fi
-	apt install -y wget mtools ovmf dmidecode python3-usb python3-pyudev
+	apt install -y wget mtools ovmf dmidecode python3-usb python3-pyudev pulseaudio
 }
 
 function ubu_install_qemu(){
@@ -23,20 +23,44 @@ function ubu_install_qemu(){
 	tar -xf $QEMU_REL.tar.xz
 	cd $QEMU_REL/
 	./configure --prefix=/usr \
-	    --enable-kvm \
-	    --disable-xen \
-	    --enable-libusb \
-	    --enable-debug-info \
-	    --enable-debug \
-	    --enable-sdl \
-	    --enable-vhost-net \
-	    --enable-spice \
-	    --disable-debug-tcg \
-	    --enable-opengl \
-	    --enable-gtk \
-	    --enable-virtfs \
-	    --target-list=x86_64-softmmu \
-	    --audio-drv-list=pa
+		--enable-kvm \
+		--disable-xen \
+		--enable-libusb \
+		--enable-debug-info \
+		--enable-debug \
+		--enable-sdl \
+		--enable-vhost-net \
+		--enable-spice \
+		--disable-debug-tcg \
+		--enable-opengl \
+		--enable-gtk \
+		--enable-virtfs \
+		--target-list=x86_64-softmmu \
+		--audio-drv-list=pa
+	make -j24
+	make install
+	cd ../
+}
+
+function ubu_install_qemu_gvtd(){
+	apt purge -y "qemu*"
+	apt autoremove -y
+	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev socat autoconf libtool uml-utilities bridge-utils liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev bison flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid 
+	wget https://download.qemu.org/$QEMU_REL.tar.xz
+	tar -xf $QEMU_REL.tar.xz
+	cd $QEMU_REL/
+	wget https://raw.githubusercontent.com/projectceladon/vendor-intel-utils/master/host/qemu/0001-Revert-Revert-vfio-pci-quirks.c-Disable-stolen-memor.patch
+	patch -p1 < 0001-Revert-Revert-vfio-pci-quirks.c-Disable-stolen-memor.patch
+	./configure --prefix=/usr \
+		--enable-kvm \
+		--disable-xen \
+		--enable-libusb \
+		--enable-debug-info \
+		--enable-debug \
+		--enable-vhost-net \
+		--disable-debug-tcg \
+		--target-list=x86_64-softmmu \
+		--audio-drv-list=pa
 	make -j24
 	make install
 	cd ../
@@ -60,6 +84,18 @@ function ubu_build_ovmf(){
 	cd ../../../
 }
 
+function ubu_build_ovmf_gvtd(){
+	sudo apt install -y uuid-dev nasm acpidump iasl
+	cd $QEMU_REL/roms/edk2
+	wget https://raw.githubusercontent.com/projectceladon/vendor-intel-utils/master/host/ovmf/OvmfPkg-add-IgdAssgingmentDxe-for-qemu-4_2_0.patch 
+	patch -p4 < OvmfPkg-add-IgdAssgingmentDxe-for-qemu-4_2_0.patch
+	source ./edksetup.sh
+	make -C BaseTools/
+	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE
+	cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd ../../../OVMF.fd
+	cd ../../../
+}
+
 function ubu_enable_host_gvtg(){
 	if [[ ! `cat /etc/default/grub` =~ "i915.enable_gvt=1 intel_iommu=on" ]]; then
 		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-g, do you want to continue? [Y/n]" res
@@ -72,6 +108,18 @@ function ubu_enable_host_gvtg(){
 		echo -e "\nkvmgt\nvfio-iommu-type1\nvfio-mdev\n" >> /etc/initramfs-tools/modules
 		update-initramfs -u -k all
 
+		reboot_required=1
+	fi
+}
+
+function ubu_enable_host_gvtd(){
+	if [[ ! `cat /etc/default/grub` =~ "intel_iommu=on kvm-intel.nested=y" ]]; then
+		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-d, do you want to continue? [Y/n]" res
+		if [ x$res = xn ]; then
+			exit 0
+		fi
+		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"intel_iommu=on kvm-intel.nested=y /g" /etc/default/grub
+		update-grub
 		reboot_required=1
 	fi
 }
@@ -149,19 +197,44 @@ function save_env(){
 	fi
 }
 
+function install_auto_start_service(){
+	service_file=/etc/systemd/system/civ.service
+	touch $service_file
+	cat /dev/null > $service_file
+
+	echo "[Unit]" > $service_file
+	echo -e "Description=CiV Auto Start\n" >> $service_file
+
+	echo "[Service]" >> $service_file
+	echo -e "WorkingDirectory=$CIV_WORK_DIR\n" >> $service_file
+	echo -e "ExecStart=/bin/bash -E $CIV_WORK_DIR/start_android.sh\n" >> $service_file
+
+	echo "[Install]" >> $service_file
+	echo -e "WantedBy=multi-user.target\n" >> $service_file
+}
+
 version=`cat /proc/version`
 
 if [[ $version =~ "Ubuntu" ]]; then
 	check_network
 	ubu_changes_require
-	ubu_install_qemu
-	ubu_build_ovmf
-	ubu_enable_host_gvtg
-	get_required_scripts
-	check_kernel
 	save_env
+	check_kernel
+	#Auto start service for audio will be enabled in future 
+	#install_auto_start_service
+	if [[ $1 == "--gvtd" ]]; then
+		ubu_install_qemu_gvtd
+		ubu_build_ovmf_gvtd
+		ubu_enable_host_gvtd
+	else
+		ubu_install_qemu
+		ubu_build_ovmf
+		ubu_enable_host_gvtg
+	fi
+	get_required_scripts
 	install_9p_module
 	ask_reboot
+
 elif [[ $version =~ "Clear Linux OS" ]]; then
 	check_network
 	clr_changes_require
