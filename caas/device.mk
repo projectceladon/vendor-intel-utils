@@ -304,6 +304,14 @@ PRODUCT_PACKAGES += \
      toybox_static \
      toybox_vendor \
 ##############################################################
+# Source: device/intel/mixins/groups/product-partition/true/product.mk
+##############################################################
+
+##############################################################
+# Source: device/intel/mixins/groups/odm-partition/true/product.mk
+##############################################################
+
+##############################################################
 # Source: device/intel/mixins/groups/display-density/medium/product.mk
 ##############################################################
 PRODUCT_AAPT_CONFIG := normal

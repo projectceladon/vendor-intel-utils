@@ -649,6 +649,20 @@ INSTALLED_RADIOIMAGE_TARGET += $(INSTALLED_CONFIGIMAGE_TARGET)
 
 selinux_fc :=
 ##############################################################
+# Source: device/intel/mixins/groups/product-partition/true/AndroidBoard.mk
+##############################################################
+include $(CLEAR_VARS)
+LOCAL_MODULE := product-partition
+INSTALLED_PRODUCTIMAGE_TARGET := $(PRODUCT_OUT)/product.img
+include $(BUILD_PHONY_PACKAGE)
+##############################################################
+# Source: device/intel/mixins/groups/odm-partition/true/AndroidBoard.mk
+##############################################################
+include $(CLEAR_VARS)
+LOCAL_MODULE := odm-partition
+INSTALLED_ODMIMAGE_TARGET := $(PRODUCT_OUT)/odm.img
+include $(BUILD_PHONY_PACKAGE)
+##############################################################
 # Source: device/intel/mixins/groups/media/auto/AndroidBoard.mk
 ##############################################################
 AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/media/auto_hal.in
@@ -807,6 +821,11 @@ endif
 tos_bin = $(INSTALLED_TOS_IMAGE_TARGET)
 endif
 
+ifdef INSTALLED_ODMIMAGE_TARGET
+raw_odm := $(INSTALLED_ODMIMAGE_TARGET).raw
+$(GPTIMAGE_BIN): odmimage $(SIMG2IMG)
+	$(SIMG2IMG) $(INSTALLED_ODMIMAGE_TARGET) $(INSTALLED_ODMIMAGE_TARGET).raw
+endif
 
 
 ifdef INSTALLED_ACPIOIMAGE_TARGET

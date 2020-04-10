@@ -16,13 +16,18 @@ Scope(_SB)
                 Package () {
                     Package () {"android.compatible", "android,firmware"},
                     Package () {"android.vbmeta.compatible","android,vbmeta"},
-                    Package () {"android.vbmeta.parts","vbmeta,boot,system,vendor,tos"},
+                    Package () {"android.vbmeta.parts","vbmeta,boot,system,vendor,tos,product"},
                     Package () {"android.fstab.compatible", "android,fstab"},
                     Package () {"android.fstab.vendor.compatible", "android,vendor"},
                     Package () {"android.fstab.vendor.dev", "/dev/block/pci/pci0000:00/0000:00:ff.ff/by-name/vendor"},  // Varies with platform
                     Package () {"android.fstab.vendor.type", "ext4"},  // May vary with platform
                     Package () {"android.fstab.vendor.mnt_flags", "ro"},  // May vary with platform
                     Package () {"android.fstab.vendor.fsmgr_flags", "wait,slotselect,avb"},  // May vary with platform
+                    Package () {"android.fstab.product.compatible", "android,product"},
+                    Package () {"android.fstab.product.dev", "/dev/block/pci/pci0000:00/0000:00:ff.ff/by-name/product"},  // Varies with platform
+                    Package () {"android.fstab.product.type", "ext4"},  // May vary with platform
+                    Package () {"android.fstab.product.mnt_flags", "ro"},  // May vary with platform
+                    Package () {"android.fstab.product.fsmgr_flags", "wait,slotselect,avb"},  // May vary with platform
                 }
             })
         }

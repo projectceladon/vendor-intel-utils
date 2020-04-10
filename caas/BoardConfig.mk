@@ -9,7 +9,7 @@ BOARD_DISK_BUS = ff.ff
 ##############################################################
 # Configure super partitions
 BOARD_SUPER_PARTITION_GROUPS := group_sys
-BOARD_GROUP_SYS_PARTITION_LIST := system vendor
+BOARD_GROUP_SYS_PARTITION_LIST := system vendor product odm
 
 BOARD_SUPER_PARTITION_SIZE := $(shell echo 6400*1024*1024 | bc)
 BOARD_GROUP_SYS_SIZE = $(shell echo "$(BOARD_SUPER_PARTITION_SIZE) / 2 - 4*1024*1024" | bc)
@@ -330,6 +330,26 @@ AB_OTA_PARTITIONS += acpio
 BOARD_CONFIGIMAGE_PARTITION_SIZE := 8388608
 BOARD_SEPOLICY_M4DEFS += module_config_partition=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/config-partition
+##############################################################
+# Source: device/intel/mixins/groups/product-partition/true/BoardConfig.mk
+##############################################################
+# Those 3 lines are required to enable product image generation.
+# Remove them if product partition is not used.
+TARGET_COPY_OUT_PRODUCT := product
+BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := ext4
+PRODUCT_PARTITION_SIZE := $(shell echo 100*1048576 | bc)
+TARGET_USE_PRODUCT := true
+AB_OTA_PARTITIONS += product
+##############################################################
+# Source: device/intel/mixins/groups/odm-partition/true/BoardConfig.mk
+##############################################################
+# Those 3 lines are required to enable odm image generation.
+# Remove them if odm partition is not used.
+TARGET_COPY_OUT_ODM := odm
+BOARD_ODMIMAGE_FILE_SYSTEM_TYPE := ext4
+ODM_PARTITION_SIZE := $(shell echo 100*1048576 | bc)
+TARGET_USE_ODM := true
+AB_OTA_PARTITIONS += odm
 ##############################################################
 # Source: device/intel/mixins/groups/cpu-arch/x86/BoardConfig.mk
 ##############################################################
