@@ -127,27 +127,16 @@ common_options="\
  -smbios "type=2,serial=$smbios_serialno"
  -nodefaults
 "
-function wifi_passthrough(){
-        if [ `find /etc/modprobe.d/ -iname vfio.conf` ]
-        then
-                echo "File exists"
-        else
-                echo "options vfio-pci ids=`lspci -nn  | grep -oP 'Network controller.*\[\K[\w:]+'`" | sudo tee -a /etc/modprobe.d/vfio.conf
-        fi
-
-
-        if [ `find /etc/modules-load.d/ -iname vfio-pci.conf` ]
-        then
-                echo "File exists"
-        else
-                echo "vfio-pci" | sudo tee -a /etc/modules-load.d/vfio-pci.conf
-        fi
-}
 
 function launch_hwrender(){
 	if [ $WIFI_PT = "true" ]
 	then
-		wifi_passthrough
+		rfkill unblock all
+		PCI_ID=`lspci -D -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`
+		echo $PCI_ID > /sys/bus/pci/devices/`echo $PCI_ID | sed 's/:/\\:/g'`/driver/unbind
+		modprobe vfio-pci
+		DEVICE_ID=`lspci -nn  | grep -oP 'Network controller.*\[\K[\w:]+'`
+		echo $DEVICE_ID | sed 's/:/\ /g' > /sys/bus/pci/drivers/vfio-pci/new_id
 		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
 	fi
 
