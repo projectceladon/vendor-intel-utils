@@ -182,6 +182,11 @@ function get_required_scripts(){
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/start_android_qcow2.sh
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/auto_switch_pt_usb_vms.sh
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/findall.py
+	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/sof_audio/configure_sof.sh
+	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/sof_audio/blacklist-dsp.conf
+	chmod +x configure_sof.sh
+	mkdir $CIV_WORK_DIR/sof_audio
+	mv -t $CIV_WORK_DIR/sof_audio configure_sof.sh blacklist-dsp.conf
 	chmod +x auto_switch_pt_usb_vms.sh
 	chmod +x findall.py
 	chmod +x start_flash_usb.sh
@@ -231,7 +236,11 @@ if [[ $version =~ "Ubuntu" ]]; then
 		ubu_build_ovmf
 		ubu_enable_host_gvtg
 	fi
+	if [[ ! -d $CIV_WORK_DIR/sof_audio ]]; then
+		reboot_required=1
+	fi
 	get_required_scripts
+	./sof_audio/configure_sof.sh "install" $CIV_WORK_DIR
 	install_9p_module
 	ask_reboot
 
