@@ -22,6 +22,11 @@ function apply()
 
             patch=$1/${proj}/${patch_name}
             change_id=`grep -w "^Change-Id:" ${patch} | awk '{print $2}'`
+			if [ -z "${change_id}" ]
+			then
+				echo "Error! change_id is missing in the patch"
+				exit
+			fi
             ret=`git log | grep -w "^    Change-Id: ${change_id}" 2>/dev/null`
             if [ "${ret}" == "" ]
             then
