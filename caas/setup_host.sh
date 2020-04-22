@@ -45,7 +45,7 @@ function ubu_install_qemu(){
 function ubu_install_qemu_gvtd(){
 	apt purge -y "qemu*"
 	apt autoremove -y
-	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev socat autoconf libtool uml-utilities bridge-utils liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev bison flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid 
+	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool uml-utilities xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid
 	wget https://download.qemu.org/$QEMU_REL.tar.xz
 	tar -xf $QEMU_REL.tar.xz
 	cd $QEMU_REL/
@@ -57,8 +57,13 @@ function ubu_install_qemu_gvtd(){
 		--enable-libusb \
 		--enable-debug-info \
 		--enable-debug \
+		--enable-sdl \
 		--enable-vhost-net \
+		--enable-spice \
 		--disable-debug-tcg \
+		--enable-opengl \
+		--enable-gtk \
+		--enable-virtfs \
 		--target-list=x86_64-softmmu \
 		--audio-drv-list=pa
 	make -j24

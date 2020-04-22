@@ -84,6 +84,8 @@ then
 	-device usb-host,vendorid=0x8087,productid=0x0026 \
 	-device usb-host,vendorid=0x8087,productid=0x0029 \
 	-device usb-host,vendorid=0x8087,productid=0x0aaa \
+	-device usb-host,vendorid=0x413c,productid=0x301a \
+	-device usb-host,vendorid=0x046d,productid=0x0a38 \
 	-device usb-host,vendorid=0x8087,productid=0x0aa7
 	"
 fi
@@ -186,6 +188,7 @@ function launch_hwrender(){
 
 function launch_hwrender_gvtd(){
 	common_options=${common_options/-display $display_type /}
+	common_options=${common_options/-vga none /-vga none -nographic}
 	qemu-system-x86_64 \
 	-device vfio-pci,host=00:02.0,x-igd-gms=2,id=hostdev0,bus=pcie.0,addr=0x2,x-igd-opregion=on \
 	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /}
