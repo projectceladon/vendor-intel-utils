@@ -592,11 +592,8 @@ PRODUCT_PACKAGES += crashlogd \
 	aplog.sh \
 	logfs.sh
 
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.vendor.crashlogd.data_quota=50
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.service.default_logfs=apklogfs
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += vendor.logd.kernel.raw_message=False
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.logd.logpersistd.count=20
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.logd.logpersistd.rotate_kbytes=5000
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += persist.logd.logpersistd.size=100
 endif
 ##############################################################
 # Source: device/intel/mixins/groups/power/true/product.mk
