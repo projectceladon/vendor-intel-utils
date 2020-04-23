@@ -258,11 +258,11 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/file_share.sh:$(TARGET_COPY_OUT_VENDOR)/bin/file_share.sh
 PRODUCT_COPY_FILES += vendor/intel/utils/LICENSE:$(PRODUCT_OUT)/LICENSE
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/start_android_qcow2.sh
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/start_flash_usb.sh
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/auto_switch_pt_usb_vms.sh
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/findall.py
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/setup_host.sh
+PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/start_android_qcow2.sh
+PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/start_flash_usb.sh
+PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/auto_switch_pt_usb_vms.sh
+PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/findall.py
+PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/setup_host.sh
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/product.mk
 ##############################################################
