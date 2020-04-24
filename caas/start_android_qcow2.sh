@@ -148,8 +148,9 @@ function launch_hwrender(){
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-pidfile android_vm.pid \
 		$WIFI_VFIO_OPTIONS \
-		$common_options &
+		$common_options >qemu_start_android.log 2>&1 </dev/null &
 		sleep 5
+		cat qemu_start_android.log
 		echo -n "Android started successfully and is running in background, pid of the process is:"
 		cat android_vm.pid
 		echo -ne '\n'
@@ -163,8 +164,9 @@ function launch_hwrender(){
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
 		$WIFI_VFIO_OPTIONS \
-		$common_options &
+		$common_options >qemu_start_android.log 2>&1 </dev/null &
 		sleep 5
+		cat qemu_start_android.log
 		echo -n "Android started successfully and is running in background, pid of the process is:"
 		cat android_vm.pid
 	elif [[ $1 == "--usb-adb" ]]
