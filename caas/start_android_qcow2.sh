@@ -4,6 +4,8 @@ work_dir=$PWD
 caas_image=$work_dir/android.qcow2
 usb_switch=$work_dir/auto_switch_pt_usb_vms.sh
 find_port=$work_dir/findall.py
+qmp_handler=$work_dir/qmp_events_handler.sh
+qmp_log=$work_dir/qmp_event.log
 
 ovmf_file="./OVMF.fd"
 [ ! -f $ovmf_file ] && ovmf_file="/usr/share/qemu/OVMF.fd"
@@ -92,7 +94,6 @@ fi
 
 smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
 
-
 common_options="\
  -m 2048 -smp 2 -M q35 \
  -name caas-vm \
@@ -103,6 +104,7 @@ common_options="\
  -machine kernel_irqchip=off \
  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
  -cpu host \
+ -qmp stdio \
  -device qemu-xhci,id=xhci,addr=0x8 \
  `/bin/bash $usb_switch` \
  -device usb-host,vendorid=0x03eb,productid=0x8a6e \
@@ -126,7 +128,7 @@ common_options="\
  -full-screen \
  -fsdev local,security_model=none,id=fsdev0,path=./share_folder \
  -device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare \
- -smbios "type=2,serial=$smbios_serialno"
+ -smbios "type=2,serial=$smbios_serialno" \
  -nodefaults
 "
 
@@ -148,7 +150,7 @@ function launch_hwrender(){
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-pidfile android_vm.pid \
 		$WIFI_VFIO_OPTIONS \
-		$common_options >qemu_start_android.log 2>&1 </dev/null &
+		$common_options 1>$qmp_log 2>qemu_start_android.log <<< "{ \"execute\": \"qmp_capabilities\" }" &
 		sleep 5
 		cat qemu_start_android.log
 		echo -n "Android started successfully and is running in background, pid of the process is:"
@@ -164,7 +166,7 @@ function launch_hwrender(){
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
 		$WIFI_VFIO_OPTIONS \
-		$common_options >qemu_start_android.log 2>&1 </dev/null &
+		$common_options 1>$qmp_log 2>qemu_start_android.log <<< "{ \"execute\": \"qmp_capabilities\" }" &
 		sleep 5
 		cat qemu_start_android.log
 		echo -n "Android started successfully and is running in background, pid of the process is:"
@@ -179,12 +181,12 @@ function launch_hwrender(){
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		-device vfio-pci,host=00:14.1,id=dwc3,addr=0x14,x-no-kvm-intx=on \
 		$WIFI_VFIO_OPTIONS \
-		$common_options
+		$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	else
 		qemu-system-x86_64 \
 		-device vfio-pci-nohotplug,ramfb=$ramfb_state,sysfsdev=$GVTg_DEV_PATH/$GVTg_VGPU_UUID,display=$display_state,x-igd-opregion=on \
 		$WIFI_VFIO_OPTIONS \
-		$common_options
+		$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	fi
 }
 
@@ -193,7 +195,7 @@ function launch_hwrender_gvtd(){
 	common_options=${common_options/-vga none /-vga none -nographic}
 	qemu-system-x86_64 \
 	-device vfio-pci,host=00:02.0,x-igd-gms=2,id=hostdev0,bus=pcie.0,addr=0x2,x-igd-opregion=on \
-	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /}
+	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /} > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 }
 
 function launch_swrender(){
@@ -202,7 +204,7 @@ function launch_swrender(){
 		qemu-system-x86_64 \
 		-device qxl-vga,xres=1280,yres=720 \
 		-pidfile android_vm.pid \
-		$common_options &
+		$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }" &
 		sleep 5
 		echo -n "Android started successfully and is running in background, pid of the process is:"
 		cat android_vm.pid
@@ -210,7 +212,7 @@ function launch_swrender(){
 	else
 		qemu-system-x86_64 \
 		-device qxl-vga,xres=1280,yres=720 \
-		$common_options
+		$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	fi
 }
 
@@ -238,6 +240,9 @@ if [[ "$vno" > "5.0.0" ]]; then
 		setup_vgpu
 	fi
 	network_setup
+
+	rm -rf $qmp_log
+	$qmp_handler &
 	if [[ $? == 0 ]]; then
 		if [[ $1 == "--gvtd" ]]; then
 			launch_hwrender_gvtd
