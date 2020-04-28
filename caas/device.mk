@@ -232,7 +232,7 @@ PRODUCT_COPY_FILES += \
 ##############################################################
 # Source: device/intel/mixins/groups/device-specific/caas/product.mk
 ##############################################################
-TARGET_BOARD_PLATFORM := broxton
+TARGET_BOARD_PLATFORM := celadon
 
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/init.recovery.rc:root/init.recovery.$(TARGET_PRODUCT).rc \
