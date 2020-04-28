@@ -94,6 +94,18 @@ fi
 
 smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
 
+common_usb_device_passthrough="\
+ -device qemu-xhci,id=xhci,addr=0x8 \
+ `/bin/bash $usb_switch` \
+ -device usb-host,vendorid=0x03eb,productid=0x8a6e \
+ -device usb-host,vendorid=0x0eef,productid=0x7200 \
+ -device usb-host,vendorid=0x222a,productid=0x0141 \
+ -device usb-host,vendorid=0x222a,productid=0x0088 \
+ $bt_passthrough \
+ -device usb-mouse \
+ -device usb-kbd \
+"
+
 common_options="\
  -m 2048 -smp 2 -M q35 \
  -name caas-vm \
@@ -105,15 +117,6 @@ common_options="\
  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
  -cpu host \
  -qmp stdio \
- -device qemu-xhci,id=xhci,addr=0x8 \
- `/bin/bash $usb_switch` \
- -device usb-host,vendorid=0x03eb,productid=0x8a6e \
- -device usb-host,vendorid=0x0eef,productid=0x7200 \
- -device usb-host,vendorid=0x222a,productid=0x0141 \
- -device usb-host,vendorid=0x222a,productid=0x0088 \
- $bt_passthrough \
- -device usb-mouse \
- -device usb-kbd \
  -drive file=$ovmf_file,format=raw,if=pflash \
  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
  -device isa-serial,chardev=charserial0,id=serial0 \
@@ -132,6 +135,66 @@ common_options="\
  -nodefaults
 "
 
+usb_vfio_passthrough="false"
+for arg in $*
+do
+        if [ $arg == "--usb-host-passthrough" ]; then
+               usb_vfio_passthrough="true"
+               echo usb_vfio_passthrough: $usb_vfio_passthrough
+               break;
+        fi
+done
+
+function setup_usb_vfio_passthrough(){
+        if [[ $usb_vfio_passthrough == "false" ]]; then
+                common_options=${common_usb_device_passthrough}${common_options}
+        else
+                modprobe vfio-pci
+
+                USBController=`sudo sh -c "lspci -D -nn | grep -i 'USB controller' | grep -i '14.0'"`
+                USBControllerID=${USBController:0:13}
+                USBControllerID=`echo $USBControllerID | awk '{gsub(/^\s+|\s+$/, "");print}'`
+                iommu_group_devices=`sudo sh -c "ls /sys/bus/pci/devices/${USBControllerID}/iommu_group/devices/"`
+                str=`echo $iommu_group_devices | sed -e 's/\s\+/,/g'`
+                str=","${str}
+
+                address=14
+                g_usb_ctrl_id=0
+
+                if [[ $1 == "setup" ]]; then
+                    echo "setup USB vfio passthrough"
+                    sudo sh -c "echo device > /sys/class/usb_role/intel_xhci_usb_sw-role-switch/role"
+                else
+                    echo "remove USB vfio passthrough"
+                    sudo sh -c "echo host > /sys/class/usb_role/intel_xhci_usb_sw-role-switch/role"
+                fi
+
+                while [ -n "$str" ];do
+
+                    substr=${str##*,}
+
+                    usb_device=`sudo sh -c "lspci -D -nn |grep ${substr} |grep -o 8086:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"`
+
+                    if [[ $1 == "setup" ]]; then
+                        sudo sh -c "echo ${substr} > /sys/bus/pci/devices/${substr}/driver/unbind"
+                        sudo sh -c "echo ${usb_device/:/ } > /sys/bus/pci/drivers/vfio-pci/new_id"
+                        commandstr="-device vfio-pci,host=${substr#*:},id=gusbctrl${g_usb_ctrl_id},addr=0x${address},x-no-kvm-intx=on "
+                        common_options=${commandstr}${common_options}
+
+                        let address=address+1
+                        let g_usb_ctrl_id=g_usb_ctrl_id+1
+                    else
+                        sudo sh -c "echo ${substr} > /sys/bus/pci/drivers/vfio-pci/unbind"
+                        sudo sh -c "echo ${substr} > /sys/bus/pci/drivers_probe"
+                    fi
+
+                    str=${str%,*}
+                done
+
+                echo "enumerate done"
+        fi
+}
+
 function launch_hwrender(){
 	if [ $WIFI_PT = "true" ]
 	then
@@ -143,6 +206,8 @@ function launch_hwrender(){
 		echo $DEVICE_ID | sed 's/:/\ /g' > /sys/bus/pci/drivers/vfio-pci/new_id
 		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
 	fi
+
+	setup_usb_vfio_passthrough setup
 
 	if [[ $1 == "--display-off" ]]
 	then
@@ -188,6 +253,8 @@ function launch_hwrender(){
 		$WIFI_VFIO_OPTIONS \
 		$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	fi
+
+	setup_usb_vfio_passthrough remove
 }
 
 function launch_hwrender_gvtd(){
