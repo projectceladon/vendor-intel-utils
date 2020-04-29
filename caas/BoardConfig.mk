@@ -471,6 +471,10 @@ DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/navigationbar/overlay
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debug-tools/androidterm
 ##############################################################
+# Source: device/intel/mixins/groups/default-drm/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/drm-default
+##############################################################
 # Source: device/intel/mixins/groups/thermal/thermal-daemon/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += device/intel/sepolicy/thermal
