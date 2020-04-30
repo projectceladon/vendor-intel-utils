@@ -214,7 +214,7 @@ public class PermissionsActivity extends QuickActivity {
     }
 
     private void handlePermissionsSuccess() {
-        Intent intent = new Intent(this, MultiViewActivity.class);
+        Intent intent = new Intent(this, FullScreenActivity.class);
         startActivity(intent);
         finish();
     }

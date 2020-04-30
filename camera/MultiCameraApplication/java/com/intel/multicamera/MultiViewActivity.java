@@ -18,7 +18,6 @@
 package com.intel.multicamera;
 
 import android.Manifest;
-import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -26,8 +25,6 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraManager;
-import android.hardware.usb.UsbDevice;
-import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.os.AsyncTask;
 import android.os.Bundle;
@@ -39,22 +36,24 @@ import androidx.appcompat.app.ActionBar;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import java.io.IOException;
-import java.util.HashMap;
-
-import static android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED;
-import static android.hardware.usb.UsbManager.ACTION_USB_DEVICE_DETACHED;
+import java.util.concurrent.TimeUnit;
 
 public class MultiViewActivity extends AppCompatActivity {
-    private static final String TAG = "MainActivity";
+    private static final String TAG = "MultiViewActivity";
+
+
     /**
      * An {@link AutoFitTextureView} for camera preview.
      */
     private AutoFitTextureView mTopLeftCam_textureView, mTopRightCam_textureView,
             mBotmLeftCam_textureView, mBotmRightCam_textureView;
 
-    private ImageButton mTopLeftCam_RecordButton, mTopLeftCam_PictureButton,
-            mTopRightCam_PictureButton, mBotmLeftCam_PictureButton, mBotmRightCam_PictureButton,
-            mTopRightCam_RecordButton, mBotmLeftCam_RecordButton, mBotmRightCam_RecordButton;
+    private ImageButton mTopLeftCam_RecordButton, mTopLeftCam_PictureButton, mTopLeftCam_Switch,
+            mTopLeftCam_Split, mTopRightCam_PictureButton, mTopRightCam_RecordButton,
+            mTopRightCam_Switch, mTopRightCam_Split, mBotmLeftCam_PictureButton,
+            mBotmLeftCam_RecordButton, mBotmLeftCam_Switch, mBotmLeftCam_Split,
+            mBotmRightCam_PictureButton, mBotmRightCam_RecordButton, mBotRightCam_Switch,
+            mBotRightCam_Split;
 
     private ImageButton SettingView0, SettingView1, SettingView2, SettingView3, SettingClose0,
             SettingClose1, SettingClose2, SettingClose3, FullScrn0, FullScrn1, FullScrn2, FullScrn3,
@@ -63,11 +62,10 @@ public class MultiViewActivity extends AppCompatActivity {
     private TextView mRecordingTimeView, mRecordingTimeView0, mRecordingTimeView1,
             mRecordingTimeView2;
 
+    private BroadcastReceiver mUsbReceiver;
     private int numOfCameras;
     private static final SparseIntArray ORIENTATIONS = new SparseIntArray();
     private FrameLayout frameView0, frameView1, frameView2, frameView3;
-
-    private CameraBase mTopRightCam, mBotmLeftCam, mBotmRightCam, mTopLeftCam;
 
     private SettingsPrefUtil Fragment, Fragment1, Fragment2, Fragment3;
 
@@ -88,7 +86,8 @@ public class MultiViewActivity extends AppCompatActivity {
 
     private int[] FrameVisibility;
     private boolean exitScrnFlag;
-
+    private boolean exitRecordScrnFlag;
+    MultiCamera ic_camera;
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -105,6 +104,7 @@ public class MultiViewActivity extends AppCompatActivity {
 
         Log.e(TAG, "onCreate");
 
+        ic_camera = MultiCamera.getInstance();
         checkPermissions();
         if (!mHasCriticalPermissions) {
             Log.v(TAG, "onCreate: Missing critical permissions.");
@@ -117,22 +117,32 @@ public class MultiViewActivity extends AppCompatActivity {
         FullScrn_Init();
 
         set_FrameVisibilities();
-        
+
+        exitScrn0.setVisibility(View.GONE);
+        exitScrn1.setVisibility(View.GONE);
+        exitScrn2.setVisibility(View.GONE);
+        exitScrn3.setVisibility(View.GONE);
+
+        FullScrn0.setVisibility(View.GONE);
+        FullScrn1.setVisibility(View.GONE);
+        FullScrn2.setVisibility(View.GONE);
+        FullScrn3.setVisibility(View.GONE);
         startCamera();
         IntentFilter filter = new IntentFilter();
         filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
 
         // BroadcastReceiver when insert/remove the device USB plug into/from a USB port
-        BroadcastReceiver mUsbReceiver = new BroadcastReceiver() {
+        mUsbReceiver = new BroadcastReceiver() {
             public void onReceive(Context context, Intent intent) {
                 String action = intent.getAction();
                 System.out.println("BroadcastReceiver Event");
                 if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
-                    System.out.println("BroadcastReceiver USB Connected");
+                    System.out.println(TAG + "BroadcastReceiver USB Connected");
                     startCamera();
+
                 } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
-                    System.out.println("BroadcastReceiver USB Disconnected");
+                    System.out.println(TAG + "BroadcastReceiver USB Disconnected");
                     startCamera();
                 }
             }
@@ -142,7 +152,17 @@ public class MultiViewActivity extends AppCompatActivity {
 
     void startCamera() {
         closeCamera();
+        try {
+            TimeUnit.MILLISECONDS.sleep(100);
+        } catch (Exception e) {
+
+        }
         GetCameraCnt();
+        if (numOfCameras == 0) {
+            Toast.makeText(MultiViewActivity.this, "No Camera Found", Toast.LENGTH_LONG).show();
+            System.out.println(TAG+" no camera found");
+            return;
+        }
         updateStorageSpace(null);
         LinearLayout LinLayout1 = findViewById(R.id.TopLayout);
         LinearLayout LinLayout2 = findViewById(R.id.BtmLayout);
@@ -244,6 +264,10 @@ public class MultiViewActivity extends AppCompatActivity {
         try {
             CameraIds = manager.getCameraIdList();
             numOfCameras = manager.getCameraIdList().length;
+            if (numOfCameras == 0) {
+                Toast.makeText(MultiViewActivity.this, "No camera found closing the application",
+                        Toast.LENGTH_LONG).show();
+            }
             Log.d(TAG, "Get total number of cameras present: " + manager.getCameraIdList().length);
         } catch (CameraAccessException e) {
             e.printStackTrace();
@@ -252,20 +276,38 @@ public class MultiViewActivity extends AppCompatActivity {
 
     public void Open_TopLeftCam() {
         String[] Data = new String[5];
-        ImageButton[] Buttons = new ImageButton[4];
+        ImageButton[] Buttons = new ImageButton[6];
 
         mTopLeftCam_textureView = findViewById(R.id.textureview0);
         if (mTopLeftCam_textureView == null) return;
 
+        mTopLeftCam_textureView.setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View v) {
+
+                 ic_camera.setOpenCameraId(0);
+                 closeCamera();
+                 ic_camera.setIsCameraOrSurveillance(0);
+                 Intent intent = new Intent(MultiViewActivity.this, SingleCameraActivity.class);
+                 intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK|Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                 startActivity(intent);
+                 finish();
+             }
+        });
+        mTopLeftCam_Switch = findViewById(R.id.camera_switch0);
+        mTopLeftCam_Switch.setVisibility(View.VISIBLE);
         mTopLeftCam_PictureButton = findViewById(R.id.Picture0);
         mTopLeftCam_RecordButton = findViewById(R.id.Record0);
+        mTopLeftCam_Split = findViewById(R.id.camera_split_view0);
 
         Buttons[0] = mTopLeftCam_PictureButton;
         Buttons[1] = mTopLeftCam_RecordButton;
         Buttons[2] = SettingView0;
         Buttons[3] = FullScrn0;
+        Buttons[4] = mTopLeftCam_Switch;
+        Buttons[5] = mTopLeftCam_Split;
 
-        mRecordingTimeView = findViewById(R.id.recording_time);
+        mRecordingTimeView = findViewById(R.id.recording_time0);
 
         Data[0] = "TopLeftCam";
         Data[1] = CameraIds[0];
@@ -273,25 +315,43 @@ public class MultiViewActivity extends AppCompatActivity {
         Data[3] = "video_list";
         Data[4] = "pref_resolution";
 
-        RoundedThumbnailView roundedThumbnailView = findViewById(R.id.rounded_thumbnail_view);
+        RoundedThumbnailView roundedThumbnailView = findViewById(R.id.rounded_thumbnail_view0);
 
-        mTopLeftCam = new CameraBase(this, mTopLeftCam_textureView, Buttons, mRecordingTimeView,
-                                     Data, roundedThumbnailView);
+        ic_camera.setTopLeftCam(new CameraBase(this, mTopLeftCam_textureView, Buttons, mRecordingTimeView,
+                                     Data, roundedThumbnailView));
     }
 
     public void Open_TopRightCam() {
         String[] Data = new String[5];
-        ImageButton[] Buttons = new ImageButton[4];
+        ImageButton[] Buttons = new ImageButton[6];
         mTopRightCam_textureView = findViewById(R.id.textureview1);
         if (mTopRightCam_textureView == null) return;
 
+        mTopRightCam_textureView.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ic_camera.setOpenCameraId(1);
+                closeCamera();
+                ic_camera.setIsCameraOrSurveillance(0);
+                Intent intent = new Intent(MultiViewActivity.this, SingleCameraActivity.class);
+                intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK|Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                startActivity(intent);
+                finish();
+            }
+        });
+
+        mTopRightCam_Switch = findViewById(R.id.camera_switch1);
+        mTopRightCam_Switch.setVisibility(View.VISIBLE);
         mTopRightCam_PictureButton = findViewById(R.id.Picture1);
         mTopRightCam_RecordButton = findViewById(R.id.Record1);
+        mTopRightCam_Split = findViewById(R.id.camera_split_view1);
 
         Buttons[0] = mTopRightCam_PictureButton;
         Buttons[1] = mTopRightCam_RecordButton;
         Buttons[2] = SettingView1;
         Buttons[3] = FullScrn1;
+        Buttons[4] = mTopRightCam_Switch;
+        Buttons[5] = mTopRightCam_Split;
 
         Data[0] = "TopRightCam";
         Data[1] = CameraIds[1];
@@ -299,27 +359,46 @@ public class MultiViewActivity extends AppCompatActivity {
         Data[3] = "video_list_1";
         Data[4] = "pref_resolution_1";
 
-        mRecordingTimeView0 = findViewById(R.id.recording_time0);
+        mRecordingTimeView0 = findViewById(R.id.recording_time1);
 
-        RoundedThumbnailView roundedThumbnailView = findViewById(R.id.rounded_thumbnail_view0);
+        RoundedThumbnailView roundedThumbnailView = findViewById(R.id.rounded_thumbnail_view1);
 
-        mTopRightCam = new CameraBase(this, mTopRightCam_textureView, Buttons, mRecordingTimeView0,
-                                      Data, roundedThumbnailView);
+        ic_camera.setTopRightCam(new CameraBase(this, mTopRightCam_textureView, Buttons,
+                                      mRecordingTimeView0, Data, roundedThumbnailView));
     }
 
     public void Open_BotmLeftCam() {
         String[] Data = new String[5];
-        ImageButton[] Buttons = new ImageButton[4];
+        ImageButton[] Buttons = new ImageButton[6];
         mBotmLeftCam_textureView = findViewById(R.id.textureview2);
         if (mBotmLeftCam_textureView == null) return;
 
+        mBotmLeftCam_textureView.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ic_camera.setOpenCameraId(2);
+                closeCamera();
+                Intent intent = new Intent(MultiViewActivity.this, SingleCameraActivity.class);
+                intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK|Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                startActivity(intent);
+                finish();
+                ic_camera.setIsCameraOrSurveillance(0);
+
+            }
+        });
+
+        mBotmLeftCam_Switch = findViewById(R.id.camera_switch2);
+
         mBotmLeftCam_PictureButton = findViewById(R.id.Picture2);
         mBotmLeftCam_RecordButton = findViewById(R.id.Record2);
+        mBotmLeftCam_Split = findViewById(R.id.camera_split_view2);
 
         Buttons[0] = mBotmLeftCam_PictureButton;
         Buttons[1] = mBotmLeftCam_RecordButton;
         Buttons[2] = SettingView2;
         Buttons[3] = FullScrn2;
+        Buttons[4] = mBotmLeftCam_Switch;
+        Buttons[5] = mBotmLeftCam_Split;
 
         Data[0] = "BotmLeftCam";
         Data[1] = CameraIds[2];
@@ -331,23 +410,40 @@ public class MultiViewActivity extends AppCompatActivity {
 
         RoundedThumbnailView roundedThumbnailView = findViewById(R.id.rounded_thumbnail_view1);
 
-        mBotmLeftCam = new CameraBase(this, mBotmLeftCam_textureView, Buttons, mRecordingTimeView1,
-                                      Data, roundedThumbnailView);
+        ic_camera.setBotLeftCam(new CameraBase(this, mBotmLeftCam_textureView, Buttons,
+                                      mRecordingTimeView1, Data, roundedThumbnailView));
     }
 
     public void Open_BotmRightCam() {
         String[] Data = new String[5];
-        ImageButton[] Buttons = new ImageButton[4];
+        ImageButton[] Buttons = new ImageButton[6];
         mBotmRightCam_textureView = findViewById(R.id.textureview3);
-        if (mTopRightCam_textureView == null) return;
+        if (mBotmRightCam_textureView == null) return;
 
+        mBotmRightCam_textureView.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                ic_camera.setOpenCameraId(3);
+                closeCamera();
+                Intent intent = new Intent(MultiViewActivity.this, SingleCameraActivity.class);
+                intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK|Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                startActivity(intent);
+                finish();
+                ic_camera.setIsCameraOrSurveillance(0);
+            }
+        });
+
+        mBotRightCam_Switch = findViewById(R.id.camera_switch3);
         mBotmRightCam_PictureButton = findViewById(R.id.Picture3);
         mBotmRightCam_RecordButton = findViewById(R.id.Record3);
+        mBotRightCam_Split = findViewById(R.id.camera_split_view3);
 
         Buttons[0] = mBotmRightCam_PictureButton;
         Buttons[1] = mBotmRightCam_RecordButton;
         Buttons[2] = SettingView3;
         Buttons[3] = FullScrn3;
+        Buttons[4] = mBotRightCam_Switch;
+        Buttons[5] = mBotRightCam_Split;
 
         Data[0] = "BotmRightCam";
         Data[1] = CameraIds[3];
@@ -359,32 +455,90 @@ public class MultiViewActivity extends AppCompatActivity {
 
         RoundedThumbnailView roundedThumbnailView = findViewById(R.id.rounded_thumbnail_view2);
 
-        mBotmRightCam = new CameraBase(this, mBotmRightCam_textureView, Buttons,
-                                       mRecordingTimeView2, Data, roundedThumbnailView);
+        ic_camera.setBotRightCam(new CameraBase(this, mBotmRightCam_textureView, Buttons,
+                                       mRecordingTimeView2, Data, roundedThumbnailView));
     }
 
     private void manageTopLeftCam() {
         frameView0.setVisibility(FrameLayout.VISIBLE);
         FrameVisibility[0] = frameView0.getVisibility();
-        if (mTopLeftCam == null) {
+        if (ic_camera.getTopLeftCam() == null) {
+
             Open_TopLeftCam();
         } else if (mTopLeftCam_textureView == null) {
             mTopLeftCam_textureView = findViewById(R.id.textureview0);
         }
 
         if (mTopLeftCam_textureView.isAvailable()) {
-            mTopLeftCam.textureListener.onSurfaceTextureAvailable(
-                    mTopLeftCam_textureView.getSurfaceTexture(), mTopLeftCam_textureView.getWidth(),
-                    mTopLeftCam_textureView.getHeight());
+            if (ic_camera.getTopLeftCam() != null) {
+                ic_camera.getTopLeftCam().textureListener.onSurfaceTextureAvailable(
+                        mTopLeftCam_textureView.getSurfaceTexture(),
+                        mTopLeftCam_textureView.getWidth(),
+                        mTopLeftCam_textureView.getHeight());
+            }
         } else {
-            mTopLeftCam_textureView.setSurfaceTextureListener(mTopLeftCam.textureListener);
+            if (ic_camera.getTopLeftCam() != null && mTopLeftCam_textureView != null) {
+                mTopLeftCam_textureView.setSurfaceTextureListener(
+                        ic_camera.getTopLeftCam().textureListener);
+            }
         }
+        findViewById(R.id.camera_switch0).setVisibility(View.VISIBLE);
+    }
+    public void hideCameraSwitchButton() {
+        findViewById(R.id.camera_switch0).setVisibility(View.GONE);
+        findViewById(R.id.camera_switch1).setVisibility(View.GONE);
+        findViewById(R.id.camera_switch2).setVisibility(View.GONE);
+        findViewById(R.id.camera_switch3).setVisibility(View.GONE);
+
+        findViewById(R.id.imageView0).setVisibility(View.VISIBLE);
+        findViewById(R.id.imageView1).setVisibility(View.VISIBLE);
+        findViewById(R.id.imageView2).setVisibility(View.VISIBLE);
+        findViewById(R.id.imageView3).setVisibility(View.VISIBLE);
     }
 
+    public void visibleCameraSwitchButton() {
+        exitScrn0.setVisibility(View.GONE);
+        exitScrn1.setVisibility(View.GONE);
+        exitScrn2.setVisibility(View.GONE);
+        exitScrn3.setVisibility(View.GONE);
+
+        FullScrn0.setVisibility(View.GONE);
+        FullScrn1.setVisibility(View.GONE);
+        FullScrn2.setVisibility(View.GONE);
+        FullScrn3.setVisibility(View.GONE);
+
+        findViewById(R.id.camera_switch0).setVisibility(View.VISIBLE);
+        findViewById(R.id.camera_switch1).setVisibility(View.VISIBLE);
+        findViewById(R.id.camera_switch2).setVisibility(View.VISIBLE);
+        findViewById(R.id.camera_switch3).setVisibility(View.VISIBLE);
+
+        findViewById(R.id.imageView0).setVisibility(View.GONE);
+        findViewById(R.id.imageView1).setVisibility(View.GONE);
+        findViewById(R.id.imageView2).setVisibility(View.GONE);
+        findViewById(R.id.imageView3).setVisibility(View.GONE);
+    }
+
+    void enableSingleCameraButtons() {
+        findViewById(R.id.camera_switch0).setVisibility(View.VISIBLE);
+        findViewById(R.id.camera_switch1).setVisibility(View.VISIBLE);
+        findViewById(R.id.camera_switch2).setVisibility(View.VISIBLE);
+        findViewById(R.id.camera_switch3).setVisibility(View.VISIBLE);
+
+        exitScrn0.setVisibility(View.GONE);
+        exitScrn1.setVisibility(View.GONE);
+        exitScrn2.setVisibility(View.GONE);
+        exitScrn3.setVisibility(View.GONE);
+
+        FullScrn0.setVisibility(View.GONE);
+        FullScrn1.setVisibility(View.GONE);
+        FullScrn2.setVisibility(View.GONE);
+        FullScrn3.setVisibility(View.GONE);
+
+    }
     private void manageTopRightCam() {
         frameView1.setVisibility(FrameLayout.VISIBLE);
         FrameVisibility[1] = frameView1.getVisibility();
-        if (mTopRightCam == null) {
+        if (ic_camera.getTopRightCam() == null) {
             Open_TopRightCam();
 
         } else if (mTopRightCam_textureView == null) {
@@ -392,18 +546,19 @@ public class MultiViewActivity extends AppCompatActivity {
         }
 
         if (mTopRightCam_textureView.isAvailable()) {
-            mTopRightCam.textureListener.onSurfaceTextureAvailable(
+            ic_camera.getTopRightCam().textureListener.onSurfaceTextureAvailable(
                     mTopRightCam_textureView.getSurfaceTexture(),
                     mTopRightCam_textureView.getWidth(), mTopRightCam_textureView.getHeight());
         } else {
-            mTopRightCam_textureView.setSurfaceTextureListener(mTopRightCam.textureListener);
+            mTopRightCam_textureView.setSurfaceTextureListener(
+                    ic_camera.getTopRightCam().textureListener);
         }
     }
 
     private void manageBotmLeftCam() {
         frameView2.setVisibility(FrameLayout.VISIBLE);
         FrameVisibility[2] = frameView2.getVisibility();
-        if (mBotmLeftCam == null) {
+        if (ic_camera.getBotLeftCam() == null) {
             Open_BotmLeftCam();
 
         } else if (mBotmLeftCam_textureView == null) {
@@ -411,18 +566,19 @@ public class MultiViewActivity extends AppCompatActivity {
         }
 
         if (mBotmLeftCam_textureView.isAvailable()) {
-            mBotmLeftCam.textureListener.onSurfaceTextureAvailable(
+            ic_camera.getBotLeftCam().textureListener.onSurfaceTextureAvailable(
                     mBotmLeftCam_textureView.getSurfaceTexture(),
                     mBotmLeftCam_textureView.getWidth(), mBotmLeftCam_textureView.getHeight());
         } else {
-            mBotmLeftCam_textureView.setSurfaceTextureListener(mBotmLeftCam.textureListener);
+            mBotmLeftCam_textureView.setSurfaceTextureListener(
+                    ic_camera.getBotLeftCam().textureListener);
         }
     }
 
     private void manageBotmRightCam() {
         frameView3.setVisibility(FrameLayout.VISIBLE);
         FrameVisibility[3] = frameView3.getVisibility();
-        if (mBotmRightCam == null) {
+        if (ic_camera.getBotRightCam() == null) {
             Open_BotmRightCam();
 
         } else if (mBotmRightCam_textureView == null) {
@@ -430,38 +586,52 @@ public class MultiViewActivity extends AppCompatActivity {
         }
 
         if (mBotmRightCam_textureView.isAvailable()) {
-            mBotmRightCam.textureListener.onSurfaceTextureAvailable(
+            ic_camera.getBotRightCam().textureListener.onSurfaceTextureAvailable(
                     mBotmRightCam_textureView.getSurfaceTexture(),
                     mBotmRightCam_textureView.getWidth(), mBotmRightCam_textureView.getHeight());
         } else {
-            mBotmRightCam_textureView.setSurfaceTextureListener(mBotmRightCam.textureListener);
+            mBotmRightCam_textureView.setSurfaceTextureListener(
+                    ic_camera.getBotRightCam().textureListener);
         }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        Log.e(TAG, "onResume");
-
-
+        Log.e(TAG, " onResume");
+        //startCamera();
+        hideCameraSwitchButton();
     }
 
-    private void closeCamera() {
-        if (null != mTopLeftCam) mTopLeftCam.closeCamera();
+    public void closeCamera() {
+        if (null != ic_camera.getTopLeftCam()) {
+            ic_camera.getTopLeftCam().closeCamera();
+            ic_camera.setTopLeftCam(null);
+        }
 
-        if (null != mTopRightCam) mTopRightCam.closeCamera();
+        if (null != ic_camera.getTopRightCam()) {
+            ic_camera.getTopRightCam().closeCamera();
+            ic_camera.setTopRightCam(null);
+        }
 
-        if (null != mBotmRightCam) mBotmRightCam.closeCamera();
+        if (null != ic_camera.getBotRightCam()) {
+            ic_camera.getBotRightCam().closeCamera();
+            ic_camera.setBotRightCam(null);
+        }
 
-        if (null != mBotmLeftCam) mBotmLeftCam.closeCamera();
+        if (null != ic_camera.getBotLeftCam()) {
+            ic_camera.getBotLeftCam().closeCamera();
+            ic_camera.setBotLeftCam(null);
+        }
     }
 
     @Override
     protected void onPause() {
-        Log.e(TAG, "onPause");
+        System.out.println("onPause");
         super.onPause();
 
-        closeCamera();
+        unregisterReceiver(mUsbReceiver);
+       // closeCamera();
     }
 
     public void settingView(View view) {
@@ -601,10 +771,7 @@ public class MultiViewActivity extends AppCompatActivity {
                 else
                     exitScrn0.setVisibility(View.VISIBLE);
 
-                mTopLeftCam_RecordButton.setVisibility(View.VISIBLE);
-                mTopLeftCam_PictureButton.setVisibility(View.VISIBLE);
-
-                mTopLeftCam.createCameraPreview();
+                ic_camera.getTopLeftCam().createCameraPreview();
 
                 break;
             case R.id.mSettingClose1:
@@ -621,10 +788,7 @@ public class MultiViewActivity extends AppCompatActivity {
                 else
                     exitScrn1.setVisibility(View.VISIBLE);
 
-                mTopRightCam_RecordButton.setVisibility(View.VISIBLE);
-                mTopRightCam_PictureButton.setVisibility(View.VISIBLE);
-
-                mTopRightCam.createCameraPreview();
+                ic_camera.getTopRightCam().createCameraPreview();
 
                 break;
             case R.id.mSettingClose2:
@@ -640,10 +804,7 @@ public class MultiViewActivity extends AppCompatActivity {
                 else
                     exitScrn2.setVisibility(View.VISIBLE);
 
-                mBotmLeftCam_RecordButton.setVisibility(View.VISIBLE);
-                mBotmLeftCam_PictureButton.setVisibility(View.VISIBLE);
-
-                mBotmLeftCam.createCameraPreview();
+                ic_camera.getBotLeftCam().createCameraPreview();
 
                 break;
             case R.id.mSettingClose3:
@@ -659,10 +820,7 @@ public class MultiViewActivity extends AppCompatActivity {
                 else
                     exitScrn3.setVisibility(View.VISIBLE);
 
-                mBotmRightCam_RecordButton.setVisibility(View.VISIBLE);
-                mBotmRightCam_PictureButton.setVisibility(View.VISIBLE);
-
-                mBotmRightCam.createCameraPreview();
+                ic_camera.getBotRightCam().createCameraPreview();
 
                 break;
 
@@ -680,67 +838,172 @@ public class MultiViewActivity extends AppCompatActivity {
 
         switch (view.getId()) {
             case R.id.imageView0:
-                this.setTitle("TopLeftCam");
-                exitScrnFlag = true;
-                exitScrn0.setVisibility(View.VISIBLE);
-                FullScrn0.setVisibility(View.GONE);
+            case R.id.Picture0:
+                ic_camera.setOpenCameraId(0);
+                break;
+            case R.id.Record0:
+                    this.setTitle("TopLeftCam");
+                    if (exitRecordScrnFlag == true) {
+
+                        this.setTitle("MultiCamera");
+                        exitRecordScrnFlag = false;
+                        LinLayout1.setVisibility(View.GONE);
+                        LinLayout2.setVisibility(View.GONE);
+                        if (numOfCameras == 1) {
+                            frameView1.setVisibility(FrameLayout.GONE);
+                            LinLayout1.setVisibility(View.VISIBLE);
+
+                        } else if (numOfCameras == 2) {
+                            LinLayout1.setVisibility(View.VISIBLE);
+                            frameView1.setVisibility(FrameLayout.VISIBLE);
+
+                        } else if (numOfCameras == 3) {
+                            LinLayout1.setVisibility(View.VISIBLE);
+                            LinLayout2.setVisibility(View.VISIBLE);
+
+                        } else if (numOfCameras == 4) {
+                            LinLayout1.setVisibility(View.VISIBLE);
+                            LinLayout2.setVisibility(View.VISIBLE);
+
+                        } else {
+                            Log.d(TAG, "onResume No CAMERA CONNECTED");
+                        }
+                        FullScrn0.setVisibility(View.VISIBLE);
+
+                        exitScrn0.setVisibility(View.GONE);
+
+                        FrameVisibility[1] = frameView1.getVisibility();
+                    } else {
+                        exitRecordScrnFlag = true;
+                        exitScrn0.setVisibility(View.GONE);
+                        FullScrn0.setVisibility(View.GONE);
 
                 frameView1.setVisibility(View.GONE);
 
-                LinLayout2.setVisibility(View.GONE);
-
+                        LinLayout2.setVisibility(View.GONE);
+                    }
                 break;
             case R.id.exitFullScreen0:
                 this.setTitle("MultiCamera");
                 exitScrnFlag = false;
+                LinLayout1.setVisibility(View.GONE);
+                LinLayout2.setVisibility(View.GONE);
+                if (numOfCameras == 1) {
+                    frameView1.setVisibility(FrameLayout.GONE);
+                    LinLayout1.setVisibility(View.VISIBLE);
 
+                } else if (numOfCameras == 2) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    frameView1.setVisibility(FrameLayout.VISIBLE);
+
+                } else if (numOfCameras == 3) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else if (numOfCameras == 4) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else {
+                    Log.d(TAG, "onResume No CAMERA CONNECTED");
+                }
                 FullScrn0.setVisibility(View.VISIBLE);
 
                 exitScrn0.setVisibility(View.GONE);
 
-                switch (FrameVisibility[1]) {
-                    case View.VISIBLE:
-
-                        frameView1.setVisibility(View.VISIBLE);
-
-                        break;
-
-                    case View.INVISIBLE:
-
-                        frameView1.setVisibility(View.INVISIBLE);
-
-                        break;
-                    default:
-                        break;
-                }
-
                 FrameVisibility[1] = frameView1.getVisibility();
-
-                LinLayout2.setVisibility(View.VISIBLE);
 
                 break;
             case R.id.imageView1:
+            case R.id.Picture1:
+                ic_camera.setOpenCameraId(1);
+                break;
+            case R.id.Record1:
                 this.setTitle("TopRightCam");
-                exitScrnFlag = true;
-                FullScrn1.setVisibility(View.GONE);
-                exitScrn1.setVisibility(View.VISIBLE);
+                if (exitRecordScrnFlag == true) {
+                    this.setTitle("MultiCamera");
+                    exitRecordScrnFlag = false;
+                    LinLayout1.setVisibility(View.GONE);
+                    LinLayout2.setVisibility(View.GONE);
+                    if (numOfCameras == 1) {
+                        frameView1.setVisibility(FrameLayout.GONE);
+                        LinLayout1.setVisibility(View.VISIBLE);
 
-                frameView0.setVisibility(View.GONE);
-                LinLayout2.setVisibility(View.GONE);
+                    } else if (numOfCameras == 2) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        frameView1.setVisibility(FrameLayout.VISIBLE);
 
+                    } else if (numOfCameras == 3) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        LinLayout2.setVisibility(View.VISIBLE);
+
+                    } else if (numOfCameras == 4) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        LinLayout2.setVisibility(View.VISIBLE);
+
+                    } else {
+                        Log.d(TAG, "onResume No CAMERA CONNECTED");
+                    }
+
+                    FullScrn1.setVisibility(View.VISIBLE);
+                    exitScrn1.setVisibility(View.GONE);
+
+                    switch (FrameVisibility[0]) {
+                        case View.VISIBLE:
+                            frameView0.setVisibility(View.VISIBLE);
+                            break;
+
+                        case View.INVISIBLE:
+
+                            frameView0.setVisibility(View.INVISIBLE);
+
+                            break;
+                        default:
+                            break;
+                    }
+
+                    FrameVisibility[0] = frameView0.getVisibility();
+                } else {
+                    exitRecordScrnFlag = true;
+                    FullScrn1.setVisibility(View.GONE);
+                    exitScrn1.setVisibility(View.GONE);
+
+                    frameView0.setVisibility(View.GONE);
+                    LinLayout2.setVisibility(View.GONE);
+                }
                 break;
             case R.id.exitFullScreen1:
                 this.setTitle("MultiCamera");
 
                 exitScrnFlag = false;
+                LinLayout1.setVisibility(View.GONE);
+                LinLayout2.setVisibility(View.GONE);
+                if (numOfCameras == 1) {
+                    frameView1.setVisibility(FrameLayout.GONE);
+                    LinLayout1.setVisibility(View.VISIBLE);
+
+                } else if (numOfCameras == 2) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    frameView1.setVisibility(FrameLayout.VISIBLE);
+
+                } else if (numOfCameras == 3) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else if (numOfCameras == 4) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else {
+                    Log.d(TAG, "onResume No CAMERA CONNECTED");
+                }
+
                 FullScrn1.setVisibility(View.VISIBLE);
                 exitScrn1.setVisibility(View.GONE);
 
                 switch (FrameVisibility[0]) {
                     case View.VISIBLE:
-
                         frameView0.setVisibility(View.VISIBLE);
-
                         break;
 
                     case View.INVISIBLE:
@@ -753,26 +1016,96 @@ public class MultiViewActivity extends AppCompatActivity {
                 }
 
                 FrameVisibility[0] = frameView0.getVisibility();
-
-                LinLayout2.setVisibility(View.VISIBLE);
-
                 break;
 
             case R.id.imageView2:
+            case R.id.Picture2:
+                ic_camera.setOpenCameraId(2);
+                break;
+            case R.id.Record2:
                 this.setTitle("BotmLeftCam");
+                if (exitRecordScrnFlag == true) {
+                    this.setTitle("MultiCamera");
 
-                exitScrnFlag = true;
-                FullScrn2.setVisibility(View.GONE);
-                exitScrn2.setVisibility(View.VISIBLE);
+                    exitRecordScrnFlag = false;
+                    LinLayout1.setVisibility(View.GONE);
+                    LinLayout2.setVisibility(View.GONE);
+                    if (numOfCameras == 1) {
+                        frameView1.setVisibility(FrameLayout.GONE);
+                        LinLayout1.setVisibility(View.VISIBLE);
 
-                frameView3.setVisibility(View.GONE);
-                LinLayout1.setVisibility(View.GONE);
+                    } else if (numOfCameras == 2) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        frameView1.setVisibility(FrameLayout.VISIBLE);
 
+                    } else if (numOfCameras == 3) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        LinLayout2.setVisibility(View.VISIBLE);
+
+                    } else if (numOfCameras == 4) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        LinLayout2.setVisibility(View.VISIBLE);
+
+                    } else {
+                        Log.d(TAG, "onResume No CAMERA CONNECTED");
+                    }
+
+                    FullScrn2.setVisibility(View.VISIBLE);
+                    exitScrn2.setVisibility(View.GONE);
+
+                    switch (FrameVisibility[3]) {
+                        case View.VISIBLE:
+
+                            frameView3.setVisibility(View.VISIBLE);
+
+                            break;
+
+                        case View.INVISIBLE:
+
+                            frameView3.setVisibility(View.INVISIBLE);
+
+                            break;
+                        default:
+                            break;
+                    }
+
+                    FrameVisibility[3] = frameView3.getVisibility();
+
+                } else {
+                    exitRecordScrnFlag = true;
+                    FullScrn2.setVisibility(View.GONE);
+                    exitScrn2.setVisibility(View.GONE);
+
+                    frameView3.setVisibility(View.GONE);
+                    LinLayout1.setVisibility(View.GONE);
+                }
                 break;
             case R.id.exitFullScreen2:
                 this.setTitle("MultiCamera");
 
                 exitScrnFlag = false;
+                LinLayout1.setVisibility(View.GONE);
+                LinLayout2.setVisibility(View.GONE);
+                if (numOfCameras == 1) {
+                    frameView1.setVisibility(FrameLayout.GONE);
+                    LinLayout1.setVisibility(View.VISIBLE);
+
+                } else if (numOfCameras == 2) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    frameView1.setVisibility(FrameLayout.VISIBLE);
+
+                } else if (numOfCameras == 3) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else if (numOfCameras == 4) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else {
+                    Log.d(TAG, "onResume No CAMERA CONNECTED");
+                }
+
                 FullScrn2.setVisibility(View.VISIBLE);
                 exitScrn2.setVisibility(View.GONE);
 
@@ -793,23 +1126,94 @@ public class MultiViewActivity extends AppCompatActivity {
                 }
 
                 FrameVisibility[3] = frameView3.getVisibility();
-
-                LinLayout1.setVisibility(View.VISIBLE);
-
                 break;
             case R.id.imageView3:
-                this.setTitle("BotmRightCam");
-                exitScrnFlag = true;
-                FullScrn3.setVisibility(View.GONE);
-                exitScrn3.setVisibility(View.VISIBLE);
+            case R.id.Picture3:
+                ic_camera.setOpenCameraId(3);
+                break;
+            case R.id.Record3:
+                if (exitRecordScrnFlag == true) {
+                    this.setTitle("MultiCamera");
+                    exitRecordScrnFlag = false;
 
-                frameView2.setVisibility(View.GONE);
-                LinLayout1.setVisibility(View.GONE);
+                    LinLayout1.setVisibility(View.GONE);
+                    LinLayout2.setVisibility(View.GONE);
+                    if (numOfCameras == 1) {
+                        frameView1.setVisibility(FrameLayout.GONE);
+                        LinLayout1.setVisibility(View.VISIBLE);
 
+                    } else if (numOfCameras == 2) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        frameView1.setVisibility(FrameLayout.VISIBLE);
+
+                    } else if (numOfCameras == 3) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        LinLayout2.setVisibility(View.VISIBLE);
+
+                    } else if (numOfCameras == 4) {
+                        LinLayout1.setVisibility(View.VISIBLE);
+                        LinLayout2.setVisibility(View.VISIBLE);
+
+                    } else {
+                        Log.d(TAG, "onResume No CAMERA CONNECTED");
+                    }
+
+                    FullScrn3.setVisibility(View.VISIBLE);
+                    exitScrn3.setVisibility(View.GONE);
+
+                    switch (FrameVisibility[2]) {
+                        case View.VISIBLE:
+
+                            frameView2.setVisibility(View.VISIBLE);
+
+                            break;
+
+                        case View.INVISIBLE:
+
+                            frameView2.setVisibility(View.INVISIBLE);
+
+                            break;
+                        default:
+                            break;
+                    }
+
+                    FrameVisibility[2] = frameView2.getVisibility();
+                } else {
+                    this.setTitle("BotmRightCam");
+                    exitRecordScrnFlag = true;
+                    FullScrn3.setVisibility(View.GONE);
+                    exitScrn3.setVisibility(View.GONE);
+
+                    frameView2.setVisibility(View.GONE);
+                    LinLayout1.setVisibility(View.GONE);
+                }
                 break;
             case R.id.exitFullScreen3:
                 this.setTitle("MultiCamera");
                 exitScrnFlag = false;
+
+                LinLayout1.setVisibility(View.GONE);
+                LinLayout2.setVisibility(View.GONE);
+                if (numOfCameras == 1) {
+                    frameView1.setVisibility(FrameLayout.GONE);
+                    LinLayout1.setVisibility(View.VISIBLE);
+
+                } else if (numOfCameras == 2) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    frameView1.setVisibility(FrameLayout.VISIBLE);
+
+                } else if (numOfCameras == 3) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else if (numOfCameras == 4) {
+                    LinLayout1.setVisibility(View.VISIBLE);
+                    LinLayout2.setVisibility(View.VISIBLE);
+
+                } else {
+                    Log.d(TAG, "onResume No CAMERA CONNECTED");
+                }
+
                 FullScrn3.setVisibility(View.VISIBLE);
                 exitScrn3.setVisibility(View.GONE);
 
@@ -830,13 +1234,19 @@ public class MultiViewActivity extends AppCompatActivity {
                 }
 
                 FrameVisibility[2] = frameView2.getVisibility();
-
-                LinLayout1.setVisibility(View.VISIBLE);
-
                 break;
             default:
                 break;
         }
+
+        closeCamera();
+
+        Intent intent = new Intent(MultiViewActivity.this, SingleCameraActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK|Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        startActivity(intent);
+        finish();
+        ic_camera.setIsCameraOrSurveillance(0);
+
     }
 
     protected static long getStorageSpaceBytes() {
