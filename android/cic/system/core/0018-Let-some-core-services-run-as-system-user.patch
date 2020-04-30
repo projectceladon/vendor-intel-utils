@@ -1,0 +1,418 @@
+From 3ac848557af57bd29bc9c920671cf9c8a5624fe0 Mon Sep 17 00:00:00 2001
+From: "ji, zhenlong z" <zhenlong.z.ji@intel.com>
+Date: Thu, 30 Apr 2020 14:28:26 +0800
+Subject: [PATCH] Let some core services run as system user
+
+android-entry will run as system user, so init & ueventd &
+zygote & storaged & lmkd & usbd will run as system user by default.
+Grant the necessary capabilities to them.
+
+Change-Id: I03e343b3589b17ec4fc82066734f36e9bee9e305
+Signed-off-by: ji, zhenlong z <zhenlong.z.ji@intel.com>
+---
+ init/builtins.cpp                             | 12 ++++--
+ init/init.cpp                                 | 41 +++++++++++++++++++
+ init/persistent_properties.cpp                |  3 +-
+ init/security.cpp                             | 15 ++++++-
+ init/service.cpp                              | 12 +++++-
+ init/subcontext.cpp                           | 22 ++++++++++
+ init/util.cpp                                 | 15 ++++++-
+ init/util.h                                   |  2 +-
+ lmkd/lmkd.rc                                  |  1 +
+ .../property_info_parser.cpp                  |  3 +-
+ rootdir/init.rc                               |  1 +
+ rootdir/init.zygote32.rc                      |  2 +-
+ rootdir/init.zygote64_32.rc                   |  4 +-
+ storaged/storaged.rc                          |  3 +-
+ usbd/usbd.rc                                  |  1 -
+ 15 files changed, 117 insertions(+), 20 deletions(-)
+
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index 8bd92ccdd..431edcdf8 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -128,7 +128,7 @@ static Result<Success> do_class_restart(const BuiltinArguments& args) {
+ }
+ 
+ static Result<Success> do_domainname(const BuiltinArguments& args) {
+-    if (auto result = WriteFile("/proc/sys/kernel/domainname", args[1]); !result) {
++    if (auto result = WriteFile("/proc/sys/kernel/domainname", args[1], true); !result) {
+         return Error() << "Unable to write to /proc/sys/kernel/domainname: " << result.error();
+     }
+     return Success();
+@@ -192,7 +192,7 @@ static Result<Success> do_export(const BuiltinArguments& args) {
+ }
+ 
+ static Result<Success> do_hostname(const BuiltinArguments& args) {
+-    if (auto result = WriteFile("/proc/sys/kernel/hostname", args[1]); !result) {
++    if (auto result = WriteFile("/proc/sys/kernel/hostname", args[1], true); !result) {
+         return Error() << "Unable to write to /proc/sys/kernel/hostname: " << result.error();
+     }
+     return Success();
+@@ -722,10 +722,14 @@ static Result<Success> do_verity_update_state(const BuiltinArguments& args) {
+ }
+ 
+ static Result<Success> do_write(const BuiltinArguments& args) {
+-    if (auto result = WriteFile(args[1], args[2]); !result) {
+-        return Error() << "Unable to write to file '" << args[1] << "': " << result.error();
++    bool run_as_root = false;
++    if (strncmp("/proc/sys", args[1].c_str(), strlen("/proc/sys")) == 0) {
++        run_as_root = true;
+     }
+ 
++    if (auto result = WriteFile(args[1], args[2], run_as_root); !result) {
++        return Error() << "Unable to write to file '" << args[1] << "': " << result.error();
++    }
+     return Success();
+ }
+ 
+diff --git a/init/init.cpp b/init/init.cpp
+index 4fe115e92..7b2e7a4ef 100644
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -542,6 +542,40 @@ static void InstallSigtermHandler() {
+     register_epoll_handler(sigterm_signal_fd, HandleSigtermSignal);
+ }
+ 
++void SetEffectiveCapsForInit() {
++    cap_t caps = cap_get_proc();
++    if (caps == NULL) {
++        PLOG(ERROR) << "cap_get_proc failed: " <<  strerror(errno);
++        return;
++    }
++
++    if (cap_clear_flag(caps, CAP_EFFECTIVE) == -1) {
++        PLOG(ERROR) << "cap_clear_flag failed: " <<  strerror(errno);
++        return;
++    }
++
++    const std::vector<cap_value_t> values = {
++        CAP_SYS_RESOURCE, CAP_SYS_ADMIN, CAP_DAC_OVERRIDE,
++        CAP_DAC_READ_SEARCH, CAP_SYS_TIME, CAP_MKNOD,
++        CAP_SYS_RAWIO, CAP_CHOWN, CAP_FOWNER, CAP_FSETID,
++        CAP_SYSLOG, CAP_NET_ADMIN, CAP_SYS_BOOT, CAP_KILL,
++        CAP_SETUID, CAP_SETGID, CAP_SETPCAP, CAP_AUDIT_WRITE,
++        CAP_NET_RAW, CAP_SYS_TTY_CONFIG, CAP_BLOCK_SUSPEND
++    };
++
++    if (cap_set_flag(caps, CAP_EFFECTIVE, values.size(), values.data(), CAP_SET) != 0) {
++        PLOG(ERROR) << "cap_set_flag failed: " <<  strerror(errno);
++        return;
++    }
++
++    if (cap_set_proc(caps) != 0) {
++        PLOG(ERROR) << "cap_set_proc failed: " <<  strerror(errno);
++        return;
++    }
++
++    cap_free(caps);
++}
++
+ int main(int argc, char** argv) {
+     if (!strcmp(basename(argv[0]), "ueventd")) {
+         return ueventd_main(argc, argv);
+@@ -564,6 +598,10 @@ int main(int argc, char** argv) {
+     bool is_first_stage = (getenv("INIT_SECOND_STAGE") == nullptr);
+ 
+     if (is_first_stage) {
++        if (getuid() != 0) {
++            SetEffectiveCapsForInit();
++        }
++
+         boot_clock::time_point start_time = boot_clock::now();
+ 
+         // Clear the umask.
+@@ -643,6 +681,9 @@ int main(int argc, char** argv) {
+         PLOG(FATAL) << "execv(\"" << path << "\") failed";
+     }
+ 
++    if (getuid() != 0) {
++        SetEffectiveCapsForInit();
++    }
+     // At this point we're in the second stage of init.
+     InitKernelLogging(argv);
+     LOG(INFO) << "init second stage started!";
+diff --git a/init/persistent_properties.cpp b/init/persistent_properties.cpp
+index 21adce914..78dd01bf3 100644
+--- a/init/persistent_properties.cpp
++++ b/init/persistent_properties.cpp
+@@ -83,8 +83,7 @@ Result<PersistentProperties> LoadLegacyPersistentProperties() {
+ 
+         // File must not be accessible to others, be owned by root/root, and
+         // not be a hard link to any other file.
+-        if (((sb.st_mode & (S_IRWXG | S_IRWXO)) != 0) || sb.st_uid != 0 || sb.st_gid != 0 ||
+-            sb.st_nlink != 1) {
++        if (((sb.st_mode & (S_IRWXG | S_IRWXO)) != 0) || sb.st_nlink != 1) {
+             PLOG(ERROR) << "skipping insecure property file " << entry->d_name
+                         << " (uid=" << sb.st_uid << " gid=" << sb.st_gid << " nlink=" << sb.st_nlink
+                         << " mode=" << std::oct << sb.st_mode << ")";
+diff --git a/init/security.cpp b/init/security.cpp
+index a3494a280..03b4d116e 100644
+--- a/init/security.cpp
++++ b/init/security.cpp
+@@ -120,6 +120,17 @@ static bool SetHighestAvailableOptionValue(std::string path, int min, int max) {
+     return true;
+ }
+ 
++static bool SetHighestAvailableOptionValueAsRoot(std::string path, int min, int max) {
++  int ori_uid = getuid();
++  if (ori_uid > 0)
++      setuid(0);
++  bool ret = SetHighestAvailableOptionValue(path, min, max);
++  if (ori_uid > 0)
++      setuid(ori_uid);
++  return ret;
++}
++
++
+ #define MMAP_RND_PATH "/proc/sys/vm/mmap_rnd_bits"
+ #define MMAP_RND_COMPAT_PATH "/proc/sys/vm/mmap_rnd_compat_bits"
+ 
+@@ -132,7 +143,7 @@ static bool __attribute__((unused)) SetMmapRndBitsMin(int start, int min, bool c
+         path = MMAP_RND_PATH;
+     }
+ 
+-    return SetHighestAvailableOptionValue(path, min, start);
++    return SetHighestAvailableOptionValueAsRoot(path, min, start);
+ }
+ 
+ // Set /proc/sys/vm/mmap_rnd_bits and potentially
+@@ -190,7 +201,7 @@ Result<Success> SetMmapRndBitsAction(const BuiltinArguments&) {
+ Result<Success> SetKptrRestrictAction(const BuiltinArguments&) {
+     std::string path = KPTR_RESTRICT_PATH;
+ 
+-    if (!SetHighestAvailableOptionValue(path, KPTR_RESTRICT_MINVALUE, KPTR_RESTRICT_MAXVALUE)) {
++    if (!SetHighestAvailableOptionValueAsRoot(path, KPTR_RESTRICT_MINVALUE, KPTR_RESTRICT_MAXVALUE)) {
+         LOG(FATAL) << "Unable to set adequate kptr_restrict value!";
+         return Error();
+     }
+diff --git a/init/service.cpp b/init/service.cpp
+index 37d3a8807..5cec240cf 100644
+--- a/init/service.cpp
++++ b/init/service.cpp
+@@ -287,7 +287,10 @@ void Service::SetProcessAttributes() {
+         if (securebits == -1UL) {
+             PLOG(FATAL) << "prctl(PR_GET_SECUREBITS) failed for " << name_;
+         }
+-        securebits |= SECBIT_KEEP_CAPS | SECBIT_KEEP_CAPS_LOCKED;
++        securebits |= SECBIT_KEEP_CAPS;
++        if (strcmp("zygote", name_.c_str()) != 0 && strcmp("zygote_secondary", name_.c_str()) != 0) {
++            securebits |= SECBIT_KEEP_CAPS_LOCKED;
++        }
+         if (prctl(PR_SET_SECUREBITS, securebits) != 0) {
+             PLOG(FATAL) << "prctl(PR_SET_SECUREBITS) failed for " << name_;
+         }
+@@ -319,7 +322,7 @@ void Service::SetProcessAttributes() {
+             PLOG(FATAL) << "setpriority failed for " << name_;
+         }
+     }
+-    if (capabilities_.any()) {
++    if (capabilities_.any() && (getuid() != 0 || uid_)) {
+         if (!SetCapsForExec(capabilities_)) {
+             LOG(FATAL) << "cannot set capabilities for " << name_;
+         }
+@@ -916,6 +919,11 @@ Result<Success> Service::Start() {
+             ZapStdio();
+         }
+ 
++        if (strcmp("adbd", name_.c_str()) == 0) {
++            if (getuid() != 0)
++                setuid(0);
++        }
++
+         // As requested, set our gid, supplemental gids, uid, context, and
+         // priority. Aborts on failure.
+         SetProcessAttributes();
+diff --git a/init/subcontext.cpp b/init/subcontext.cpp
+index fdb46415d..cc24b4a71 100644
+--- a/init/subcontext.cpp
++++ b/init/subcontext.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "subcontext.h"
++#include "capabilities.h"
+ 
+ #include <fcntl.h>
+ #include <poll.h>
+@@ -89,6 +90,23 @@ Result<Success> SendMessage(int socket, const T& message) {
+     return Success();
+ }
+ 
++void SetExecCapsForSubcontext() {
++    const std::vector<unsigned int> caps = {
++        CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_CHOWN, CAP_FOWNER,
++        CAP_FSETID, CAP_NET_ADMIN, CAP_SYS_ADMIN, CAP_BLOCK_SUSPEND
++    };
++
++    CapSet capabilities = 0;
++    for (size_t i = 1; i < caps.size(); i++) {
++        capabilities[caps[i]] = true;
++    }
++
++    if (!SetCapsForExec(capabilities)) {
++        PLOG(ERROR) << "SetCapsForExec failed";
++        return;
++    }
++}
++
+ std::vector<std::pair<std::string, std::string>> properties_to_set;
+ 
+ uint32_t SubcontextPropertySet(const std::string& name, const std::string& value) {
+@@ -252,6 +270,10 @@ void Subcontext::Fork() {
+         auto child_fd_string = std::to_string(child_fd);
+         const char* args[] = {init_path.c_str(), "subcontext", context_.c_str(),
+                               child_fd_string.c_str(), nullptr};
++
++        if (getuid() != 0) {
++            SetExecCapsForSubcontext();
++        }
+         execv(init_path.data(), const_cast<char**>(args));
+ 
+         PLOG(FATAL) << "Could not execv subcontext init";
+diff --git a/init/util.cpp b/init/util.cpp
+index 4455b2eb1..e9d9eebb8 100644
+--- a/init/util.cpp
++++ b/init/util.cpp
+@@ -201,7 +201,7 @@ static int OpenFile(const std::string& path, int flags, mode_t mode) {
+     return rc;
+ }
+ 
+-Result<Success> WriteFile(const std::string& path, const std::string& content) {
++static Result<Success> WriteFileImp(const std::string& path, const std::string& content) {
+     android::base::unique_fd fd(TEMP_FAILURE_RETRY(
+         OpenFile(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_TRUNC | O_CLOEXEC, 0600)));
+     if (fd == -1) {
+@@ -213,6 +213,19 @@ Result<Success> WriteFile(const std::string& path, const std::string& content) {
+     return Success();
+ }
+ 
++Result<Success> WriteFile(const std::string& path, const std::string& content, bool as_root) {
++    int ori_uid = 0;
++    if (as_root && (ori_uid = getuid()) != 0)
++        setuid(0);
++
++    auto ret = WriteFileImp(path, content);
++
++    if (as_root && ori_uid != 0)
++        setuid(ori_uid);
++
++    return ret;
++}
++
+ bool mkdir_recursive(const std::string& path, mode_t mode) {
+     std::string::size_type slash = 0;
+     while ((slash = path.find('/', slash + 1)) != std::string::npos) {
+diff --git a/init/util.h b/init/util.h
+index 07e4864ac..94aa1defc 100644
+--- a/init/util.h
++++ b/init/util.h
+@@ -42,7 +42,7 @@ int CreateSocket(const char* name, int type, bool passcred, mode_t perm, uid_t u
+                  const char* socketcon);
+ 
+ Result<std::string> ReadFile(const std::string& path);
+-Result<Success> WriteFile(const std::string& path, const std::string& content);
++Result<Success> WriteFile(const std::string& path, const std::string& content, bool as_root = false);
+ 
+ Result<uid_t> DecodeUid(const std::string& name);
+ 
+diff --git a/lmkd/lmkd.rc b/lmkd/lmkd.rc
+index 3bb84abf6..85caac5fb 100644
+--- a/lmkd/lmkd.rc
++++ b/lmkd/lmkd.rc
+@@ -1,5 +1,6 @@
+ service lmkd /system/bin/lmkd
+     class core
++    capabilities DAC_READ_SEARCH DAC_OVERRIDE SYS_RESOURCE KILL IPC_LOCK SYS_NICE
+     group root readproc
+     critical
+     socket lmkd seqpacket 0660 system system
+diff --git a/property_service/libpropertyinfoparser/property_info_parser.cpp b/property_service/libpropertyinfoparser/property_info_parser.cpp
+index 489d81a67..c7baf90e9 100644
+--- a/property_service/libpropertyinfoparser/property_info_parser.cpp
++++ b/property_service/libpropertyinfoparser/property_info_parser.cpp
+@@ -205,8 +205,7 @@ bool PropertyInfoAreaFile::LoadPath(const char* filename) {
+     return false;
+   }
+ 
+-  if ((fd_stat.st_uid != 0) || (fd_stat.st_gid != 0) ||
+-      ((fd_stat.st_mode & (S_IWGRP | S_IWOTH)) != 0) ||
++  if (((fd_stat.st_mode & (S_IWGRP | S_IWOTH)) != 0) ||
+       (fd_stat.st_size < static_cast<off_t>(sizeof(PropertyInfoArea)))) {
+     close(fd);
+     return false;
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index b9464e7fd..68cc79798 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -743,6 +743,7 @@ on property:security.perf_harden=1
+ ##
+ service ueventd /sbin/ueventd
+     class core
++    capabilities DAC_OVERRIDE DAC_READ_SEARCH CHOWN MKNOD NET_ADMIN SETGID FSETID SYS_RAWIO FOWNER
+     critical
+     seclabel u:r:ueventd:s0
+     shutdown critical
+diff --git a/rootdir/init.zygote32.rc b/rootdir/init.zygote32.rc
+index ac87979ec..e61477ee6 100644
+--- a/rootdir/init.zygote32.rc
++++ b/rootdir/init.zygote32.rc
+@@ -1,7 +1,7 @@
+ service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-system-server
+     class main
++    capabilities DAC_READ_SEARCH DAC_OVERRIDE SETGID SETUID FOWNER CHOWN SETPCAP SYS_ADMIN SYS_NICE SYS_TIME NET_ADMIN WAKE_ALARM NET_RAW NET_BIND_SERVICE
+     priority -20
+-    user root
+     group root readproc reserved_disk
+     socket zygote stream 660 root system
+     onrestart write /sys/android_power/request_state wake
+diff --git a/rootdir/init.zygote64_32.rc b/rootdir/init.zygote64_32.rc
+index 7ddd52ee5..3c1790b45 100644
+--- a/rootdir/init.zygote64_32.rc
++++ b/rootdir/init.zygote64_32.rc
+@@ -1,7 +1,7 @@
+ service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote --start-system-server --socket-name=zygote
+     class main
++    capabilities DAC_READ_SEARCH DAC_OVERRIDE SETGID SETUID FOWNER CHOWN SETPCAP SYS_ADMIN SYS_NICE SYS_TIME NET_ADMIN WAKE_ALARM NET_RAW NET_BIND_SERVICE
+     priority -20
+-    user root
+     group root readproc reserved_disk
+     socket zygote stream 660 root system
+     onrestart write /sys/android_power/request_state wake
+@@ -15,8 +15,8 @@ service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote --start-s
+ 
+ service zygote_secondary /system/bin/app_process32 -Xzygote /system/bin --zygote --socket-name=zygote_secondary --enable-lazy-preload
+     class main
++    capabilities DAC_READ_SEARCH DAC_OVERRIDE SETGID SETUID FOWNER CHOWN SETPCAP SYS_ADMIN SYS_NICE SYS_TIME NET_ADMIN WAKE_ALARM NET_RAW NET_BIND_SERVICE
+     priority -20
+-    user root
+     group root readproc reserved_disk
+     socket zygote_secondary stream 660 root system
+     onrestart restart zygote
+diff --git a/storaged/storaged.rc b/storaged/storaged.rc
+index 0614fadd1..88cfd2972 100644
+--- a/storaged/storaged.rc
++++ b/storaged/storaged.rc
+@@ -1,8 +1,7 @@
+ service storaged /system/bin/storaged
+     class main
+-    capabilities DAC_READ_SEARCH
++    capabilities DAC_READ_SEARCH DAC_OVERRIDE
+     priority 10
+     file /d/mmc0/mmc0:0001/ext_csd r
+     writepid /dev/cpuset/system-background/tasks
+-    user root
+     group package_info
+diff --git a/usbd/usbd.rc b/usbd/usbd.rc
+index 809044aaa..c9a284871 100644
+--- a/usbd/usbd.rc
++++ b/usbd/usbd.rc
+@@ -1,5 +1,4 @@
+ service usbd /system/bin/usbd
+     class late_start
+     oneshot
+-    user root
+     group root usb system
+-- 
+2.20.1
+
