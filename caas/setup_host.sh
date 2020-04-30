@@ -45,7 +45,7 @@ function ubu_install_qemu(){
 function ubu_install_qemu_gvtd(){
 	apt purge -y "qemu*"
 	apt autoremove -y
-	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool uml-utilities xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid
+	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool uml-utilities xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid libgl1-mesa-dri
 	wget https://download.qemu.org/$QEMU_REL.tar.xz
 	tar -xf $QEMU_REL.tar.xz
 	cd $QEMU_REL/
@@ -92,7 +92,7 @@ function ubu_build_ovmf(){
 function ubu_build_ovmf_gvtd(){
 	sudo apt install -y uuid-dev nasm acpidump iasl
 	cd $QEMU_REL/roms/edk2
-	wget https://raw.githubusercontent.com/projectceladon/vendor-intel-utils/master/host/ovmf/OvmfPkg-add-IgdAssgingmentDxe-for-qemu-4_2_0.patch 
+	wget https://raw.githubusercontent.com/projectceladon/vendor-intel-utils/master/host/ovmf/OvmfPkg-add-IgdAssgingmentDxe-for-qemu-4_2_0.patch
 	patch -p4 < OvmfPkg-add-IgdAssgingmentDxe-for-qemu-4_2_0.patch
 	source ./edksetup.sh
 	make -C BaseTools/
@@ -118,12 +118,13 @@ function ubu_enable_host_gvtg(){
 }
 
 function ubu_enable_host_gvtd(){
-	if [[ ! `cat /etc/default/grub` =~ "intel_iommu=on kvm-intel.nested=y" ]]; then
+	systemctl set-default multi-user.target
+	if [[ ! `cat /etc/default/grub` =~ "intel_iommu=on i915.force=probe=* " ]]; then
 		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-d, do you want to continue? [Y/n]" res
 		if [ x$res = xn ]; then
 			exit 0
 		fi
-		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"intel_iommu=on kvm-intel.nested=y /g" /etc/default/grub
+		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"intel_iommu=on i915.force_probe=* /g" /etc/default/grub
 		update-grub
 		reboot_required=1
 	fi
@@ -155,7 +156,7 @@ function check_kernel(){
 			for(i=0;i<NF;i++) { if ($i == "Linux" && $(i+1) == "version") { print $(i+2); next; } }
 		}'
 	)
-	if [[ "$version" > "5.0.0" ]]; then 
+	if [[ "$version" > "5.0.0" ]]; then
 		echo "hardware rendering is supported in current kernel"
 	else
 		echo "W: Detected linux version $version"
@@ -230,7 +231,7 @@ if [[ $version =~ "Ubuntu" ]]; then
 	ubu_changes_require
 	save_env
 	check_kernel
-	#Auto start service for audio will be enabled in future 
+	#Auto start service for audio will be enabled in future
 	#install_auto_start_service
 	if [[ $1 == "--gvtd" ]]; then
 		ubu_install_qemu_gvtd
