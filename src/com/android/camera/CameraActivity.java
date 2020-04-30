@@ -1749,6 +1749,10 @@ public class CameraActivity extends QuickActivity
             Log.w(TAG, "Unable to get PackageInfo for callingPackage " + callingPackage);
         }
         if (packageInfo != null) {
+            if (packageInfo.requestedPermissions == null) {
+                // No-permissions at all, were requested by the calling app.
+                return true;
+            }
             for (int i = 0; i < packageInfo.requestedPermissions.length; i++) {
                 if (packageInfo.requestedPermissions[i].equals(
                         Manifest.permission.ACCESS_FINE_LOCATION) &&
