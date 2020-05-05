@@ -3,6 +3,7 @@
 reboot_required=0
 QEMU_REL=qemu-4.2.0
 a=`grep -rn CIV_WORK_DIR /etc/environment`
+CIV_WORK_DIR=$(pwd)
 
 function ubu_changes_require(){
 	echo "Please make sure your apt is working"
