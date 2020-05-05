@@ -92,6 +92,18 @@ then
 	"
 fi
 
+GUEST_PM="false"
+
+for each in $@
+	do
+	if [[ $each == "--guest-pm" ]]
+	then
+		GUEST_PM="true"
+		echo GUEST_PM: $GUEST_PM
+		break
+	fi
+done
+
 smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
 
 common_usb_device_passthrough="\
@@ -104,6 +116,10 @@ common_usb_device_passthrough="\
  $bt_passthrough \
  -device usb-mouse \
  -device usb-kbd \
+"
+common_guest_pm_control="\
+ -qmp unix:qmp-sock,server,nowait \
+ -nodefaults -no-reboot \
 "
 
 common_options="\
@@ -208,6 +224,12 @@ function launch_hwrender(){
 	fi
 
 	setup_usb_vfio_passthrough setup
+
+	if [ $GUEST_PM = "true" ]
+	then
+		 common_options=${common_guest_pm_control}${common_options}
+		./guest_pm_control qmp-sock &
+	fi
 
 	if [[ $1 == "--display-off" ]]
 	then

@@ -190,6 +190,7 @@ function get_required_scripts(){
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/findall.py
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/sof_audio/configure_sof.sh
 	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/sof_audio/blacklist-dsp.conf
+	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/guest_pm_control
 	chmod +x configure_sof.sh
 	mkdir $CIV_WORK_DIR/sof_audio
 	mv -t $CIV_WORK_DIR/sof_audio configure_sof.sh blacklist-dsp.conf
@@ -197,6 +198,7 @@ function get_required_scripts(){
 	chmod +x findall.py
 	chmod +x start_flash_usb.sh
 	chmod +x start_android_qcow2.sh
+	chmod +x guest_pm_control
 }
 
 function save_env(){
