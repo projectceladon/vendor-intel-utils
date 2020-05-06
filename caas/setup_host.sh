@@ -227,6 +227,14 @@ function install_auto_start_service(){
 	echo -e "WantedBy=multi-user.target\n" >> $service_file
 }
 
+function ubu_thermal_conf (){
+	systemctl stop thermald.service
+	cp intel-thermal-conf.xml /etc/thermald
+	cp thermald.service  /lib/systemd/system
+	systemctl daemon-reload
+	systemctl start thermald.service
+}
+
 version=`cat /proc/version`
 
 if [[ $version =~ "Ubuntu" ]]; then
@@ -250,6 +258,8 @@ if [[ $version =~ "Ubuntu" ]]; then
 	fi
 	get_required_scripts
 	./sof_audio/configure_sof.sh "install" $CIV_WORK_DIR
+	#starting Intel Thermal Deamon, currently supporting CML/EHL only.
+	ubu_thermal_conf
 	install_9p_module
 	ask_reboot
 
