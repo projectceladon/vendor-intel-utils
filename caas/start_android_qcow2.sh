@@ -81,15 +81,9 @@ done
 
 if [ $BT_PT = "true" ]
 then
-	bt_passthrough="-device usb-host,vendorid=0x8087,productid=0x0a2b \
-	-device usb-host,vendorid=0x8087,productid=0x0025 \
-	-device usb-host,vendorid=0x8087,productid=0x0026 \
-	-device usb-host,vendorid=0x8087,productid=0x0029 \
-	-device usb-host,vendorid=0x8087,productid=0x0aaa \
-	-device usb-host,vendorid=0x413c,productid=0x301a \
-	-device usb-host,vendorid=0x046d,productid=0x0a38 \
-	-device usb-host,vendorid=0x8087,productid=0x0aa7
-	"
+       bt_passthrough=`sed -n '/Cls=e0(wlcon)/{n;p}' /sys/kernel/debug/usb/devices \
+		| grep 'Vendor=8087 ProdID=' | awk -F "=" '{print $3}' | \
+		awk '{printf "-device usb-host,vendorid=0x8087,productid=0x%s\n", $1;}'`
 fi
 
 GUEST_PM="false"
