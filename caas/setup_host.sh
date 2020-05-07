@@ -228,6 +228,8 @@ function install_auto_start_service(){
 }
 
 function ubu_thermal_conf (){
+	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/intel-thermal-conf.xml
+	wget https://raw.githubusercontent.com/projectceladon/device-androidia-mixins/master/groups/device-specific/caas/thermald.service
 	systemctl stop thermald.service
 	cp intel-thermal-conf.xml /etc/thermald
 	cp thermald.service  /lib/systemd/system
