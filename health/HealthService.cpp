@@ -20,6 +20,7 @@
 #include <health2/Health.h>
 #include <health2/service.h>
 #include <health2/powerSupplyType.h>
+#include <health2/battery_notifypkt.h>
 #include <hidl/HidlTransportSupport.h>
 
 #include <utils/String8.h>
@@ -34,14 +35,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-
 using android::hardware::health::V1_0::BatteryStatus;
 using android::hardware::health::V1_0::BatteryHealth;
 using namespace android;
 
 #define POWER_SUPPLY_SUBSYSTEM "power_supply"
 #define POWER_SUPPLY_SYSFS_PATH "/sys/class/" POWER_SUPPLY_SUBSYSTEM
-
 
 unsigned int platformPowerSupplyType = BATTERY;
 
@@ -73,7 +72,8 @@ void healthd_board_init(struct healthd_config*)
 
 int healthd_board_battery_update(struct android::BatteryProperties *props)
 {
-
+    if (get_battery_properties(props))
+        platformPowerSupplyType = BATTERY;
     if (platformPowerSupplyType == CONSTANT_POWER) {
         props->batteryStatus = android::BATTERY_STATUS_FULL;
         props->batteryHealth = android::BATTERY_HEALTH_GOOD;
@@ -93,7 +93,6 @@ int healthd_board_battery_update(struct android::BatteryProperties *props)
         UNUSED(props);
     return 0;
 }
-
 
 int main(void) {
     return health_service_main();

@@ -28,12 +28,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <thread>
 #include <sys/epoll.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <linux/vm_sockets.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 #include <utils/Errors.h>
 
 #include <health2/Health.h>
+#include <health2/battery_notifypkt.h>
+
+#define HEALTH_PORT 1234
 
 using namespace android;
 
@@ -64,6 +71,10 @@ static struct healthd_config healthd_config = {
 
 static int eventct;
 static int epollfd;
+
+static std::thread vsock_thread;
+static struct android::BatteryProperties s_props;
+static bool is_vsock_present = false;
 
 #define POWER_SUPPLY_SUBSYSTEM "power_supply"
 
@@ -211,15 +222,152 @@ static void wakealarm_init(void) {
     wakealarm_set_interval(healthd_config.periodic_chores_interval_fast);
 }
 
+bool get_battery_properties(struct android::BatteryProperties *props)
+{
+/* TODO: Use a better check to see if s_props is initialized.
+ * For now, batteryLevel 0 can be skipped because the host OS itself
+ * would have shutdown by then.
+ */
+    if (is_vsock_present && s_props.batteryLevel != 0) {
+        memcpy(props, &s_props, sizeof(struct android::BatteryProperties));
+        return true;
+    }
+    return false;
+}
+
+static void parse_battery_status(uint8_t *status)
+{
+    if(!strncmp((char *)status, "Unknown", 7))
+        s_props.batteryStatus = BATTERY_STATUS_UNKNOWN;
+    else if(!strncmp((char *)status, "Charging", 8))
+        s_props.batteryStatus = BATTERY_STATUS_CHARGING;
+    else if(!strncmp((char *)status, "Discharging", 11))
+        s_props.batteryStatus = BATTERY_STATUS_DISCHARGING;
+    else if(!strncmp((char *)status, "Not charging", 12))
+        s_props.batteryStatus = BATTERY_STATUS_NOT_CHARGING;
+    else if(!strncmp((char *)status, "Full", 4))
+        s_props.batteryStatus = BATTERY_STATUS_FULL;
+}
+
+static void parse_battery_health(uint8_t *health)
+{
+    if(!strncmp((char *)health, "Unknown", 7))
+        s_props.batteryHealth = BATTERY_HEALTH_UNKNOWN;
+    else if(!strncmp((char *)health, "Good", 4))
+        s_props.batteryHealth = BATTERY_HEALTH_GOOD;
+    else if(!strncmp((char *)health, "Overheat", 8))
+        s_props.batteryHealth = BATTERY_HEALTH_OVERHEAT;
+    else if(!strncmp((char *)health, "Dead", 4))
+        s_props.batteryHealth = BATTERY_HEALTH_DEAD;
+    else if(!strncmp((char *)health, "Over voltage", 12))
+        s_props.batteryHealth = BATTERY_HEALTH_OVER_VOLTAGE;
+    else if(!strncmp((char *)health, "Unspecified failure", 18))
+        s_props.batteryHealth = BATTERY_HEALTH_UNSPECIFIED_FAILURE;
+    else if(!strncmp((char *)health, "Cold", 4))
+        s_props.batteryHealth = BATTERY_HEALTH_COLD;
+}
+
+static void parse_battery_type(uint8_t *type)
+{
+    if (!strncmp((char *)type, "Mains", 7))
+        s_props.chargerAcOnline = true;
+    else if (!strncmp((char *)type, "USB", 3))
+        s_props.chargerUsbOnline = true;
+}
+
+static void parse_init_properties(struct initial_pkt *ipkt)
+{
+    s_props.batteryTechnology = (char *)ipkt->technology;
+    s_props.batteryPresent = (strncmp((char *)ipkt->present, "1", 1) == 0);
+    parse_battery_type(ipkt->type);
+}
+
+static void parse_battery_properties(struct monitor_pkt *mpkt)
+{
+    s_props.batteryLevel = mpkt->capacity;
+    s_props.batteryVoltage = mpkt->voltage_now;
+    s_props.batteryTemperature = mpkt->temp;
+    s_props.batteryFullCharge = mpkt->charge_full;
+    s_props.batteryChargeCounter = mpkt->charge_now;
+    parse_battery_status(mpkt->status);
+    parse_battery_health(mpkt->health);
+}
+
+static int connect_vsock(int *vsock_fd) {
+    struct sockaddr_vm sa = {
+        .svm_family = AF_VSOCK,
+        .svm_cid = VMADDR_CID_HOST,
+        .svm_port = HEALTH_PORT,
+    };
+    *vsock_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (*vsock_fd < 0) {
+        KLOG_WARNING(LOG_TAG, "healthd socket init failed\n");
+        return *vsock_fd;
+    }
+    if (connect(*vsock_fd, (struct sockaddr*)&sa, sizeof(sa)) != 0) {
+            KLOG_WARNING(LOG_TAG, "healthd connect failed\n");
+            close(*vsock_fd);
+	    return -1;
+    }
+    KLOG_INFO(LOG_TAG, "healthd connect to cid(%d) port(%d)\n", sa.svm_cid, sa.svm_port);
+    return 0;
+}
+
+static void recv_vsock(int *vsock_fd) {
+    char msgbuf[1024];
+    struct header *head = (struct header *)malloc(sizeof(struct header));
+    struct monitor_pkt *mpkt = (struct monitor_pkt *)malloc(sizeof(struct monitor_pkt));
+    struct initial_pkt *ipkt = (struct initial_pkt *)malloc(sizeof(struct initial_pkt));
+    klog_set_level(KLOG_LEVEL);
+    while (1) {
+        int ret;
+        memset(msgbuf, 0, sizeof(msgbuf));
+        ret =  recv(*vsock_fd, msgbuf, sizeof(msgbuf), MSG_DONTWAIT);
+        if (ret < 0 && errno == EBADF) {
+            if (connect_vsock(vsock_fd) == 0)
+                ret =  recv(*vsock_fd, msgbuf, sizeof(msgbuf), MSG_DONTWAIT);
+        }
+        if (ret > 0) {
+            memcpy(head, msgbuf, sizeof(struct header));
+            if (head->notify_id == 1) {
+                memcpy(ipkt, msgbuf + sizeof(struct header), sizeof(struct initial_pkt));
+                parse_init_properties(ipkt);
+                memcpy(mpkt, msgbuf + sizeof(struct header) + sizeof (struct initial_pkt),
+                                                              sizeof(struct monitor_pkt));
+                parse_battery_properties(mpkt);
+            }
+            if (head->notify_id == 2) {
+                memcpy(mpkt, msgbuf + sizeof(struct header), sizeof(struct monitor_pkt));
+                parse_battery_properties(mpkt);
+            }
+            periodic_chores();
+        }
+        sleep(1);
+    }
+    free(head);
+    free(mpkt);
+    free(ipkt);
+}
+
 static void healthd_mainloop(void) {
     int nevents = 0;
+    int vsock_fd;
+
+    if (connect_vsock(&vsock_fd) == 0)
+        is_vsock_present = true;
+
+    if (is_vsock_present) {
+        vsock_thread = std::thread(recv_vsock, &vsock_fd);
+        vsock_thread.detach();
+    }
+
     while (1) {
         struct epoll_event events[eventct];
         int timeout = awake_poll_interval;
         int mode_timeout;
 
         /* Don't wait for first timer timeout to run periodic chores */
-        if (!nevents) periodic_chores();
+        if (!nevents && !is_vsock_present) periodic_chores();
 
         healthd_mode_ops->heartbeat();
 
@@ -237,7 +385,6 @@ static void healthd_mainloop(void) {
             if (events[n].data.ptr) (*(void (*)(int))events[n].data.ptr)(events[n].events);
         }
     }
-
     return;
 }
 
