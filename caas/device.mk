@@ -150,7 +150,7 @@ PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-tablet
 ##############################################################
 # Source: device/intel/mixins/groups/audio/project-celadon/product.mk
 ##############################################################
-TARGET_BOARD_PLATFORM := broxton
+TARGET_BOARD_PLATFORM := celadon
 
 # Tinyalsa
 PRODUCT_PACKAGES_DEBUG += \
