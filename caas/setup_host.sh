@@ -18,7 +18,7 @@ function ubu_changes_require(){
 function ubu_install_qemu(){
 	apt purge -y "qemu*"
 	apt autoremove -y
-	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev
+	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex
 
 	wget https://download.qemu.org/$QEMU_REL.tar.xz
 	tar -xf $QEMU_REL.tar.xz

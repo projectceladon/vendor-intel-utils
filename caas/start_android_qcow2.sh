@@ -12,6 +12,7 @@ ovmf_file="./OVMF.fd"
 
 GVTg_DEV_PATH="/sys/bus/pci/devices/0000:00:02.0"
 GVTg_VGPU_UUID="4ec1ff92-81d7-11e9-aed4-5bf6a9a2bb0a"
+GVTg_VGPU_TYPE="i915-GVTg_V5_4"
 
 function network_setup(){
 	#setup unprivileged ICMP on the host for ping to work on guest side.
@@ -22,7 +23,7 @@ function setup_vgpu(){
 	res=0
 	if [ ! -d $GVTg_DEV_PATH/$GVTg_VGPU_UUID ]; then
 		echo "Creating VGPU..."
-		sudo sh -c "echo $GVTg_VGPU_UUID > $GVTg_DEV_PATH/mdev_supported_types/i915-GVTg_V5_8/create"
+		sudo sh -c "echo $GVTg_VGPU_UUID > $GVTg_DEV_PATH/mdev_supported_types/$GVTg_VGPU_TYPE/create"
 		res=$?
 	fi
 	return $res
