@@ -23,6 +23,8 @@ function ubu_install_qemu(){
 	wget https://download.qemu.org/$QEMU_REL.tar.xz
 	tar -xf $QEMU_REL.tar.xz
 	cd $QEMU_REL/
+	wget https://raw.githubusercontent.com/projectceladon/vendor-intel-utils/master/host/qemu/Disable-EDID-auto-generation-in-QEMU.patch 
+	patch -p1 < Disable-EDID-auto-generation-in-QEMU.patch
 	./configure --prefix=/usr \
 		--enable-kvm \
 		--disable-xen \
