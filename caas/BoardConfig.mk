@@ -250,7 +250,9 @@ BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/start_flash_usb.sh
 BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/auto_switch_pt_usb_vms.sh
 BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/findall.py
 BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/setup_host.sh
-
+BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/sof_audio/configure_sof.sh
+BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/sof_audio/blacklist-dsp.conf
+BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/guest_pm_control
 
 # for USB OTG WA
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/bxt_usb

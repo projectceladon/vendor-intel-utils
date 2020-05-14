@@ -258,11 +258,14 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/file_share.sh:$(TARGET_COPY_OUT_VENDOR)/bin/file_share.sh
 PRODUCT_COPY_FILES += vendor/intel/utils/LICENSE:$(PRODUCT_OUT)/LICENSE
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/start_android_qcow2.sh
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/start_flash_usb.sh
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/auto_switch_pt_usb_vms.sh
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/findall.py
-PRODUCT_COPY_FILES += device/intel/project-celadon/caas/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/setup_host.sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/start_android_qcow2.sh:$(PRODUCT_OUT)/scripts/start_android_qcow2.sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/start_flash_usb.sh:$(PRODUCT_OUT)/scripts/start_flash_usb.sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/auto_switch_pt_usb_vms.sh:$(PRODUCT_OUT)/scripts/auto_switch_pt_usb_vms.sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/findall.py:$(PRODUCT_OUT)/scripts/findall.py
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/setup_host.sh:$(PRODUCT_OUT)/scripts/setup_host.sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/sof_audio/configure_sof.sh:$(PRODUCT_OUT)/scripts/sof_audio/configure_sof.sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/sof_audio/blacklist-dsp.conf:$(PRODUCT_OUT)/scripts/sof_audio/blacklist-dsp.conf
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/guest_pm_control:$(PRODUCT_OUT)/scripts/guest_pm_control
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/product.mk
 ##############################################################
