@@ -6,7 +6,7 @@ cd host_kernel
 git clone https://github.com/projectceladon/vendor-intel-utils
 git clone https://chromium.googlesource.com/chromiumos/third_party/kernel
 cd kernel
-git checkout 07d7b6f5da3765d837ee4ea8810d6f442d4742c8
+git checkout 7ce9d039b0b4636826b89a39ecdbeaa7fd4e2ac3
 cp ../vendor-intel-utils/host/kernel/lts2019-chromium/x86_64_defconfig .config
 patch_list=`find ../vendor-intel-utils/host/kernel/lts2019-chromium -iname "*.patch" | sort -u`
 for i in $patch_list
