@@ -116,8 +116,15 @@ common_guest_pm_control="\
  -qmp unix:qmp-sock,server,nowait \
  -nodefaults -no-reboot \
 "
-
-common_options="\
+common_audio_mediation="\
+ -device intel-hda -device hda-duplex \
+ -audiodev id=android_spk,timer-period=5000,server=$XDG_RUNTIME_DIR/pulse/native,driver=pa \
+"
+common_eth_mediation="\
+ -device e1000,netdev=net0 \
+ -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=tcp::5554-:5554 \
+"
+ common_options="\
  -m 2048 -smp 2 -M q35 \
  -name caas-vm \
  -enable-kvm \
@@ -131,13 +138,9 @@ common_options="\
  -drive file=$ovmf_file,format=raw,if=pflash \
  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
  -device isa-serial,chardev=charserial0,id=serial0 \
- -device intel-hda -device hda-duplex \
- -audiodev id=android_spk,timer-period=5000,server=$XDG_RUNTIME_DIR/pulse/native,driver=pa \
  -drive file=$caas_image,if=none,id=disk1 \
  -device virtio-blk-pci,drive=disk1,bootindex=1 \
  -device vhost-vsock-pci,id=vhost-vsock-pci0,guest-cid=3 \
- -device e1000,netdev=net0 \
- -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=tcp::5554-:5554 \
  -device intel-iommu,device-iotlb=off,caching-mode=on \
  -full-screen \
  -fsdev local,security_model=none,id=fsdev0,path=./share_folder \
@@ -152,6 +155,16 @@ do
         if [ $arg == "--usb-host-passthrough" ]; then
                usb_vfio_passthrough="true"
                echo usb_vfio_passthrough: $usb_vfio_passthrough
+               break;
+        fi
+done
+
+audio_vfio_passthrough="false"
+for arg in $*
+do
+        if [ $arg == "--audio-passthrough" ]; then
+               audio_vfio_passthrough="true"
+               echo audio_vfio_passthrough: $audio_vfio_passthrough
                break;
         fi
 done
@@ -206,6 +219,32 @@ function setup_usb_vfio_passthrough(){
         fi
 }
 
+function setup_audio(){
+	# adding eth here as it is grouped with Audio in lspci, WIP to make it more generic
+        if [[ $audio_vfio_passthrough == "false" ]]; then
+                common_options=${common_audio_mediation}${common_options}
+                common_options=${common_eth_mediation}${common_options}
+        else
+		modprobe vfio-pci
+		AUDIOController=`sudo sh -c "lspci -D -nn| grep -i 'audio '  | grep -i '1f'"`
+		AUDIOControllerId=${AUDIOController:0:13}
+		AUDIOControllerId=`echo $AUDIOControllerId | awk '{gsub(/^\s+|\s+$/, "");print}'`
+		iommu_group_devices=`sudo sh -c "ls /sys/bus/pci/devices/${AUDIOControllerId}/iommu_group/devices/"`
+		str=`echo $iommu_group_devices | sed -e 's/\s\+/,/g'`
+		str=","${str}
+
+		while [ -n "$str" ]; do
+			device=${str##*,}
+			device_id=`sudo sh -c "lspci -D -nn |grep ${device} |grep -o 8086:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"`
+			commandstr="-device vfio-pci,host=${device#*:} "
+			sudo sh -c "echo ${device} > /sys/bus/pci/devices/${device}/driver/unbind"
+			sudo sh -c "echo ${device_id/:/ } > /sys/bus/pci/drivers/vfio-pci/new_id"
+			common_options=${commandstr}${common_options}
+			str=${str%,*}
+		done
+	fi
+}
+
 function launch_hwrender(){
 	if [ $WIFI_PT = "true" ]
 	then
@@ -219,6 +258,7 @@ function launch_hwrender(){
 	fi
 
 	setup_usb_vfio_passthrough setup
+	setup_audio
 
 	if [ $GUEST_PM = "true" ]
 	then
@@ -276,6 +316,7 @@ function launch_hwrender(){
 
 function launch_hwrender_gvtd(){
 	setup_usb_vfio_passthrough setup
+	setup_audio
 	common_options=${common_options/-display $display_type /}
 	common_options=${common_options/-vga none /-vga none -nographic}
 	qemu-system-x86_64 \
