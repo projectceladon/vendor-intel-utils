@@ -29,9 +29,9 @@
 #define CPU_USAGE_PARAS_NUM         5
 #define CPU_USAGE_FILE              "/proc/stat"
 #define CPU_ONLINE_FILE             "/sys/devices/system/cpu/online"
-#define CPU_TEMPERATURE_UNIT        1000
 #define TEMP_UNIT                   1000
 #define THERMAL_PORT                1235
+#define MAX_ZONES                   40
 
 namespace android {
 namespace hardware {
@@ -157,7 +157,7 @@ static int get_soc_pkg_temperature(float* temp)
     }
 
     fclose(file);
-    *temp = fTemp / CPU_TEMPERATURE_UNIT;
+    *temp = fTemp / TEMP_UNIT;
 
     return 0;
 }
@@ -292,10 +292,10 @@ static void parse_temp_info(struct temp_info *t)
 {
     switch(t->type) {
         case 0:
-            kTemp_2_0.value = t->temp / 1000;
+            kTemp_2_0.value = t->temp / TEMP_UNIT;
             break;
         case 2:
-            kTemp_2_0_1.value = t->temp / 1000;
+            kTemp_2_0_1.value = t->temp / TEMP_UNIT;
             break;
         default:
             break;
@@ -305,8 +305,10 @@ static void parse_temp_info(struct temp_info *t)
 static int recv_vsock(int *vsock_fd)
 {
     char msgbuf[1024];
-    struct header *head = (struct header *)malloc(sizeof(struct header));
     int ret;
+    struct header *head = (struct header *)malloc(sizeof(struct header));
+    if (!head)
+        return -ENOMEM;
     memset(msgbuf, 0, sizeof(msgbuf));
     ret = recv(*vsock_fd, msgbuf, sizeof(msgbuf), MSG_DONTWAIT);
     if (ret < 0 && errno == EBADF) {
@@ -319,19 +321,29 @@ static int recv_vsock(int *vsock_fd)
         int ptr = 0;
         int i;
         if (head->notifyid == 1) {
-           num_zones = head->length / sizeof(struct zone_info);
-           ptr += sizeof(struct header);
-           struct zone_info *zinfo = (struct zone_info *)malloc(sizeof(struct zone_info));
-           for (i = 0; i < num_zones; i++) {
-               memcpy(zinfo, msgbuf + ptr, sizeof(struct zone_info));
-               parse_zone_info(zinfo);
-               ptr = ptr + sizeof(struct zone_info);
-           }
-           free(zinfo);
+            num_zones = head->length / sizeof(struct zone_info);
+            num_zones = num_zones < MAX_ZONES ? num_zones : MAX_ZONES;
+            ptr += sizeof(struct header);
+            struct zone_info *zinfo = (struct zone_info *)malloc(sizeof(struct zone_info));
+            if (!zinfo) {
+                free(head);
+                return -ENOMEM;
+            }
+            for (i = 0; i < num_zones; i++) {
+                memcpy(zinfo, msgbuf + ptr, sizeof(struct zone_info));
+                parse_zone_info(zinfo);
+                ptr = ptr + sizeof(struct zone_info);
+            }
+            free(zinfo);
         } else if (head->notifyid == 2) {
             ptr = sizeof(struct header); //offset of num_zones field
             struct temp_info *tinfo = (struct temp_info *)malloc(sizeof(struct temp_info));
+            if (!tinfo) {
+                free(head);
+                return -ENOMEM;
+            }
             memcpy(&num_zones, msgbuf + ptr, sizeof(num_zones));
+            num_zones = num_zones < MAX_ZONES ? num_zones : MAX_ZONES;
             ptr += 4; //offset of first zone type info
             for (i = 0; i < num_zones; i++) {
                 memcpy(&tinfo->type, msgbuf + ptr, sizeof(tinfo->type));

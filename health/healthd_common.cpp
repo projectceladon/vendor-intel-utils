@@ -315,10 +315,20 @@ static int connect_vsock(int *vsock_fd) {
 
 static void recv_vsock(int *vsock_fd) {
     char msgbuf[1024];
-    struct header *head = (struct header *)malloc(sizeof(struct header));
-    struct monitor_pkt *mpkt = (struct monitor_pkt *)malloc(sizeof(struct monitor_pkt));
-    struct initial_pkt *ipkt = (struct initial_pkt *)malloc(sizeof(struct initial_pkt));
+    struct header *head;
+    struct monitor_pkt *mpkt;
+    struct initial_pkt *ipkt;
+
     klog_set_level(KLOG_LEVEL);
+    head = (struct header *)malloc(sizeof(struct header));
+    if (!head)
+        goto exit;
+    mpkt = (struct monitor_pkt *)malloc(sizeof(struct monitor_pkt));
+    if (!mpkt)
+        goto free_head;
+    ipkt = (struct initial_pkt *)malloc(sizeof(struct initial_pkt));
+    if (!ipkt)
+        goto free_mpkt;
     while (1) {
         int ret;
         memset(msgbuf, 0, sizeof(msgbuf));
@@ -344,9 +354,13 @@ static void recv_vsock(int *vsock_fd) {
         }
         sleep(1);
     }
-    free(head);
-    free(mpkt);
     free(ipkt);
+free_mpkt:
+    free(mpkt);
+free_head:
+    free(head);
+exit:
+    KLOG_INFO(LOG_TAG, "Exiting healthd recv loop...\n");
 }
 
 static void healthd_mainloop(void) {
