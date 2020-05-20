@@ -389,7 +389,7 @@ static void healthd_mainloop(void) {
         if (timeout < 0 || (mode_timeout > 0 && mode_timeout < timeout))
             timeout = mode_timeout;
         nevents = epoll_wait(epollfd, events, eventct, timeout);
-        if (nevents == -1) {
+        if (nevents == -1 && !is_vsock_present) {
             if (errno == EINTR) continue;
             KLOG_ERROR(LOG_TAG, "healthd_mainloop: epoll_wait failed\n");
             break;

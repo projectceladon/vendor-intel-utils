@@ -354,6 +354,7 @@ static int recv_vsock(int *vsock_fd)
             free(tinfo);
         }
     }
+    free(head);
     return 0;
 }
 
