@@ -220,12 +220,11 @@ public class VideoRecord implements MediaRecorder.OnErrorListener, MediaRecorder
 
             Surface surface = new Surface(texture);
 
-            String Key = GetChnagedPrefKey();
+            String key = GetChnagedPrefKey();
+            if (key == null) return;
 
-            previewSize = getSelectedDimension(Key);
-
-            if(Key == null || previewSize == null)
-                return;
+            previewSize = getSelectedDimension(key);
+            if (previewSize == null) return;
 
             if (previewSize.getWidth() == 640 || previewSize.getWidth() == 320) {
                 previewSize = SIZE_480P;
@@ -234,7 +233,7 @@ public class VideoRecord implements MediaRecorder.OnErrorListener, MediaRecorder
                 previewSize = SIZE_720P;
             }
 
-            Log.i(TAG, "Previewing with " + Key + " " + previewSize.getWidth() + " x " +
+            Log.i(TAG, "Previewing with " + key + " " + previewSize.getWidth() + " x " +
                     previewSize.getHeight());
 
             texture.setDefaultBufferSize(previewSize.getWidth(), previewSize.getHeight());
