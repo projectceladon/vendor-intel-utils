@@ -1,0 +1,195 @@
+From d962a94b5fbf03edddf1f9d57396a696f8add276 Mon Sep 17 00:00:00 2001
+From: Mark Salyzyn <salyzyn@android.com>
+Date: Tue, 23 Jul 2019 13:53:48 -0700
+Subject: [PATCH] FROMLIST: overlayfs: internal getxattr operations without
+ sepolicy checking
+
+Check impure, opaque, origin & meta xattr with no sepolicy audit
+(using __vfs_getxattr) since these operations are internal to
+overlayfs operations and do not disclose any data.  This became
+an issue for credential override off since sys_admin would have
+been required by the caller; whereas would have been inherently
+present for the creator since it performed the mount.
+
+This is a change in operations since we do not check in the new
+ovl_do_vfs_getxattr function if the credential override is off or
+not.  Reasoning is that the sepolicy check is unnecessary overhead,
+especially since the check can be expensive.
+
+Because for override credentials off, this affects _everyone_ that
+underneath performs private xattr calls without the appropriate
+sepolicy permissions and sys_admin capability.  Providing blanket
+support for sys_admin would be bad for all possible callers.
+
+For the override credentials on, this will affect only the mounter,
+should it lack sepolicy permissions. Not considered a security
+problem since mounting by definition has sys_admin capabilities,
+but sepolicy contexts would still need to be crafted.
+
+It should be noted that there is precedence, __vfs_getxattr is used
+in other filesystems for their own internal trusted xattr management.
+
+Signed-off-by: Mark Salyzyn <salyzyn@android.com>
+Cc: Miklos Szeredi <miklos@szeredi.hu>
+Cc: Jonathan Corbet <corbet@lwn.net>
+Cc: Vivek Goyal <vgoyal@redhat.com>
+Cc: Eric W. Biederman <ebiederm@xmission.com>
+Cc: Amir Goldstein <amir73il@gmail.com>
+Cc: Randy Dunlap <rdunlap@infradead.org>
+Cc: Stephen Smalley <sds@tycho.nsa.gov>
+Cc: linux-unionfs@vger.kernel.org
+Cc: linux-doc@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+Cc: kernel-team@android.com
+Cc: linux-security-module@vger.kernel.org
+
+(cherry picked from https://lore.kernel.org/lkml/20191104215253.141818-4-salyzyn@android.com/)
+Signed-off-by: Mark Salyzyn <salyzyn@google.com>
+Bug: 133515582
+Bug: 136124883
+Bug: 129319403
+Change-Id: I34d99cc46e9e87a79efc8d05f85980bbc137f7eb
+---
+ fs/overlayfs/namei.c     | 12 +++++++-----
+ fs/overlayfs/overlayfs.h |  8 ++++++++
+ fs/overlayfs/util.c      | 18 +++++++++---------
+ 3 files changed, 24 insertions(+), 14 deletions(-)
+
+diff --git a/fs/overlayfs/namei.c b/fs/overlayfs/namei.c
+index e9717c2..f5aba0a 100644
+--- a/fs/overlayfs/namei.c
++++ b/fs/overlayfs/namei.c
+@@ -106,10 +106,11 @@ int ovl_check_fh_len(struct ovl_fh *fh, int fh_len)
+ 
+ static struct ovl_fh *ovl_get_fh(struct dentry *dentry, const char *name)
+ {
+-	int res, err;
++	ssize_t res;
++	int err;
+ 	struct ovl_fh *fh = NULL;
+ 
+-	res = vfs_getxattr(dentry, name, NULL, 0);
++	res = ovl_do_vfs_getxattr(dentry, name, NULL, 0);
+ 	if (res < 0) {
+ 		if (res == -ENODATA || res == -EOPNOTSUPP)
+ 			return NULL;
+@@ -123,7 +124,7 @@ static struct ovl_fh *ovl_get_fh(struct dentry *dentry, const char *name)
+ 	if (!fh)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	res = vfs_getxattr(dentry, name, fh, res);
++	res = ovl_do_vfs_getxattr(dentry, name, fh, res);
+ 	if (res < 0)
+ 		goto fail;
+ 
+@@ -141,10 +142,11 @@ static struct ovl_fh *ovl_get_fh(struct dentry *dentry, const char *name)
+ 	return NULL;
+ 
+ fail:
+-	pr_warn_ratelimited("overlayfs: failed to get origin (%i)\n", res);
++	pr_warn_ratelimited("overlayfs: failed to get origin (%zi)\n", res);
+ 	goto out;
+ invalid:
+-	pr_warn_ratelimited("overlayfs: invalid origin (%*phN)\n", res, fh);
++	pr_warn_ratelimited("overlayfs: invalid origin (%*phN)\n",
++			    (int)res, fh);
+ 	goto out;
+ }
+ 
+diff --git a/fs/overlayfs/overlayfs.h b/fs/overlayfs/overlayfs.h
+index ab3d031..55b872c 100644
+--- a/fs/overlayfs/overlayfs.h
++++ b/fs/overlayfs/overlayfs.h
+@@ -200,6 +200,14 @@ static inline bool ovl_open_flags_need_copy_up(int flags)
+ 	return ((OPEN_FMODE(flags) & FMODE_WRITE) || (flags & O_TRUNC));
+ }
+ 
++static inline ssize_t ovl_do_vfs_getxattr(struct dentry *dentry,
++					  const char *name, void *buf,
++					  size_t size)
++{
++	return __vfs_getxattr(dentry, d_inode(dentry), name, buf, size,
++			      XATTR_NOSECURITY);
++}
++
+ /* util.c */
+ int ovl_want_write(struct dentry *dentry);
+ void ovl_drop_write(struct dentry *dentry);
+diff --git a/fs/overlayfs/util.c b/fs/overlayfs/util.c
+index f5678a3..2050c50 100644
+--- a/fs/overlayfs/util.c
++++ b/fs/overlayfs/util.c
+@@ -537,9 +537,9 @@ void ovl_copy_up_end(struct dentry *dentry)
+ 
+ bool ovl_check_origin_xattr(struct dentry *dentry)
+ {
+-	int res;
++	ssize_t res;
+ 
+-	res = vfs_getxattr(dentry, OVL_XATTR_ORIGIN, NULL, 0);
++	res = ovl_do_vfs_getxattr(dentry, OVL_XATTR_ORIGIN, NULL, 0);
+ 
+ 	/* Zero size value means "copied up but origin unknown" */
+ 	if (res >= 0)
+@@ -550,13 +550,13 @@ bool ovl_check_origin_xattr(struct dentry *dentry)
+ 
+ bool ovl_check_dir_xattr(struct dentry *dentry, const char *name)
+ {
+-	int res;
++	ssize_t res;
+ 	char val;
+ 
+ 	if (!d_is_dir(dentry))
+ 		return false;
+ 
+-	res = vfs_getxattr(dentry, name, &val, 1);
++	res = ovl_do_vfs_getxattr(dentry, name, &val, 1);
+ 	if (res == 1 && val == 'y')
+ 		return true;
+ 
+@@ -837,13 +837,13 @@ int ovl_lock_rename_workdir(struct dentry *workdir, struct dentry *upperdir)
+ /* err < 0, 0 if no metacopy xattr, 1 if metacopy xattr found */
+ int ovl_check_metacopy_xattr(struct dentry *dentry)
+ {
+-	int res;
++	ssize_t res;
+ 
+ 	/* Only regular files can have metacopy xattr */
+ 	if (!S_ISREG(d_inode(dentry)->i_mode))
+ 		return 0;
+ 
+-	res = vfs_getxattr(dentry, OVL_XATTR_METACOPY, NULL, 0);
++	res = ovl_do_vfs_getxattr(dentry, OVL_XATTR_METACOPY, NULL, 0);
+ 	if (res < 0) {
+ 		if (res == -ENODATA || res == -EOPNOTSUPP)
+ 			return 0;
+@@ -852,7 +852,7 @@ int ovl_check_metacopy_xattr(struct dentry *dentry)
+ 
+ 	return 1;
+ out:
+-	pr_warn_ratelimited("overlayfs: failed to get metacopy (%i)\n", res);
++	pr_warn_ratelimited("overlayfs: failed to get metacopy (%zi)\n", res);
+ 	return res;
+ }
+ 
+@@ -878,7 +878,7 @@ ssize_t ovl_getxattr(struct dentry *dentry, char *name, char **value,
+ 	ssize_t res;
+ 	char *buf = NULL;
+ 
+-	res = vfs_getxattr(dentry, name, NULL, 0);
++	res = ovl_do_vfs_getxattr(dentry, name, NULL, 0);
+ 	if (res < 0) {
+ 		if (res == -ENODATA || res == -EOPNOTSUPP)
+ 			return -ENODATA;
+@@ -890,7 +890,7 @@ ssize_t ovl_getxattr(struct dentry *dentry, char *name, char **value,
+ 		if (!buf)
+ 			return -ENOMEM;
+ 
+-		res = vfs_getxattr(dentry, name, buf, res);
++		res = ovl_do_vfs_getxattr(dentry, name, buf, res);
+ 		if (res < 0)
+ 			goto fail;
+ 	}
+-- 
+2.7.4
+
