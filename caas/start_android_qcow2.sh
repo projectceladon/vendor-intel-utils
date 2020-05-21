@@ -1,11 +1,14 @@
 #!/bin/bash
 
 work_dir=$PWD
+scripts_dir=$work_dir/scripts
+
 caas_image=$work_dir/android.qcow2
-usb_switch=$work_dir/auto_switch_pt_usb_vms.sh
-find_port=$work_dir/findall.py
-qmp_handler=$work_dir/qmp_events_handler.sh
 qmp_log=$work_dir/qmp_event.log
+
+usb_switch=$scripts_dir/auto_switch_pt_usb_vms.sh
+find_port=$scripts_dir/findall.py
+qmp_handler=$scripts_dir/qmp_events_handler.sh
 
 ovmf_file="./OVMF.fd"
 [ ! -f $ovmf_file ] && ovmf_file="/usr/share/qemu/OVMF.fd"
@@ -103,7 +106,7 @@ smbios_serialno=$(dmidecode -t 2 | grep -i serial | awk '{print $3}')
 
 common_usb_device_passthrough="\
  -device qemu-xhci,id=xhci,addr=0x8 \
- `/bin/bash $usb_switch` \
+ `/bin/bash $usb_switch $find_port` \
  -device usb-host,vendorid=0x03eb,productid=0x8a6e \
  -device usb-host,vendorid=0x0eef,productid=0x7200 \
  -device usb-host,vendorid=0x222a,productid=0x0141 \

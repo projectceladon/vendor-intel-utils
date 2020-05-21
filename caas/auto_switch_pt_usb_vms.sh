@@ -40,5 +40,5 @@ findall()
 }
 
 rm -rf usb_vm.txt
-python3.6 findall.py 
+python3.6 $1
 findall
