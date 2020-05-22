@@ -189,6 +189,8 @@ function prepare_required_scripts(){
 	mv -t $CIV_WORK_DIR/sof_audio $CIV_WORK_DIR/scripts/sof_audio/configure_sof.sh $CIV_WORK_DIR/scripts/sof_audio/blacklist-dsp.conf
 	chmod +x $CIV_WORK_DIR/scripts/guest_pm_control
 	chmod +x $CIV_WORK_DIR/scripts/findall.py
+	chmod +x $CIV_WORK_DIR/scripts/thermsys
+	chmod +x $CIV_WORK_DIR/scripts/batsys
 }
 
 function save_env(){

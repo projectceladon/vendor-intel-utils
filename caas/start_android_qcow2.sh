@@ -9,6 +9,8 @@ qmp_log=$work_dir/qmp_event.log
 usb_switch=$scripts_dir/auto_switch_pt_usb_vms.sh
 find_port=$scripts_dir/findall.py
 qmp_handler=$scripts_dir/qmp_events_handler.sh
+thermal_utility=$scripts_dir/thermsys
+battery_utility=$scripts_dir/batsys
 
 ovmf_file="./OVMF.fd"
 [ ! -f $ovmf_file ] && ovmf_file="/usr/share/qemu/OVMF.fd"
@@ -172,6 +174,16 @@ do
         fi
 done
 
+enable_vsock="false"
+for arg in $*
+do
+        if [ $arg == "--enable-vsock" ]; then
+               enable_vsock="true"
+               echo enable_vsock: $enable_vsock
+               break;
+        fi
+done
+
 function setup_usb_vfio_passthrough(){
         if [[ $usb_vfio_passthrough == "false" ]]; then
                 common_options=${common_usb_device_passthrough}${common_options}
@@ -248,6 +260,30 @@ function setup_audio(){
 	fi
 }
 
+function start_battery_utility(){
+	if [[ `cat /sys/class/power_supply/*/type` != *"Battery"* ]]; then
+		modprobe test_power
+	fi
+
+        echo "Starting battery utility !!!"
+        $battery_utility &
+}
+
+function setup_vsock_host_utilities(){
+	if [[ $enable_vsock == "true" ]]; then
+		start_battery_utility
+		echo "Starting thermal utility !!!"
+		$thermal_utility &
+	fi
+}
+
+function cleanup_vsock_host_utilities(){
+	if [[ $enable_vsock == "true" ]]; then
+		kill -9 `pidof batsys`
+		kill -9 `pidof thermsys`
+	fi
+}
+
 function launch_hwrender(){
 	if [ $WIFI_PT = "true" ]
 	then
@@ -262,6 +298,7 @@ function launch_hwrender(){
 
 	setup_usb_vfio_passthrough setup
 	setup_audio
+	setup_vsock_host_utilities
 
 	if [ $GUEST_PM = "true" ]
 	then
@@ -315,17 +352,20 @@ function launch_hwrender(){
 	fi
 
 	setup_usb_vfio_passthrough remove
+	cleanup_vsock_host_utilities
 }
 
 function launch_hwrender_gvtd(){
 	setup_usb_vfio_passthrough setup
 	setup_audio
+	setup_vsock_host_utilities
 	common_options=${common_options/-display $display_type /}
 	common_options=${common_options/-vga none /-vga none -nographic}
 	qemu-system-x86_64 \
 	-device vfio-pci,host=00:02.0,x-igd-gms=2,id=hostdev0,bus=pcie.0,addr=0x2,x-igd-opregion=on \
 	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /} > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	setup_usb_vfio_passthrough remove
+	cleanup_vsock_host_utilities
 }
 
 function launch_swrender(){
