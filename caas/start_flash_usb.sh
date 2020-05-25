@@ -14,12 +14,12 @@ then
 	fi
 fi
 
-qemu-img create -f qcow2 android.qcow2 16G
+qemu-img create -f qcow2 android.qcow2 10G
 
 [ -d "./flashfiles_decompress" ] && rm -rf "./flashfiles_decompress"
 mkdir ./flashfiles_decompress
 unzip $1 -d ./flashfiles_decompress
-dd if=/dev/zero of=./flash.vfat bs=63M count=160
+dd if=/dev/zero of=./flash.vfat bs=63M count=120
 mkfs.vfat ./flash.vfat
 mcopy -i flash.vfat flashfiles_decompress/* ::
 
