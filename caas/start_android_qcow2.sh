@@ -18,6 +18,8 @@ ovmf_file="./OVMF.fd"
 GVTg_DEV_PATH="/sys/bus/pci/devices/0000:00:02.0"
 GVTg_VGPU_UUID="4ec1ff92-81d7-11e9-aed4-5bf6a9a2bb0a"
 GVTg_VGPU_TYPE="i915-GVTg_V5_4"
+SDONLY_DEV_PATH="/dev/mmcblk0p1"
+SDEMMC_DEV_PATH="/dev/mmcblk1p1"
 
 function network_setup(){
 	#setup unprivileged ICMP on the host for ping to work on guest side.
@@ -129,6 +131,12 @@ common_eth_mediation="\
  -device e1000,netdev=net0 \
  -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=tcp::5554-:5554 \
 "
+common_sd_only="\
+ -drive file=$SDONLY_DEV_PATH,format=raw,id=sdcard0 \
+"
+common_sd_emmc="\
+ -drive file=$SDEMMC_DEV_PATH,format=raw,id=sdcard0 \
+"
  common_options="\
  -m 2048 -smp 2 -M q35 \
  -name caas-vm \
@@ -183,6 +191,26 @@ do
                break;
         fi
 done
+
+sdemmc_exist="false"
+for arg in $*
+do
+        if [ $arg == "--sdemmc-coexist" ]; then
+               sdemmc_exist="true"
+               echo sd-emmc: $sdemmc_exist
+               break;
+        fi
+done
+
+function setup_sdcard(){
+      # Handling some boards with SD only and some with SD/EMMC co-exist.
+      # Todo: Shall optimize further with minor number check
+        if [[ $sdemmc_exist == "false" ]]; then
+                common_options=${common_sd_only}${common_options}
+        else
+                common_options=${common_sd_emmc}${common_options}
+      fi
+}
 
 function setup_usb_vfio_passthrough(){
         if [[ $usb_vfio_passthrough == "false" ]]; then
@@ -295,7 +323,8 @@ function launch_hwrender(){
 		echo $DEVICE_ID | sed 's/:/\ /g' > /sys/bus/pci/drivers/vfio-pci/new_id
 		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
 	fi
-
+	
+	setup_sdcard
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
@@ -356,6 +385,7 @@ function launch_hwrender(){
 }
 
 function launch_hwrender_gvtd(){
+	setup_sdcard
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
