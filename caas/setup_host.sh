@@ -196,6 +196,7 @@ if [[ $version =~ "Ubuntu" ]]; then
 	fi
 	prepare_required_scripts
 	$CIV_WORK_DIR/sof_audio/configure_sof.sh "install" $CIV_WORK_DIR
+	$CIV_WORK_DIR/scripts/setup_audio_host.sh
 	#starting Intel Thermal Deamon, currently supporting CML/EHL only.
 	ubu_thermal_conf
 	install_9p_module
