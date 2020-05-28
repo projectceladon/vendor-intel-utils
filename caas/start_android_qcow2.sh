@@ -161,6 +161,14 @@ common_sd_emmc="\
  -smbios "type=2,serial=$smbios_serialno" \
  -nodefaults
 "
+#ethernet mediation
+AUDIOController=`sudo sh -c "lspci -D -nn| grep -i 'audio'"`
+AUDIOControllerId=${AUDIOController:8:2}
+eth_check=`sudo sh -c "lspci -D -nn | grep -i '$AUDIOControllerId'"`
+if [[ "$eth_check" != *"Ethernet"* ]]; then
+        common_options=${common_eth_mediation}${common_options}
+        echo $common_options
+fi
 
 usb_vfio_passthrough="false"
 for arg in $*
@@ -263,10 +271,12 @@ function setup_usb_vfio_passthrough(){
 }
 
 function setup_audio(){
-	# adding eth here as it is grouped with Audio in lspci, WIP to make it more generic
+	# handling ethernet here when it is in the same group of audio in lspci
         if [[ $audio_vfio_passthrough == "false" ]]; then
+                if [[ "$eth_check" == *"Ethernet"* ]]; then
+                        common_options=${common_eth_mediation}${common_options}
+                fi
                 common_options=${common_audio_mediation}${common_options}
-                common_options=${common_eth_mediation}${common_options}
         else
 		modprobe vfio-pci
 		AUDIOController=`sudo sh -c "lspci -D -nn| grep -i 'audio '  | grep -i '1f'"`
