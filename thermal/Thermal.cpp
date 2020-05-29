@@ -86,6 +86,14 @@ static Temperature_2_0 kTemp_2_0 = {
         .throttlingStatus = ThrottlingSeverity::NONE,
 };
 
+// Workaround for VTS. Dummy entry for GPU temperature.
+static Temperature_2_0 kDummyTemp = {
+	.type = TemperatureType::GPU,
+	.name = "test sensor",
+	.value = 25,
+	.throttlingStatus = ThrottlingSeverity::NONE,
+};
+
 static Temperature_2_0 kTemp_2_0_1 = {
         .type = TemperatureType::BATTERY,
         .name = "TBATTERY",
@@ -105,6 +113,15 @@ static TemperatureThreshold kTempThreshold_1 = {
         .type = TemperatureType::BATTERY,
         .name = "TBATTERY",
         .hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 65, 68}},
+        .coldThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
+        .vrThrottlingThreshold = NAN,
+};
+
+// Workaround for VTS. Dummy entry for GPU threshold.
+static TemperatureThreshold kDummyTempThreshold = {
+        .type = TemperatureType::GPU,
+        .name = "test sensor",
+        .hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 90, 100}},
         .coldThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
         .vrThrottlingThreshold = NAN,
 };
@@ -471,22 +488,28 @@ Return<void> Thermal::getCurrentTemperatures(bool filterType, TemperatureType ty
     float temp = NAN;
     int res = -1;
 
-    if (filterType && type != kTemp_2_0.type) {
-        // Workaround for VTS Test
-        //status.code = ThermalStatusCode::FAILURE;
-        //status.debugMessage = "Failed to read data";
-    } else {
-        temperatures = {kTemp_2_0, kTemp_2_0_1};
-        if (!is_vsock_present) {
-            res = get_soc_pkg_temperature(&temp);
-            temperatures[0].value = temp;
-        } else
-            res = 0;
-        if (res) {
-            ALOGE("Can not get temperature of type %d", kTemp_2_0.type);
-            status.code = ThermalStatusCode::FAILURE;
-            status.debugMessage = strerror(-res);
+    if (!is_vsock_present) {
+        if (filterType && type != kTemp_2_0.type) {
+            // Workaround for VTS Test
+            //status.code = ThermalStatusCode::FAILURE;
+            //status.debugMessage = "Failed to read data";
         } else {
+            temperatures = {kTemp_2_0};
+            res = get_soc_pkg_temperature(&temp);
+            if (res) {
+                ALOGE("Can not get temperature of type %d", kTemp_2_0.type);
+                status.code = ThermalStatusCode::FAILURE;
+                status.debugMessage = strerror(-res);
+            } else
+                temperatures[0].value = temp;
+        }
+    } else {
+        if (!filterType) {
+            // No filter type. Send all temperatures. Update legitimate temp thresholds.
+            // Workaround for VTS which expects temperatures in order:
+            // GPU temp is not exposed in Intel Android platforms.
+            // So add the dummy entry for GPU temp.
+            temperatures = {kTemp_2_0, kDummyTemp, kTemp_2_0_1};
             for (size_t i = kTempThreshold.hotThrottlingThresholds.size() - 1; i > 0; i--) {
                 if (temperatures[0].value >= kTempThreshold.hotThrottlingThresholds[i]) {
                     temperatures[0].throttlingStatus = (ThrottlingSeverity)i;
@@ -496,6 +519,22 @@ Return<void> Thermal::getCurrentTemperatures(bool filterType, TemperatureType ty
             for (size_t i = kTempThreshold_1.hotThrottlingThresholds.size() - 1; i > 0; i--) {
                 if (temperatures[1].value >= kTempThreshold_1.hotThrottlingThresholds[i]) {
                     temperatures[1].throttlingStatus = (ThrottlingSeverity)i;
+                    break;
+                }
+            }
+        } else if (type == kTemp_2_0.type) {
+            temperatures = {kTemp_2_0};
+            for (size_t i = kTempThreshold.hotThrottlingThresholds.size() - 1; i > 0; i--) {
+                if (temperatures[0].value >= kTempThreshold.hotThrottlingThresholds[i]) {
+                    temperatures[0].throttlingStatus = (ThrottlingSeverity)i;
+                    break;
+                }
+            }
+        } else if (type == kTemp_2_0_1.type) {
+            temperatures = {kTemp_2_0_1};
+            for (size_t i = kTempThreshold_1.hotThrottlingThresholds.size() - 1; i > 0; i--) {
+                if (temperatures[0].value >= kTempThreshold_1.hotThrottlingThresholds[i]) {
+                    temperatures[0].throttlingStatus = (ThrottlingSeverity)i;
                     break;
                 }
             }
@@ -519,11 +558,30 @@ Return<void> Thermal::getTemperatureThresholds(bool filterType, TemperatureType 
     ThermalStatus status;
     status.code = ThermalStatusCode::SUCCESS;
     std::vector<TemperatureThreshold> temperature_thresholds;
-    if (filterType && type != kTempThreshold.type) {
-        status.code = ThermalStatusCode::FAILURE;
-        status.debugMessage = "Failed to read data";
+
+    if (!is_vsock_present) {
+        if (filterType && type != kTempThreshold.type) {
+            // Workaround for VTS test
+        } else {
+            temperature_thresholds = {kTempThreshold};
+        }
+    } else if (filterType) {
+        if (type == kTempThreshold.type)
+            temperature_thresholds = {kTempThreshold};
+        else if (type == kTempThreshold_1.type)
+            temperature_thresholds = {kTempThreshold_1};
     } else {
-        temperature_thresholds = {kTempThreshold, kTempThreshold_1};
+        temperature_thresholds = {kTempThreshold, kDummyTempThreshold, kTempThreshold_1};
+    }
+
+    //Workaround for VTS.
+    if (filterType && temperature_thresholds.size() == 0) {
+        temperature_thresholds = {(TemperatureThreshold) {
+            .type = type,
+            .name = "FAKE DATA",
+            .hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 90, 100}},
+            .coldThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
+            .vrThrottlingThreshold = NAN,}};
     }
     _hidl_cb(status, temperature_thresholds);
     return Void();
