@@ -210,13 +210,25 @@ do
         fi
 done
 
+sd_exist="false"
+for arg in $*
+do
+        if [ $arg == "--sdonly" ]; then
+               sd_exist="true"
+               echo sdonly: $sd_exist
+               break;
+        fi
+done
+
 function setup_sdcard(){
       # Handling some boards with SD only and some with SD/EMMC co-exist.
       # Todo: Shall optimize further with minor number check
-        if [[ $sdemmc_exist == "false" ]]; then
+        if [[ $sdemmc_exist == "true" ]]; then
+                common_options=${common_sd_emmc}${common_options}
+        else if [[ $sd_exist == "true" ]]; then
                 common_options=${common_sd_only}${common_options}
         else
-                common_options=${common_sd_emmc}${common_options}
+                echo no-sdcard
       fi
 }
 
