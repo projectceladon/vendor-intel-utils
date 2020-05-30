@@ -225,7 +225,7 @@ function setup_sdcard(){
       # Todo: Shall optimize further with minor number check
         if [[ $sdemmc_exist == "true" ]]; then
                 common_options=${common_sd_emmc}${common_options}
-        else if [[ $sd_exist == "true" ]]; then
+        elif [[ $sd_exist == "true" ]]; then
                 common_options=${common_sd_only}${common_options}
         else
                 echo no-sdcard
