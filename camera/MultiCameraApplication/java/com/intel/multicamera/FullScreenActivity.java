@@ -254,11 +254,12 @@ public class FullScreenActivity extends AppCompatActivity {
                         mIsRecordingVideo =true;
                         if (mCameraInst.getWhichCamera() == 0) {
                             mCameraBack.getmRecord().startRecordingVideo();
+                            mCameraBack.getmRecord().showRecordingUI(true);
                         }
                         else {
                             mCameraFront.getmRecord().startRecordingVideo();
+                            mCameraFront.getmRecord().showRecordingUI(true);
                         }
-                        mCameraBack.getmRecord().showRecordingUI(true);
                         mSettings.setVisibility(View.GONE);
                         mCameraSwitch.setVisibility(View.GONE);
                         mCameraPicture.setVisibility(View.GONE);
