@@ -407,6 +407,16 @@ function launch_hwrender(){
 }
 
 function launch_hwrender_gvtd(){
+	if [ $WIFI_PT = "true" ]
+	then
+		rfkill unblock all
+		PCI_ID=`lspci -D -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`
+		echo $PCI_ID > /sys/bus/pci/devices/`echo $PCI_ID | sed 's/:/\\:/g'`/driver/unbind
+		modprobe vfio-pci
+		DEVICE_ID=`lspci -nn  | grep -oP 'Network controller.*\[\K[\w:]+'`
+		echo $DEVICE_ID | sed 's/:/\ /g' > /sys/bus/pci/drivers/vfio-pci/new_id
+		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
+	fi
 	setup_sdcard
 	setup_usb_vfio_passthrough setup
 	setup_audio
@@ -415,6 +425,7 @@ function launch_hwrender_gvtd(){
 	common_options=${common_options/-vga none /-vga none -nographic}
 	qemu-system-x86_64 \
 	-device vfio-pci,host=00:02.0,x-igd-gms=2,id=hostdev0,bus=pcie.0,addr=0x2,x-igd-opregion=on \
+	$WIFI_VFIO_OPTIONS \
 	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /} > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	setup_usb_vfio_passthrough remove
 	cleanup_vsock_host_utilities
