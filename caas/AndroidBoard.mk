@@ -670,13 +670,9 @@ AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/media/auto_hal.in
 ##############################################################
 # Source: device/intel/mixins/groups/graphics/auto/AndroidBoard.mk
 ##############################################################
-ifeq ($(TARGET_BOARD_PLATFORM),icelakeu)
-	I915_FW_PATH := $(INTEL_PATH_VENDOR)/ufo/gen9_dev/x86_64_media_icl/vendor/firmware/i915
-else ifeq ($(TARGET_BOARD_PLATFORM),kabylake)
-	I915_FW_PATH := $(INTEL_PATH_VENDOR)/ufo/gen9_dev/x86_64_media_kbl/vendor/firmware/i915
-else
-	I915_FW_PATH := $(INTEL_PATH_VENDOR)/ufo/gen9_dev/x86_64_media/vendor/firmware/i915
-endif
+
+I915_FW_PATH := vendor/linux/firmware/i915
+
 #list of i915/huc_xxx.bin i915/dmc_xxx.bin i915/guc_xxx.bin
 $(foreach t, $(patsubst $(I915_FW_PATH)/%,%,$(wildcard $(I915_FW_PATH)/*)) ,$(eval I915_FW += i915/$(t)) $(eval $(LOCAL_KERNEL) : $(PRODUCT_OUT)/vendor/firmware/i915/$(t)))
 
