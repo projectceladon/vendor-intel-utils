@@ -253,7 +253,9 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.graphics.allocator@2.0-service \
                     android.hardware.renderscript@1.0-impl \
                     android.hardware.graphics.composer@2.1-impl \
-                    android.hardware.graphics.composer@2.1-service
+                    android.hardware.graphics.composer@2.1-service \
+                    batsys \
+                    thermsys
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/file_share.sh:$(TARGET_COPY_OUT_VENDOR)/bin/file_share.sh
