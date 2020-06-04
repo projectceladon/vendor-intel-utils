@@ -157,6 +157,10 @@ public class Camera2OneCameraManagerImpl implements OneCameraManager {
         String cameraId = findFirstCameraIdFacing(CameraCharacteristics.LENS_FACING_BACK);
         if (cameraId == null) {
             Log.w(TAG, "No back-facing camera found.");
+            cameraId = findFirstCameraIdFacing(CameraCharacteristics.LENS_FACING_EXTERNAL);
+            if (cameraId == null) {
+                Log.w(TAG, "No external camera found.");
+            }
         }
         return cameraId;
     }
@@ -167,6 +171,10 @@ public class Camera2OneCameraManagerImpl implements OneCameraManager {
         String cameraId = findFirstCameraIdFacing(CameraCharacteristics.LENS_FACING_FRONT);
         if (cameraId == null) {
             Log.w(TAG, "No front-facing camera found.");
+            cameraId = findFirstCameraIdFacing(CameraCharacteristics.LENS_FACING_EXTERNAL);
+            if (cameraId == null) {
+                Log.w(TAG, "No external camera found.");
+            }
         }
         return cameraId;
     }
