@@ -128,8 +128,11 @@ public class SettingsManager {
     protected SharedPreferences openPreferences(String scope) {
         synchronized (mLock) {
             SharedPreferences preferences;
+            // For external camera, scope could have "/" separator which is a invalid path
+            // for the shared preference.
+            String validScope = scope.replaceAll("/", "_");
             preferences = mContext.getSharedPreferences(
-                    mPackageName + scope, Context.MODE_PRIVATE);
+                    mPackageName + validScope, Context.MODE_PRIVATE);
 
             for (OnSharedPreferenceChangeListener listener : mSharedPreferenceListeners) {
                 preferences.registerOnSharedPreferenceChangeListener(listener);
