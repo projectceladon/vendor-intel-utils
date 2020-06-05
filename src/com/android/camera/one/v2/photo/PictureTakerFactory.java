@@ -43,31 +43,46 @@ public final class PictureTakerFactory {
             FrameServer frameServer,
             RequestBuilder.Factory rootRequestBuilder,
             ManagedImageReader sharedImageReader,
-            Supplier<OneCamera.PhotoCaptureParameters.Flash> flashMode) {
+            Supplier<OneCamera.PhotoCaptureParameters.Flash> flashMode, boolean cafSupport) {
         // When flash is ON, always use the ConvergedImageCaptureCommand which
-        // performs the AF & AE precapture sequence.
-        ImageCaptureCommand flashOnCommand = new ConvergedImageCaptureCommand(
+        // performs the AE precapture sequence and AF precapture if supported.
+        ImageCaptureCommand flashOnCommand = cafSupport ? new ConvergedImageCaptureCommand(
                 sharedImageReader, frameServer, rootRequestBuilder,
                 CameraDevice.TEMPLATE_PREVIEW /* repeatingRequestTemplate */,
                 CameraDevice.TEMPLATE_STILL_CAPTURE /* stillCaptureRequestTemplate */,
-                Arrays.asList(rootRequestBuilder), true /* ae */, true /* af */);
+                Arrays.asList(rootRequestBuilder), true /* ae */, true /* af */) :
+            new ConvergedImageCaptureCommand(
+                    sharedImageReader, frameServer, rootRequestBuilder,
+                    CameraDevice.TEMPLATE_PREVIEW /* repeatingRequestTemplate */,
+                    CameraDevice.TEMPLATE_STILL_CAPTURE /* stillCaptureRequestTemplate */,
+                    Arrays.asList(rootRequestBuilder), true /* ae */);
 
-        // When flash is OFF, wait for AF convergence, but not AE convergence
+        // When flash is OFF, wait for AF convergence if AF is supported, but not AE convergence
         // (which can be very slow).
-        ImageCaptureCommand flashOffCommand = new ConvergedImageCaptureCommand(
+        ImageCaptureCommand flashOffCommand = cafSupport ? new ConvergedImageCaptureCommand(
                 sharedImageReader, frameServer, rootRequestBuilder,
                 CameraDevice.TEMPLATE_PREVIEW /* repeatingRequestTemplate */,
                 CameraDevice.TEMPLATE_STILL_CAPTURE /* stillCaptureRequestTemplate */,
-                Arrays.asList(rootRequestBuilder), false /* ae */, true /* af */);
+                Arrays.asList(rootRequestBuilder), false /* ae */, true /* af */) :
+            new ConvergedImageCaptureCommand(
+                    sharedImageReader, frameServer, rootRequestBuilder,
+                    CameraDevice.TEMPLATE_PREVIEW /* repeatingRequestTemplate */,
+                    CameraDevice.TEMPLATE_STILL_CAPTURE /* stillCaptureRequestTemplate */,
+                    Arrays.asList(rootRequestBuilder), false /* ae */);
 
-        // When flash is AUTO, wait for AF & AE.
+        // When flash is AUTO, wait for AE and AF if supported.
         // TODO OPTIMIZE If the last converged-AE state indicates that flash is
         // not necessary, then this could skip waiting for AE convergence.
-        ImageCaptureCommand flashAutoCommand = new ConvergedImageCaptureCommand(
+        ImageCaptureCommand flashAutoCommand = cafSupport ? new ConvergedImageCaptureCommand(
                 sharedImageReader, frameServer, rootRequestBuilder,
                 CameraDevice.TEMPLATE_PREVIEW /* repeatingRequestTemplate */,
                 CameraDevice.TEMPLATE_STILL_CAPTURE /* stillCaptureRequestTemplate */,
-                Arrays.asList(rootRequestBuilder), true /* ae */, true /* af */);
+                Arrays.asList(rootRequestBuilder), true /* ae */, true /* af */) :
+            new ConvergedImageCaptureCommand(
+                    sharedImageReader, frameServer, rootRequestBuilder,
+                    CameraDevice.TEMPLATE_PREVIEW /* repeatingRequestTemplate */,
+                    CameraDevice.TEMPLATE_STILL_CAPTURE /* stillCaptureRequestTemplate */,
+                    Arrays.asList(rootRequestBuilder), true /* ae */);
 
         ImageCaptureCommand flashBasedCommand = new FlashBasedPhotoCommand(logFactory, flashMode,
                 flashOnCommand, flashAutoCommand, flashOffCommand);
