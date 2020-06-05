@@ -64,19 +64,53 @@ class ConvergedImageCaptureCommand implements ImageCaptureCommand {
     private final boolean mWaitForAEConvergence;
     private final boolean mWaitForAFConvergence;
 
+    private final boolean mCAFSupport;
+
     /**
      * Transforms a request template by resetting focus and exposure modes.
      */
-    private static RequestBuilder.Factory resetFocusExposureModes(RequestBuilder.Factory template) {
+    private static RequestBuilder.Factory resetFocusExposureModes(RequestBuilder.Factory template,
+            boolean cafSupport) {
         RequestTemplate result = new RequestTemplate(template);
         result.setParam(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
-        result.setParam(CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-        result.setParam(CaptureRequest.CONTROL_AF_TRIGGER,
-                CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+        if (cafSupport) {
+            result.setParam(CaptureRequest.CONTROL_AF_MODE,
+                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            result.setParam(CaptureRequest.CONTROL_AF_TRIGGER,
+                    CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+        }
         result.setParam(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
                 CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_IDLE);
         return result;
+    }
+
+    /**
+     * @param imageReader Creates the {@link ImageStream} used for capturing
+     *            images to be saved.
+     * @param frameServer Used for interacting with the camera device.
+     * @param repeatingRequestBuilder Creates request builders to use for
+     *            repeating requests sent during the scanning phase and after
+     *            capture is complete.
+     * @param repeatingRequestTemplate The template type to use for repeating
+     *            requests.
+     * @param burst Creates request builders to use for each image captured from
+     * @param waitForAEConvergence
+     */
+    public ConvergedImageCaptureCommand(ManagedImageReader imageReader, FrameServer frameServer,
+            RequestBuilder.Factory repeatingRequestBuilder,
+            int repeatingRequestTemplate, int stillCaptureRequestTemplate,
+            List<RequestBuilder.Factory> burst, boolean waitForAEConvergence) {
+        mImageReader = imageReader;
+        mFrameServer = frameServer;
+        mRepeatingRequestBuilder = repeatingRequestBuilder;
+        mRepeatingRequestTemplate = repeatingRequestTemplate;
+        mStillCaptureRequestTemplate = stillCaptureRequestTemplate;
+        mBurst = burst;
+        mWaitForAEConvergence = waitForAEConvergence;
+        mWaitForAFConvergence = false;
+        mCAFSupport = false;
+
+        mScanRequestTemplate = resetFocusExposureModes(repeatingRequestBuilder, mCAFSupport);
     }
 
     /**
@@ -105,10 +139,10 @@ class ConvergedImageCaptureCommand implements ImageCaptureCommand {
         mBurst = burst;
         mWaitForAEConvergence = waitForAEConvergence;
         mWaitForAFConvergence = waitForAFConvergence;
+        mCAFSupport = true;
 
-        mScanRequestTemplate = resetFocusExposureModes(repeatingRequestBuilder);
+        mScanRequestTemplate = resetFocusExposureModes(repeatingRequestBuilder, mCAFSupport);
     }
-
     /**
      * Sends a request to take a picture and blocks until it completes.
      */
@@ -193,8 +227,10 @@ class ConvergedImageCaptureCommand implements ImageCaptureCommand {
         for (RequestBuilder.Factory builderTemplate : mBurst) {
             RequestBuilder builder = builderTemplate.create(mStillCaptureRequestTemplate);
 
-            builder.setParam(CaptureRequest.CONTROL_AF_MODE, CaptureRequest
-                    .CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            if (mCAFSupport) {
+                builder.setParam(CaptureRequest.CONTROL_AF_MODE, CaptureRequest
+                        .CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            }
             builder.setParam(CaptureRequest.CONTROL_CAPTURE_INTENT,
                     CaptureRequest.CONTROL_CAPTURE_INTENT_STILL_CAPTURE);
 
