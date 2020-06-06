@@ -11,6 +11,7 @@ find_port=$scripts_dir/findall.py
 qmp_handler=$scripts_dir/qmp_events_handler.sh
 thermal_utility=$scripts_dir/thermsys
 battery_utility=$scripts_dir/batsys
+audio_settings=$scripts_dir/setup_audio_host.sh
 
 ovmf_file="./OVMF.fd"
 [ ! -f $ovmf_file ] && ovmf_file="/usr/share/qemu/OVMF.fd"
@@ -289,6 +290,7 @@ function setup_audio(){
                         common_options=${common_eth_mediation}${common_options}
                 fi
                 common_options=${common_audio_mediation}${common_options}
+                $audio_settings setMicGain &
         else
 		modprobe vfio-pci
 		AUDIOController=`sudo sh -c "lspci -D -nn| grep -i 'audio '  | grep -i '1f'"`
