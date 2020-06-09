@@ -24,6 +24,33 @@ function ubu_install_qemu(){
 	tar -xf $CIV_WORK_DIR/$QEMU_REL.tar.xz
 	cd $CIV_WORK_DIR/$QEMU_REL/
 	patch -p1 < $CIV_WORK_DIR/patches/qemu/Disable-EDID-auto-generation-in-QEMU.patch
+	./configure --prefix=/usr \
+		--enable-kvm \
+		--disable-xen \
+		--enable-libusb \
+		--enable-debug-info \
+		--enable-debug \
+		--enable-sdl \
+		--enable-vhost-net \
+		--enable-spice \
+		--disable-debug-tcg \
+		--enable-opengl \
+		--enable-gtk \
+		--enable-virtfs \
+		--target-list=x86_64-softmmu \
+		--audio-drv-list=pa
+	make -j24
+	make install
+	cd -
+}
+
+function ubu_install_qemu_gvtd(){
+	apt purge -y "qemu*"
+	apt autoremove -y
+	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool uml-utilities xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid libgl1-mesa-dri
+	wget https://download.qemu.org/$QEMU_REL.tar.xz -P $CIV_WORK_DIR
+	tar -xf $CIV_WORK_DIR/$QEMU_REL.tar.xz
+	cd $CIV_WORK_DIR/$QEMU_REL/
 	patch -p1 < $CIV_WORK_DIR/patches/qemu/0001-Revert-Revert-vfio-pci-quirks.c-Disable-stolen-memor.patch
 	./configure --prefix=/usr \
 		--enable-kvm \
@@ -56,7 +83,6 @@ function install_9p_module(){
 function ubu_build_ovmf(){
 	sudo apt install -y uuid-dev nasm acpidump iasl
 	cd $CIV_WORK_DIR/$QEMU_REL/roms/edk2
-	patch -p4 < $CIV_WORK_DIR/patches/ovmf/OvmfPkg-add-IgdAssgingmentDxe-for-qemu-4_2_0.patch
 	source ./edksetup.sh
 	make -C BaseTools/
 	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE -DTPM2_ENABLE=TRUE
@@ -64,18 +90,42 @@ function ubu_build_ovmf(){
 	cd -
 }
 
-function ubu_enable_host(){
-	if [[ ! `cat /etc/default/grub` =~ "i915.enable_gvt=1 intel_iommu=on i915.force=probe=*" ]]; then
-		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-g and GVT-d, do you want to continue? [Y/n]" res
+function ubu_build_ovmf_gvtd(){
+	sudo apt install -y uuid-dev nasm acpidump iasl
+	cd $CIV_WORK_DIR/$QEMU_REL/roms/edk2
+	patch -p4 < $CIV_WORK_DIR/patches/ovmf/OvmfPkg-add-IgdAssgingmentDxe-for-qemu-4_2_0.patch
+	source ./edksetup.sh
+	make -C BaseTools/
+	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE
+	cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd ../../../OVMF.fd
+	cd -
+}
+
+function ubu_enable_host_gvtg(){
+	if [[ ! `cat /etc/default/grub` =~ "i915.enable_gvt=1 intel_iommu=on" ]]; then
+		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-g, do you want to continue? [Y/n]" res
 		if [ x$res = xn ]; then
 			exit 0
 		fi
-		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"i915.enable_gvt=1 intel_iommu=on i915.force=probe=*/g" /etc/default/grub
+		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"i915.enable_gvt=1 intel_iommu=on /g" /etc/default/grub
 		update-grub
 
 		echo -e "\nkvmgt\nvfio-iommu-type1\nvfio-mdev\n" >> /etc/initramfs-tools/modules
 		update-initramfs -u -k all
 
+		reboot_required=1
+	fi
+}
+
+function ubu_enable_host_gvtd(){
+	systemctl set-default multi-user.target
+	if [[ ! `cat /etc/default/grub` =~ "intel_iommu=on i915.force=probe=* " ]]; then
+		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-d, do you want to continue? [Y/n]" res
+		if [ x$res = xn ]; then
+			exit 0
+		fi
+		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"intel_iommu=on i915.force_probe=* /g" /etc/default/grub
+		update-grub
 		reboot_required=1
 	fi
 }
@@ -185,11 +235,14 @@ if [[ $version =~ "Ubuntu" ]]; then
 	check_kernel
 	#Auto start service for audio will be enabled in future
 	#install_auto_start_service
-	ubu_install_qemu
-	ubu_build_ovmf
-	ubu_enable_host
 	if [[ $1 == "--gvtd" ]]; then
-		systemctl set-default multi-user.target
+		ubu_install_qemu_gvtd
+		ubu_build_ovmf_gvtd
+		ubu_enable_host_gvtd
+	else
+		ubu_install_qemu
+		ubu_build_ovmf
+		ubu_enable_host_gvtg
 	fi
 	if [[ ! -d $CIV_WORK_DIR/sof_audio ]]; then
 		reboot_required=1
