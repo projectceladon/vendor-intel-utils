@@ -10,7 +10,7 @@ using namespace android;
 bool get_battery_properties(android::BatteryProperties *props);
 
 struct header {
-    uint8_t intelipc[8];
+    uint8_t intelipc[9];
     uint16_t notify_id;
     uint16_t length;
 };

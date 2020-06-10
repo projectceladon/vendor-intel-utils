@@ -55,7 +55,7 @@ struct zone_info {
 };
 
 struct header {
-	uint8_t intelipcid[8];
+	uint8_t intelipcid[9];
 	uint16_t notifyid;
 	uint16_t length;
 };
