@@ -154,6 +154,8 @@ KERNELFLINGER_SUPPORT_LIVE_BOOT ?= true
 BOARD_HOSTAPD_DRIVER := NL80211
 BOARD_WPA_SUPPLICANT_DRIVER := NL80211
 WPA_SUPPLICANT_VERSION := VER_2_1_DEVEL
+# required for wifi HAL support
+BOARD_WLAN_DEVICE := iwlwifi
 
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/common
 ##############################################################
