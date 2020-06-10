@@ -113,8 +113,11 @@ public class PhotoPreview {
                             Intent scanIntent = new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE);
                             scanIntent.setData(Uri.fromFile(file));
                             mActivity.sendBroadcast(scanIntent);
-                            preView.setImageResource(android.R.color.background_dark);
-                            details.setVisibility(View.INVISIBLE);
+                            FrameLayout previewLayout;
+                            previewLayout = mActivity.findViewById(R.id.previewLayout);
+                            previewLayout.setVisibility(View.GONE);
+
+                            mRoundedThumbnailView.hideThumbnail();
                         }
                     }
                 });
