@@ -431,7 +431,6 @@ public class FullScreenActivity extends AppCompatActivity {
 
     @Override
     protected void onPause() {
-        unregisterReceiver(mUsbReceiver);
         super.onPause();
     }
 
