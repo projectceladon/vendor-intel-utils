@@ -66,27 +66,26 @@ else
 fi
 
 WIFI_PT="false"
+BT_PT="true"
+ETH_PT="false"
 
 for each in $@
         do
         if [[ $each == "--wifi-passthrough" ]]
-                then
+        then
                 WIFI_PT="true"
                 echo WIFI_PT: $WIFI_PT
-                break
-	fi
-done
-BT_PT="true"
-
-for each in $@
-	do
-	if [[ $each == "--bt-host" ]]
+	elif [[ $each == "--bt-host" ]]
 	then
 		BT_PT="false"
 		echo BT_PT: $BT_PT
-		break
+	elif [[ $each == "--eth-passthrough" ]]
+	then
+		ETH_PT="true"
+		echo ETH_PT: $ETH_PT
 	fi
 done
+
 
 if [ $BT_PT = "true" ]
 then
@@ -162,15 +161,6 @@ common_sd_emmc="\
  -smbios "type=2,serial=$smbios_serialno" \
  -nodefaults
 "
-#ethernet mediation
-AUDIOController=`sudo sh -c "lspci -D -nn| grep -i 'audio'"`
-AUDIOControllerId=${AUDIOController:8:2}
-eth_check=`sudo sh -c "lspci -D -nn | grep -i '$AUDIOControllerId'"`
-if [[ "$eth_check" != *"Ethernet"* ]]; then
-        common_options=${common_eth_mediation}${common_options}
-        echo $common_options
-fi
-
 usb_vfio_passthrough="false"
 for arg in $*
 do
@@ -200,6 +190,66 @@ do
                break;
         fi
 done
+
+function setup_ethernet(){
+	EthController=`sudo sh -c "lspci -D -nn| grep -i 'Ethernet'"`
+	EthControllerId=${EthController:8:2}
+	sharing="false"
+	sharing_with="false"
+	if [ `sudo sh -c "lspci -D -nn | grep -i '$EthControllerId'" | wc -l` > 1 ]
+	then
+		sharing="true"
+		iommu_group=`sudo sh -c "lspci -D -nn | grep -i '$EthControllerId'"`
+		if [[ $iommu_group == *"Audio"* ]]
+		then
+			sharing_with="audio"
+		elif [[ $iommu_group == *"USB"* ]]
+		then
+			sharing_with="usb"
+		fi
+		echo "Ethernet sharing: $sharing with: $sharing_with "
+	fi
+
+	if [[ `sudo sh -c "lsusb -v | grep -e 'Ethernet Networking' | wc -l"` && $usb_vfio_passthrough == 'true' ]]
+	then
+		sharing="true"
+		sharing_with="usb"
+	        echo "Ethernet sharing: $sharing with: $sharing_with "
+	fi
+
+	if [ $ETH_PT == 'false' ]; then
+		if [ $sharing == 'true' ]
+		then
+			if [[ $sharing_with == "audio" && $audio_vfio_passthrough == 'true' ]]
+			then
+				common_eth_mediation=""
+			elif [[ $sharing_with == 'usb' && $usb_vfio_passthrough == 'true' ]]
+			then
+				common_eth_mediation=""
+			fi
+			#TBD, further checks are needed when ethernet is grouped with different devices
+		fi
+		common_options=${common_eth_mediation}${common_options}
+	else
+		modprobe vfio-pci
+		EthBusId=${EthController:0:13}
+		EthBusId=`echo $EthBusId| awk '{gsub(/^\s+|\s+$/, "");print}'`
+		iommu_group_devices=`sudo sh -c "ls /sys/bus/pci/devices/${EthBusId}/iommu_group/devices/"`
+		str=`echo $iommu_group_devices | sed -e 's/\s\+/,/g'`
+	        str=","${str}
+
+		while [ -n "$str" ]; do
+			device=${str##*,}
+			device_id=`sudo sh -c "lspci -D -nn |grep ${device} |grep -o [0-9a-f][0-9a-f][0-9a-f][0-9a-f]:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"`
+			commandstr="-device vfio-pci,host=${device#*:} "
+			sudo sh -c "echo ${device} > /sys/bus/pci/devices/${device}/driver/unbind"
+			sudo sh -c "echo ${device_id/:/ } > /sys/bus/pci/drivers/vfio-pci/new_id"
+			common_options=${commandstr}${common_options}
+			str=${str%,*}
+	        done
+		#TBD for usb ethernet
+	fi
+}
 
 sdemmc_exist="false"
 for arg in $*
@@ -286,9 +336,6 @@ function setup_usb_vfio_passthrough(){
 function setup_audio(){
 	# handling ethernet here when it is in the same group of audio in lspci
         if [[ $audio_vfio_passthrough == "false" ]]; then
-                if [[ "$eth_check" == *"Ethernet"* ]]; then
-                        common_options=${common_eth_mediation}${common_options}
-                fi
                 common_options=${common_audio_mediation}${common_options}
                 $audio_settings setMicGain &
         else
@@ -349,6 +396,7 @@ function launch_hwrender(){
 	fi
 	
 	setup_sdcard
+	setup_ethernet
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
@@ -420,6 +468,7 @@ function launch_hwrender_gvtd(){
 		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
 	fi
 	setup_sdcard
+	setup_ethernet
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
