@@ -3,10 +3,9 @@
 rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
-#git clone https://github.com/projectceladon/vendor-intel-utils
-git clone https://chromium.googlesource.com/chromiumos/third_party/kernel
-cd kernel
-git checkout 7ce9d039b0b4636826b89a39ecdbeaa7fd4e2ac3
+git clone https://github.com/projectceladon/linux-intel-lts2019-chromium.git
+cd linux-intel-lts2019-chromium
+git checkout 81b0b6899182d3d6ef496092b559eae49a8b6776
 cp ../../x86_64_defconfig .config
 patch_list=`find ../../ -iname "*.patch" | sort -u`
 for i in $patch_list

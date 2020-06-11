@@ -4,9 +4,8 @@ rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
 git clone https://github.com/projectceladon/vendor-intel-utils
-git clone https://github.com/intel/linux-intel-lts.git
-cd linux-intel-lts
-git checkout 61b917f571560989b82cf63142ee37c525e8ee5a
+git clone https://github.com/projectceladon/linux-intel-lts2019-yocto.git
+cd linux-intel-lts2019-yocto
 cp ../vendor-intel-utils/host/kernel/lts2019-yocto/x86_64_defconfig .config
 patch_list=`find ../vendor-intel-utils/host/kernel/lts2019-yocto -iname "*.patch" | sort -u`
 for i in $patch_list
