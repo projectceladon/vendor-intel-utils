@@ -24,6 +24,7 @@ previous_project=""
 conflict=""
 conflict_list=""
 applied_already=""
+max_check_num=10000
 
 apply_patch() {
 
@@ -55,7 +56,7 @@ apply_patch() {
     cd $top_dir/$current_project
     a=`grep "Date: " ${pd}/$i`
     b=`echo ${a#"Date: "}`
-    c=`git log --pretty=format:%aD | grep "$b"`
+    c=`git log -n $max_check_num --pretty=format:%aD | grep "$b"`
 
     if [[ "$c" == "" ]] ; then
       git am -3 --keep-cr --whitespace=nowarn $pd/$i >& /dev/null
