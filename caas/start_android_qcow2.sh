@@ -148,6 +148,7 @@ common_sd_emmc="\
  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
  -cpu host \
  -qmp stdio \
+ -qmp tcp:localhost:4444,server,nowait \
  -drive file=$ovmf_file,format=raw,if=pflash \
  -chardev socket,id=charserial0,path=./kernel-console,server,nowait \
  -device isa-serial,chardev=charserial0,id=serial0 \
@@ -457,6 +458,11 @@ function launch_hwrender(){
 }
 
 function launch_hwrender_gvtd(){
+	if [ $GUEST_PM = "true" ]
+	then
+		common_options=${common_guest_pm_control}${common_options}
+		./guest_pm_control qmp-sock &
+	fi
 	if [ $WIFI_PT = "true" ]
 	then
 		rfkill unblock all
