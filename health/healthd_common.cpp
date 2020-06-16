@@ -40,7 +40,7 @@
 #include <health2/Health.h>
 #include <health2/battery_notifypkt.h>
 
-#define HEALTH_PORT 1234
+#define HEALTH_PORT 14196
 
 using namespace android;
 

@@ -30,7 +30,7 @@
 #define CPU_USAGE_FILE              "/proc/stat"
 #define CPU_ONLINE_FILE             "/sys/devices/system/cpu/online"
 #define TEMP_UNIT                   1000
-#define THERMAL_PORT                1235
+#define THERMAL_PORT                14096
 #define MAX_ZONES                   40
 
 namespace android {
