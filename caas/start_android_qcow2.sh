@@ -51,6 +51,12 @@ function setup_gvtd(){
 	return $res
 }
 
+function setup_virtio_gpu(){
+	echo "Launching Virtio GPU..."
+	virglrender_version=`/usr/bin/pkg-config --modversion virglrenderer`
+	echo "Host libvirglrenderer version is ${virglrender_version}"
+}
+
 function create_snd_dummy(){
 	modprobe snd-dummy
 }
@@ -488,11 +494,60 @@ function launch_hwrender_gvtd(){
 	cleanup_vsock_host_utilities
 }
 
+function launch_virtio_gpu(){
+	if [ $GUEST_PM = "true" ]
+	then
+		common_options=${common_guest_pm_control}${common_options}
+		./guest_pm_control qmp-sock &
+	fi
+	if [ $WIFI_PT = "true" ]
+	then
+		rfkill unblock all
+		PCI_ID=`lspci -D -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`
+		echo $PCI_ID > /sys/bus/pci/devices/`echo $PCI_ID | sed 's/:/\\:/g'`/driver/unbind
+		modprobe vfio-pci
+		DEVICE_ID=`lspci -nn  | grep -oP 'Network controller.*\[\K[\w:]+'`
+		echo $DEVICE_ID | sed 's/:/\ /g' > /sys/bus/pci/drivers/vfio-pci/new_id
+		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
+	fi
+	setup_sdcard
+	setup_ethernet
+	setup_usb_vfio_passthrough setup
+	setup_audio
+	setup_vsock_host_utilities
+	qemu-system-x86_64 \
+	-device virtio-gpu-pci \
+	$WIFI_VFIO_OPTIONS \
+	$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
+	setup_usb_vfio_passthrough remove
+	cleanup_vsock_host_utilities
+}
+
 function launch_swrender(){
+	if [ $GUEST_PM = "true" ]
+	then
+		common_options=${common_guest_pm_control}${common_options}
+		./guest_pm_control qmp-sock &
+	fi
+	if [ $WIFI_PT = "true" ]
+	then
+		rfkill unblock all
+		PCI_ID=`lspci -D -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`
+		echo $PCI_ID > /sys/bus/pci/devices/`echo $PCI_ID | sed 's/:/\\:/g'`/driver/unbind
+		modprobe vfio-pci
+		DEVICE_ID=`lspci -nn  | grep -oP 'Network controller.*\[\K[\w:]+'`
+		echo $DEVICE_ID | sed 's/:/\ /g' > /sys/bus/pci/drivers/vfio-pci/new_id
+		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
+	fi
+	setup_sdcard
+	setup_ethernet
+	setup_usb_vfio_passthrough setup
+	setup_audio
+	setup_vsock_host_utilities
 	if [[ $1 == "--display-off" ]]
         then
 		qemu-system-x86_64 \
-		-device qxl-vga,xres=1280,yres=720 \
+		-device qxl-vga,xres=480,yres=360 \
 		-pidfile android_vm.pid \
 		$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }" &
 		sleep 5
@@ -501,9 +556,11 @@ function launch_swrender(){
 		echo -ne '\n'
 	else
 		qemu-system-x86_64 \
-		-device qxl-vga,xres=1280,yres=720 \
+		-device qxl-vga,xres=480,yres=360 \
 		$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	fi
+	setup_usb_vfio_passthrough remove
+	cleanup_vsock_host_utilities
 }
 
 function check_nested_vt(){
@@ -526,6 +583,8 @@ if [[ "$vno" > "5.0.0" ]]; then
 	create_snd_dummy
 	if [[ $1 == "--gvtd" ]]; then
 		setup_gvtd
+	elif [[ $1 == "--virtio_gpu" ]]; then
+		setup_virtio_gpu
 	else
 		setup_vgpu
 	fi
@@ -536,6 +595,8 @@ if [[ "$vno" > "5.0.0" ]]; then
 	if [[ $? == 0 ]]; then
 		if [[ $1 == "--gvtd" ]]; then
 			launch_hwrender_gvtd
+		elif [[ $1 == "--virtio_gpu" ]]; then
+			launch_virtio_gpu
 		else
 			launch_hwrender $1
 		fi
