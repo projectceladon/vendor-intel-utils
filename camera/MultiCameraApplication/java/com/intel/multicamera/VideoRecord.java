@@ -438,6 +438,11 @@ public class VideoRecord implements MediaRecorder.OnErrorListener, MediaRecorder
                     mAudioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
             for (AudioDeviceInfo audioDeviceInfo : deviceList) {
                 if (audioDeviceInfo.getType() == AudioDeviceInfo.TYPE_USB_DEVICE) {
+                    Log.d(TAG, "Setting preferred device to TYPE_USB_DEVICE");
+                    mMediaRecorder.setPreferredDevice(audioDeviceInfo);
+                    break;
+                } else if (audioDeviceInfo.getType() == AudioDeviceInfo.TYPE_USB_HEADSET) {
+                    Log.d(TAG, "Setting preferred device to TYPE_USB_HEADSET");
                     mMediaRecorder.setPreferredDevice(audioDeviceInfo);
                     break;
                 }
