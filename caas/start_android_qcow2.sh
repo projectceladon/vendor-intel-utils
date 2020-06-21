@@ -217,7 +217,7 @@ function setup_ethernet(){
 		echo "Ethernet sharing: $sharing with: $sharing_with "
 	fi
 
-	if [[ `sudo sh -c "lsusb -v | grep -e 'Ethernet Networking' | wc -l"` && $usb_vfio_passthrough == 'true' ]]
+	if [[ `sudo sh -c "lsusb -v | grep -e 'Ethernet Networking' | wc -l"` > 0 && $usb_vfio_passthrough == 'true' ]]
 	then
 		sharing="true"
 		sharing_with="usb"
