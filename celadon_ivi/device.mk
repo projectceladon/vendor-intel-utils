@@ -234,6 +234,8 @@ PRODUCT_COPY_FILES += \
 ifeq ($(BASE_YOCTO_KERNEL), true)
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/audio/default/mixer_paths_ehl.xml:vendor/etc/mixer_paths_0.xml
+
+PRODUCT_PROPERTY_OVERRIDES += ro.vendor.hdmi.audio=ehl
 else
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/audio/default/mixer_paths_0.xml:vendor/etc/mixer_paths_0.xml

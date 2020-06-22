@@ -229,6 +229,8 @@ else
 INTEL_AUDIO_HAL := stub
 endif
 
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/audio
+
 # Use XML audio policy configuration file
 USE_XML_AUDIO_POLICY_CONF := 1
 # Use configurable audio policy
