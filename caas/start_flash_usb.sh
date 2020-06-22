@@ -14,7 +14,7 @@ then
 	fi
 fi
 
-qemu-img create -f qcow2 android.qcow2 16G
+qemu-img create -f qcow2 android.qcow2 32G
 
 [ -d "./flashfiles_decompress" ] && rm -rf "./flashfiles_decompress"
 mkdir ./flashfiles_decompress
