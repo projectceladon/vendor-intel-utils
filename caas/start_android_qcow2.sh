@@ -168,6 +168,16 @@ common_sd_emmc="\
  -smbios "type=2,serial=$smbios_serialno" \
  -nodefaults
 "
+
+HPI2CTouchDev=/dev/input/by-path/pci-0000:00:15.0-platform-i2c_designware.0-event
+if [ -e "$HPI2cTouchDev" ]
+then
+   common_touch_i2c_device="\
+      -device virtio-input-host-pci,evdev=/dev/input/by-path/pci-0000:00:15.0-platform-i2c_designware.0-event \
+      "
+   common_options=${common_touch_i2c_device}${common_options}
+fi
+
 usb_vfio_passthrough="false"
 for arg in $*
 do
