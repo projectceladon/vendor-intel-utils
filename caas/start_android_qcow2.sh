@@ -421,7 +421,7 @@ function launch_hwrender(){
 	if [ $GUEST_PM = "true" ]
 	then
 		 common_options=${common_guest_pm_control}${common_options}
-		./guest_pm_control qmp-sock &
+		./scripts/guest_pm_control qmp-sock &
 	fi
 
 	if [[ $1 == "--display-off" ]]
@@ -477,7 +477,7 @@ function launch_hwrender_gvtd(){
 	if [ $GUEST_PM = "true" ]
 	then
 		common_options=${common_guest_pm_control}${common_options}
-		./guest_pm_control qmp-sock &
+		./scripts/guest_pm_control qmp-sock &
 	fi
 	if [ $WIFI_PT = "true" ]
 	then
@@ -508,7 +508,7 @@ function launch_virtio_gpu(){
 	if [ $GUEST_PM = "true" ]
 	then
 		common_options=${common_guest_pm_control}${common_options}
-		./guest_pm_control qmp-sock &
+		./scripts/guest_pm_control qmp-sock &
 	fi
 	if [ $WIFI_PT = "true" ]
 	then
@@ -537,7 +537,7 @@ function launch_swrender(){
 	if [ $GUEST_PM = "true" ]
 	then
 		common_options=${common_guest_pm_control}${common_options}
-		./guest_pm_control qmp-sock &
+		./scripts/guest_pm_control qmp-sock &
 	fi
 	if [ $WIFI_PT = "true" ]
 	then
