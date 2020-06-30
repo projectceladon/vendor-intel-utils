@@ -282,6 +282,7 @@ PRODUCT_COPY_FILES += $(LOCAL_PATH)/thermald.service:$(PRODUCT_OUT)/scripts/ther
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/qmp_events_handler.sh:$(PRODUCT_OUT)/scripts/qmp_events_handler.sh
 PRODUCT_COPY_FILES += device/intel/civ/host/backend/battery/bin/batsys:$(PRODUCT_OUT)/scripts/batsys
 PRODUCT_COPY_FILES += device/intel/civ/host/backend/thermal/bin/thermsys:$(PRODUCT_OUT)/scripts/thermsys
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/wakeup.py:$(PRODUCT_OUT)/scripts/wakeup.py
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/product.mk
 ##############################################################
