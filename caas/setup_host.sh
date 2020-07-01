@@ -1,14 +1,22 @@
 #!/bin/bash
 
+set -eE
+
+function error() {
+	local line=$1
+	local cmd=$2
+	echo "$BASH_SOURCE Failed at line($line): $cmd"
+}
+trap 'error ${LINENO} "$BASH_COMMAND"' ERR
+
 reboot_required=0
 QEMU_REL=qemu-4.2.0
-a=`grep -rn CIV_WORK_DIR /etc/environment`
 CIV_WORK_DIR=$(pwd)
 
 function ubu_changes_require(){
 	echo "Please make sure your apt is working"
 	echo "If you run the installation first time, reboot is required"
-	read -p "QEMU version will be replaced (it could be recovered by 'apt purge qemu*, apt install qemu'), do you want to continue? [Y/n]" res
+	read -p "QEMU version will be replaced (it could be recovered by 'apt purge ^qemu, apt install qemu'), do you want to continue? [Y/n]" res
 	if [ x$res = xn ]; then
 		exit 0
 	fi
@@ -16,12 +24,14 @@ function ubu_changes_require(){
 }
 
 function ubu_install_qemu(){
-	apt purge -y "qemu*"
+	apt purge -y "^qemu"
 	apt autoremove -y
-	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex libvirglrenderer-dev
+	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0-0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex libvirglrenderer-dev
 
-	wget https://download.qemu.org/$QEMU_REL.tar.xz -P $CIV_WORK_DIR
+	[ ! -f $CIV_WORK_DIR/$QEMU_REL.tar.xz ] && wget https://download.qemu.org/$QEMU_REL.tar.xz -P $CIV_WORK_DIR
+	[ -d $CIV_WORK_DIR/$QEMU_REL ] && rm -rf $CIV_WORK_DIR/$QEMU_REL
 	tar -xf $CIV_WORK_DIR/$QEMU_REL.tar.xz
+
 	cd $CIV_WORK_DIR/$QEMU_REL/
 	patch -p1 < $CIV_WORK_DIR/patches/qemu/Disable-EDID-auto-generation-in-QEMU.patch
 	./configure --prefix=/usr \
@@ -45,11 +55,14 @@ function ubu_install_qemu(){
 }
 
 function ubu_install_qemu_gvtd(){
-	apt purge -y "qemu*"
+	apt purge -y "^qemu"
 	apt autoremove -y
-	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool uml-utilities xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0.0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid libgl1-mesa-dri
-	wget https://download.qemu.org/$QEMU_REL.tar.xz -P $CIV_WORK_DIR
+	apt install -y git python-dev libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool uml-utilities xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0-0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex gcc g++ flex pkg-config python-pip libpulse-dev uuid-runtime uuid libgl1-mesa-dri
+
+	[ ! -f $CIV_WORK_DIR/$QEMU_REL.tar.xz ] && wget https://download.qemu.org/$QEMU_REL.tar.xz -P $CIV_WORK_DIR
+	[ -d $CIV_WORK_DIR/$QEMU_REL ] && rm -rf $CIV_WORK_DIR/$QEMU_REL
 	tar -xf $CIV_WORK_DIR/$QEMU_REL.tar.xz
+
 	cd $CIV_WORK_DIR/$QEMU_REL/
 	patch -p1 < $CIV_WORK_DIR/patches/qemu/0001-Revert-Revert-vfio-pci-quirks.c-Disable-stolen-memor.patch
 	./configure --prefix=/usr \
@@ -77,7 +90,7 @@ function install_9p_module(){
 	sudo modprobe 9pnet
 	sudo modprobe 9pnet_virtio
 	sudo modprobe 9p
-	mkdir $CIV_WORK_DIR/share_folder
+	mkdir -p $CIV_WORK_DIR/share_folder
 }
 
 function ubu_build_ovmf(){
@@ -185,21 +198,11 @@ function clr_enable_host_gvtg(){
 
 function prepare_required_scripts(){
 	chmod +x $CIV_WORK_DIR/scripts/*.sh
-	mkdir $CIV_WORK_DIR/sof_audio
-	mv -t $CIV_WORK_DIR/sof_audio $CIV_WORK_DIR/scripts/sof_audio/configure_sof.sh $CIV_WORK_DIR/scripts/sof_audio/blacklist-dsp.conf
+	cp -R $CIV_WORK_DIR/scripts/sof_audio/ $CIV_WORK_DIR/
 	chmod +x $CIV_WORK_DIR/scripts/guest_pm_control
 	chmod +x $CIV_WORK_DIR/scripts/findall.py
 	chmod +x $CIV_WORK_DIR/scripts/thermsys
 	chmod +x $CIV_WORK_DIR/scripts/batsys
-}
-
-function save_env(){
-	if [ -z "$a" ]; then
-		echo "export CIV_WORK_DIR=$(pwd)" | tee -a /etc/environment
-	else
-		sed -i "s|export CIV_WORK_DIR.*||g" /etc/environment
-		echo "export CIV_WORK_DIR=$(pwd)" | tee -a /etc/environment
-	fi
 }
 
 function install_auto_start_service(){
@@ -231,7 +234,6 @@ version=`cat /proc/version`
 if [[ $version =~ "Ubuntu" ]]; then
 	check_network
 	ubu_changes_require
-	save_env
 	check_kernel
 	#Auto start service for audio will be enabled in future
 	#install_auto_start_service
