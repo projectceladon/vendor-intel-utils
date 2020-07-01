@@ -18,6 +18,7 @@
 package com.intel.multicamera;
 
 import android.Manifest;
+import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -32,6 +33,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
+import android.view.Window;
 import android.view.WindowManager;
 import android.widget.ImageButton;
 import android.widget.ImageView;
@@ -50,7 +52,7 @@ import static com.intel.multicamera.MultiViewActivity.updateStorageSpace;
 public class SingleCameraActivity extends AppCompatActivity {
     private static final String TAG = "SingleCameraActivity";
     private boolean mHasCriticalPermissions;
-
+    private int isDialogShown;
     private int numOfCameras;
     private AutoFitTextureView mCamera_BackView, mCamera_FrontView;
 
@@ -76,7 +78,7 @@ public class SingleCameraActivity extends AppCompatActivity {
         if (actionBar != null) {
             actionBar.setHomeButtonEnabled(true);
         }
-
+        isDialogShown = 0;
         setContentView(R.layout.activity_full_screen);
 
         mIsRecordingVideo = false;
@@ -94,7 +96,54 @@ public class SingleCameraActivity extends AppCompatActivity {
 
         checkPermissions();
         OpenCamera();
+        try {
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+            filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
 
+            // BroadcastReceiver when insert/remove the device USB plug into/from a USB port
+            mUsbReceiver = new BroadcastReceiver() {
+                public void onReceive(Context context, Intent intent) {
+                    String action = intent.getAction();
+                    if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
+                        System.out.println(TAG + "BroadcastReceiver USB Connected");
+                        if (isDialogShown == 0) {
+                            Dialog detailDialog = USBChangeDialog.create(SingleCameraActivity.this);
+                            detailDialog.setCancelable(false);
+                            detailDialog.setCanceledOnTouchOutside(false);
+                            detailDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                            detailDialog.show();
+                            isDialogShown = 1;
+                            mCameraSwitch.setVisibility(View.GONE);
+                            mCameraRecord.setVisibility(View.GONE);
+                            mCameraPicture.setVisibility(View.GONE);
+                            mCameraSplit.setVisibility(View.GONE);
+                        }
+
+                    } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                        System.out.println(TAG + "BroadcastReceiver USB Disconnected");
+                        if (isDialogShown == 0) {
+                            Dialog detailDialog = USBChangeDialog.create(SingleCameraActivity.this);
+                            detailDialog.setCancelable(false);
+                            detailDialog.setCanceledOnTouchOutside(false);
+                            detailDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                            detailDialog.show();
+                            isDialogShown = 1;
+                            mCameraSwitch.setVisibility(View.GONE);
+                            mCameraRecord.setVisibility(View.GONE);
+                            mCameraPicture.setVisibility(View.GONE);
+                            mCameraSplit.setVisibility(View.GONE);
+                        }
+                    }
+                }
+            };
+            registerReceiver(mUsbReceiver , filter);
+        } catch (Exception e) {
+            //there is race condition when camera connection app is trying to open during that
+            // time is camera is disconnect suddently then its trying to access non exist device
+            //nodes hence crash is observed
+            System.out.println(TAG + " Exception occured during USB attach and detach");
+        }
 
         mCameraSwitch.setOnClickListener(new View.OnClickListener() {
             @Override

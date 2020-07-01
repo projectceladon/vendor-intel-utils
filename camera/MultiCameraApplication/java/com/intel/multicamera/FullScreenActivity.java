@@ -22,6 +22,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
 import android.Manifest;
+import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -36,6 +37,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
+import android.view.Window;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
@@ -58,6 +60,7 @@ public class FullScreenActivity extends AppCompatActivity {
     private int numOfCameras;
     private AutoFitTextureView mCamera_BackView, mCamera_FrontView;
 
+    private int isDialogShown;
     private ImageButton mCameraSwitch, mCameraPicture, mCameraRecord, mCameraSplit, mSettings;
     private ImageButton mSettingClose;
 
@@ -78,6 +81,7 @@ public class FullScreenActivity extends AppCompatActivity {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
+        isDialogShown = 0;
         ActionBar actionBar = getSupportActionBar();
         if (actionBar != null) {
             actionBar.setHomeButtonEnabled(true);
@@ -99,28 +103,51 @@ public class FullScreenActivity extends AppCompatActivity {
         checkPermissions();
 
         openBackCamera();
+        try {
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
+            filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
 
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
-        filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+            // BroadcastReceiver when insert/remove the device USB plug into/from a USB port
+            mUsbReceiver = new BroadcastReceiver() {
+                public void onReceive(Context context, Intent intent) {
+                    String action = intent.getAction();
+                    if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
+                        System.out.println(TAG + "BroadcastReceiver USB Connected");
+                        if (isDialogShown == 0) {
+                            Dialog detailDialog = USBChangeDialog.create(FullScreenActivity.this);
+                            detailDialog.setCancelable(false);
+                            detailDialog.setCanceledOnTouchOutside(false);
+                            detailDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                            detailDialog.show();
+                            isDialogShown = 1;
+                            mCameraSwitch.setVisibility(View.GONE);
+                            mCameraRecord.setVisibility(View.GONE);
+                            mCameraPicture.setVisibility(View.GONE);
+                            mCameraSplit.setVisibility(View.GONE);
+                        }
 
-        // BroadcastReceiver when insert/remove the device USB plug into/from a USB port
-        mUsbReceiver = new BroadcastReceiver() {
-            public void onReceive(Context context, Intent intent) {
-                String action = intent.getAction();
-                System.out.println("BroadcastReceiver Event");
-                if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
-                    System.out.println(TAG+"BroadcastReceiver USB Connected");
-                    openBackCamera();
-
-                } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
-                    System.out.println(TAG+"BroadcastReceiver USB Disconnected");
-                    openBackCamera();
+                    } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
+                        System.out.println(TAG + "BroadcastReceiver USB Disconnected");
+                        if (isDialogShown == 0) {
+                            Dialog detailDialog = USBChangeDialog.create(FullScreenActivity.this);
+                            detailDialog.setCancelable(false);
+                            detailDialog.setCanceledOnTouchOutside(false);
+                            detailDialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+                            detailDialog.show();
+                            isDialogShown = 1;
+                            mCameraSwitch.setVisibility(View.GONE);
+                            mCameraRecord.setVisibility(View.GONE);
+                            mCameraPicture.setVisibility(View.GONE);
+                            mCameraSplit.setVisibility(View.GONE);
+                        }
+                    }
                 }
-            }
-        };
+            };
 
-        registerReceiver(mUsbReceiver , filter);
+            registerReceiver(mUsbReceiver , filter);
+        } catch (Exception e) {
+        }
 
         mCameraSwitch.setOnClickListener(new View.OnClickListener() {
             @Override
