@@ -267,7 +267,8 @@ PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/audio/default/effect/audio_effects.xml:vendor/etc/audio_effects.xml
 ifeq ($(BASE_YOCTO_KERNEL), true)
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/audio/default/mixer_paths_ehl.xml:vendor/etc/mixer_paths_0.xml
+    $(LOCAL_PATH)/audio/default/mixer_paths_ehl.xml:vendor/etc/mixer_paths_0.xml \
+    $(LOCAL_PATH)/audio/default/mixer_paths_usb.xml:vendor/etc/mixer_paths_usb.xml
 
 PRODUCT_PROPERTY_OVERRIDES += ro.vendor.hdmi.audio=ehl
 else
