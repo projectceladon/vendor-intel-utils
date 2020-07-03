@@ -22,6 +22,13 @@ GVTg_VGPU_TYPE="i915-GVTg_V5_4"
 SDONLY_DEV_PATH="/dev/mmcblk0p1"
 SDEMMC_DEV_PATH="/dev/mmcblk1p1"
 
+RPMB_PATH=${scripts_dir}
+RPMB_DEV=${RPMB_PATH}/rpmb_dev
+RPMB_DATA=${work_dir}/RPMB_DATA
+RPMB_SOCK=${work_dir}/rpmb_sock
+RPMB_INIT_KEY="ea df 64 44 ea 65 5d 1c 87 27 d4 20 71 0d 53 42 dd 73 a3 38 63 e1 d7 94 c3 72 a6 ea e0 64 64 e6"
+RPMB_DEV_PID=
+
 function network_setup(){
 	#setup unprivileged ICMP on the host for ping to work on guest side.
 	sysctl -w net.ipv4.ping_group_range='0 2147483647'
@@ -143,7 +150,9 @@ common_sd_only="\
 common_sd_emmc="\
  -drive file=$SDEMMC_DEV_PATH,format=raw,id=sdcard0 \
 "
- common_options="\
+
+# Caution: Please keep rpmb0 device always be the first virtio device
+common_options="\
  -m 2048 -smp 2 -M q35 \
  -name caas-vm \
  -enable-kvm \
@@ -153,6 +162,9 @@ common_sd_emmc="\
  -machine kernel_irqchip=off \
  -global PIIX4_PM.disable_s3=1 -global PIIX4_PM.disable_s4=1 \
  -cpu host \
+ -device virtio-serial \
+ -device virtserialport,chardev=rpmb0,name=rpmb0 \
+ -chardev socket,id=rpmb0,path=${RPMB_SOCK} \
  -qmp stdio \
  -qmp tcp:localhost:4444,server,nowait \
  -drive file=$ovmf_file,format=raw,if=pflash \
@@ -393,10 +405,39 @@ function setup_vsock_host_utilities(){
 	fi
 }
 
+
+function setup_rpmb(){
+	# RPMB_DATA is created and initialized with specific key, if this file
+	# is deleted by accidently, create a new one without any data.
+	if [ ! -f ${RPMB_DATA} ]; then
+		echo "Creating RPMB DATA..."
+		${RPMB_DEV} --dev ${RPMB_DATA} --init --key ${RPMB_INIT_KEY} --size 2048
+	fi
+
+	# RPMB sock should be removed at cleanup, if there exists RPMB sock,
+	# rpmb_dev cannot be launched succefully. Delete any exist RPMB sock,
+	# rpmb_dev application creates RPMB sock by itself.
+	if [ -S ${RPMB_SOCK} ]; then
+		rm ${RPMB_SOCK}
+	fi
+
+	# rmpb_dev should be launched in background process
+	${RPMB_DEV} --dev ${RPMB_DATA} --sock ${RPMB_SOCK} &
+	RPMB_DEV_PID=$!
+}
+
 function cleanup_vsock_host_utilities(){
 	if [[ $enable_vsock == "true" ]]; then
 		kill -9 `pidof batsys`
 		kill -9 `pidof thermsys`
+	fi
+}
+
+function cleanup_rpmb_sock(){
+	# Send kill signal to rpmb_dev process, remove RPMB sock
+	if [[ ! -z "$RPMB_DEV_PID" ]]; then
+		kill -9 $RPMB_DEV_PID
+		rm ${RPMB_SOCK}
 	fi
 }
 
@@ -417,6 +458,7 @@ function launch_hwrender(){
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
+	setup_rpmb
 
 	if [ $GUEST_PM = "true" ]
 	then
@@ -471,6 +513,7 @@ function launch_hwrender(){
 
 	setup_usb_vfio_passthrough remove
 	cleanup_vsock_host_utilities
+	cleanup_rpmb_sock
 }
 
 function launch_hwrender_gvtd(){
@@ -494,6 +537,7 @@ function launch_hwrender_gvtd(){
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
+	setup_rpmb
 	common_options=${common_options/-display $display_type /}
 	common_options=${common_options/-vga none /-vga none -nographic}
 	qemu-system-x86_64 \
@@ -502,6 +546,7 @@ function launch_hwrender_gvtd(){
 	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /} > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	setup_usb_vfio_passthrough remove
 	cleanup_vsock_host_utilities
+	cleanup_rpmb_sock
 }
 
 function launch_virtio_gpu(){
@@ -554,6 +599,7 @@ function launch_swrender(){
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
+	setup_rpmb
 	if [[ $1 == "--display-off" ]]
         then
 		qemu-system-x86_64 \
@@ -571,6 +617,7 @@ function launch_swrender(){
 	fi
 	setup_usb_vfio_passthrough remove
 	cleanup_vsock_host_utilities
+	cleanup_rpmb_sock
 }
 
 function check_nested_vt(){

@@ -268,7 +268,7 @@ BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/setup_audio_host.sh
 BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/guest_pm_control
 BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/intel-thermal-conf.xml
 BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/thermald.service
-
+BOARD_FLASHFILES += $(PRODUCT_OUT)/scripts/rpmb_dev
 
 # for USB OTG WA
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/bxt_usb

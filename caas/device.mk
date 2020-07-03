@@ -281,6 +281,7 @@ PRODUCT_COPY_FILES += $(LOCAL_PATH)/guest_pm_control:$(PRODUCT_OUT)/scripts/gues
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/intel-thermal-conf.xml:$(PRODUCT_OUT)/scripts/intel-thermal-conf.xml
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/thermald.service:$(PRODUCT_OUT)/scripts/thermald.service
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/qmp_events_handler.sh:$(PRODUCT_OUT)/scripts/qmp_events_handler.sh
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/rpmb_dev:$(PRODUCT_OUT)/scripts/rpmb_dev
 PRODUCT_COPY_FILES += device/intel/civ/host/backend/battery/bin/batsys:$(PRODUCT_OUT)/scripts/batsys
 PRODUCT_COPY_FILES += device/intel/civ/host/backend/thermal/bin/thermsys:$(PRODUCT_OUT)/scripts/thermsys
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/wakeup.py:$(PRODUCT_OUT)/scripts/wakeup.py
