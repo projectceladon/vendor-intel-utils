@@ -368,24 +368,26 @@ function setup_audio(){
                 common_options=${common_audio_mediation}${common_options}
                 $audio_settings setMicGain &
         else
-		modprobe vfio-pci
-		AUDIOController=`sudo sh -c "lspci -D -nn| grep -i 'audio '  | grep -i '1f'"`
-		AUDIOControllerId=${AUDIOController:0:13}
-		AUDIOControllerId=`echo $AUDIOControllerId | awk '{gsub(/^\s+|\s+$/, "");print}'`
-		iommu_group_devices=`sudo sh -c "ls /sys/bus/pci/devices/${AUDIOControllerId}/iommu_group/devices/"`
-		str=`echo $iommu_group_devices | sed -e 's/\s\+/,/g'`
-		str=","${str}
+                modprobe vfio-pci
+                AUDIOController=`sudo sh -c "lspci -D -nn| grep -i 'audio'"`
+                AUDIOControllerId=${AUDIOController:8:2}
+                AUDIOControllerGroup=`sudo sh -c "lspci -D -nn| grep -i 'audio '  | grep -i '$AUDIOControllerId'"`
+                AUDIOControllerId=${AUDIOControllerGroup:0:12}
+                AUDIOControllerId=`echo $AUDIOControllerId | awk '{gsub(/^\s+|\s+$/, "");print}'`
+                iommu_group_devices=`sudo sh -c "ls /sys/bus/pci/devices/${AUDIOControllerId}/iommu_group/devices/"`
+                str=`echo $iommu_group_devices | sed -e 's/\s\+/,/g'`
+                str=","${str}
 
-		while [ -n "$str" ]; do
-			device=${str##*,}
-			device_id=`sudo sh -c "lspci -D -nn |grep ${device} |grep -o 8086:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"`
-			commandstr="-device vfio-pci,host=${device#*:} "
-			sudo sh -c "echo ${device} > /sys/bus/pci/devices/${device}/driver/unbind"
-			sudo sh -c "echo ${device_id/:/ } > /sys/bus/pci/drivers/vfio-pci/new_id"
-			common_options=${commandstr}${common_options}
-			str=${str%,*}
-		done
-	fi
+                while [ -n "$str" ]; do
+                        device=${str##*,}
+                        device_id=`sudo sh -c "lspci -D -nn |grep ${device} |grep -o 8086:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]"`
+                        commandstr="-device vfio-pci,host=${device#*:} "
+                        sudo sh -c "echo ${device} > /sys/bus/pci/devices/${device}/driver/unbind"
+                        sudo sh -c "echo ${device_id/:/ } > /sys/bus/pci/drivers/vfio-pci/new_id"
+                        common_options=${commandstr}${common_options}
+                        str=${str%,*}
+                done
+        fi
 }
 
 function start_battery_utility(){
