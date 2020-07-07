@@ -1,0 +1,132 @@
+From 448fd2cdb628c409ad5c0351a586ce74877ebb86 Mon Sep 17 00:00:00 2001
+From: ahs <amrita.h.s@intel.com>
+Date: Fri, 19 Jun 2020 14:40:32 +0530
+Subject: [PATCH] 3 GenGC Base Image
+
+Change-Id: I56664eb9ba3c005aec7c30b6d0a81ae8db890618
+Tracked-On:
+Signed-off-by: ahs <amrita.h.s@intel.com>
+---
+ runtime/gc/collector/concurrent_copying.cc | 20 +++++++++++++++++++-
+ runtime/gc/collector/concurrent_copying.h  |  5 +++++
+ runtime/gc/heap.cc                         |  2 +-
+ runtime/runtime.cc                         |  3 +++
+ 4 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/runtime/gc/collector/concurrent_copying.cc b/runtime/gc/collector/concurrent_copying.cc
+index 9428a0b8cd..7bd34ab066 100644
+--- a/runtime/gc/collector/concurrent_copying.cc
++++ b/runtime/gc/collector/concurrent_copying.cc
+@@ -119,7 +119,11 @@ ConcurrentCopying::ConcurrentCopying(Heap* heap,
+       gc_grays_immune_objects_(false),
+       immune_gray_stack_lock_("concurrent copying immune gray stack lock",
+                               kMarkSweepMarkStackLock),
+-      num_bytes_allocated_before_gc_(0) {
++      num_bytes_allocated_before_gc_(0),
++      vin_total_obj_(0),
++      vin_total_time_(0),
++      vin_scanned_(0),
++      vin_scanned_time_(0) {
+   static_assert(space::RegionSpace::kRegionSize == accounting::ReadBarrierTable::kRegionSize,
+                 "The region space size and the read barrier table region size must match");
+   CHECK(use_generational_cc_ || !young_gen_);
+@@ -393,6 +397,11 @@ void ConcurrentCopying::InitializePhase() {
+   objects_moved_gc_thread_ = 0;
+   GcCause gc_cause = GetCurrentIteration()->GetGcCause();
+ 
++  vin_total_obj_ = 0;
++  vin_total_time_ = 0;
++  vin_scanned_ = 0;
++  vin_scanned_time_ = 0;
++
+   force_evacuate_all_ = false;
+   if (!use_generational_cc_ || !young_gen_) {
+     if (gc_cause == kGcCauseExplicit ||
+@@ -2147,6 +2156,8 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
+         // TODO: Temporary; remove this when this is no longer needed (b/116087961).
+         << " runtime->sentinel=" << Runtime::Current()->GetSentinel().Read<kWithoutReadBarrier>();
+   }
++  ++vin_total_obj_;
++  uint64_t total_strt = NanoTime();
+   bool add_to_live_bytes = false;
+   // Invariant: There should be no object from a newly-allocated
+   // region (either large or non-large) on the mark stack.
+@@ -2220,11 +2231,14 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
+       }
+   }
+   if (perform_scan) {
++    ++vin_scanned_;
++    uint64_t strt = NanoTime();
+     if (use_generational_cc_ && young_gen_) {
+       Scan<true>(to_ref);
+     } else {
+       Scan<false>(to_ref);
+     }
++    vin_scanned_time_ += (NanoTime() - strt);
+   }
+   if (kUseBakerReadBarrier) {
+     DCHECK(to_ref->GetReadBarrierState() == ReadBarrier::GrayState())
+@@ -2281,6 +2295,7 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
+         visitor,
+         visitor);
+   }
++  vin_total_time_ += (NanoTime() - total_strt);
+ }
+ 
+ class ConcurrentCopying::DisableWeakRefAccessCallback : public Closure {
+@@ -3683,6 +3698,9 @@ void ConcurrentCopying::FinishPhase() {
+     rb_slow_path_count_total_ += rb_slow_path_count_.load(std::memory_order_relaxed);
+     rb_slow_path_count_gc_total_ += rb_slow_path_count_gc_.load(std::memory_order_relaxed);
+   }
++  LOG(INFO) << "[VK] GC - young_gen_="<< young_gen_;
++  LOG(INFO) << "vin_total_obj_ ="<<vin_total_obj_<<", vin_total_time_="<<vin_total_time_;
++  LOG(INFO) << "vin_scanned_="<<vin_scanned_<<", vin_scanned_time_="<<vin_scanned_time_;
+ }
+ 
+ bool ConcurrentCopying::IsNullOrMarkedHeapReference(mirror::HeapReference<mirror::Object>* field,
+diff --git a/runtime/gc/collector/concurrent_copying.h b/runtime/gc/collector/concurrent_copying.h
+index 2e5752b91e..6546c3f4b3 100644
+--- a/runtime/gc/collector/concurrent_copying.h
++++ b/runtime/gc/collector/concurrent_copying.h
+@@ -461,6 +461,11 @@ class ConcurrentCopying : public GarbageCollector {
+   // Use signed because after_gc may be larger than before_gc.
+   int64_t num_bytes_allocated_before_gc_;
+ 
++  uint64_t vin_total_obj_;
++  uint64_t vin_total_time_;
++  uint64_t vin_scanned_;
++  uint64_t vin_scanned_time_;
++
+   class ActivateReadBarrierEntrypointsCallback;
+   class ActivateReadBarrierEntrypointsCheckpoint;
+   class AssertToSpaceInvariantFieldVisitor;
+diff --git a/runtime/gc/heap.cc b/runtime/gc/heap.cc
+index ff53f7896e..6af1e7f72f 100644
+--- a/runtime/gc/heap.cc
++++ b/runtime/gc/heap.cc
+@@ -2829,7 +2829,7 @@ void Heap::LogGC(GcCause gc_cause, collector::GarbageCollector* collector) {
+       log_gc = log_gc || pause >= long_pause_log_threshold_;
+     }
+   }
+-  if (log_gc) {
++  if (log_gc || VLOG_IS_ON(heap)) {
+     const size_t percent_free = GetPercentFree();
+     const size_t current_heap_size = GetBytesAllocated();
+     const size_t total_memory = GetTotalMemory();
+diff --git a/runtime/runtime.cc b/runtime/runtime.cc
+index 51a40e78c6..ed412b1eb0 100644
+--- a/runtime/runtime.cc
++++ b/runtime/runtime.cc
+@@ -666,6 +666,9 @@ void Runtime::PostZygoteFork() {
+ void Runtime::CallExitHook(jint status) {
+   if (exit_ != nullptr) {
+     ScopedThreadStateChange tsc(Thread::Current(), kNative);
++    if (dump_gc_performance_on_shutdown_) {
++      heap_->DumpGcPerformanceInfo(LOG_STREAM(INFO));
++    }
+     exit_(status);
+     LOG(WARNING) << "Exit hook returned instead of exiting!";
+   }
+-- 
+2.17.1
+
