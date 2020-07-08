@@ -574,10 +574,6 @@ BOARD_VNDK_VERSION := current
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/hdcpd
 ##############################################################
-# Source: device/intel/mixins/groups/neuralnetworks/true/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/neuralnetworks
-##############################################################
 # Source: device/intel/mixins/groups/load_modules/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS +=  $(INTEL_PATH_SEPOLICY)/load_modules

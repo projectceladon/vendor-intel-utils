@@ -682,24 +682,6 @@ PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/public-libraries/public.librarie
 # HDCP Daemon
 PRODUCT_PACKAGES += hdcpd
 ##############################################################
-# Source: device/intel/mixins/groups/neuralnetworks/true/product.mk
-##############################################################
-# neuralnetworks HAL
-PRODUCT_PACKAGES += \
-    android.hardware.neuralnetworks@1.2-generic-service \
-    android.hardware.neuralnetworks@1.2-generic-impl \
-    android.hardware.neuralnetworks@1.2-service-gpgpu
-
-PRODUCT_PACKAGES += \
-    libinference_engine
-
-PRODUCT_PACKAGES += \
-    libMKLDNNPlugin\
-    libmkldnn
-
-PRODUCT_PACKAGES += \
-    graphtest_cpu
-##############################################################
 # Source: device/intel/mixins/groups/load_modules/true/product.mk
 ##############################################################
 PRODUCT_PACKAGES += load_modules.sh
