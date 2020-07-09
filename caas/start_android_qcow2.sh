@@ -542,8 +542,14 @@ function launch_hwrender_gvtd(){
 	setup_rpmb
 	common_options=${common_options/-display $display_type /}
 	common_options=${common_options/-vga none /-vga none -nographic}
+
+	CIV_GOP_DIR=$work_dir/GOP_PKG
+	if [ -f $CIV_GOP_DIR/GOP.rom ]; then
+		GOP_ROM="$CIV_GOP_DIR/GOP.rom"
+	fi
+
 	qemu-system-x86_64 \
-	-device vfio-pci,host=00:02.0,x-igd-gms=2,id=hostdev0,bus=pcie.0,addr=0x2,x-igd-opregion=on \
+	-device vfio-pci,host=00:02.0,x-igd-gms=2,id=hostdev0,bus=pcie.0,addr=0x2,x-igd-opregion=on,romfile=$GOP_ROM \
 	$WIFI_VFIO_OPTIONS \
 	${common_options/-device virtio-9p-pci,fsdev=fsdev0,mount_tag=hostshare /} > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	setup_usb_vfio_passthrough remove
