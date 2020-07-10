@@ -413,7 +413,7 @@ function setup_rpmb(){
 	# is deleted by accidently, create a new one without any data.
 	if [ ! -f ${RPMB_DATA} ]; then
 		echo "Creating RPMB DATA..."
-		${RPMB_DEV} --dev ${RPMB_DATA} --init --key ${RPMB_INIT_KEY} --size 2048
+		${RPMB_DEV} --dev ${RPMB_DATA} --init --key "${RPMB_INIT_KEY}" --size 2048
 	fi
 
 	# RPMB sock should be removed at cleanup, if there exists RPMB sock,
