@@ -67,6 +67,12 @@ function setup_virtio_gpu(){
 function create_snd_dummy(){
 	modprobe snd-dummy
 }
+
+function setup_mixer_gain_audio(){
+	amixer sset 'PCM' 50%
+	amixer sset 'Master' 50%
+}
+
 if [[ $1 == "--display-off" ]]
 then
         display_type="none"
@@ -454,7 +460,7 @@ function launch_hwrender(){
 		echo $DEVICE_ID | sed 's/:/\ /g' > /sys/bus/pci/drivers/vfio-pci/new_id
 		WIFI_VFIO_OPTIONS="-device vfio-pci,host=`lspci -nn  | grep -oP '([\w:[\w.]+) Network controller' | awk '{print $1}'`"
 	fi
-	
+	setup_mixer_gain_audio
 	setup_sdcard
 	setup_ethernet
 	setup_usb_vfio_passthrough setup
