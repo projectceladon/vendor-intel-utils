@@ -6,7 +6,7 @@ import time
 import subprocess
 from sys import argv,exit
 
-timeout = 2*60
+timeout = 60
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../qemu-4.2.0/python'))
 

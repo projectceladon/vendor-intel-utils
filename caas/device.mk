@@ -285,6 +285,8 @@ PRODUCT_COPY_FILES += $(LOCAL_PATH)/rpmb_dev:$(PRODUCT_OUT)/scripts/rpmb_dev
 PRODUCT_COPY_FILES += device/intel/civ/host/backend/battery/bin/batsys:$(PRODUCT_OUT)/scripts/batsys
 PRODUCT_COPY_FILES += device/intel/civ/host/backend/thermal/bin/thermsys:$(PRODUCT_OUT)/scripts/thermsys
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/wakeup.py:$(PRODUCT_OUT)/scripts/wakeup.py
+PRODUCT_COPY_FILES += device/intel/civ/host/virtual-input-manager/bin/sendkey:$(PRODUCT_OUT)/scripts/sendkey
+PRODUCT_COPY_FILES += device/intel/civ/host/virtual-input-manager/bin/vinput-manager:$(PRODUCT_OUT)/scripts/vinput-manager
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/product.mk
 ##############################################################
