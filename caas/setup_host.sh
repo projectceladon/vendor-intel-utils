@@ -24,10 +24,10 @@ function ubu_changes_require(){
 	apt install -y wget mtools ovmf dmidecode python3-usb python3-pyudev pulseaudio jq
 }
 
-function ubu_install_qemu(){
+function ubu_install_qemu_gvt(){
 	apt purge -y "^qemu"
 	apt autoremove -y
-	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0-0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex libvirglrenderer-dev build-essential gettext libegl-mesa0 libegl-dev libglvnd-dev libgl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libegl1
+	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0-0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex libvirglrenderer-dev build-essential gettext libegl-mesa0 libegl-dev libglvnd-dev libgl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libegl1 gcc g++ pkg-config libpulse-dev libgl1-mesa-dri
 
 	[ ! -f $CIV_WORK_DIR/$QEMU_REL.tar.xz ] && wget https://download.qemu.org/$QEMU_REL.tar.xz -P $CIV_WORK_DIR
 	[ -d $CIV_WORK_DIR/$QEMU_REL ] && rm -rf $CIV_WORK_DIR/$QEMU_REL
@@ -35,37 +35,6 @@ function ubu_install_qemu(){
 
 	cd $CIV_WORK_DIR/$QEMU_REL/
 	patch -p1 < $CIV_WORK_DIR/patches/qemu/Disable-EDID-auto-generation-in-QEMU.patch
-	./configure --prefix=/usr \
-		--enable-kvm \
-		--disable-xen \
-		--enable-libusb \
-		--enable-debug-info \
-		--enable-debug \
-		--enable-sdl \
-		--enable-vhost-net \
-		--enable-spice \
-		--disable-debug-tcg \
-		--enable-opengl \
-		--enable-gtk \
-		--enable-virtfs \
-		--target-list=x86_64-softmmu \
-		--audio-drv-list=pa
-	make -j24
-	make install
-	cd -
-}
-
-function ubu_install_qemu_gvtd(){
-	apt purge -y "^qemu"
-	apt autoremove -y
-	apt install -y git libfdt-dev libpixman-1-dev libssl-dev vim socat libsdl2-dev libspice-server-dev autoconf libtool uml-utilities xtightvncviewer tightvncserver x11vnc uuid-runtime uuid uml-utilities bridge-utils python-dev liblzma-dev libc6-dev libegl1-mesa-dev libepoxy-dev libdrm-dev libgbm-dev libaio-dev libusb-1.0-0-dev libgtk-3-dev bison libcap-dev libattr1-dev flex gcc g++ flex pkg-config libpulse-dev uuid-runtime uuid libgl1-mesa-dri build-essential gettext libegl-mesa0 libegl-dev libglvnd-dev libgl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libegl1
-
-	[ ! -f $CIV_WORK_DIR/$QEMU_REL.tar.xz ] && wget https://download.qemu.org/$QEMU_REL.tar.xz -P $CIV_WORK_DIR
-	[ -d $CIV_WORK_DIR/$QEMU_REL ] && rm -rf $CIV_WORK_DIR/$QEMU_REL
-	tar -xf $CIV_WORK_DIR/$QEMU_REL.tar.xz
-
-	cd $CIV_WORK_DIR/$QEMU_REL/
-
 	patch -p1 < $CIV_WORK_DIR/patches/qemu/0001-Revert-Revert-vfio-pci-quirks.c-Disable-stolen-memor.patch
 	if [ -d $CIV_GOP_DIR ]; then
 		for i in $CIV_GOP_DIR/qemu/*.patch; do patch -p1 < $i; done
@@ -99,17 +68,7 @@ function install_9p_module(){
 	mkdir -p $CIV_WORK_DIR/share_folder
 }
 
-function ubu_build_ovmf(){
-	sudo apt install -y uuid-dev nasm acpidump iasl
-	cd $CIV_WORK_DIR/$QEMU_REL/roms/edk2
-	source ./edksetup.sh
-	make -C BaseTools/
-	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE -DTPM2_ENABLE=TRUE
-	cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd ../../../OVMF.fd
-	cd -
-}
-
-function ubu_build_ovmf_gvtd(){
+function ubu_build_ovmf_gvt(){
 	sudo apt install -y uuid-dev nasm acpidump iasl
 	cd $CIV_WORK_DIR/$QEMU_REL/roms/edk2
 
@@ -121,7 +80,7 @@ function ubu_build_ovmf_gvtd(){
 
 	source ./edksetup.sh
 	make -C BaseTools/
-	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE
+	build -b DEBUG -t GCC5 -a X64 -p OvmfPkg/OvmfPkgX64.dsc -D NETWORK_IP4_ENABLE -D NETWORK_ENABLE  -D SECURE_BOOT_ENABLE -DTPM2_ENABLE=TRUE
 	cp Build/OvmfX64/DEBUG_GCC5/FV/OVMF.fd ../../../OVMF.fd
 
 	if [ -d $CIV_GOP_DIR ]; then
@@ -132,31 +91,18 @@ function ubu_build_ovmf_gvtd(){
 	cd -
 }
 
-function ubu_enable_host_gvtg(){
-	if [[ ! `cat /etc/default/grub` =~ "i915.enable_gvt=1 intel_iommu=on intel_iommu=igfx_off" ]]; then
-		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-g, do you want to continue? [Y/n]" res
+function ubu_enable_host_gvt(){
+	if [[ ! `cat /etc/default/grub` =~ "i915.enable_gvt=1 intel_iommu=on i915.force_probe=*" ]]; then
+		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-g and GVT-d, do you want to continue? [Y/n]" res
 		if [ x$res = xn ]; then
 			exit 0
 		fi
-		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"i915.enable_gvt=1 intel_iommu=on intel_iommu=igfx_off /g" /etc/default/grub
+		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"i915.enable_gvt=1 intel_iommu=on i915.force_probe=*/g" /etc/default/grub
 		update-grub
 
 		echo -e "\nkvmgt\nvfio-iommu-type1\nvfio-mdev\n" >> /etc/initramfs-tools/modules
 		update-initramfs -u -k all
 
-		reboot_required=1
-	fi
-}
-
-function ubu_enable_host_gvtd(){
-	systemctl set-default multi-user.target
-	if [[ ! `cat /etc/default/grub` =~ "intel_iommu=on i915.force=probe=* " ]]; then
-		read -p "The grub entry in '/etc/default/grub' will be updated for enabling GVT-d, do you want to continue? [Y/n]" res
-		if [ x$res = xn ]; then
-			exit 0
-		fi
-		sed -i "s/GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"intel_iommu=on i915.force_probe=* /g" /etc/default/grub
-		update-grub
 		reboot_required=1
 	fi
 }
@@ -255,14 +201,11 @@ if [[ $version =~ "Ubuntu" ]]; then
 	check_kernel
 	#Auto start service for audio will be enabled in future
 	#install_auto_start_service
+	ubu_install_qemu_gvt
+	ubu_build_ovmf_gvt
+	ubu_enable_host_gvt
 	if [[ $1 == "--gvtd" ]]; then
-		ubu_install_qemu_gvtd
-		ubu_build_ovmf_gvtd
-		ubu_enable_host_gvtd
-	else
-		ubu_install_qemu
-		ubu_build_ovmf
-		ubu_enable_host_gvtg
+		systemctl set-default multi-user.target
 	fi
 	if [[ ! -d $CIV_WORK_DIR/sof_audio ]]; then
 		reboot_required=1
