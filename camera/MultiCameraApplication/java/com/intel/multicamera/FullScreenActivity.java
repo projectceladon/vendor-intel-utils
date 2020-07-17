@@ -31,6 +31,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraManager;
+import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.net.Uri;
 import android.os.Bundle;
@@ -104,7 +105,7 @@ public class FullScreenActivity extends AppCompatActivity {
 
         openBackCamera();
         try {
-            IntentFilter filter = new IntentFilter();
+            final IntentFilter filter = new IntentFilter();
             filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
             filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
 
@@ -114,6 +115,13 @@ public class FullScreenActivity extends AppCompatActivity {
                     String action = intent.getAction();
                     if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
                         System.out.println(TAG + "BroadcastReceiver USB Connected");
+                        UsbDevice usbDevice = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                        if (usbDevice.getDeviceClass() == mCameraInst.getUsbCamDeviceClass()) {
+                            Log.d(TAG, "USB camera insert detected ");
+                        } else {
+                            Log.d(TAG, "No USB camera device connected ");
+                            return;
+                        }
                         if (isDialogShown == 0) {
                             Dialog detailDialog = USBChangeDialog.create(FullScreenActivity.this);
                             detailDialog.setCancelable(false);
@@ -129,6 +137,13 @@ public class FullScreenActivity extends AppCompatActivity {
 
                     } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
                         System.out.println(TAG + "BroadcastReceiver USB Disconnected");
+                        UsbDevice usbDevice = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                        if (usbDevice.getDeviceClass() == mCameraInst.getUsbCamDeviceClass()) {
+                            Log.d(TAG, "USB camera remove detected ");
+                        } else {
+                            Log.d(TAG, "No USB camera device Disconnected ");
+                            return;
+                        }
                         if (isDialogShown == 0) {
                             Dialog detailDialog = USBChangeDialog.create(FullScreenActivity.this);
                             detailDialog.setCancelable(false);
@@ -271,11 +286,14 @@ public class FullScreenActivity extends AppCompatActivity {
                             mCameraFront.getmRecord().showRecordingUI(false);
                             mCameraFront.getmPhoto().showVideoThumbnail();
                         }
-
-                        mCameraSwitch.setVisibility(View.VISIBLE);
+                        
+                        if (numOfCameras > 1) {
+                            mCameraSwitch.setVisibility(View.VISIBLE);
+                            mCameraSplit.setVisibility(View.VISIBLE);
+                        }
                         mCameraPicture.setVisibility(View.VISIBLE);
                         mCameraRecord.setImageResource(R.drawable.ic_capture_video);
-                        mCameraSplit.setVisibility(View.VISIBLE);
+
                         mSettings.setVisibility(View.VISIBLE);
                     } else {
                         mIsRecordingVideo =true;

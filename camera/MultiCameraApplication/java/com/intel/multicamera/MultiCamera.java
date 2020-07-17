@@ -23,6 +23,7 @@ import android.net.Uri;
 
 public class MultiCamera {
     private static MultiCamera ic_instance = null;
+    private static final int usb_dev_id = 239;
     private CameraBase mTopRightCam;
     private CameraBase mBotmLeftCam;
     private CameraBase mBotmRightCam;
@@ -119,5 +120,8 @@ public class MultiCamera {
 
     public void setOpenCameraId(int openCameraId) {
         mOpenCameraId = openCameraId;
+    }
+    public static int getUsbCamDeviceClass() {
+        return usb_dev_id;
     }
 }

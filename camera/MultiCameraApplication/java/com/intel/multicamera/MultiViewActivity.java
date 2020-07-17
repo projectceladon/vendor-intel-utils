@@ -26,6 +26,7 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.hardware.camera2.CameraAccessException;
 import android.hardware.camera2.CameraManager;
+import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.AsyncTask;
 import android.os.Bundle;
@@ -133,7 +134,7 @@ public class MultiViewActivity extends AppCompatActivity {
         FullScrn3.setVisibility(View.GONE);
         startCamera();
         try {
-            IntentFilter filter = new IntentFilter();
+            final IntentFilter filter = new IntentFilter();
             filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
             filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
 
@@ -142,7 +143,13 @@ public class MultiViewActivity extends AppCompatActivity {
                 public void onReceive(Context context, Intent intent) {
                     String action = intent.getAction();
                     if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
-                        System.out.println(TAG + "BroadcastReceiver USB Connected");
+                        UsbDevice usbDevice = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                        if (usbDevice.getDeviceClass() == ic_camera.getUsbCamDeviceClass()) {
+                            Log.d(TAG, "USB camera insert detected ");
+                        } else {
+                            Log.d(TAG, "No USB camera device connected ");
+                            return;
+                        }
                         if (isDialogShown == 0) {
                             Dialog detailDialog = USBChangeDialog.create(MultiViewActivity.this);
                             detailDialog.setCancelable(false);
@@ -153,7 +160,13 @@ public class MultiViewActivity extends AppCompatActivity {
                         }
 
                     } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
-                        System.out.println(TAG + "BroadcastReceiver USB Disconnected");
+                        UsbDevice usbDevice = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                        if (usbDevice.getDeviceClass() == ic_camera.getUsbCamDeviceClass()) {
+                            Log.d(TAG, "USB camera removed detected ");
+                        } else {
+                            Log.d(TAG, "No USB camera device disconnected ");
+                            return;
+                        }
                         if (isDialogShown == 0) {
                             Dialog detailDialog = USBChangeDialog.create(MultiViewActivity.this);
                             detailDialog.setCancelable(false);
