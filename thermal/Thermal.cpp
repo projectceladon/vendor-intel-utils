@@ -29,7 +29,7 @@
 #define CPU_USAGE_PARAS_NUM         5
 #define CPU_USAGE_FILE              "/proc/stat"
 #define CPU_ONLINE_FILE             "/sys/devices/system/cpu/online"
-#define TEMP_UNIT                   1000
+#define TEMP_UNIT                   1000.0
 #define THERMAL_PORT                14096
 #define MAX_ZONES                   40
 
@@ -51,7 +51,7 @@ struct zone_info {
 	uint32_t trip_1;
 	uint32_t trip_2;
 	uint16_t number;
-	uint16_t type;
+	int16_t type;
 };
 
 struct header {
@@ -149,7 +149,7 @@ static bool is_vsock_present;
 
 
 struct temp_info {
-    uint16_t type;
+    int16_t type;
     uint32_t temp;
 };
 
