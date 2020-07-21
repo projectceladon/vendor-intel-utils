@@ -361,7 +361,16 @@ public class SingleCameraActivity extends AppCompatActivity {
 
     }
 
-
+    @Override
+    protected void onDestroy() {
+        try {
+            unregisterReceiver(mUsbReceiver);
+        }catch (Exception e) {
+            Log.e(TAG, "fatal during unregister receiver");
+        }
+        super.onDestroy();
+    }
+    
     @Override
     protected void onPause() {
         super.onPause();

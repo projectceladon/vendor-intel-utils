@@ -319,6 +319,7 @@ public class FullScreenActivity extends AppCompatActivity {
     }
 
     public void openBackCamera() {
+	System.out.println(TAG+"open back camera start");
         closeCamera();
 
         GetCameraCnt();
@@ -335,15 +336,21 @@ public class FullScreenActivity extends AppCompatActivity {
         updateStorageSpace(null);
 
         OpenOnlyBackCamera();
+	System.out.println(TAG+"open back camera end");
+
     }
 
     public void openFrontCamera() {
+	System.out.println(TAG+"open front camera start");
+
         closeCamera();
 
         GetCameraCnt();
         updateStorageSpace(null);
 
         OpenOnlyFrontCamera();
+	System.out.println(TAG+"open front camera end");
+
     }
 
     private void OpenOnlyFrontCamera() {
@@ -472,6 +479,16 @@ public class FullScreenActivity extends AppCompatActivity {
             return;
         }
 
+    }
+
+    @Override
+    protected void onDestroy() {
+        try {
+            unregisterReceiver(mUsbReceiver);
+        }catch (Exception e) {
+            Log.e(TAG, "fatal during unregister receiver");
+        }
+        super.onDestroy();
     }
 
     @Override
