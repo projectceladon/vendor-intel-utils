@@ -581,12 +581,14 @@ function launch_virtio_gpu(){
 	setup_usb_vfio_passthrough setup
 	setup_audio
 	setup_vsock_host_utilities
+	setup_rpmb
 	qemu-system-x86_64 \
 	-device virtio-gpu-pci \
 	$WIFI_VFIO_OPTIONS \
 	$common_options > $qmp_log <<< "{ \"execute\": \"qmp_capabilities\" }"
 	setup_usb_vfio_passthrough remove
 	cleanup_vsock_host_utilities
+	cleanup_rpmb_sock
 }
 
 function launch_swrender(){
