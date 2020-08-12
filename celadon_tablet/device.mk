@@ -404,6 +404,7 @@ PRODUCT_PACKAGES += \
 
 # Open source media_driver
 PRODUCT_PACKAGES += i965_drv_video
+PRODUCT_PACKAGES += libgmm_umd
 PRODUCT_PACKAGES += libigfxcmrt
 
 # Open source hdcp
@@ -428,7 +429,13 @@ PRODUCT_PACKAGES += \
 # Mesa
 PRODUCT_PACKAGES += \
     libGLES_mesa \
-    libGLES_android
+    libGLES_android \
+    libigdrcl \
+    libOpenCL \
+    libcommon_clang \
+    libigc \
+    libigdfcl
+
 
 PRODUCT_PACKAGES += \
     libdrm \
@@ -711,7 +718,10 @@ PRODUCT_PACKAGES += \
 
 PRODUCT_PACKAGES += \
     libMKLDNNPlugin\
-    libmkldnn
+    libmkldnn \
+    libmkldnn \
+    libclDNNPlugin \
+    libclDNN64
 
 PRODUCT_PACKAGES += \
     graphtest_cpu
