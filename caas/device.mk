@@ -268,6 +268,7 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     vinput-manager \
                     sendkey
 
+PRODUCT_PROPERTY_OVERRIDES += ro.control_privapp_permissions=enforce
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/file_share.sh:$(TARGET_COPY_OUT_VENDOR)/bin/file_share.sh
