@@ -26,11 +26,15 @@ def main():
         except qemu.error:
             print
 
-        if time.time() >= con_timeout + timeout_start:
+        if time.time() >= timeout + timeout_start:
             print("connection timeout error")
             return
+    resp = qemu.cmd('query-status')
+    if resp != None:
+        for val in resp.values():
+            if val['status'] == "suspended":
+                qemu.cmd('system_wakeup')
 
-    qemu.cmd('system_wakeup')
 
 if __name__ == '__main__':
     main()
