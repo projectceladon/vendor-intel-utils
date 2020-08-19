@@ -5,7 +5,7 @@ mkdir -p host_kernel
 cd host_kernel
 git clone https://github.com/projectceladon/linux-intel-lts2019-yocto.git
 cd linux-intel-lts2019-yocto
-git checkout cf38aa86082230fb27b1f113f37dedbfd4d8daeb
+git checkout 1f4c50d2f5aa318b8f11949c92b30145729ec328
 cp ../../x86_64_defconfig .config
 patch_list=`find ../../ -iname "*.patch" | sort -u`
 for i in $patch_list
