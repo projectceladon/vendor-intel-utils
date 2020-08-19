@@ -674,6 +674,12 @@ endif
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/dbc
 ##############################################################
+# Source: device/intel/mixins/groups/evs/true/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += \
+    packages/services/Car/evs/sepolicy \
+    $(INTEL_PATH_SEPOLICY)/evs
+##############################################################
 # Source: device/intel/mixins/groups/default-drm/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/drm-default
