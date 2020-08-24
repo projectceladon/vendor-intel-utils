@@ -11,7 +11,7 @@ BOARD_DISK_BUS = ff.ff
 BOARD_SUPER_PARTITION_GROUPS := group_sys
 BOARD_GROUP_SYS_PARTITION_LIST := system vendor
 
-BOARD_SUPER_PARTITION_SIZE := $(shell echo 6400*1024*1024 | bc)
+BOARD_SUPER_PARTITION_SIZE := $(shell echo 8000*1024*1024 | bc)
 BOARD_GROUP_SYS_SIZE = $(shell echo "$(BOARD_SUPER_PARTITION_SIZE) / 2 - 4*1024*1024" | bc)
 
 ##############################################################
