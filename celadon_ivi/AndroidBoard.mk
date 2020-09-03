@@ -572,11 +572,17 @@ INSTALLED_ACPIOIMAGE_TARGET := $(PRODUCT_OUT)/acpio.img
 
 MKDTIMG := $(HOST_OUT_EXECUTABLES)/mkdtimg
 
+DUMMY_SSDT = $(PRODUCT_OUT)/dummy-ssdt.aml
+
 ifeq ($(INTEL_PREBUILT),true)
 ACPIO_SRC := $(wildcard $(INTEL_PATH_PREBUILTS)/acpio/*.aml)
 else
-ACPIO_SRC :=
+ACPIO_SRC := $(DUMMY_SSDT)
 endif
+
+DUMMY_SSDT_FILE := $(TARGET_DEVICE_DIR)/extra_files/acpio-partition/dummy-ssdt.asl
+$(DUMMY_SSDT): $(DUMMY_SSDT_FILE) $(IASL)
+	$(hide) $(IASL) -p $(@:.aml=) $(DUMMY_SSDT_FILE);
 
 $(ACPIO_BIN): $(ACPIO_SRC) $(MKDTIMG)
 	$(hide) rm -rf $(ACPIO_OUT) && mkdir -p $(ACPIO_OUT)
