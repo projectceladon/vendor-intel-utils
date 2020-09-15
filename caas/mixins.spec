@@ -69,7 +69,7 @@ public-libraries: true
 device-specific: caas
 hdcpd: true
 treble: true
-swap: zram_auto(size=1073741824,swappiness=true,hardware=gordon_peak)
+swap: zram_auto(size=1073741824,swappiness=true,hardware=gordon_peak,disk_based_swap=true)
 art-config: true
 psdapp: true
 debugfs: true
