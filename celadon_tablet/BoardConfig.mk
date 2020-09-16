@@ -324,6 +324,10 @@ BOARD_USES_GENERIC_AUDIO := false
 
 DEVICE_MANIFEST_FILE := ${TARGET_DEVICE_DIR}/manifest.xml
 DEVICE_MATRIX_FILE   := ${TARGET_DEVICE_DIR}/compatibility_matrix.xml
+BUILD_BROKEN_USES_BUILD_HOST_STATIC_LIBRARY := true
+BUILD_BROKEN_USES_BUILD_HOST_SHARED_LIBRARY := true
+BUILD_BROKEN_USES_BUILD_HOST_EXECUTABLE := true
+BUILD_BROKEN_USES_BUILD_COPY_HEADERS := true
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/BoardConfig.mk
 ##############################################################
@@ -566,7 +570,7 @@ POWER_THROTTLE := true
 
 
 BOARD_SEPOLICY_M4DEFS += module_power=true
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/power
+#BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/power
 ##############################################################
 # Source: device/intel/mixins/groups/intel_prop/true/BoardConfig.mk
 ##############################################################

@@ -138,7 +138,6 @@ BOARD_VBMETAIMAGE_PARTITION_SIZE := 2097152
 BOARD_FLASHFILES += $(PRODUCT_OUT)/vbmeta.img
 
 AB_OTA_PARTITIONS += vbmeta
-AB_OTA_PARTITIONS += tos
 
 
 KERNELFLINGER_SUPPORT_USB_STORAGE ?= true
@@ -196,7 +195,13 @@ endif
 BOARD_SEPOLICY_M4DEFS += module_kernel=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/kernel
 ##############################################################
-# Source: device/intel/mixins/groups/sepolicy/enforcing/BoardConfig.mk
+# Source: device/intel/mixins/groups/sepolicy/permissive/BoardConfig.mk.1
+##############################################################
+# start kernel in permissive mode, this way we don't
+# need 'setenforce 0' from init.rc files
+BOARD_KERNEL_CMDLINE += enforcing=0 androidboot.selinux=permissive
+##############################################################
+# Source: device/intel/mixins/groups/sepolicy/permissive/BoardConfig.mk
 ##############################################################
 # SELinux Policy
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)
@@ -283,49 +288,11 @@ BOARD_USES_GENERIC_AUDIO := false
 
 DEVICE_MANIFEST_FILE := ${TARGET_DEVICE_DIR}/manifest.xml
 DEVICE_MATRIX_FILE   := ${TARGET_DEVICE_DIR}/compatibility_matrix.xml
-##############################################################
-# Source: device/intel/mixins/groups/trusty/true/BoardConfig.mk
-##############################################################
-TARGET_USE_TRUSTY := true
-
-ifneq (, $(filter abl sbl, project-celadon))
-TARGET_USE_MULTIBOOT := true
-endif
-
-BOARD_USES_TRUSTY := true
-BOARD_USES_KEYMASTER1 := true
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty
-BOARD_SEPOLICY_M4DEFS += module_trusty=true
-
-TRUSTY_BUILDROOT = $(PWD)/$(PRODUCT_OUT)/obj/trusty/
-
-TRUSTY_ENV_VAR += TRUSTY_REF_TARGET=celadon_64
-
-#for trusty vmm
-# use same toolchain as android kernel
-TRUSTY_ENV_VAR += CLANG_BINDIR=$(PWD)/$(LLVM_PREBUILTS_PATH)
-TRUSTY_ENV_VAR += COMPILE_TOOLCHAIN=$(YOCTO_CROSSCOMPILE)
-TRUSTY_ENV_VAR += TARGET_BUILD_VARIANT=$(TARGET_BUILD_VARIANT)
-TRUSTY_ENV_VAR += BOOT_ARCH=project-celadon
-
-# output build dir to android out folder
-TRUSTY_ENV_VAR += BUILD_DIR=$(TRUSTY_BUILDROOT)
-ifeq ($(LKDEBUG),2)
-TRUSTY_ENV_VAR += LKBIN_DIR=$(PWD)/vendor/intel/fw/trusty-release-binaries/debug/
-else
-TRUSTY_ENV_VAR += LKBIN_DIR=$(PWD)/vendor/intel/fw/trusty-release-binaries/
-endif
-
-#Fix the cpu hotplug fail due to the trusty.
-#Trusty will introduce some delay for cpu_up().
-#Experiment show need wait at least 60us after
-#apic_icr_write(APIC_DM_STARTUP | (start_eip >> 12), phys_apicid);
-#So here override the cpu_init_udelay to have the cpu wait for 300us
-#to guarantee the cpu_up success.
-BOARD_KERNEL_CMDLINE += cpu_init_udelay=10
-
-#TOS_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/tos.img
-#EVMM_PREBUILT := $(PWD)/$(INTEL_PATH_VENDOR)/fw/evmm/multiboot.img
+DEVICE_FRAMEWORK_MANIFEST_FILE := ${TARGET_DEVICE_DIR}/framework_manifest.xml
+BUILD_BROKEN_USES_BUILD_HOST_STATIC_LIBRARY := true
+BUILD_BROKEN_USES_BUILD_HOST_SHARED_LIBRARY := true
+BUILD_BROKEN_USES_BUILD_HOST_EXECUTABLE := true
+BUILD_BROKEN_USES_BUILD_COPY_HEADERS := true
 ##############################################################
 # Source: device/intel/mixins/groups/firststage-mount/true/BoardConfig.mk
 ##############################################################
@@ -529,7 +496,7 @@ POWER_THROTTLE := true
 
 
 BOARD_SEPOLICY_M4DEFS += module_power=true
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/power
+#BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/power
 ##############################################################
 # Source: device/intel/mixins/groups/intel_prop/true/BoardConfig.mk
 ##############################################################
@@ -543,10 +510,6 @@ endif
 # Source: device/intel/mixins/groups/memtrack/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/memtrack
-##############################################################
-# Source: device/intel/mixins/groups/health/true/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/health_hal
 ##############################################################
 # Source: device/intel/mixins/groups/abota-fw/true/BoardConfig.mk
 ##############################################################

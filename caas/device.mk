@@ -118,7 +118,7 @@ KERNEL_MODULES_ROOT_PATH ?= vendor/lib/modules
 KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
 ##############################################################
-# Source: device/intel/mixins/groups/sepolicy/enforcing/product.mk
+# Source: device/intel/mixins/groups/sepolicy/permissive/product.mk
 ##############################################################
 PRODUCT_PACKAGES += sepolicy-areq-checker
 ##############################################################
@@ -261,11 +261,14 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.graphics.allocator@2.0-impl \
                     android.hardware.graphics.allocator@2.0-service \
                     android.hardware.renderscript@1.0-impl \
-                    android.hardware.graphics.composer@2.3-service \
+                    android.hardware.graphics.composer@2.1-impl \
+                    android.hardware.graphics.composer@2.1-service\
+					android.hardware.health@2.1-service\
+					android.hardware.health@2.1-impl
+
 
 PRODUCT_PROPERTY_OVERRIDES += ro.control_privapp_permissions=enforce
 
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/file_share.sh:$(TARGET_COPY_OUT_VENDOR)/bin/file_share.sh
 PRODUCT_COPY_FILES += vendor/intel/utils/LICENSE:$(PRODUCT_OUT)/LICENSE
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/auto_switch_pt_usb_vms.sh:$(PRODUCT_OUT)/scripts/auto_switch_pt_usb_vms.sh
@@ -282,41 +285,6 @@ PRODUCT_COPY_FILES += device/intel/civ/host/vm-manager/scripts/guest_time_keepin
 PRODUCT_COPY_FILES += device/intel/civ/host/vm-manager/scripts/start_flash_usb.sh:$(PRODUCT_OUT)/scripts/start_flash_usb.sh
 PRODUCT_COPY_FILES += vendor/intel/fw/trusty-release-binaries/rpmb_dev:$(PRODUCT_OUT)/scripts/rpmb_dev
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/wakeup.py:$(PRODUCT_OUT)/scripts/wakeup.py
-##############################################################
-# Source: device/intel/mixins/groups/trusty/true/product.mk
-##############################################################
-
-KM_VERSION := 2
-
-ifeq ($(KM_VERSION),2)
-PRODUCT_PACKAGES += \
-	keystore.trusty
-PRODUCT_PROPERTY_OVERRIDES += \
-	ro.hardware.keystore=trusty
-endif
-
-ifeq ($(KM_VERSION),1)
-PRODUCT_PACKAGES += \
-	keystore.${TARGET_BOARD_PLATFORM}
-endif
-
-PRODUCT_PACKAGES += \
-	libtrusty \
-	storageproxyd \
-	libinteltrustystorage \
-	libinteltrustystorageinterface \
-	gatekeeper.trusty \
-	android.hardware.gatekeeper@1.0-impl \
-	android.hardware.gatekeeper@1.0-service \
-
-PRODUCT_PACKAGES_DEBUG += \
-	intel-secure-storage-unit-test \
-	gatekeeper-unit-tests \
-	libscrypt_static \
-	scrypt_test \
-
-PRODUCT_PROPERTY_OVERRIDES += \
-	ro.hardware.gatekeeper=trusty \
 ##############################################################
 # Source: device/intel/mixins/groups/vendor-partition/true/product.mk
 ##############################################################
@@ -613,8 +581,8 @@ PRODUCT_PACKAGES += lights.$(TARGET_BOARD_PLATFORM) \
 ##############################################################
 # Power HAL
 PRODUCT_PACKAGES += power.$(TARGET_BOARD_PLATFORM) \
-                    android.hardware.power@1.2-service \
-                    android.hardware.power@1.2-impl \
+                    android.hardware.power@1.0-service \
+                    android.hardware.power@1.0-impl \
                     power_hal_helper
 
 ##############################################################
@@ -639,12 +607,6 @@ PRODUCT_PACKAGES += \
         memtrack.$(TARGET_BOARD_PLATFORM) \
 	android.hardware.memtrack@1.0-service \
 	android.hardware.memtrack@1.0-impl
-##############################################################
-# Source: device/intel/mixins/groups/health/true/product.mk
-##############################################################
-PRODUCT_PACKAGES += health
-
-PRODUCT_PACKAGES += android.hardware.health@2.0-service.intel
 ##############################################################
 # Source: device/intel/mixins/groups/abota-fw/true/product.mk
 ##############################################################

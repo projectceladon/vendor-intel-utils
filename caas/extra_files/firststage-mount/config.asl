@@ -16,7 +16,7 @@ Scope(_SB)
                 Package () {
                     Package () {"android.compatible", "android,firmware"},
                     Package () {"android.vbmeta.compatible","android,vbmeta"},
-                    Package () {"android.vbmeta.parts","vbmeta,boot,system,vendor,tos,product"},
+                    Package () {"android.vbmeta.parts","vbmeta,boot,system,vendor,product"},
                     Package () {"android.fstab.compatible", "android,fstab"},
                     Package () {"android.fstab.vendor.compatible", "android,vendor"},
                     Package () {"android.fstab.vendor.dev", "/dev/block/pci/pci0000:00/0000:00:ff.ff/by-name/vendor"},  // Varies with platform

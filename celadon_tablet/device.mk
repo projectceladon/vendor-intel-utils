@@ -325,7 +325,6 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.graphics.composer@2.1-service \
                     libbt-vendor
 
-PRODUCT_COPY_FILES += $(LOCAL_PATH)/manifest.xml:vendor/manifest.xml
 PRODUCT_COPY_FILES += vendor/intel/utils/LICENSE:$(PRODUCT_OUT)/LICENSE
 ##############################################################
 # Source: device/intel/mixins/groups/trusty/true/product.mk
@@ -650,8 +649,8 @@ PRODUCT_PACKAGES += lights.$(TARGET_BOARD_PLATFORM) \
 ##############################################################
 # Power HAL
 PRODUCT_PACKAGES += power.$(TARGET_BOARD_PLATFORM) \
-                    android.hardware.power@1.2-service \
-                    android.hardware.power@1.2-impl \
+                    android.hardware.power@1.0-service \
+                    android.hardware.power@1.0-impl \
                     power_hal_helper
 
 ##############################################################
@@ -681,7 +680,7 @@ PRODUCT_PACKAGES += \
 ##############################################################
 PRODUCT_PACKAGES += health
 
-PRODUCT_PACKAGES += android.hardware.health@2.0-service.intel
+PRODUCT_PACKAGES += android.hardware.health@2.1-service
 ##############################################################
 # Source: device/intel/mixins/groups/abota-fw/true/product.mk
 ##############################################################

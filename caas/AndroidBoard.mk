@@ -250,7 +250,7 @@ kernel: $(PRODUCT_OUT)/kernel
 
 else
 
-TARGET_KERNEL_CLANG_VERSION := r365631
+TARGET_KERNEL_CLANG_VERSION := r383902b
 CLANG_PREBUILTS_PATH := $(abspath $(INTEL_PATH_DEVICE)/../../../prebuilts/clang)
 
 ifneq ($(TARGET_KERNEL_CLANG_VERSION),)
@@ -417,7 +417,7 @@ $(LOCAL_KERNEL_PATH)/copy_modules: $(LOCAL_KERNEL)
 		find $(LOCAL_KERNEL_PATH)/lib/modules/ -name $$f -exec cp {} $(TARGET_RECOVERY_ROOT_OUT)/$(KERNEL_MODULES_ROOT)/ \; ;\
 		done
 
-ifeq ($(PRODUCTS.$(INTERNAL_PRODUCT).PRODUCT_SUPPORTS_VERITY), true)
+ifeq ($(PRODUCT_SUPPORTS_VERITY), true)
 DM_VERITY_CERT := $(LOCAL_KERNEL_PATH)/verity.x509
 $(DM_VERITY_CERT): $(PRODUCTS.$(INTERNAL_PRODUCT).PRODUCT_VERITY_SIGNING_KEY).x509.pem $(OPENSSL)
 	$(transform-pem-cert-to-der-cert)
@@ -470,7 +470,7 @@ kernel: $(LOCAL_KERNEL_PATH)/copy_modules $(PRODUCT_OUT)/kernel
 endif
 
 ##############################################################
-# Source: device/intel/mixins/groups/sepolicy/enforcing/AndroidBoard.mk
+# Source: device/intel/mixins/groups/sepolicy/permissive/AndroidBoard.mk
 ##############################################################
 include $(CLEAR_VARS)
 LOCAL_MODULE := sepolicy-areq-checker
@@ -524,28 +524,6 @@ em-host-utilities:
 
 .PHONY: host-pkg
 host-pkg: em-host-utilities vinput-manager
-##############################################################
-# Source: device/intel/mixins/groups/trusty/true/AndroidBoard.mk
-##############################################################
-.PHONY: tosimage multiboot
-
-EVMM_PKG := $(TOP)/$(PRODUCT_OUT)/obj/trusty/evmm_pkg.bin
-EVMM_LK_PKG := $(TOP)/$(PRODUCT_OUT)/obj/trusty/evmm_lk_pkg.bin
-
-LOCAL_MAKE := make
-
-$(EVMM_PKG):
-	@echo "making evmm.."
-	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
-
-$(EVMM_LK_PKG):
-	@echo "making evmm(packing with lk.bin).."
-	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
-
-# include sub-makefile according to boot_arch
-include $(TARGET_DEVICE_DIR)/extra_files/trusty/trusty_project-celadon.mk
-
-LOAD_MODULES_H_IN += $(TARGET_DEVICE_DIR)/extra_files/trusty/load_trusty_modules.in
 ##############################################################
 # Source: device/intel/mixins/groups/firststage-mount/true/AndroidBoard.mk
 ##############################################################
