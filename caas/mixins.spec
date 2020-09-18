@@ -52,7 +52,7 @@ lights: true
 power: true(power_throttle=true)
 debug-usb-config: true(source_dev=dvcith-0-msc0)
 intel_prop: true
-trusty: false
+trusty: true(ref_target=celadon_64)
 memtrack: true
 avb: true
 health: false
