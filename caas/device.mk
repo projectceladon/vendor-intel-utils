@@ -432,6 +432,9 @@ PRODUCT_COPY_FILES += \
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.vulkan.version-1_1.xml:vendor/etc/permissions/android.hardware.vulkan.version.xml
 
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.software.vulkan.deqp.level-2020-03-01.xml:vendor/etc/permissions/android.software.vulkan.deqp.level.xml
+
 PRODUCT_PACKAGES += \
     vulkan.$(TARGET_BOARD_PLATFORM) \
     libvulkan_intel
