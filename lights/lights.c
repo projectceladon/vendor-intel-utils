@@ -216,6 +216,12 @@ static int open_lights(const struct hw_module_t *module, char const *name,
 
   determine_backlight_device();
 
+  /* If none of the light device is supported, disable HW HAL support for light service*/
+  if (!cur_backlight_dev) {
+      ALOGE("Could not find any backlight device");
+      return -EINVAL;
+  }
+
   dev = malloc(sizeof(struct light_device_t));
   if (!dev) {
     ALOGE("Could not allocate memory for lights_device_t!");
