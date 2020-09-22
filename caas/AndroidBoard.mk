@@ -470,7 +470,7 @@ kernel: $(LOCAL_KERNEL_PATH)/copy_modules $(PRODUCT_OUT)/kernel
 endif
 
 ##############################################################
-# Source: device/intel/mixins/groups/sepolicy/permissive/AndroidBoard.mk
+# Source: device/intel/mixins/groups/sepolicy/enforcing/AndroidBoard.mk
 ##############################################################
 include $(CLEAR_VARS)
 LOCAL_MODULE := sepolicy-areq-checker

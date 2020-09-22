@@ -118,7 +118,7 @@ KERNEL_MODULES_ROOT_PATH ?= vendor/lib/modules
 KERNEL_MODULES_ROOT ?= $(KERNEL_MODULES_ROOT_PATH)
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_MODULES_ROOT_PATH)
 ##############################################################
-# Source: device/intel/mixins/groups/sepolicy/permissive/product.mk
+# Source: device/intel/mixins/groups/sepolicy/enforcing/product.mk
 ##############################################################
 PRODUCT_PACKAGES += sepolicy-areq-checker
 ##############################################################
@@ -388,10 +388,7 @@ PRODUCT_PACKAGES += \
 
 # HWComposer IA
 PRODUCT_PACKAGES += \
-    hwcomposer.$(TARGET_GFX_INTEL)
-
-# PRODUCT_PROPERTY_OVERRIDES += \
-#   ro.hardware.hwcomposer=$(TARGET_GFX_INTEL)
+    hwcomposer.$(TARGET_BOARD_PLATFORM)
 
 INTEL_HWC_CONFIG := $(INTEL_PATH_VENDOR)/external/hwcomposer-intel
 
@@ -403,12 +400,10 @@ PRODUCT_COPY_FILES += $(INTEL_HWC_CONFIG)/hwc_display.kvm.ini:$(TARGET_COPY_OUT_
 endif
 
 # Mini gbm
-# PRODUCT_PROPERTY_OVERRIDES += \
-#    ro.hardware.gralloc=$(TARGET_GFX_INTEL)
 
 PRODUCT_PACKAGES += \
     gralloc.minigbm \
-    gralloc.$(TARGET_GFX_INTEL)
+    gralloc.$(TARGET_BOARD_PLATFORM)
 
 
 
@@ -533,7 +528,7 @@ endif
 #only enable default drm service
 PRODUCT_PACKAGES += android.hardware.drm@1.0-service \
                     android.hardware.drm@1.0-impl \
-                    android.hardware.drm@1.2-service.clearkey
+                    android.hardware.drm@1.3-service.clearkey
 
 ##############################################################
 # Source: device/intel/mixins/groups/thermal/thermal-daemon/product.mk

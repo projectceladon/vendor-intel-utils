@@ -757,7 +757,7 @@ PRODUCT_PACKAGES += android.hardware.automotive.evs@1.0-sample \
 #only enable default drm service
 PRODUCT_PACKAGES += android.hardware.drm@1.0-service \
                     android.hardware.drm@1.0-impl \
-                    android.hardware.drm@1.2-service.clearkey
+                    android.hardware.drm@1.3-service.clearkey
 
 ##############################################################
 # Source: device/intel/mixins/groups/debug-unresponsive/default/product.mk
