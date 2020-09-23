@@ -284,6 +284,41 @@ PRODUCT_COPY_FILES += device/intel/civ/host/vm-manager/scripts/start_flash_usb.s
 PRODUCT_COPY_FILES += vendor/intel/fw/trusty-release-binaries/rpmb_dev:$(PRODUCT_OUT)/scripts/rpmb_dev
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/wakeup.py:$(PRODUCT_OUT)/scripts/wakeup.py
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/true/product.mk
+##############################################################
+
+KM_VERSION := 2
+
+ifeq ($(KM_VERSION),2)
+PRODUCT_PACKAGES += \
+	keystore.trusty
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.hardware.keystore=trusty
+endif
+
+ifeq ($(KM_VERSION),1)
+PRODUCT_PACKAGES += \
+	keystore.${TARGET_BOARD_PLATFORM}
+endif
+
+PRODUCT_PACKAGES += \
+	libtrusty \
+	storageproxyd \
+	libinteltrustystorage \
+	libinteltrustystorageinterface \
+	gatekeeper.trusty \
+	android.hardware.gatekeeper@1.0-impl \
+	android.hardware.gatekeeper@1.0-service \
+
+PRODUCT_PACKAGES_DEBUG += \
+	intel-secure-storage-unit-test \
+	gatekeeper-unit-tests \
+	libscrypt_static \
+	scrypt_test \
+
+PRODUCT_PROPERTY_OVERRIDES += \
+	ro.hardware.gatekeeper=trusty \
+##############################################################
 # Source: device/intel/mixins/groups/vendor-partition/true/product.mk
 ##############################################################
 
