@@ -716,7 +716,7 @@ PRODUCT_PACKAGES_TESTS += \
     art-run-tests \
     libarttest \
     libnativebridgetest \
-    libart-gtest
+    libart-gtest.com.android.art.testing
 ##############################################################
 # Source: device/intel/mixins/groups/psdapp/true/product.mk
 ##############################################################
