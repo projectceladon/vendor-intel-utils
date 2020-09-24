@@ -21,6 +21,9 @@ private_patch_dir_bsp="$private_utils_dir/bsp_diff"
 vertical_utils_dir="$top_dir/vendor/intel/utils_vertical"
 vertical_patch_dir_aosp="$vertical_utils_dir/aosp_diff"
 vertical_patch_dir_bsp="$vertical_utils_dir/bsp_diff"
+private_vertical_utils_dir="$top_dir/vendor/intel/utils_vertical_priv"
+private_vertical_patch_dir_aosp="$private_vertical_utils_dir/aosp_diff"
+private_vertical_patch_dir_bsp="$private_vertical_utils_dir/bsp_diff"
 
 current_project=""
 previous_project=""
@@ -211,6 +214,48 @@ if [[ -e ${vertical_utils_dir} ]] && [[ -d ${vertical_utils_dir} ]];then
       fi
       if [ -f "$top_dir/vendor/intel/utils_vertical/Android.mk" ]; then
               sed -i '/^/d' $top_dir/vendor/intel/utils_vertical/Android.mk
+      fi
+    fi
+fi
+
+# Apply Vertical private patches if exist
+if [[ -e ${private_vertical_utils_dir} ]] && [[ -d ${private_vertical_utils_dir} ]];then
+        echo -e "\n============================="
+        echo "Vertical Embargoed Patches Found"
+        echo "============================="
+
+    if [[ -e ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
+        echo -e "\nApply private_utils_vertical/aosp_diff/preliminary Patches:"
+        fpnat "${private_vertical_patch_dir_aosp}/preliminary"
+    fi
+
+    if [[ -e ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
+        echo -e "\nApply private_utils_vertical/aosp_diff Target ${TARGET_PRODUCT} Patches:"
+        fpnat "${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT}"
+    fi
+
+    if [[ -e ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
+        echo -e "\nApply private_utils_vertical/bsp_diff/common Patches:"
+        fpnat "${private_vertical_patch_dir_bsp}/common"
+    fi
+
+    if [[ -e ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT} ]];then
+        echo -e "\nApply private_utils_vertical/bsp_diff Target ${TARGET_PRODUCT} Patches:"
+        fpnat "${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT}"
+    fi
+
+    if [[ "$conflict" == "y" ]]; then
+      echo -e "\n\t\tALERT : Conflicts Observed while patch application !!           "
+      for i in $conflict_list ; do echo $i; done | sort -u
+      echo -e "\n\t\tError: Please resolve Conflict(s) and re-run lunch..."
+      echo '$(error "Conflicts seen while applying lunch patches !! Resolve and re-trigger")' > $top_dir/vendor/intel/utils_vertical_priv/Android.mk
+    else
+      echo -e "\n\t\tSUCCESS : All patches applied SUCCESSFULLY in `basename ${private_vertical_patch_dir_aosp}` and `basename ${private_vertical_patch_dir_bsp}`"
+      if [[ "$applied_already" == "y" ]]; then
+        echo -e "\n\t\tINFO : SOME PATCHES ARE APPLIED ALREADY  !!"
+      fi
+      if [ -f "$top_dir/vendor/intel/utils_vertical_priv/Android.mk" ]; then
+              sed -i '/^/d' $top_dir/vendor/intel/utils_vertical_priv/Android.mk
       fi
     fi
 fi
