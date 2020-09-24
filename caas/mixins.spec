@@ -30,7 +30,7 @@ storage: sdcard-mmc0-v-usb-sd-r(adoptablesd=false,adoptableusb=false)
 ethernet: dhcp
 camera-ext: ext-camera-only
 rfkill: true(force_disable=)
-wlan: auto
+wlan: iwlwifi(libwifi-hal=true)
 codecs: configurable(hw_ve_h265=true, hw_vd_vp9=true, hw_vd_mp2=true, hw_vd_vc1=false, platform=bxt, profile_file=media_profiles_1080p.xml)
 codec2: true
 usb: host
