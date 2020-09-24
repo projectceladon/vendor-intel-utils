@@ -470,6 +470,10 @@ PRODUCT_PACKAGES += \
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.hardware.vulkan=$(TARGET_BOARD_PLATFORM)
 ##############################################################
+# Source: device/intel/mixins/groups/storage/sdcard-mmc0-v-usb-sd-r/product.mk
+##############################################################
+$(call inherit-product, $(SRC_TARGET_DIR)/product/emulated_storage.mk)
+##############################################################
 # Source: device/intel/mixins/groups/ethernet/dhcp/product.mk
 ##############################################################
 PRODUCT_COPY_FILES += \
