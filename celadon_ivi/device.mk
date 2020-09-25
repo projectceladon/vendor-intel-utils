@@ -93,32 +93,15 @@ PRODUCT_PACKAGES += \
     iw
 
 PRODUCT_PACKAGES += \
-  android.hardware.wifi@1.0-service
-
-# FW and PNVM
-PRODUCT_PACKAGES += \
-    iwl-nvm
-
-# iwlwifi USC
-PRODUCT_PACKAGES += \
-    wifi_intel_usc
+    android.hardware.wifi@1.0-service
 
 #copy iwlwifi wpa config files
 PRODUCT_COPY_FILES += \
-        $(INTEL_PATH_COMMON)/wlan/wpa_supplicant-common.conf:vendor/etc/wifi/wpa_supplicant.conf \
-        $(INTEL_PATH_COMMON)/wlan/iwlwifi/wpa_supplicant_overlay.conf:vendor/etc/wifi/wpa_supplicant_overlay.conf \
-        $(INTEL_PATH_COMMON)/wlan/iwlwifi/p2p_supplicant_overlay.conf:vendor/etc/wifi/p2p_supplicant_overlay.conf \
-        frameworks/native/data/etc/android.hardware.wifi.xml:vendor/etc/permissions/android.hardware.wifi.xml \
-        frameworks/native/data/etc/android.hardware.wifi.direct.xml:vendor/etc/permissions/android.hardware.wifi.direct.xml
-
-PRODUCT_COPY_FILES += \
-    vendor/linux/firmware/iwlwifi-9260-th-b0-jf-b0-43.ucode:$(TARGET_COPY_OUT_VENDOR)/firmware/iwlwifi-9260-th-b0-jf-b0-43.ucode \
-    vendor/linux/firmware/iwlwifi-3168-29.ucode:$(TARGET_COPY_OUT_VENDOR)/firmware/iwlwifi-3168-29.ucode \
-    vendor/linux/firmware/iwlwifi-8265-36.ucode:$(TARGET_COPY_OUT_VENDOR)/firmware/iwlwifi-8265-36.ucode
-
-
-PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
-    ro.wifi.softap_dualband_allow=false
+    $(INTEL_PATH_COMMON)/wlan/wpa_supplicant-common.conf:vendor/etc/wifi/wpa_supplicant.conf \
+    $(INTEL_PATH_COMMON)/wlan/iwlwifi/wpa_supplicant_overlay.conf:vendor/etc/wifi/wpa_supplicant_overlay.conf \
+    $(INTEL_PATH_COMMON)/wlan/iwlwifi/p2p_supplicant_overlay.conf:vendor/etc/wifi/p2p_supplicant_overlay.conf \
+    frameworks/native/data/etc/android.hardware.wifi.xml:vendor/etc/permissions/android.hardware.wifi.xml \
+    frameworks/native/data/etc/android.hardware.wifi.direct.xml:vendor/etc/permissions/android.hardware.wifi.direct.xml
 
 PRODUCT_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/wlan/overlay-disable_keepalive_offload
 ##############################################################

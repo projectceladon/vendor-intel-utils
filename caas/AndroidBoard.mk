@@ -220,6 +220,10 @@ make_bootloader_dir:
 $(PRODUCT_OUT)/ramdisk.img: make_bootloader_dir
 
 ##############################################################
+# Source: device/intel/mixins/groups/wlan/iwlwifi/AndroidBoard.mk
+##############################################################
+LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/wlan/load_legacy_iwlwifi.in
+##############################################################
 # Source: device/intel/mixins/groups/kernel/gmin64/AndroidBoard.mk.1
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/kernel/load_kernel_modules.in

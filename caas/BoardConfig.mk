@@ -146,7 +146,7 @@ KERNELFLINGER_SUPPORT_USB_STORAGE ?= true
 KERNELFLINGER_SUPPORT_LIVE_BOOT ?= true
 
 ##############################################################
-# Source: device/intel/mixins/groups/wlan/auto/BoardConfig.mk
+# Source: device/intel/mixins/groups/wlan/iwlwifi/BoardConfig.mk
 ##############################################################
 # This enables the wpa wireless driver
 BOARD_HOSTAPD_DRIVER := NL80211
@@ -155,7 +155,10 @@ WPA_SUPPLICANT_VERSION := VER_2_1_DEVEL
 # required for wifi HAL support
 BOARD_WLAN_DEVICE := iwlwifi
 
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/common
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/load_iwlwifi
+
+BOARD_SEPOLICY_M4DEFS += module_iwlwifi=true
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/iwlwifi
 ##############################################################
 # Source: device/intel/mixins/groups/kernel/gmin64/BoardConfig.mk.1
 ##############################################################
