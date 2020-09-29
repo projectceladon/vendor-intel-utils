@@ -119,7 +119,7 @@ public class PermissionsActivity extends QuickActivity {
             mFlagHasMicrophonePermission = true;
         }
 
-        if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
+        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED) {
             mNumPermissionsToRequest++;
             mShouldRequestStoragePermission = true;
@@ -172,7 +172,7 @@ public class PermissionsActivity extends QuickActivity {
             permissionsRequestIndex++;
         }
         if (mShouldRequestStoragePermission) {
-            permissionsToRequest[permissionsRequestIndex] = Manifest.permission.READ_EXTERNAL_STORAGE;
+            permissionsToRequest[permissionsRequestIndex] = Manifest.permission.WRITE_EXTERNAL_STORAGE;
             mIndexPermissionRequestStorage = permissionsRequestIndex;
             permissionsRequestIndex++;
         }

@@ -421,7 +421,14 @@ public class TaskCompressImageToJpeg extends TaskJpegEncode {
      * @return Quality level to use for JPEG compression.
      */
     protected int getJpegCompressionQuality () {
-        return CameraProfile.getJpegEncodingQualityParameter(CameraProfile.QUALITY_HIGH);
+        /* Media framework doesn't support query of EXTERNAL camera quality,
+         * It will return the BACK facing camera's quality. Set quality to 90 as WA.
+         */
+        int quality = CameraProfile.getJpegEncodingQualityParameter(CameraProfile.QUALITY_HIGH);
+        if (quality == 0)
+            return 90;
+        return quality;
+
     }
 
     /**

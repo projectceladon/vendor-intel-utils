@@ -160,7 +160,8 @@ public class SettingsManager {
     }
 
     public static String getCameraSettingScope(String cameraIdValue) {
-        return CAMERA_SCOPE_PREFIX + cameraIdValue;
+        cameraIdValue = cameraIdValue.replaceAll("/", "_");
+         return CAMERA_SCOPE_PREFIX + cameraIdValue;
     }
 
     public static String getModuleSettingScope(String moduleScopeNamespace) {
