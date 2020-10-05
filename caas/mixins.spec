@@ -55,7 +55,7 @@ intel_prop: true
 trusty: true(ref_target=celadon_64)
 memtrack: true
 avb: true
-health: false
+health: hal
 slot-ab: true
 abota-fw: true
 firststage-mount: true
