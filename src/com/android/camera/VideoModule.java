@@ -48,6 +48,8 @@ import android.view.KeyEvent;
 import android.view.View;
 import android.widget.Toast;
 
+import android.media.AudioDeviceInfo;
+
 import com.android.camera.app.AppController;
 import com.android.camera.app.CameraAppUI;
 import com.android.camera.app.LocationManager;
@@ -1148,6 +1150,23 @@ public class VideoModule extends CameraModule
         mMediaRecorder.setMaxDuration(mMaxVideoDurationInMs);
 
         setRecordLocation();
+
+        Context mContext = mActivity.getApplicationContext();
+        AudioManager mAudioManager =
+            (AudioManager)mContext.getSystemService(Context.AUDIO_SERVICE);
+        AudioDeviceInfo[] deviceList =
+            mAudioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
+        for (AudioDeviceInfo audioDeviceInfo : deviceList) {
+            if (audioDeviceInfo.getType() == AudioDeviceInfo.TYPE_USB_DEVICE) {
+                Log.d(TAG, "Setting preferred device to USB_DEVIVE");
+                mMediaRecorder.setPreferredDevice(audioDeviceInfo);
+                break;
+            } else if (audioDeviceInfo.getType() == AudioDeviceInfo.TYPE_USB_HEADSET) {
+                Log.d(TAG, "Setting preferred device to TYPE_USB_HEADSET");
+                mMediaRecorder.setPreferredDevice(audioDeviceInfo);
+                break;
+            }
+        }
 
         // Set output file.
         // Try Uri in the intent first. If it doesn't exist, use our own
