@@ -552,6 +552,10 @@ endif
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/memtrack
 ##############################################################
+# Source: device/intel/mixins/groups/health/hal/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/health_hal
+##############################################################
 # Source: device/intel/mixins/groups/abota-fw/true/BoardConfig.mk
 ##############################################################
 ABOTA_BOOTARCH=project-celadon

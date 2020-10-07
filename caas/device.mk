@@ -259,9 +259,7 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.graphics.allocator@2.0-service \
                     android.hardware.renderscript@1.0-impl \
                     android.hardware.graphics.composer@2.1-impl \
-                    android.hardware.graphics.composer@2.1-service\
-					android.hardware.health@2.1-service\
-					android.hardware.health@2.1-impl
+                    android.hardware.graphics.composer@2.1-service
 
 
 PRODUCT_PROPERTY_OVERRIDES += ro.control_privapp_permissions=enforce
@@ -641,6 +639,11 @@ PRODUCT_PACKAGES += \
         memtrack.$(TARGET_BOARD_PLATFORM) \
 	android.hardware.memtrack@1.0-service \
 	android.hardware.memtrack@1.0-impl
+##############################################################
+# Source: device/intel/mixins/groups/health/hal/product.mk
+##############################################################
+PRODUCT_PACKAGES += android.hardware.health@2.1-service \
+                    android.hardware.health@2.1-impl-intel
 ##############################################################
 # Source: device/intel/mixins/groups/abota-fw/true/product.mk
 ##############################################################
