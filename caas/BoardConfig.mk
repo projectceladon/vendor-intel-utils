@@ -155,6 +155,8 @@ WPA_SUPPLICANT_VERSION := VER_2_1_DEVEL
 # required for wifi HAL support
 BOARD_WLAN_DEVICE := iwlwifi
 
+BOARD_WPA_SUPPLICANT_PRIVATE_LIB ?= lib_driver_cmd_intc
+
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/load_iwlwifi
 
 BOARD_SEPOLICY_M4DEFS += module_iwlwifi=true
