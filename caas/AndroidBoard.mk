@@ -721,6 +721,10 @@ LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/ethernet/load_eth_modules.in
 ##############################################################
 AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/usb-gadget/auto_hal.in
 ##############################################################
+# Source: device/intel/mixins/groups/thermal/thermal-daemon/AndroidBoard.mk
+##############################################################
+AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/thermal/auto_hal.in
+##############################################################
 # Source: device/intel/mixins/groups/flashfiles/ini/AndroidBoard.mk
 ##############################################################
 ff_intermediates := $(call intermediates-dir-for,PACKAGING,flashfiles)
