@@ -127,6 +127,11 @@ PRODUCT_COPY_FILES += \
     $(INTEL_PATH_VENDOR_CIC_HAL)/wifi/WifiConfigStore.xml:data/misc/wifi/WifiConfigStore.xml \
     frameworks/native/data/etc/android.hardware.wifi.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.wifi.xml
 ##############################################################
+# Source: device/intel/mixins/groups/trusty/default/product.mk
+##############################################################
+PRODUCT_PACKAGES += \
+    android.hardware.gatekeeper@1.0-service.software
+##############################################################
 # Source: device/intel/mixins/groups/bluetooth/default/product.mk
 ##############################################################
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += config.disable_bluetooth=true

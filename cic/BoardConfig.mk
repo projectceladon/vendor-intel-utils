@@ -136,4 +136,8 @@ WPA_SUPPLICANT_VERSION      := VER_0_8_X
 WIFI_DRIVER_FW_PATH_PARAM   := "/dev/null"
 WIFI_DRIVER_FW_PATH_STA     := "/dev/null"
 WIFI_DRIVER_FW_PATH_AP      := "/dev/null"
+##############################################################
+# Source: device/intel/mixins/groups/trusty/default/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/trusty/disabled
 # ------------------ END MIX-IN DEFINITIONS ------------------
