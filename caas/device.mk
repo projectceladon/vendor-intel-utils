@@ -739,14 +739,6 @@ PRODUCT_COPY_FILES += \
         frameworks/native/data/etc/android.hardware.sensor.light.xml:vendor/etc/permissions/android.hardware.sensor.light.xml
 
 ##############################################################
-# Source: device/intel/mixins/groups/mainline-mod/true/product.mk
-##############################################################
-# Enable updating of APEXes
- $(call inherit-product, $(SRC_TARGET_DIR)/product/updatable_apex.mk)
-
-# Enable userspace reboot
- $(call inherit-product, $(SRC_TARGET_DIR)/product/userspace_reboot.mk)
-##############################################################
 # Source: device/intel/mixins/groups/debug-unresponsive/default/product.mk
 ##############################################################
 ifneq ($(TARGET_BUILD_VARIANT),user)
