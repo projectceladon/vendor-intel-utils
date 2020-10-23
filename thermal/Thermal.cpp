@@ -25,7 +25,7 @@
 #include "Thermal.h"
 
 #define SYSFS_TEMPERATURE_CPU       "/sys/class/thermal/thermal_zone0/temp"
-#define CPU_NUM_MAX                 4
+#define CPU_NUM_MAX                 12
 #define CPU_USAGE_PARAS_NUM         5
 #define CPU_USAGE_FILE              "/proc/stat"
 #define CPU_ONLINE_FILE             "/sys/devices/system/cpu/online"
@@ -44,7 +44,18 @@ using ::android::hardware::interfacesEqual;
 using ::android::hardware::thermal::V1_0::ThermalStatus;
 using ::android::hardware::thermal::V1_0::ThermalStatusCode;
 
-static const char *CPU_LABEL[] = {"CPU0", "CPU1", "CPU2", "CPU3"};
+static const char *CPU_LABEL[] = {"CPU0",
+                                  "CPU1",
+                                  "CPU2",
+                                  "CPU3",
+                                  "CPU4",
+                                  "CPU5",
+                                  "CPU6",
+                                  "CPU7",
+                                  "CPU8",
+                                  "CPU9",
+                                  "CPU10",
+                                  "CPU11"};
 struct zone_info {
 	uint32_t temperature;
 	uint32_t trip_0;
