@@ -1,0 +1,1744 @@
+From 2005a6507b34c77960b7662d2f9de253dee70298 Mon Sep 17 00:00:00 2001
+From: ahs <amrita.h.s@intel.com>
+Date: Thu, 22 Oct 2020 11:03:55 +0530
+Subject: [PATCH] Modify "inferencing AVX2/FMA patch" to make it march
+ independent
+
+Tracked-On: OAM-94493
+Signed-off-by: ahs <amrita.h.s@intel.com>
+---
+ cpu_ref/Android.bp                     |  29 +-
+ cpu_ref/dynamic_function_dispatch.h    |  87 +++++
+ cpu_ref/ifuncs.h                       |  40 ++
+ cpu_ref/rsCpuIntrinsicResize.cpp       | 670 +-------------------------------
+ cpu_ref/rsCpuIntrinsicResize.h         | 109 ++++++
+ cpu_ref/rsCpuIntrinsicResizeCommon.cpp | 680 +++++++++++++++++++++++++++++++++
+ 6 files changed, 954 insertions(+), 661 deletions(-)
+ create mode 100644 cpu_ref/dynamic_function_dispatch.h
+ create mode 100644 cpu_ref/ifuncs.h
+ create mode 100644 cpu_ref/rsCpuIntrinsicResize.h
+ create mode 100644 cpu_ref/rsCpuIntrinsicResizeCommon.cpp
+
+diff --git a/cpu_ref/Android.bp b/cpu_ref/Android.bp
+index b8da924..7396b01 100644
+--- a/cpu_ref/Android.bp
++++ b/cpu_ref/Android.bp
+@@ -25,6 +25,7 @@ cc_library_shared {
+         "rsCpuIntrinsicConvolve5x5.cpp",
+         "rsCpuIntrinsicHistogram.cpp",
+         "rsCpuIntrinsicResize.cpp",
++        "rsCpuIntrinsicResizeCommon.cpp",
+         "rsCpuIntrinsicLUT.cpp",
+         "rsCpuIntrinsicYuvToRGB.cpp",
+     ],
+@@ -80,9 +81,6 @@ cc_library_shared {
+         x86_64: {
+             cflags: ["-DARCH_X86_HAVE_SSSE3"],
+             srcs: ["rsCpuIntrinsics_x86.cpp"],
+-	    avx2: {
+-                cflags: ["-DARCH_X86_HAVE_AVX2", "-mavx2", "-mfma"],
+-            },
+         },
+     },
+ 
+@@ -102,6 +100,7 @@ cc_library_shared {
+         "libblas",
+     ],
+     static_libs: ["libbnnmlowp"],
++    whole_static_libs: ["libresizeavx2"],
+     header_libs: [
+         "libutils_headers",
+         "libhardware_headers",
+@@ -128,3 +127,27 @@ cc_library_shared {
+         },
+     },
+ }
++
++genrule {
++  name: "avxsrcs",
++  cmd: "echo 'AHS Copy rsCpuIntrinsicResizeCommon.cpp'" +  "&& cp frameworks/rs/cpu_ref/rsCpuIntrinsicResizeCommon.cpp $(out)",
++  out: ["rsCpuIntrinsicResizeCommon_avx2.cpp"],
++
++}
++
++cc_library_static {
++   name: "libresizeavx2",
++   vendor_available: true,
++   cflags: ["-DUSE_AVX2",
++            "-mavx2",
++            "-mfma",
++            "-Wno-unused-parameter",
++            "-Wno-unused-variable"],
++   generated_sources: ["avxsrcs"],
++   include_dirs: [
++        "frameworks/compile/libbcc/include",
++        "frameworks/rs",
++        "system/core/liblog/include",
++        "system/core/libutils/include",
++    ],
++}
+diff --git a/cpu_ref/dynamic_function_dispatch.h b/cpu_ref/dynamic_function_dispatch.h
+new file mode 100644
+index 0000000..f52fa7f
+--- /dev/null
++++ b/cpu_ref/dynamic_function_dispatch.h
+@@ -0,0 +1,87 @@
++/*
++ * Copyright (C) 2019 The Android Open Source Project
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include "ifuncs.h"
++
++typedef void kernel_func(const RsExpandKernelDriverInfo *info,
++                uint32_t xstart, uint32_t xend,
++                uint32_t outstep);
++namespace android {
++namespace renderscript {
++
++kernel_func kernelU1_helper __attribute__((ifunc("kernelU1_resolver")));
++kernel_func kernelU2_helper __attribute__((ifunc("kernelU2_resolver")));
++kernel_func kernelU4_helper __attribute__((ifunc("kernelU4_resolver")));
++kernel_func kernelF1_helper __attribute__((ifunc("kernelF1_resolver")));
++kernel_func kernelF2_helper __attribute__((ifunc("kernelF2_resolver")));
++kernel_func kernelF4_helper __attribute__((ifunc("kernelF4_resolver")));
++
++extern "C" {
++__attribute__((visibility("hidden")))
++kernel_func* kernelU1_resolver() {
++   __builtin_cpu_init();
++   if (__builtin_cpu_supports("avx2")) RETURN_FUNC(kernel_func, kernelU1_avx2);
++   RETURN_FUNC(kernel_func, kernelU1_generic);
++}
++
++__attribute__((visibility("hidden")))
++kernel_func* kernelU2_resolver() {
++   __builtin_cpu_init();
++   if (__builtin_cpu_supports("avx2")) RETURN_FUNC(kernel_func, kernelU2_avx2);
++   RETURN_FUNC(kernel_func, kernelU2_generic);
++}
++
++__attribute__((visibility("hidden")))
++kernel_func* kernelU4_resolver() {
++   __builtin_cpu_init();
++   if (__builtin_cpu_supports("avx2")) RETURN_FUNC(kernel_func, kernelU4_avx2);
++   RETURN_FUNC(kernel_func, kernelU4_generic);
++}
++
++__attribute__((visibility("hidden")))
++kernel_func* kernelF1_resolver() {
++   __builtin_cpu_init();
++   if (__builtin_cpu_supports("avx2")) RETURN_FUNC(kernel_func, kernelF1_avx2);
++   RETURN_FUNC(kernel_func, kernelF1_generic);
++}
++__attribute__((visibility("hidden")))
++kernel_func* kernelF2_resolver() {
++   __builtin_cpu_init();
++   if (__builtin_cpu_supports("avx2")) RETURN_FUNC(kernel_func, kernelF2_avx2);
++   RETURN_FUNC(kernel_func, kernelF2_generic);
++}
++
++__attribute__((visibility("hidden")))
++kernel_func* kernelF4_resolver() {
++   __builtin_cpu_init();
++   if (__builtin_cpu_supports("avx2")) RETURN_FUNC(kernel_func, kernelF4_avx2);
++   RETURN_FUNC(kernel_func, kernelF4_generic);
++}
++}
++}
++}
+diff --git a/cpu_ref/ifuncs.h b/cpu_ref/ifuncs.h
+new file mode 100644
+index 0000000..75b5d6d
+--- /dev/null
++++ b/cpu_ref/ifuncs.h
+@@ -0,0 +1,40 @@
++/*
++ * Copyright (C) 2019 The Android Open Source Project
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <stdint.h>
++
++#define DECLARE_FUNC(type, name) \
++    __attribute__((visibility("hidden"))) \
++    type name
++
++#define RETURN_FUNC(type, name) { \
++        DECLARE_FUNC(type, name); \
++        return name; \
++    }
+diff --git a/cpu_ref/rsCpuIntrinsicResize.cpp b/cpu_ref/rsCpuIntrinsicResize.cpp
+index 8a3dd1a..ea11ad9 100644
+--- a/cpu_ref/rsCpuIntrinsicResize.cpp
++++ b/cpu_ref/rsCpuIntrinsicResize.cpp
+@@ -14,698 +14,53 @@
+  * limitations under the License.
+  */
+ 
+-#if defined(ARCH_X86_HAVE_AVX2)
+-#include <stdint.h>
+-#include <x86intrin.h>
+-#include <xmmintrin.h>
+-#endif
+-
+ #include "rsCpuIntrinsic.h"
++#include "rsCpuIntrinsicResize.h"
+ #include "rsCpuIntrinsicInlines.h"
++#include "dynamic_function_dispatch.h"
+ 
+ namespace android {
+ namespace renderscript {
+ 
+-
+-class RsdCpuScriptIntrinsicResize : public RsdCpuScriptIntrinsic {
+-public:
+-    void populateScript(Script *) override;
+-    void invokeFreeChildren() override;
+-
+-    void setGlobalObj(uint32_t slot, ObjectBase *data) override;
+-
+-    ~RsdCpuScriptIntrinsicResize() override;
+-    RsdCpuScriptIntrinsicResize(RsdCpuReferenceImpl *ctx, const Script *s, const Element *);
+-
+-    void preLaunch(uint32_t slot, const Allocation ** ains,
+-                   uint32_t inLen, Allocation * aout, const void * usr,
+-                   uint32_t usrLen, const RsScriptCall *sc) override;
+-
+-    float scaleX;
+-    float scaleY;
+-
+-protected:
+-    ObjectBaseRef<const Allocation> mAlloc;
+-    ObjectBaseRef<const Element> mElement;
+-
+-    static void kernelU1(const RsExpandKernelDriverInfo *info,
+-                         uint32_t xstart, uint32_t xend,
+-                         uint32_t outstep);
+-    static void kernelU2(const RsExpandKernelDriverInfo *info,
+-                         uint32_t xstart, uint32_t xend,
+-                         uint32_t outstep);
+-    static void kernelU4(const RsExpandKernelDriverInfo *info,
+-                         uint32_t xstart, uint32_t xend,
+-                         uint32_t outstep);
+-    static void kernelF1(const RsExpandKernelDriverInfo *info,
+-                         uint32_t xstart, uint32_t xend,
+-                         uint32_t outstep);
+-    static void kernelF2(const RsExpandKernelDriverInfo *info,
+-                         uint32_t xstart, uint32_t xend,
+-                         uint32_t outstep);
+-    static void kernelF4(const RsExpandKernelDriverInfo *info,
+-                         uint32_t xstart, uint32_t xend,
+-                         uint32_t outstep);
+-};
+-
+-void RsdCpuScriptIntrinsicResize::setGlobalObj(uint32_t slot, ObjectBase *data) {
+-    rsAssert(slot == 0);
+-    mAlloc.set(static_cast<Allocation *>(data));
+-}
+-
+-static float4 cubicInterpolate(float4 p0,float4 p1,float4 p2,float4 p3, float x) {
+-    return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 + 4.f * p2 - p3
+-            + x * (3.f * (p1 - p2) + p3 - p0)));
+-}
+-
+-static float2 cubicInterpolate(float2 p0,float2 p1,float2 p2,float2 p3, float x) {
+-    return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 + 4.f * p2 - p3
+-            + x * (3.f * (p1 - p2) + p3 - p0)));
+-}
+-
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-static float cubicInterpolate(float p0,float p1,float p2,float p3 , float x) {
+-   return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 +
+-           _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(4.f), _mm_set1_ps(p2),_mm_set1_ps(p3)))
+-           + x * (_mm_cvtss_f32(_mm_fmadd_ss (_mm_set1_ps(3.f),_mm_set1_ps(p1 - p2),_mm_set1_ps(p3 - p0))))));
+-
+-}
+-#else
+-static float cubicInterpolate(float p0,float p1,float p2,float p3 , float x) {
+-    return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 + 4.f * p2 - p3
+-            + x * (3.f * (p1 - p2) + p3 - p0)));
+-}
+-#endif
+-
+-static uchar4 OneBiCubic(const uchar4 *yp0, const uchar4 *yp1, const uchar4 *yp2, const uchar4 *yp3,
+-                         float xf, float yf, int width) {
+-    int startx = (int) floor(xf - 1);
+-    xf = xf - floor(xf);
+-    int maxx = width - 1;
+-    int xs0 = rsMax(0, startx + 0);
+-    int xs1 = rsMax(0, startx + 1);
+-    int xs2 = rsMin(maxx, startx + 2);
+-    int xs3 = rsMin(maxx, startx + 3);
+-
+-    float4 p0  = cubicInterpolate(convert_float4(yp0[xs0]),
+-                                  convert_float4(yp0[xs1]),
+-                                  convert_float4(yp0[xs2]),
+-                                  convert_float4(yp0[xs3]), xf);
+-
+-    float4 p1  = cubicInterpolate(convert_float4(yp1[xs0]),
+-                                  convert_float4(yp1[xs1]),
+-                                  convert_float4(yp1[xs2]),
+-                                  convert_float4(yp1[xs3]), xf);
+-
+-    float4 p2  = cubicInterpolate(convert_float4(yp2[xs0]),
+-                                  convert_float4(yp2[xs1]),
+-                                  convert_float4(yp2[xs2]),
+-                                  convert_float4(yp2[xs3]), xf);
+-
+-    float4 p3  = cubicInterpolate(convert_float4(yp3[xs0]),
+-                                  convert_float4(yp3[xs1]),
+-                                  convert_float4(yp3[xs2]),
+-                                  convert_float4(yp3[xs3]), xf);
+-
+-    float4 p  = cubicInterpolate(p0, p1, p2, p3, yf);
+-    p = clamp(p + 0.5f, 0.f, 255.f);
+-    return convert_uchar4(p);
+-}
+-
+-static uchar2 OneBiCubic(const uchar2 *yp0, const uchar2 *yp1, const uchar2 *yp2, const uchar2 *yp3,
+-                         float xf, float yf, int width) {
+-    int startx = (int) floor(xf - 1);
+-    xf = xf - floor(xf);
+-    int maxx = width - 1;
+-    int xs0 = rsMax(0, startx + 0);
+-    int xs1 = rsMax(0, startx + 1);
+-    int xs2 = rsMin(maxx, startx + 2);
+-    int xs3 = rsMin(maxx, startx + 3);
+-
+-    float2 p0  = cubicInterpolate(convert_float2(yp0[xs0]),
+-                                  convert_float2(yp0[xs1]),
+-                                  convert_float2(yp0[xs2]),
+-                                  convert_float2(yp0[xs3]), xf);
+-
+-    float2 p1  = cubicInterpolate(convert_float2(yp1[xs0]),
+-                                  convert_float2(yp1[xs1]),
+-                                  convert_float2(yp1[xs2]),
+-                                  convert_float2(yp1[xs3]), xf);
+-
+-    float2 p2  = cubicInterpolate(convert_float2(yp2[xs0]),
+-                                  convert_float2(yp2[xs1]),
+-                                  convert_float2(yp2[xs2]),
+-                                  convert_float2(yp2[xs3]), xf);
+-
+-    float2 p3  = cubicInterpolate(convert_float2(yp3[xs0]),
+-                                  convert_float2(yp3[xs1]),
+-                                  convert_float2(yp3[xs2]),
+-                                  convert_float2(yp3[xs3]), xf);
+-
+-    float2 p  = cubicInterpolate(p0, p1, p2, p3, yf);
+-    p = clamp(p + 0.5f, 0.f, 255.f);
+-    return convert_uchar2(p);
+-}
+-
+-static uchar OneBiCubic(const uchar *yp0, const uchar *yp1, const uchar *yp2, const uchar *yp3,
+-                        float xf, float yf, int width) {
+-    int startx = (int) floor(xf - 1);
+-    xf = xf - floor(xf);
+-    int maxx = width - 1;
+-    int xs0 = rsMax(0, startx + 0);
+-    int xs1 = rsMax(0, startx + 1);
+-    int xs2 = rsMin(maxx, startx + 2);
+-    int xs3 = rsMin(maxx, startx + 3);
+-
+-    float p0  = cubicInterpolate((float)yp0[xs0], (float)yp0[xs1],
+-                                 (float)yp0[xs2], (float)yp0[xs3], xf);
+-    float p1  = cubicInterpolate((float)yp1[xs0], (float)yp1[xs1],
+-                                 (float)yp1[xs2], (float)yp1[xs3], xf);
+-    float p2  = cubicInterpolate((float)yp2[xs0], (float)yp2[xs1],
+-                                 (float)yp2[xs2], (float)yp2[xs3], xf);
+-    float p3  = cubicInterpolate((float)yp3[xs0], (float)yp3[xs1],
+-                                 (float)yp3[xs2], (float)yp3[xs3], xf);
+-
+-    float p  = cubicInterpolate(p0, p1, p2, p3, yf);
+-    p = clamp(p + 0.5f, 0.f, 255.f);
+-    return (uchar)p;
+-}
+-
+-extern "C" uint64_t rsdIntrinsicResize_oscctl_K(uint32_t xinc);
+-
+-extern "C" void rsdIntrinsicResizeB4_K(
+-            uchar4 *dst,
+-            size_t count,
+-            uint32_t xf,
+-            uint32_t xinc,
+-            uchar4 const *srcn,
+-            uchar4 const *src0,
+-            uchar4 const *src1,
+-            uchar4 const *src2,
+-            size_t xclip,
+-            size_t avail,
+-            uint64_t osc_ctl,
+-            int32_t const *yr);
+-
+-extern "C" void rsdIntrinsicResizeB2_K(
+-            uchar2 *dst,
+-            size_t count,
+-            uint32_t xf,
+-            uint32_t xinc,
+-            uchar2 const *srcn,
+-            uchar2 const *src0,
+-            uchar2 const *src1,
+-            uchar2 const *src2,
+-            size_t xclip,
+-            size_t avail,
+-            uint64_t osc_ctl,
+-            int32_t const *yr);
+-
+-extern "C" void rsdIntrinsicResizeB1_K(
+-            uchar *dst,
+-            size_t count,
+-            uint32_t xf,
+-            uint32_t xinc,
+-            uchar const *srcn,
+-            uchar const *src0,
+-            uchar const *src1,
+-            uchar const *src2,
+-            size_t xclip,
+-            size_t avail,
+-            uint64_t osc_ctl,
+-            int32_t const *yr);
+-
+-#if defined(ARCH_ARM_USE_INTRINSICS)
+-static void mkYCoeff(int32_t *yr, float yf) {
+-    int32_t yf1 = rint(yf * 0x10000);
+-    int32_t yf2 = rint(yf * yf * 0x10000);
+-    int32_t yf3 = rint(yf * yf * yf * 0x10000);
+-
+-    yr[0] = -(2 * yf2 - yf3 - yf1) >> 1;
+-    yr[1] = (3 * yf3 - 5 * yf2 + 0x20000) >> 1;
+-    yr[2] = (-3 * yf3 + 4 * yf2 + yf1) >> 1;
+-    yr[3] = -(yf3 - yf2) >> 1;
+-}
+-#endif
+-
+-static float4 OneBiCubic(const float4 *yp0, const float4 *yp1, const float4 *yp2, const float4 *yp3,
+-                         float xf, float yf, int width) {
+-    int startx = (int) floor(xf - 1);
+-    xf = xf - floor(xf);
+-    int maxx = width - 1;
+-    int xs0 = rsMax(0, startx + 0);
+-    int xs1 = rsMax(0, startx + 1);
+-    int xs2 = rsMin(maxx, startx + 2);
+-    int xs3 = rsMin(maxx, startx + 3);
+-
+-    float4 p0  = cubicInterpolate(yp0[xs0], yp0[xs1],
+-                                  yp0[xs2], yp0[xs3], xf);
+-    float4 p1  = cubicInterpolate(yp1[xs0], yp1[xs1],
+-                                  yp1[xs2], yp1[xs3], xf);
+-    float4 p2  = cubicInterpolate(yp2[xs0], yp2[xs1],
+-                                  yp2[xs2], yp2[xs3], xf);
+-    float4 p3  = cubicInterpolate(yp3[xs0], yp3[xs1],
+-                                  yp3[xs2], yp3[xs3], xf);
+-
+-    float4 p  = cubicInterpolate(p0, p1, p2, p3, yf);
+-    return p;
+-}
+-
+-static float2 OneBiCubic(const float2 *yp0, const float2 *yp1, const float2 *yp2, const float2 *yp3,
+-                         float xf, float yf, int width) {
+-    int startx = (int) floor(xf - 1);
+-    xf = xf - floor(xf);
+-    int maxx = width - 1;
+-    int xs0 = rsMax(0, startx + 0);
+-    int xs1 = rsMax(0, startx + 1);
+-    int xs2 = rsMin(maxx, startx + 2);
+-    int xs3 = rsMin(maxx, startx + 3);
+-
+-    float2 p0  = cubicInterpolate(yp0[xs0], yp0[xs1],
+-                                  yp0[xs2], yp0[xs3], xf);
+-    float2 p1  = cubicInterpolate(yp1[xs0], yp1[xs1],
+-                                  yp1[xs2], yp1[xs3], xf);
+-    float2 p2  = cubicInterpolate(yp2[xs0], yp2[xs1],
+-                                  yp2[xs2], yp2[xs3], xf);
+-    float2 p3  = cubicInterpolate(yp3[xs0], yp3[xs1],
+-                                  yp3[xs2], yp3[xs3], xf);
+-
+-    float2 p  = cubicInterpolate(p0, p1, p2, p3, yf);
+-    return p;
+-}
+-
+-static float OneBiCubic(const float *yp0, const float *yp1, const float *yp2, const float *yp3,
+-                        float xf, float yf, int width) {
+-    int startx = (int) floor(xf - 1);
+-    xf = xf - floor(xf);
+-    int maxx = width - 1;
+-    int xs0 = rsMax(0, startx + 0);
+-    int xs1 = rsMax(0, startx + 1);
+-    int xs2 = rsMin(maxx, startx + 2);
+-    int xs3 = rsMin(maxx, startx + 3);
+-
+-    float p0  = cubicInterpolate(yp0[xs0], yp0[xs1],
+-                                 yp0[xs2], yp0[xs3], xf);
+-    float p1  = cubicInterpolate(yp1[xs0], yp1[xs1],
+-                                 yp1[xs2], yp1[xs3], xf);
+-    float p2  = cubicInterpolate(yp2[xs0], yp2[xs1],
+-                                 yp2[xs2], yp2[xs3], xf);
+-    float p3  = cubicInterpolate(yp3[xs0], yp3[xs1],
+-                                 yp3[xs2], yp3[xs3], xf);
+-
+-    float p  = cubicInterpolate(p0, p1, p2, p3, yf);
+-    return p;
+-}
+-
+ void RsdCpuScriptIntrinsicResize::kernelU4(const RsExpandKernelDriverInfo *info,
+                                                 uint32_t xstart, uint32_t xend,
+                                                 uint32_t outstep) {
+-    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
+-
+-    if (!cp->mAlloc.get()) {
+-        ALOGE("Resize executed without input, skipping");
+-        return;
+-    }
+-    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
+-    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
+-    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
+-    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
+-
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
+-#else
+-    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
+-#endif
+-
+-
+-    int starty = (int) floor(yf - 1);
+-    yf = yf - floor(yf);
+-    int maxy = srcHeight - 1;
+-    int ys0 = rsMax(0, starty + 0);
+-    int ys1 = rsMax(0, starty + 1);
+-    int ys2 = rsMin(maxy, starty + 2);
+-    int ys3 = rsMin(maxy, starty + 3);
+-
+-    const uchar4 *yp0 = (const uchar4 *)(pin + stride * ys0);
+-    const uchar4 *yp1 = (const uchar4 *)(pin + stride * ys1);
+-    const uchar4 *yp2 = (const uchar4 *)(pin + stride * ys2);
+-    const uchar4 *yp3 = (const uchar4 *)(pin + stride * ys3);
+-
+-    uchar4 *out = ((uchar4 *)info->outPtr[0]) + xstart;
+-    uint32_t x1 = xstart;
+-    uint32_t x2 = xend;
+-
+-#if defined(ARCH_ARM_USE_INTRINSICS)
+-    if (gArchUseSIMD && x2 > x1 && cp->scaleX < 4.0f) {
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-        long xf16 = rint(xf * 0x10000);
+-        uint32_t xinc16 = rint(cp->scaleX * 0x10000);
+-
+-        int xoff = (xf16 >> 16) - 1;
+-        int xclip = rsMax(0, xoff) - xoff;
+-        int len = x2 - x1;
+-
+-        int32_t yr[4];
+-        uint64_t osc_ctl = rsdIntrinsicResize_oscctl_K(xinc16);
+-        mkYCoeff(yr, yf);
+-
+-        xoff += xclip;
+-
+-        rsdIntrinsicResizeB4_K(
+-                out, len,
+-                xf16 & 0xffff, xinc16,
+-                yp0 + xoff, yp1 + xoff, yp2 + xoff, yp3 + xoff,
+-                xclip, srcWidth - xoff + xclip,
+-                osc_ctl, yr);
+-        out += len;
+-        x1 += len;
+-    }
+-#endif
+-
+-    while(x1 < x2) {
+-#if defined(ARCH_X86_HAVE_AVX2)
+-        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
+-#else
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-#endif
+-        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
+-        out++;
+-        x1++;
+-    }
++	kernelU4_helper(info, xstart, xend, outstep);
+ }
+ 
+ void RsdCpuScriptIntrinsicResize::kernelU2(const RsExpandKernelDriverInfo *info,
+                                                 uint32_t xstart, uint32_t xend,
+                                                 uint32_t outstep) {
+-    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
+-
+-    if (!cp->mAlloc.get()) {
+-        ALOGE("Resize executed without input, skipping");
+-        return;
+-    }
+-    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
+-    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
+-    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
+-    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
+-
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
+-#else
+-    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
+-#endif
+-
+-    int starty = (int) floor(yf - 1);
+-    yf = yf - floor(yf);
+-    int maxy = srcHeight - 1;
+-    int ys0 = rsMax(0, starty + 0);
+-    int ys1 = rsMax(0, starty + 1);
+-    int ys2 = rsMin(maxy, starty + 2);
+-    int ys3 = rsMin(maxy, starty + 3);
+-
+-    const uchar2 *yp0 = (const uchar2 *)(pin + stride * ys0);
+-    const uchar2 *yp1 = (const uchar2 *)(pin + stride * ys1);
+-    const uchar2 *yp2 = (const uchar2 *)(pin + stride * ys2);
+-    const uchar2 *yp3 = (const uchar2 *)(pin + stride * ys3);
+-
+-    uchar2 *out = ((uchar2 *)info->outPtr[0]) + xstart;
+-    uint32_t x1 = xstart;
+-    uint32_t x2 = xend;
+-
+-#if defined(ARCH_ARM_USE_INTRINSICS)
+-    if (gArchUseSIMD && x2 > x1 && cp->scaleX < 4.0f) {
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-        long xf16 = rint(xf * 0x10000);
+-        uint32_t xinc16 = rint(cp->scaleX * 0x10000);
+-
+-        int xoff = (xf16 >> 16) - 1;
+-        int xclip = rsMax(0, xoff) - xoff;
+-        int len = x2 - x1;
+-
+-        int32_t yr[4];
+-        uint64_t osc_ctl = rsdIntrinsicResize_oscctl_K(xinc16);
+-        mkYCoeff(yr, yf);
+-
+-        xoff += xclip;
+-
+-        rsdIntrinsicResizeB2_K(
+-                out, len,
+-                xf16 & 0xffff, xinc16,
+-                yp0 + xoff, yp1 + xoff, yp2 + xoff, yp3 + xoff,
+-                xclip, srcWidth - xoff + xclip,
+-                osc_ctl, yr);
+-        out += len;
+-        x1 += len;
+-    }
+-#endif
+-
+-    while(x1 < x2) {
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
+-#else
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-#endif
+-        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
+-        out++;
+-        x1++;
+-    }
++	kernelU2_helper(info, xstart, xend, outstep);
+ }
+ 
+ void RsdCpuScriptIntrinsicResize::kernelU1(const RsExpandKernelDriverInfo *info,
+                                                 uint32_t xstart, uint32_t xend,
+                                                 uint32_t outstep) {
+-    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
+-
+-    if (!cp->mAlloc.get()) {
+-        ALOGE("Resize executed without input, skipping");
+-        return;
+-    }
+-    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
+-    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
+-    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
+-    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
+-
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
+-#else
+-    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
+-#endif
+-
+-    int starty = (int) floor(yf - 1);
+-    yf = yf - floor(yf);
+-    int maxy = srcHeight - 1;
+-    int ys0 = rsMax(0, starty + 0);
+-    int ys1 = rsMax(0, starty + 1);
+-    int ys2 = rsMin(maxy, starty + 2);
+-    int ys3 = rsMin(maxy, starty + 3);
+-
+-    const uchar *yp0 = pin + stride * ys0;
+-    const uchar *yp1 = pin + stride * ys1;
+-    const uchar *yp2 = pin + stride * ys2;
+-    const uchar *yp3 = pin + stride * ys3;
+-
+-    uchar *out = ((uchar *)info->outPtr[0]) + xstart;
+-    uint32_t x1 = xstart;
+-    uint32_t x2 = xend;
+-
+-#if defined(ARCH_ARM_USE_INTRINSICS)
+-    if (gArchUseSIMD && x2 > x1 && cp->scaleX < 4.0f) {
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-        long xf16 = rint(xf * 0x10000);
+-        uint32_t xinc16 = rint(cp->scaleX * 0x10000);
+-
+-        int xoff = (xf16 >> 16) - 1;
+-        int xclip = rsMax(0, xoff) - xoff;
+-        int len = x2 - x1;
+-
+-        int32_t yr[4];
+-        uint64_t osc_ctl = rsdIntrinsicResize_oscctl_K(xinc16);
+-        mkYCoeff(yr, yf);
+-
+-        xoff += xclip;
+-
+-        rsdIntrinsicResizeB1_K(
+-                out, len,
+-                xf16 & 0xffff, xinc16,
+-                yp0 + xoff, yp1 + xoff, yp2 + xoff, yp3 + xoff,
+-                xclip, srcWidth - xoff + xclip,
+-                osc_ctl, yr);
+-        out += len;
+-        x1 += len;
+-    }
+-#endif
+-
+-    while(x1 < x2) {
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
+-#else
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-#endif
+-
+-        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
+-        out++;
+-        x1++;
+-    }
++kernelU1_helper(info, xstart, xend, outstep);
+ }
+ 
+ void RsdCpuScriptIntrinsicResize::kernelF4(const RsExpandKernelDriverInfo *info,
+                                                 uint32_t xstart, uint32_t xend,
+                                                 uint32_t outstep) {
+-    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
+-
+-    if (!cp->mAlloc.get()) {
+-        ALOGE("Resize executed without input, skipping");
+-        return;
+-    }
+-    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
+-    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
+-    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
+-    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
+-#else
+-    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
+-#endif
+-
+-    int starty = (int) floor(yf - 1);
+-    yf = yf - floor(yf);
+-    int maxy = srcHeight - 1;
+-    int ys0 = rsMax(0, starty + 0);
+-    int ys1 = rsMax(0, starty + 1);
+-    int ys2 = rsMin(maxy, starty + 2);
+-    int ys3 = rsMin(maxy, starty + 3);
+-
+-    const float4 *yp0 = (const float4 *)(pin + stride * ys0);
+-    const float4 *yp1 = (const float4 *)(pin + stride * ys1);
+-    const float4 *yp2 = (const float4 *)(pin + stride * ys2);
+-    const float4 *yp3 = (const float4 *)(pin + stride * ys3);
+-
+-    float4 *out = ((float4 *)info->outPtr[0]) + xstart;
+-    uint32_t x1 = xstart;
+-    uint32_t x2 = xend;
+-
+-    while(x1 < x2) {
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
+-#else
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-#endif
+-
+-        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
+-        out++;
+-        x1++;
+-    }
++kernelF4_helper(info, xstart, xend, outstep);
+ }
+ 
+ void RsdCpuScriptIntrinsicResize::kernelF2(const RsExpandKernelDriverInfo *info,
+                                                 uint32_t xstart, uint32_t xend,
+                                                 uint32_t outstep) {
+-    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
+-
+-    if (!cp->mAlloc.get()) {
+-        ALOGE("Resize executed without input, skipping");
+-        return;
+-    }
+-    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
+-    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
+-    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
+-    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
+-
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
+-#else
+-    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
+-#endif
+-
+-    int starty = (int) floor(yf - 1);
+-    yf = yf - floor(yf);
+-    int maxy = srcHeight - 1;
+-    int ys0 = rsMax(0, starty + 0);
+-    int ys1 = rsMax(0, starty + 1);
+-    int ys2 = rsMin(maxy, starty + 2);
+-    int ys3 = rsMin(maxy, starty + 3);
+-
+-    const float2 *yp0 = (const float2 *)(pin + stride * ys0);
+-    const float2 *yp1 = (const float2 *)(pin + stride * ys1);
+-    const float2 *yp2 = (const float2 *)(pin + stride * ys2);
+-    const float2 *yp3 = (const float2 *)(pin + stride * ys3);
+-
+-    float2 *out = ((float2 *)info->outPtr[0]) + xstart;
+-    uint32_t x1 = xstart;
+-    uint32_t x2 = xend;
+-
+-    while(x1 < x2) {
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
+-#else
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-#endif
+-
+-        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
+-        out++;
+-        x1++;
+-    }
++kernelF2_helper(info, xstart, xend, outstep);
+ }
+ 
+ void RsdCpuScriptIntrinsicResize::kernelF1(const RsExpandKernelDriverInfo *info,
+                                                 uint32_t xstart, uint32_t xend,
+                                                 uint32_t outstep) {
+-    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
+-
+-    if (!cp->mAlloc.get()) {
+-        ALOGE("Resize executed without input, skipping");
+-        return;
+-    }
+-    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
+-    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
+-    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
+-    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
+-
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
+-#else
+-    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
+-#endif
+-
+-    int starty = (int) floor(yf - 1);
+-    yf = yf - floor(yf);
+-    int maxy = srcHeight - 1;
+-    int ys0 = rsMax(0, starty + 0);
+-    int ys1 = rsMax(0, starty + 1);
+-    int ys2 = rsMin(maxy, starty + 2);
+-    int ys3 = rsMin(maxy, starty + 3);
+-
+-    const float *yp0 = (const float *)(pin + stride * ys0);
+-    const float *yp1 = (const float *)(pin + stride * ys1);
+-    const float *yp2 = (const float *)(pin + stride * ys2);
+-    const float *yp3 = (const float *)(pin + stride * ys3);
+-
+-    float *out = ((float *)info->outPtr[0]) + xstart;
+-    uint32_t x1 = xstart;
+-    uint32_t x2 = xend;
+-
+-    while(x1 < x2) {
+-
+-#if defined(ARCH_X86_HAVE_AVX2)
+-        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
+-#else
+-        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
+-#endif
++kernelF1_helper(info, xstart, xend, outstep);
++}
+ 
+-        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
+-        out++;
+-        x1++;
+-    }
++void RsdCpuScriptIntrinsicResize::setGlobalObj(uint32_t slot, ObjectBase *data) {
++    rsAssert(slot == 0);
++    mAlloc.set(static_cast<Allocation *>(data));
+ }
+ 
+ RsdCpuScriptIntrinsicResize::RsdCpuScriptIntrinsicResize (
+@@ -776,6 +131,5 @@ RsdCpuScriptImpl * rsdIntrinsic_Resize(RsdCpuReferenceImpl *ctx, const Script *s
+ 
+     return new RsdCpuScriptIntrinsicResize(ctx, s, e);
+ }
+-
+ } // namespace renderscript
+ } // namespace android
+diff --git a/cpu_ref/rsCpuIntrinsicResize.h b/cpu_ref/rsCpuIntrinsicResize.h
+new file mode 100644
+index 0000000..2282962
+--- /dev/null
++++ b/cpu_ref/rsCpuIntrinsicResize.h
+@@ -0,0 +1,109 @@
++/*
++ * Copyright (C) 2014 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++//#include "rsCpuIntrinsic.h"
++//#include "rsCpuIntrinsicInlines.h"
++//#include "ifuncs.h"
++//#if !defined(USE_AVX2)
++//#include "dynamic_function_dispatch.h"
++//#endif
++
++typedef void kernel_func(const RsExpandKernelDriverInfo *info,
++                      uint32_t xstart, uint32_t xend,
++                      uint32_t outstep);
++
++namespace android {
++namespace renderscript {
++
++class RsdCpuScriptIntrinsicResize : public RsdCpuScriptIntrinsic {
++public:
++    void populateScript(Script *) override;
++    void invokeFreeChildren() override;
++
++    void setGlobalObj(uint32_t slot, ObjectBase *data) override;
++
++    ~RsdCpuScriptIntrinsicResize() override;
++    RsdCpuScriptIntrinsicResize(RsdCpuReferenceImpl *ctx, const Script *s, const Element *);
++
++    void preLaunch(uint32_t slot, const Allocation ** ains,
++                   uint32_t inLen, Allocation * aout, const void * usr,
++                   uint32_t usrLen, const RsScriptCall *sc) override;
++
++    float scaleX;
++    float scaleY;
++
++    ObjectBaseRef<const Allocation> mAlloc;
++    ObjectBaseRef<const Element> mElement;
++protected:
++    static void kernelU1(const RsExpandKernelDriverInfo *info,
++                         uint32_t xstart, uint32_t xend,
++                         uint32_t outstep);
++    static void kernelU2(const RsExpandKernelDriverInfo *info,
++                         uint32_t xstart, uint32_t xend,
++                         uint32_t outstep);
++    static void kernelU4(const RsExpandKernelDriverInfo *info,
++                         uint32_t xstart, uint32_t xend,
++                         uint32_t outstep);
++    static void kernelF1(const RsExpandKernelDriverInfo *info,
++                         uint32_t xstart, uint32_t xend,
++                         uint32_t outstep);
++    static void kernelF2(const RsExpandKernelDriverInfo *info,
++                         uint32_t xstart, uint32_t xend,
++                         uint32_t outstep);
++    static void kernelF4(const RsExpandKernelDriverInfo *info,
++                         uint32_t xstart, uint32_t xend,
++                         uint32_t outstep);
++};
++
++/*#ifndef USE_AVX2
++void RsdCpuScriptIntrinsicResize::kernelU4(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++kernelU4_helper(info, xstart, xend, outstep);
++}
++
++void RsdCpuScriptIntrinsicResize::kernelU2(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++kernelU2_helper(info, xstart, xend, outstep);
++}
++
++void RsdCpuScriptIntrinsicResize::kernelU1(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++kernelU1_helper(info, xstart, xend, outstep);
++}
++
++void RsdCpuScriptIntrinsicResize::kernelF4(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++kernelF4_helper(info, xstart, xend, outstep);
++}
++
++void RsdCpuScriptIntrinsicResize::kernelF2(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++kernelF2_helper(info, xstart, xend, outstep);
++}
++
++void RsdCpuScriptIntrinsicResize::kernelF1(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++kernelF1_helper(info, xstart, xend, outstep);
++}
++#endif*/
++} // namespace renderscript
++} // namespace android
+diff --git a/cpu_ref/rsCpuIntrinsicResizeCommon.cpp b/cpu_ref/rsCpuIntrinsicResizeCommon.cpp
+new file mode 100644
+index 0000000..a3faa1c
+--- /dev/null
++++ b/cpu_ref/rsCpuIntrinsicResizeCommon.cpp
+@@ -0,0 +1,680 @@
++/*
++ * Copyright (C) 2014 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#if defined(USE_AVX2)
++#include <stdint.h>
++#include <x86intrin.h>
++#include <xmmintrin.h>
++#endif
++
++#include "rsCpuIntrinsic.h"
++#include "rsCpuIntrinsicInlines.h"
++#include "rsCpuIntrinsicResize.h"
++
++namespace android {
++namespace renderscript {
++
++static float4 cubicInterpolate(float4 p0,float4 p1,float4 p2,float4 p3, float x) {
++    return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 + 4.f * p2 - p3
++            + x * (3.f * (p1 - p2) + p3 - p0)));
++}
++
++static float2 cubicInterpolate(float2 p0,float2 p1,float2 p2,float2 p3, float x) {
++    return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 + 4.f * p2 - p3
++            + x * (3.f * (p1 - p2) + p3 - p0)));
++}
++
++static float cubicInterpolate(float p0,float p1,float p2,float p3 , float x) {
++#if defined(USE_AVX2)
++   return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 +
++           _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(4.f), _mm_set1_ps(p2),_mm_set1_ps(p3)))
++           + x * (_mm_cvtss_f32(_mm_fmadd_ss (_mm_set1_ps(3.f),_mm_set1_ps(p1 - p2),_mm_set1_ps(p3 - p0))))));
++#else
++    return p1 + 0.5f * x * (p2 - p0 + x * (2.f * p0 - 5.f * p1 + 4.f * p2 - p3
++            + x * (3.f * (p1 - p2) + p3 - p0)));
++#endif
++}
++
++static uchar4 OneBiCubic(const uchar4 *yp0, const uchar4 *yp1, const uchar4 *yp2, const uchar4 *yp3,
++                         float xf, float yf, int width) {
++    int startx = (int) floor(xf - 1);
++    xf = xf - floor(xf);
++    int maxx = width - 1;
++    int xs0 = rsMax(0, startx + 0);
++    int xs1 = rsMax(0, startx + 1);
++    int xs2 = rsMin(maxx, startx + 2);
++    int xs3 = rsMin(maxx, startx + 3);
++
++    float4 p0  = cubicInterpolate(convert_float4(yp0[xs0]),
++                                  convert_float4(yp0[xs1]),
++                                  convert_float4(yp0[xs2]),
++                                  convert_float4(yp0[xs3]), xf);
++
++    float4 p1  = cubicInterpolate(convert_float4(yp1[xs0]),
++                                  convert_float4(yp1[xs1]),
++                                  convert_float4(yp1[xs2]),
++                                  convert_float4(yp1[xs3]), xf);
++
++    float4 p2  = cubicInterpolate(convert_float4(yp2[xs0]),
++                                  convert_float4(yp2[xs1]),
++                                  convert_float4(yp2[xs2]),
++                                  convert_float4(yp2[xs3]), xf);
++
++    float4 p3  = cubicInterpolate(convert_float4(yp3[xs0]),
++                                  convert_float4(yp3[xs1]),
++                                  convert_float4(yp3[xs2]),
++                                  convert_float4(yp3[xs3]), xf);
++
++    float4 p  = cubicInterpolate(p0, p1, p2, p3, yf);
++    p = clamp(p + 0.5f, 0.f, 255.f);
++    return convert_uchar4(p);
++}
++
++static uchar2 OneBiCubic(const uchar2 *yp0, const uchar2 *yp1, const uchar2 *yp2, const uchar2 *yp3,
++                         float xf, float yf, int width) {
++    int startx = (int) floor(xf - 1);
++    xf = xf - floor(xf);
++    int maxx = width - 1;
++    int xs0 = rsMax(0, startx + 0);
++    int xs1 = rsMax(0, startx + 1);
++    int xs2 = rsMin(maxx, startx + 2);
++    int xs3 = rsMin(maxx, startx + 3);
++
++    float2 p0  = cubicInterpolate(convert_float2(yp0[xs0]),
++                                  convert_float2(yp0[xs1]),
++                                  convert_float2(yp0[xs2]),
++                                  convert_float2(yp0[xs3]), xf);
++
++    float2 p1  = cubicInterpolate(convert_float2(yp1[xs0]),
++                                  convert_float2(yp1[xs1]),
++                                  convert_float2(yp1[xs2]),
++                                  convert_float2(yp1[xs3]), xf);
++
++    float2 p2  = cubicInterpolate(convert_float2(yp2[xs0]),
++                                  convert_float2(yp2[xs1]),
++                                  convert_float2(yp2[xs2]),
++                                  convert_float2(yp2[xs3]), xf);
++
++    float2 p3  = cubicInterpolate(convert_float2(yp3[xs0]),
++                                  convert_float2(yp3[xs1]),
++                                  convert_float2(yp3[xs2]),
++                                  convert_float2(yp3[xs3]), xf);
++
++    float2 p  = cubicInterpolate(p0, p1, p2, p3, yf);
++    p = clamp(p + 0.5f, 0.f, 255.f);
++    return convert_uchar2(p);
++}
++
++static uchar OneBiCubic(const uchar *yp0, const uchar *yp1, const uchar *yp2, const uchar *yp3,
++                        float xf, float yf, int width) {
++    int startx = (int) floor(xf - 1);
++    xf = xf - floor(xf);
++    int maxx = width - 1;
++    int xs0 = rsMax(0, startx + 0);
++    int xs1 = rsMax(0, startx + 1);
++    int xs2 = rsMin(maxx, startx + 2);
++    int xs3 = rsMin(maxx, startx + 3);
++
++    float p0  = cubicInterpolate((float)yp0[xs0], (float)yp0[xs1],
++                                 (float)yp0[xs2], (float)yp0[xs3], xf);
++    float p1  = cubicInterpolate((float)yp1[xs0], (float)yp1[xs1],
++                                 (float)yp1[xs2], (float)yp1[xs3], xf);
++    float p2  = cubicInterpolate((float)yp2[xs0], (float)yp2[xs1],
++                                 (float)yp2[xs2], (float)yp2[xs3], xf);
++    float p3  = cubicInterpolate((float)yp3[xs0], (float)yp3[xs1],
++                                 (float)yp3[xs2], (float)yp3[xs3], xf);
++
++    float p  = cubicInterpolate(p0, p1, p2, p3, yf);
++    p = clamp(p + 0.5f, 0.f, 255.f);
++    return (uchar)p;
++}
++
++extern "C" uint64_t rsdIntrinsicResize_oscctl_K(uint32_t xinc);
++
++extern "C" void rsdIntrinsicResizeB4_K(
++            uchar4 *dst,
++            size_t count,
++            uint32_t xf,
++            uint32_t xinc,
++            uchar4 const *srcn,
++            uchar4 const *src0,
++            uchar4 const *src1,
++            uchar4 const *src2,
++            size_t xclip,
++            size_t avail,
++            uint64_t osc_ctl,
++            int32_t const *yr);
++
++extern "C" void rsdIntrinsicResizeB2_K(
++            uchar2 *dst,
++            size_t count,
++            uint32_t xf,
++            uint32_t xinc,
++            uchar2 const *srcn,
++            uchar2 const *src0,
++            uchar2 const *src1,
++            uchar2 const *src2,
++            size_t xclip,
++            size_t avail,
++            uint64_t osc_ctl,
++            int32_t const *yr);
++
++extern "C" void rsdIntrinsicResizeB1_K(
++            uchar *dst,
++            size_t count,
++            uint32_t xf,
++            uint32_t xinc,
++            uchar const *srcn,
++            uchar const *src0,
++            uchar const *src1,
++            uchar const *src2,
++            size_t xclip,
++            size_t avail,
++            uint64_t osc_ctl,
++            int32_t const *yr);
++
++#if defined(ARCH_ARM_USE_INTRINSICS)
++static void mkYCoeff(int32_t *yr, float yf) {
++    int32_t yf1 = rint(yf * 0x10000);
++    int32_t yf2 = rint(yf * yf * 0x10000);
++    int32_t yf3 = rint(yf * yf * yf * 0x10000);
++
++    yr[0] = -(2 * yf2 - yf3 - yf1) >> 1;
++    yr[1] = (3 * yf3 - 5 * yf2 + 0x20000) >> 1;
++    yr[2] = (-3 * yf3 + 4 * yf2 + yf1) >> 1;
++    yr[3] = -(yf3 - yf2) >> 1;
++}
++#endif
++
++static float4 OneBiCubic(const float4 *yp0, const float4 *yp1, const float4 *yp2, const float4 *yp3,
++                         float xf, float yf, int width) {
++    int startx = (int) floor(xf - 1);
++    xf = xf - floor(xf);
++    int maxx = width - 1;
++    int xs0 = rsMax(0, startx + 0);
++    int xs1 = rsMax(0, startx + 1);
++    int xs2 = rsMin(maxx, startx + 2);
++    int xs3 = rsMin(maxx, startx + 3);
++
++    float4 p0  = cubicInterpolate(yp0[xs0], yp0[xs1],
++                                  yp0[xs2], yp0[xs3], xf);
++    float4 p1  = cubicInterpolate(yp1[xs0], yp1[xs1],
++                                  yp1[xs2], yp1[xs3], xf);
++    float4 p2  = cubicInterpolate(yp2[xs0], yp2[xs1],
++                                  yp2[xs2], yp2[xs3], xf);
++    float4 p3  = cubicInterpolate(yp3[xs0], yp3[xs1],
++                                  yp3[xs2], yp3[xs3], xf);
++
++    float4 p  = cubicInterpolate(p0, p1, p2, p3, yf);
++    return p;
++}
++
++static float2 OneBiCubic(const float2 *yp0, const float2 *yp1, const float2 *yp2, const float2 *yp3,
++                         float xf, float yf, int width) {
++    int startx = (int) floor(xf - 1);
++    xf = xf - floor(xf);
++    int maxx = width - 1;
++    int xs0 = rsMax(0, startx + 0);
++    int xs1 = rsMax(0, startx + 1);
++    int xs2 = rsMin(maxx, startx + 2);
++    int xs3 = rsMin(maxx, startx + 3);
++
++    float2 p0  = cubicInterpolate(yp0[xs0], yp0[xs1],
++                                  yp0[xs2], yp0[xs3], xf);
++    float2 p1  = cubicInterpolate(yp1[xs0], yp1[xs1],
++                                  yp1[xs2], yp1[xs3], xf);
++    float2 p2  = cubicInterpolate(yp2[xs0], yp2[xs1],
++                                  yp2[xs2], yp2[xs3], xf);
++    float2 p3  = cubicInterpolate(yp3[xs0], yp3[xs1],
++                                  yp3[xs2], yp3[xs3], xf);
++
++    float2 p  = cubicInterpolate(p0, p1, p2, p3, yf);
++    return p;
++}
++
++static float OneBiCubic(const float *yp0, const float *yp1, const float *yp2, const float *yp3,
++                        float xf, float yf, int width) {
++    int startx = (int) floor(xf - 1);
++    xf = xf - floor(xf);
++    int maxx = width - 1;
++    int xs0 = rsMax(0, startx + 0);
++    int xs1 = rsMax(0, startx + 1);
++    int xs2 = rsMin(maxx, startx + 2);
++    int xs3 = rsMin(maxx, startx + 3);
++
++    float p0  = cubicInterpolate(yp0[xs0], yp0[xs1],
++                                 yp0[xs2], yp0[xs3], xf);
++    float p1  = cubicInterpolate(yp1[xs0], yp1[xs1],
++                                 yp1[xs2], yp1[xs3], xf);
++    float p2  = cubicInterpolate(yp2[xs0], yp2[xs1],
++                                 yp2[xs2], yp2[xs3], xf);
++    float p3  = cubicInterpolate(yp3[xs0], yp3[xs1],
++                                 yp3[xs2], yp3[xs3], xf);
++
++    float p  = cubicInterpolate(p0, p1, p2, p3, yf);
++    return p;
++}
++
++#ifdef USE_AVX2
++#define kernelU4_func kernelU4_avx2
++#define kernelU2_func kernelU2_avx2
++#define kernelU1_func kernelU1_avx2
++#define kernelF4_func kernelF4_avx2
++#define kernelF2_func kernelF2_avx2
++#define kernelF1_func kernelF1_avx2
++#else
++#define kernelU4_func kernelU4_generic
++#define kernelU2_func kernelU2_generic
++#define kernelU1_func kernelU1_generic
++#define kernelF4_func kernelF4_generic
++#define kernelF2_func kernelF2_generic
++#define kernelF1_func kernelF1_generic
++#endif
++
++extern "C" {
++void kernelU4_func(const RsExpandKernelDriverInfo *info,
++              uint32_t xstart, uint32_t xend,
++              uint32_t outstep) {
++    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
++
++    if (!cp->mAlloc.get()) {
++        ALOGE("Resize executed without input, skipping");
++        return;
++    }
++    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
++    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
++    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
++    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
++
++
++#if defined(USE_AVX2)
++    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
++#else
++    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
++#endif
++
++
++    int starty = (int) floor(yf - 1);
++    yf = yf - floor(yf);
++    int maxy = srcHeight - 1;
++    int ys0 = rsMax(0, starty + 0);
++    int ys1 = rsMax(0, starty + 1);
++    int ys2 = rsMin(maxy, starty + 2);
++    int ys3 = rsMin(maxy, starty + 3);
++
++    const uchar4 *yp0 = (const uchar4 *)(pin + stride * ys0);
++    const uchar4 *yp1 = (const uchar4 *)(pin + stride * ys1);
++    const uchar4 *yp2 = (const uchar4 *)(pin + stride * ys2);
++    const uchar4 *yp3 = (const uchar4 *)(pin + stride * ys3);
++
++    uchar4 *out = ((uchar4 *)info->outPtr[0]) + xstart;
++    uint32_t x1 = xstart;
++    uint32_t x2 = xend;
++
++#if defined(ARCH_ARM_USE_INTRINSICS)
++    if (gArchUseSIMD && x2 > x1 && cp->scaleX < 4.0f) {
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++        long xf16 = rint(xf * 0x10000);
++        uint32_t xinc16 = rint(cp->scaleX * 0x10000);
++
++        int xoff = (xf16 >> 16) - 1;
++        int xclip = rsMax(0, xoff) - xoff;
++        int len = x2 - x1;
++
++        int32_t yr[4];
++        uint64_t osc_ctl = rsdIntrinsicResize_oscctl_K(xinc16);
++        mkYCoeff(yr, yf);
++
++        xoff += xclip;
++
++        rsdIntrinsicResizeB4_K(
++                out, len,
++                xf16 & 0xffff, xinc16,
++                yp0 + xoff, yp1 + xoff, yp2 + xoff, yp3 + xoff,
++                xclip, srcWidth - xoff + xclip,
++                osc_ctl, yr);
++        out += len;
++        x1 += len;
++    }
++#endif
++
++    while(x1 < x2) {
++#if defined(USE_AVX2)
++        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
++#else
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++#endif
++        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
++        out++;
++        x1++;
++    }
++}
++
++void kernelU2_func(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
++
++    if (!cp->mAlloc.get()) {
++        ALOGE("Resize executed without input, skipping");
++        return;
++    }
++    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
++    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
++    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
++    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
++
++
++#if defined(USE_AVX2)
++    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
++#else
++    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
++#endif
++
++    int starty = (int) floor(yf - 1);
++    yf = yf - floor(yf);
++    int maxy = srcHeight - 1;
++    int ys0 = rsMax(0, starty + 0);
++    int ys1 = rsMax(0, starty + 1);
++    int ys2 = rsMin(maxy, starty + 2);
++    int ys3 = rsMin(maxy, starty + 3);
++
++    const uchar2 *yp0 = (const uchar2 *)(pin + stride * ys0);
++    const uchar2 *yp1 = (const uchar2 *)(pin + stride * ys1);
++    const uchar2 *yp2 = (const uchar2 *)(pin + stride * ys2);
++    const uchar2 *yp3 = (const uchar2 *)(pin + stride * ys3);
++
++    uchar2 *out = ((uchar2 *)info->outPtr[0]) + xstart;
++    uint32_t x1 = xstart;
++    uint32_t x2 = xend;
++
++#if defined(ARCH_ARM_USE_INTRINSICS)
++    if (gArchUseSIMD && x2 > x1 && cp->scaleX < 4.0f) {
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++        long xf16 = rint(xf * 0x10000);
++        uint32_t xinc16 = rint(cp->scaleX * 0x10000);
++
++        int xoff = (xf16 >> 16) - 1;
++        int xclip = rsMax(0, xoff) - xoff;
++        int len = x2 - x1;
++
++        int32_t yr[4];
++        uint64_t osc_ctl = rsdIntrinsicResize_oscctl_K(xinc16);
++        mkYCoeff(yr, yf);
++
++        xoff += xclip;
++
++        rsdIntrinsicResizeB2_K(
++                out, len,
++                xf16 & 0xffff, xinc16,
++                yp0 + xoff, yp1 + xoff, yp2 + xoff, yp3 + xoff,
++                xclip, srcWidth - xoff + xclip,
++                osc_ctl, yr);
++        out += len;
++        x1 += len;
++    }
++#endif
++
++    while(x1 < x2) {
++
++#if defined(USE_AVX2)
++        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
++#else
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++#endif
++        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
++        out++;
++        x1++;
++    }
++}
++
++void kernelU1_func(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
++
++    if (!cp->mAlloc.get()) {
++        ALOGE("Resize executed without input, skipping");
++        return;
++    }
++    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
++    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
++    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
++    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
++
++
++#if defined(USE_AVX2)
++    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
++#else
++    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
++#endif
++
++    int starty = (int) floor(yf - 1);
++    yf = yf - floor(yf);
++    int maxy = srcHeight - 1;
++    int ys0 = rsMax(0, starty + 0);
++    int ys1 = rsMax(0, starty + 1);
++    int ys2 = rsMin(maxy, starty + 2);
++    int ys3 = rsMin(maxy, starty + 3);
++
++    const uchar *yp0 = pin + stride * ys0;
++    const uchar *yp1 = pin + stride * ys1;
++    const uchar *yp2 = pin + stride * ys2;
++    const uchar *yp3 = pin + stride * ys3;
++
++    uchar *out = ((uchar *)info->outPtr[0]) + xstart;
++    uint32_t x1 = xstart;
++    uint32_t x2 = xend;
++
++#if defined(ARCH_ARM_USE_INTRINSICS)
++    if (gArchUseSIMD && x2 > x1 && cp->scaleX < 4.0f) {
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++        long xf16 = rint(xf * 0x10000);
++        uint32_t xinc16 = rint(cp->scaleX * 0x10000);
++
++        int xoff = (xf16 >> 16) - 1;
++        int xclip = rsMax(0, xoff) - xoff;
++        int len = x2 - x1;
++
++        int32_t yr[4];
++        uint64_t osc_ctl = rsdIntrinsicResize_oscctl_K(xinc16);
++        mkYCoeff(yr, yf);
++
++        xoff += xclip;
++
++        rsdIntrinsicResizeB1_K(
++                out, len,
++                xf16 & 0xffff, xinc16,
++                yp0 + xoff, yp1 + xoff, yp2 + xoff, yp3 + xoff,
++                xclip, srcWidth - xoff + xclip,
++                osc_ctl, yr);
++        out += len;
++        x1 += len;
++    }
++#endif
++
++    while(x1 < x2) {
++
++#if defined(USE_AVX2)
++        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
++#else
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++#endif
++
++        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
++        out++;
++        x1++;
++    }
++}
++
++void kernelF4_func(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
++
++    if (!cp->mAlloc.get()) {
++        ALOGE("Resize executed without input, skipping");
++        return;
++    }
++    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
++    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
++    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
++    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
++
++#if defined(USE_AVX2)
++    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
++#else
++    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
++#endif
++
++    int starty = (int) floor(yf - 1);
++    yf = yf - floor(yf);
++    int maxy = srcHeight - 1;
++    int ys0 = rsMax(0, starty + 0);
++    int ys1 = rsMax(0, starty + 1);
++    int ys2 = rsMin(maxy, starty + 2);
++    int ys3 = rsMin(maxy, starty + 3);
++
++    const float4 *yp0 = (const float4 *)(pin + stride * ys0);
++    const float4 *yp1 = (const float4 *)(pin + stride * ys1);
++    const float4 *yp2 = (const float4 *)(pin + stride * ys2);
++    const float4 *yp3 = (const float4 *)(pin + stride * ys3);
++
++    float4 *out = ((float4 *)info->outPtr[0]) + xstart;
++    uint32_t x1 = xstart;
++    uint32_t x2 = xend;
++
++    while(x1 < x2) {
++
++#if defined(USE_AVX2)
++        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
++#else
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++#endif
++
++        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
++        out++;
++        x1++;
++    }
++}
++
++void kernelF2_func(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
++
++    if (!cp->mAlloc.get()) {
++        ALOGE("Resize executed without input, skipping");
++        return;
++    }
++    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
++    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
++    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
++    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
++
++
++#if defined(USE_AVX2)
++    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
++#else
++    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
++#endif
++
++    int starty = (int) floor(yf - 1);
++    yf = yf - floor(yf);
++    int maxy = srcHeight - 1;
++    int ys0 = rsMax(0, starty + 0);
++    int ys1 = rsMax(0, starty + 1);
++    int ys2 = rsMin(maxy, starty + 2);
++    int ys3 = rsMin(maxy, starty + 3);
++
++    const float2 *yp0 = (const float2 *)(pin + stride * ys0);
++    const float2 *yp1 = (const float2 *)(pin + stride * ys1);
++    const float2 *yp2 = (const float2 *)(pin + stride * ys2);
++    const float2 *yp3 = (const float2 *)(pin + stride * ys3);
++
++    float2 *out = ((float2 *)info->outPtr[0]) + xstart;
++    uint32_t x1 = xstart;
++    uint32_t x2 = xend;
++
++    while(x1 < x2) {
++
++#if defined(USE_AVX2)
++        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
++#else
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++#endif
++
++        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
++        out++;
++        x1++;
++    }
++}
++
++void kernelF1_func(const RsExpandKernelDriverInfo *info,
++                                                uint32_t xstart, uint32_t xend,
++                                                uint32_t outstep) {
++    RsdCpuScriptIntrinsicResize *cp = (RsdCpuScriptIntrinsicResize *)info->usr;
++
++    if (!cp->mAlloc.get()) {
++        ALOGE("Resize executed without input, skipping");
++        return;
++    }
++    const uchar *pin = (const uchar *)cp->mAlloc->mHal.drvState.lod[0].mallocPtr;
++    const int srcHeight = cp->mAlloc->mHal.drvState.lod[0].dimY;
++    const int srcWidth = cp->mAlloc->mHal.drvState.lod[0].dimX;
++    const size_t stride = cp->mAlloc->mHal.drvState.lod[0].stride;
++
++
++#if defined(USE_AVX2)
++    float yf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(info->current.y + 0.5f),_mm_set1_ps(cp->scaleY), _mm_set1_ps(0.5f)));
++#else
++    float yf = (info->current.y + 0.5f) * cp->scaleY - 0.5f;
++#endif
++
++    int starty = (int) floor(yf - 1);
++    yf = yf - floor(yf);
++    int maxy = srcHeight - 1;
++    int ys0 = rsMax(0, starty + 0);
++    int ys1 = rsMax(0, starty + 1);
++    int ys2 = rsMin(maxy, starty + 2);
++    int ys3 = rsMin(maxy, starty + 3);
++
++    const float *yp0 = (const float *)(pin + stride * ys0);
++    const float *yp1 = (const float *)(pin + stride * ys1);
++    const float *yp2 = (const float *)(pin + stride * ys2);
++    const float *yp3 = (const float *)(pin + stride * ys3);
++
++    float *out = ((float *)info->outPtr[0]) + xstart;
++    uint32_t x1 = xstart;
++    uint32_t x2 = xend;
++
++    while(x1 < x2) {
++
++#if defined(USE_AVX2)
++        float xf = _mm_cvtss_f32(_mm_fmsub_ss(_mm_set1_ps(x1 + 0.5f) , _mm_set1_ps(cp->scaleX) , _mm_set1_ps(0.5f)));
++#else
++        float xf = (x1 + 0.5f) * cp->scaleX - 0.5f;
++#endif
++
++        *out = OneBiCubic(yp0, yp1, yp2, yp3, xf, yf, srcWidth);
++        out++;
++        x1++;
++    }
++}
++} //extern
++
++} // namespace renderscript
++} // namespace android
+-- 
+2.7.4
+
