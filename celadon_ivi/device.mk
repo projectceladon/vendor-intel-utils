@@ -28,9 +28,11 @@ PRODUCT_PACKAGES += \
     bootctrl.avb \
     bootctrl.intel \
     bootctrl.intel.static \
+    bootctrl.intel.recovery \
     update_engine_sideload \
     avbctl \
     android.hardware.boot@1.0-impl \
+    android.hardware.boot@1.0-impl.recovery \
     android.hardware.boot@1.0-service
 
 PRODUCT_PROPERTY_OVERRIDES += \
