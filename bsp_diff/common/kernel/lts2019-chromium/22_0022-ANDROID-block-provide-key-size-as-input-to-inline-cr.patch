@@ -1,0 +1,153 @@
+From 16d48b3f572000a580e4a62f070d00f0954dfbaf Mon Sep 17 00:00:00 2001
+From: Barani Muthukumaran <bmuthuku@codeaurora.org>
+Date: Thu, 2 Jan 2020 11:57:39 -0800
+Subject: [PATCH] ANDROID: block: provide key size as input to inline crypto
+ APIs
+
+Currently, blk-crypto uses the algorithm to determine the size of keys.
+However, some inline encryption hardware supports protecting keys from
+software by wrapping the storage keys with an ephemeral key.  Since
+these wrapped keys are not of a fixed size, add the capability to
+provide the key size when initializing a blk_crypto_key, and update the
+keyslot manager to take size into account when comparing keys.
+
+Bug: 147209885
+
+Change-Id: Ibc2e4807e0a0ec473e72d131e0f20abb3a6033b5
+Co-developed-by: Gaurav Kashyap <gaurkash@codeaurora.org>
+Signed-off-by: Gaurav Kashyap <gaurkash@codeaurora.org>
+Signed-off-by: Barani Muthukumaran <bmuthuku@codeaurora.org>
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+---
+ block/blk-crypto.c            | 21 ++++++++++++++-------
+ block/keyslot-manager.c       |  1 +
+ fs/crypto/inline_crypt.c      |  4 ++--
+ include/linux/bio-crypt-ctx.h |  3 ++-
+ include/linux/blk-crypto.h    |  3 ++-
+ 5 files changed, 21 insertions(+), 11 deletions(-)
+
+diff --git a/block/blk-crypto.c b/block/blk-crypto.c
+index 42ebd5ade0d3..a8de0d9680e0 100644
+--- a/block/blk-crypto.c
++++ b/block/blk-crypto.c
+@@ -171,15 +171,19 @@ bool blk_crypto_endio(struct bio *bio)
+ /**
+  * blk_crypto_init_key() - Prepare a key for use with blk-crypto
+  * @blk_key: Pointer to the blk_crypto_key to initialize.
+- * @raw_key: Pointer to the raw key.  Must be the correct length for the chosen
+- *	     @crypto_mode; see blk_crypto_modes[].
++ * @raw_key: Pointer to the raw key.
++ * @raw_key_size: Size of raw key.  Must be at least the required size for the
++ *                chosen @crypto_mode; see blk_crypto_modes[].  (It's allowed
++ *                to be longer than the mode's actual key size, in order to
++ *                support inline encryption hardware that accepts wrapped keys.)
+  * @crypto_mode: identifier for the encryption algorithm to use
+  * @data_unit_size: the data unit size to use for en/decryption
+  *
+  * Return: The blk_crypto_key that was prepared, or an ERR_PTR() on error.  When
+  *	   done using the key, it must be freed with blk_crypto_free_key().
+  */
+-int blk_crypto_init_key(struct blk_crypto_key *blk_key, const u8 *raw_key,
++int blk_crypto_init_key(struct blk_crypto_key *blk_key,
++			const u8 *raw_key, unsigned int raw_key_size,
+ 			enum blk_crypto_mode_num crypto_mode,
+ 			unsigned int data_unit_size)
+ {
+@@ -191,8 +195,11 @@ int blk_crypto_init_key(struct blk_crypto_key *blk_key, const u8 *raw_key,
+ 	if (crypto_mode >= ARRAY_SIZE(blk_crypto_modes))
+ 		return -EINVAL;
+ 
++	BUILD_BUG_ON(BLK_CRYPTO_MAX_WRAPPED_KEY_SIZE < BLK_CRYPTO_MAX_KEY_SIZE);
++
+ 	mode = &blk_crypto_modes[crypto_mode];
+-	if (mode->keysize == 0)
++	if (raw_key_size < mode->keysize ||
++	    raw_key_size > BLK_CRYPTO_MAX_WRAPPED_KEY_SIZE)
+ 		return -EINVAL;
+ 
+ 	if (!is_power_of_2(data_unit_size))
+@@ -201,8 +208,8 @@ int blk_crypto_init_key(struct blk_crypto_key *blk_key, const u8 *raw_key,
+ 	blk_key->crypto_mode = crypto_mode;
+ 	blk_key->data_unit_size = data_unit_size;
+ 	blk_key->data_unit_size_bits = ilog2(data_unit_size);
+-	blk_key->size = mode->keysize;
+-	memcpy(blk_key->raw, raw_key, mode->keysize);
++	blk_key->size = raw_key_size;
++	memcpy(blk_key->raw, raw_key, raw_key_size);
+ 
+ 	/*
+ 	 * The keyslot manager uses the SipHash of the key to implement O(1) key
+@@ -210,7 +217,7 @@ int blk_crypto_init_key(struct blk_crypto_key *blk_key, const u8 *raw_key,
+ 	 * precomputed here so that it only needs to be computed once per key.
+ 	 */
+ 	get_random_once(&hash_key, sizeof(hash_key));
+-	blk_key->hash = siphash(raw_key, mode->keysize, &hash_key);
++	blk_key->hash = siphash(raw_key, raw_key_size, &hash_key);
+ 
+ 	return 0;
+ }
+diff --git a/block/keyslot-manager.c b/block/keyslot-manager.c
+index 687f5245073f..c6b84eeae5c2 100644
+--- a/block/keyslot-manager.c
++++ b/block/keyslot-manager.c
+@@ -173,6 +173,7 @@ static int find_keyslot(struct keyslot_manager *ksm,
+ 	hlist_for_each_entry(slotp, head, hash_node) {
+ 		if (slotp->key.hash == key->hash &&
+ 		    slotp->key.crypto_mode == key->crypto_mode &&
++		    slotp->key.size == key->size &&
+ 		    slotp->key.data_unit_size == key->data_unit_size &&
+ 		    !crypto_memneq(slotp->key.raw, key->raw, key->size))
+ 			return slotp - ksm->slots;
+diff --git a/fs/crypto/inline_crypt.c b/fs/crypto/inline_crypt.c
+index fa8818f078b4..43e5dd69b046 100644
+--- a/fs/crypto/inline_crypt.c
++++ b/fs/crypto/inline_crypt.c
+@@ -74,8 +74,8 @@ int fscrypt_prepare_inline_crypt_key(struct fscrypt_prepared_key *prep_key,
+ 	else
+ 		sb->s_cop->get_devices(sb, blk_key->devs);
+ 
+-	err = blk_crypto_init_key(&blk_key->base, raw_key, crypto_mode,
+-				  sb->s_blocksize);
++	err = blk_crypto_init_key(&blk_key->base, raw_key, ci->ci_mode->keysize,
++				  crypto_mode, sb->s_blocksize);
+ 	if (err) {
+ 		fscrypt_err(inode, "error %d initializing blk-crypto key", err);
+ 		goto fail;
+diff --git a/include/linux/bio-crypt-ctx.h b/include/linux/bio-crypt-ctx.h
+index 00aaf3cdb051..ab22dbe7b880 100644
+--- a/include/linux/bio-crypt-ctx.h
++++ b/include/linux/bio-crypt-ctx.h
+@@ -19,6 +19,7 @@ enum blk_crypto_mode_num {
+ #ifdef CONFIG_BLK_INLINE_ENCRYPTION
+ 
+ #define BLK_CRYPTO_MAX_KEY_SIZE		64
++#define BLK_CRYPTO_MAX_WRAPPED_KEY_SIZE		128
+ 
+ /**
+  * struct blk_crypto_key - an inline encryption key
+@@ -41,7 +42,7 @@ struct blk_crypto_key {
+ 	unsigned int data_unit_size_bits;
+ 	unsigned int size;
+ 	unsigned int hash;
+-	u8 raw[BLK_CRYPTO_MAX_KEY_SIZE];
++	u8 raw[BLK_CRYPTO_MAX_WRAPPED_KEY_SIZE];
+ };
+ 
+ #define BLK_CRYPTO_MAX_IV_SIZE		32
+diff --git a/include/linux/blk-crypto.h b/include/linux/blk-crypto.h
+index 07d32e33f0bb..6dd37961888a 100644
+--- a/include/linux/blk-crypto.h
++++ b/include/linux/blk-crypto.h
+@@ -14,7 +14,8 @@ int blk_crypto_submit_bio(struct bio **bio_ptr);
+ 
+ bool blk_crypto_endio(struct bio *bio);
+ 
+-int blk_crypto_init_key(struct blk_crypto_key *blk_key, const u8 *raw_key,
++int blk_crypto_init_key(struct blk_crypto_key *blk_key,
++			const u8 *raw_key, unsigned int raw_key_size,
+ 			enum blk_crypto_mode_num crypto_mode,
+ 			unsigned int data_unit_size);
+ 
+-- 
+2.20.1
+

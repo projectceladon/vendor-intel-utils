@@ -1,0 +1,140 @@
+From 24cc0551593e4f89bcdfd58f5048a528109fb748 Mon Sep 17 00:00:00 2001
+From: Eric Biggers <ebiggers@google.com>
+Date: Tue, 21 Jan 2020 09:25:59 -0800
+Subject: [PATCH] ANDROID: ext4, f2fs: enable direct I/O with inline encryption
+
+ext4 and f2fs have traditionally not supported direct I/O on encrypted
+files, since it's difficult to implement with the traditional
+filesystem-layer encryption.  But when inline encryption is used
+instead, it's straightforward to support direct I/O, as long as the I/O
+is fully filesystem-block-aligned.  Add support for it by:
+
+- Making the two generic direct I/O implementations in the kernel,
+  __blockdev_direct_IO() and iomap_dio_rw(), set the encryption context
+  on bios for inline-encrypted files.  __blockdev_direct_IO() is used by
+  f2fs, and was used by ext4 in kernel v5.4 and earlier.  iomap_dio_rw()
+  is used by ext4 in kernel v5.5 and later.
+
+- Making ext4 and f2fs allow direct I/O to encrypted files (rather the
+  current behavior of falling back to buffered I/O) when the file is
+  using inline encryption and the I/O is fully filesystem-block-aligned.
+
+Bug: 137270441
+Change-Id: I4c8f7497eb8f829d03611d24281113d68c21d4d1
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+---
+ fs/direct-io.c       |  5 +++++
+ fs/ext4/inode.c      | 10 ++++++----
+ fs/f2fs/f2fs.h       |  8 +++++++-
+ fs/iomap/direct-io.c |  6 ++++++
+ 4 files changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/fs/direct-io.c b/fs/direct-io.c
+index 9329ced91f1d..e1e92d86f646 100644
+--- a/fs/direct-io.c
++++ b/fs/direct-io.c
+@@ -24,6 +24,7 @@
+ #include <linux/module.h>
+ #include <linux/types.h>
+ #include <linux/fs.h>
++#include <linux/fscrypt.h>
+ #include <linux/mm.h>
+ #include <linux/slab.h>
+ #include <linux/highmem.h>
+@@ -430,6 +431,7 @@ dio_bio_alloc(struct dio *dio, struct dio_submit *sdio,
+ 	      sector_t first_sector, int nr_vecs)
+ {
+ 	struct bio *bio;
++	struct inode *inode = dio->inode;
+ 
+ 	/*
+ 	 * bio_alloc() is guaranteed to return a bio when allowed to sleep and
+@@ -437,6 +439,9 @@ dio_bio_alloc(struct dio *dio, struct dio_submit *sdio,
+ 	 */
+ 	bio = bio_alloc(GFP_KERNEL, nr_vecs);
+ 
++	fscrypt_set_bio_crypt_ctx(bio, inode,
++				  sdio->cur_page_fs_offset >> inode->i_blkbits,
++				  GFP_KERNEL);
+ 	bio_set_dev(bio, bdev);
+ 	bio->bi_iter.bi_sector = first_sector;
+ 	bio_set_op_attrs(bio, dio->op, dio->op_flags);
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index 6e57a0ac3987..a19f76c8f125 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -3898,10 +3898,12 @@ static ssize_t ext4_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
+ 	ssize_t ret;
+ 	int rw = iov_iter_rw(iter);
+ 
+-#ifdef CONFIG_FS_ENCRYPTION
+-	if (IS_ENCRYPTED(inode) && S_ISREG(inode->i_mode))
+-		return 0;
+-#endif
++	if (IS_ENABLED(CONFIG_FS_ENCRYPTION) && IS_ENCRYPTED(inode)) {
++		if (!fscrypt_inode_uses_inline_crypto(inode) ||
++		    !IS_ALIGNED(iocb->ki_pos | iov_iter_alignment(iter),
++				i_blocksize(inode)))
++			return 0;
++	}
+ 	if (fsverity_active(inode))
+ 		return 0;
+ 
+diff --git a/fs/f2fs/f2fs.h b/fs/f2fs/f2fs.h
+index 9e2c09bf9138..95a9c1cade49 100644
+--- a/fs/f2fs/f2fs.h
++++ b/fs/f2fs/f2fs.h
+@@ -3713,7 +3713,13 @@ static inline bool f2fs_force_buffered_io(struct inode *inode,
+ 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
+ 	int rw = iov_iter_rw(iter);
+ 
+-	if (f2fs_post_read_required(inode))
++	if (IS_ENABLED(CONFIG_FS_ENCRYPTION) && f2fs_encrypted_file(inode)) {
++		if (!fscrypt_inode_uses_inline_crypto(inode) ||
++		    !IS_ALIGNED(iocb->ki_pos | iov_iter_alignment(iter),
++				F2FS_BLKSIZE))
++			return true;
++	}
++	if (fsverity_active(inode))
+ 		return true;
+ 	if (f2fs_is_multi_device(sbi))
+ 		return true;
+diff --git a/fs/iomap/direct-io.c b/fs/iomap/direct-io.c
+index 7b5f76efef02..795694085363 100644
+--- a/fs/iomap/direct-io.c
++++ b/fs/iomap/direct-io.c
+@@ -6,6 +6,7 @@
+ #include <linux/module.h>
+ #include <linux/compiler.h>
+ #include <linux/fs.h>
++#include <linux/fscrypt.h>
+ #include <linux/iomap.h>
+ #include <linux/backing-dev.h>
+ #include <linux/uio.h>
+@@ -178,11 +179,14 @@ static void
+ iomap_dio_zero(struct iomap_dio *dio, struct iomap *iomap, loff_t pos,
+ 		unsigned len)
+ {
++	struct inode *inode = file_inode(dio->iocb->ki_filp);
+ 	struct page *page = ZERO_PAGE(0);
+ 	int flags = REQ_SYNC | REQ_IDLE;
+ 	struct bio *bio;
+ 
+ 	bio = bio_alloc(GFP_KERNEL, 1);
++	fscrypt_set_bio_crypt_ctx(bio, inode, pos >> inode->i_blkbits,
++				  GFP_KERNEL);
+ 	bio_set_dev(bio, iomap->bdev);
+ 	bio->bi_iter.bi_sector = iomap_sector(iomap, pos);
+ 	bio->bi_private = dio;
+@@ -261,6 +265,8 @@ iomap_dio_bio_actor(struct inode *inode, loff_t pos, loff_t length,
+ 		}
+ 
+ 		bio = bio_alloc(GFP_KERNEL, nr_pages);
++		fscrypt_set_bio_crypt_ctx(bio, inode, pos >> inode->i_blkbits,
++					  GFP_KERNEL);
+ 		bio_set_dev(bio, iomap->bdev);
+ 		bio->bi_iter.bi_sector = iomap_sector(iomap, pos);
+ 		bio->bi_write_hint = dio->iocb->ki_hint;
+-- 
+2.20.1
+

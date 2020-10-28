@@ -1,0 +1,172 @@
+From 29c97e1f161c852a873a0196cc8a58a0b4a5bdcb Mon Sep 17 00:00:00 2001
+From: Satya Tangirala <satyat@google.com>
+Date: Tue, 21 Jan 2020 09:27:43 -0800
+Subject: [PATCH] ANDROID: block: Introduce passthrough keyslot manager
+
+The regular keyslot manager is designed for devices that have a small
+number of keyslots that need to be programmed with keys ahead of time,
+and bios that are sent to the device need to be tagged with a keyslot
+index.
+
+Some inline encryption hardware may not have any limitations on the
+number of keyslot, and may instead allow each bio to be tagged with
+a raw key, data unit number, etc. rather than a pre-programmed keyslot's
+index. These devices don't need any sort of keyslot management, and it's
+better for these devices not to have to allocate a regular keyslot
+manager with some fixed number of keyslots. These devices can instead
+set up a passthrough keyslot manager in their request queue, which
+require less resources than regular keyslot managers, as they simply
+do no-ops when trying to program keys into slots.
+
+Separately, the device mapper may map over devices that have inline
+encryption hardware, and it wants to pass the key along to the
+underlying hardware. While the DM layer can expose inline encryption
+capabilities by setting up a regular keyslot manager with some fixed
+number of keyslots in the dm device's request queue, this only wastes
+memory since the keys programmed into the dm device's request queue
+will never be used. Instead, it's better to set up a passthrough
+keyslot manager for dm devices.
+
+Bug: 137270441
+Bug: 147814592
+Change-Id: I6d91e83e86a73b0d6066873c8a9117cf2c089234
+Signed-off-by: Satya Tangirala <satyat@google.com>
+Signed-off-by: Eric Biggers <ebiggers@google.com>
+---
+ block/keyslot-manager.c         | 66 +++++++++++++++++++++++++++++++++
+ include/linux/keyslot-manager.h |  5 +++
+ 2 files changed, 71 insertions(+)
+
+diff --git a/block/keyslot-manager.c b/block/keyslot-manager.c
+index cdf0607019d4..3ed77daf124e 100644
+--- a/block/keyslot-manager.c
++++ b/block/keyslot-manager.c
+@@ -66,6 +66,11 @@ struct keyslot_manager {
+ 	struct keyslot slots[];
+ };
+ 
++static inline bool keyslot_manager_is_passthrough(struct keyslot_manager *ksm)
++{
++	return ksm->num_slots == 0;
++}
++
+ /**
+  * keyslot_manager_create() - Create a keyslot manager
+  * @num_slots: The number of key slots to manage.
+@@ -210,6 +215,9 @@ int keyslot_manager_get_slot_for_key(struct keyslot_manager *ksm,
+ 	int err;
+ 	struct keyslot *idle_slot;
+ 
++	if (keyslot_manager_is_passthrough(ksm))
++		return 0;
++
+ 	down_read(&ksm->lock);
+ 	slot = find_and_grab_keyslot(ksm, key);
+ 	up_read(&ksm->lock);
+@@ -275,6 +283,9 @@ int keyslot_manager_get_slot_for_key(struct keyslot_manager *ksm,
+  */
+ void keyslot_manager_get_slot(struct keyslot_manager *ksm, unsigned int slot)
+ {
++	if (keyslot_manager_is_passthrough(ksm))
++		return;
++
+ 	if (WARN_ON(slot >= ksm->num_slots))
+ 		return;
+ 
+@@ -292,6 +303,9 @@ void keyslot_manager_put_slot(struct keyslot_manager *ksm, unsigned int slot)
+ {
+ 	unsigned long flags;
+ 
++	if (keyslot_manager_is_passthrough(ksm))
++		return;
++
+ 	if (WARN_ON(slot >= ksm->num_slots))
+ 		return;
+ 
+@@ -351,6 +365,16 @@ int keyslot_manager_evict_key(struct keyslot_manager *ksm,
+ 	int err;
+ 	struct keyslot *slotp;
+ 
++	if (keyslot_manager_is_passthrough(ksm)) {
++		if (ksm->ksm_ll_ops.keyslot_evict) {
++			down_write(&ksm->lock);
++			err = ksm->ksm_ll_ops.keyslot_evict(ksm, key, -1);
++			up_write(&ksm->lock);
++			return err;
++		}
++		return 0;
++	}
++
+ 	down_write(&ksm->lock);
+ 	slot = find_keyslot(ksm, key);
+ 	if (slot < 0) {
+@@ -388,6 +412,9 @@ void keyslot_manager_reprogram_all_keys(struct keyslot_manager *ksm)
+ {
+ 	unsigned int slot;
+ 
++	if (WARN_ON(keyslot_manager_is_passthrough(ksm)))
++		return;
++
+ 	down_write(&ksm->lock);
+ 	for (slot = 0; slot < ksm->num_slots; slot++) {
+ 		const struct keyslot *slotp = &ksm->slots[slot];
+@@ -424,3 +451,42 @@ void keyslot_manager_destroy(struct keyslot_manager *ksm)
+ 	}
+ }
+ EXPORT_SYMBOL_GPL(keyslot_manager_destroy);
++
++/**
++ * keyslot_manager_create_passthrough() - Create a passthrough keyslot manager
++ * @ksm_ll_ops: The struct keyslot_mgmt_ll_ops
++ * @crypto_mode_supported: Bitmasks for supported encryption modes
++ * @ll_priv_data: Private data passed as is to the functions in ksm_ll_ops.
++ *
++ * Allocate memory for and initialize a passthrough keyslot manager.
++ * Called by e.g. storage drivers to set up a keyslot manager in their
++ * request_queue, when the storage driver wants to manage its keys by itself.
++ * This is useful for inline encryption hardware that don't have a small fixed
++ * number of keyslots, and for layered devices.
++ *
++ * See keyslot_manager_create() for more details about the parameters.
++ *
++ * Context: This function may sleep
++ * Return: Pointer to constructed keyslot manager or NULL on error.
++ */
++struct keyslot_manager *keyslot_manager_create_passthrough(
++	const struct keyslot_mgmt_ll_ops *ksm_ll_ops,
++	const unsigned int crypto_mode_supported[BLK_ENCRYPTION_MODE_MAX],
++	void *ll_priv_data)
++{
++	struct keyslot_manager *ksm;
++
++	ksm = kzalloc(sizeof(*ksm), GFP_KERNEL);
++	if (!ksm)
++		return NULL;
++
++	ksm->ksm_ll_ops = *ksm_ll_ops;
++	memcpy(ksm->crypto_mode_supported, crypto_mode_supported,
++	       sizeof(ksm->crypto_mode_supported));
++	ksm->ll_priv_data = ll_priv_data;
++
++	init_rwsem(&ksm->lock);
++
++	return ksm;
++}
++EXPORT_SYMBOL_GPL(keyslot_manager_create_passthrough);
+diff --git a/include/linux/keyslot-manager.h b/include/linux/keyslot-manager.h
+index fbc423fe5cd5..307f89ca818b 100644
+--- a/include/linux/keyslot-manager.h
++++ b/include/linux/keyslot-manager.h
+@@ -57,4 +57,9 @@ void *keyslot_manager_private(struct keyslot_manager *ksm);
+ 
+ void keyslot_manager_destroy(struct keyslot_manager *ksm);
+ 
++struct keyslot_manager *keyslot_manager_create_passthrough(
++	const struct keyslot_mgmt_ll_ops *ksm_ops,
++	const unsigned int crypto_mode_supported[BLK_ENCRYPTION_MODE_MAX],
++	void *ll_priv_data);
++
+ #endif /* __LINUX_KEYSLOT_MANAGER_H */
+-- 
+2.20.1
+
