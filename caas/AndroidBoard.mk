@@ -898,7 +898,6 @@ gptimage: $(GPTIMAGE_BIN)
 ##############################################################
 # Source: device/intel/mixins/groups/aaf/true/AndroidBoard.mk
 ##############################################################
-AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/aaf/auto_hal.in
 include $(CLEAR_VARS)
 LOCAL_MODULE := auto_detection.sh
 LOCAL_PROPRIETARY_MODULE := true
@@ -911,4 +910,8 @@ $(LOCAL_BUILT_MODULE): $(LOCAL_SRC)
 	$(hide) mkdir -p "$(dir $@)"
 	echo "#!/vendor/bin/sh" > $@
 	cat $(AUTO_IN) >> $@
+##############################################################
+# Source: device/intel/mixins/groups/suspend/auto/AndroidBoard.mk
+##############################################################
+AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/suspend/auto_hal.in
 # ------------------ END MIX-IN DEFINITIONS ------------------
