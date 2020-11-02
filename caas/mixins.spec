@@ -81,7 +81,7 @@ gptbuild: true(size=32G,generate_craff=false,compress_gptimage=true)
 dynamic-partitions: true(super_img_in_flashzip=true)
 dbc: true
 atrace: true
-firmware: true(all_firmwares=true)
+firmware: true(all_firmwares=false)
 aaf: true
 suspend: auto
 sensors: mediation
