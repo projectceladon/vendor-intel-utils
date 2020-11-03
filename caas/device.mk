@@ -638,6 +638,10 @@ PRODUCT_PACKAGES += \
 	android.hardware.memtrack@1.0-service \
 	android.hardware.memtrack@1.0-impl
 ##############################################################
+# Source: device/intel/mixins/groups/avx/auto/product.mk
+##############################################################
+PRODUCT_COPY_FILES += $(LOCAL_PATH)/extra_files/avx/checkavx.sh:vendor/bin/checkavx.sh 
+##############################################################
 # Source: device/intel/mixins/groups/health/hal/product.mk
 ##############################################################
 PRODUCT_PACKAGES += android.hardware.health@2.1-service \
