@@ -266,6 +266,7 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
 
 
 PRODUCT_PROPERTY_OVERRIDES += ro.control_privapp_permissions=enforce
+PRODUCT_PROPERTY_OVERRIDES += dalvik.vm.useautofastjni=true
 
 PRODUCT_COPY_FILES += $(LOCAL_PATH)/file_share.sh:$(TARGET_COPY_OUT_VENDOR)/bin/file_share.sh
 PRODUCT_COPY_FILES += vendor/intel/utils/LICENSE:$(PRODUCT_OUT)/LICENSE
