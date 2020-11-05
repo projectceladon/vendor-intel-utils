@@ -75,9 +75,9 @@ int healthd_board_battery_update(struct android::BatteryProperties *props)
     if (get_battery_properties(props))
         platformPowerSupplyType = BATTERY;
     if (platformPowerSupplyType == CONSTANT_POWER) {
-        props->batteryStatus = android::BATTERY_STATUS_FULL;
-        props->batteryHealth = android::BATTERY_HEALTH_GOOD;
-        props->batteryLevel = 100;
+        props->batteryStatus = android::BATTERY_STATUS_UNKNOWN;
+        props->batteryHealth = android::BATTERY_HEALTH_UNKNOWN;
+        props->batteryLevel = 0;
         props->batteryChargeCounter= 1000000;
         props->batteryCurrent= 1000000;
         props->chargerAcOnline = true;
@@ -85,7 +85,7 @@ int healthd_board_battery_update(struct android::BatteryProperties *props)
         props->chargerWirelessOnline = false;
         props->maxChargingCurrent= 2500000;
         props->maxChargingVoltage= 4300000;
-        props->batteryPresent= true;
+        props->batteryPresent= false;
         props->batteryVoltage= 1200000;
         props->batteryTemperature= 25;
         props->batteryFullCharge= 4200000;
