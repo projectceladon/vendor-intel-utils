@@ -714,7 +714,6 @@ PRODUCT_PACKAGES += \
 # Source: device/intel/mixins/groups/firmware/true/product.mk
 ##############################################################
 FIRMWARES_DIR ?= vendor/linux/firmware
-INCLUDE_ALL_FIRMWARE := true
 
 $(call inherit-product,device/intel/common/firmware.mk)
 ##############################################################
