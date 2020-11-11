@@ -320,6 +320,7 @@ PRODUCT_PACKAGES += \
 	libinteltrustystorage \
 	libinteltrustystorageinterface \
 	android.hardware.gatekeeper@1.0-service.trusty \
+	keybox_provisioning \
 
 PRODUCT_PACKAGES_DEBUG += \
 	intel-secure-storage-unit-test \
