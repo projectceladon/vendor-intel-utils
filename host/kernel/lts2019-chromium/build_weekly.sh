@@ -20,7 +20,7 @@ do
     else
       git am --abort
       echo "Not able to apply\t"`basename $i`
-      break
+      exit
     fi
   else
     echo -e "\tAlready applied\t\t"`basename $i`
