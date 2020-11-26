@@ -62,7 +62,7 @@ abota-fw: true
 firststage-mount: true
 cpuset: autocores
 usb-init: true
-usb-audio-init: true
+usb-audio-init: false
 usb-otg-switch: true
 vndk: true
 public-libraries: true
