@@ -814,10 +814,6 @@ handle_isa_perf_modules: isa_perf_libs
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/usb-init/load_usb_modules.in
 ##############################################################
-# Source: device/intel/mixins/groups/usb-audio-init/true/AndroidBoard.mk
-##############################################################
-LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/usb-audio-init/load_usbaudio_modules.in
-##############################################################
 # Source: device/intel/mixins/groups/load_modules/true/AndroidBoard.mk
 ##############################################################
 include $(CLEAR_VARS)
