@@ -127,10 +127,12 @@ PRODUCT_PACKAGES += sepolicy-areq-checker
 ##############################################################
 # Source: device/intel/mixins/groups/bluetooth/btusb/product.mk
 ##############################################################
+PRODUCT_PACKAGES += \
+    hciconfig
+
 # Bluetooth tools eng / userdebug
 ifneq ($(TARGET_BUILD_VARIANT),user)
 PRODUCT_PACKAGES += \
-    hciconfig \
     btmon \
     hcitool
 endif
@@ -138,18 +140,6 @@ endif
 PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.hardware.bluetooth.xml:vendor/etc/permissions/android.hardware.bluetooth.xml \
     frameworks/native/data/etc/android.hardware.bluetooth_le.xml:vendor/etc/permissions/android.hardware.bluetooth_le.xml
-
-PRODUCT_COPY_FILES += \
-    vendor/linux/firmware/intel/ibt-18-16-1.ddc:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-16-1.ddc \
-    vendor/linux/firmware/intel/ibt-18-16-1.sfi:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-16-1.sfi \
-    vendor/linux/firmware/intel/ibt-18-2.ddc:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-2.ddc \
-    vendor/linux/firmware/intel/ibt-18-2.sfi:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-18-2.sfi \
-    vendor/linux/firmware/intel/ibt-12-16.ddc:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-12-16.ddc \
-    vendor/linux/firmware/intel/ibt-12-16.sfi:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-12-16.sfi \
-    vendor/linux/firmware/intel/ibt-hw-37.8.10-fw-22.50.19.14.f.bseq:$(TARGET_COPY_OUT_VENDOR)/firmware/intel/ibt-hw-37.8.10-fw-22.50.19.14.f.bseq
-
-PRODUCT_COPY_FILES += \
-	$(LOCAL_PATH)/extra_files/bluetooth/bluetooth_auto_detection.sh:vendor/bin/bluetooth_auto_detection.sh
 
 PRODUCT_PROPERTY_OVERRIDES += bluetooth.rfkill=1
 

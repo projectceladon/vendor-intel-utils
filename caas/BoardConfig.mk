@@ -214,11 +214,10 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)
 # Pass device target to build in
 BOARD_SEPOLICY_M4DEFS += board_sepolicy_target_product=$(TARGET_PRODUCT)
 ##############################################################
-# Source: device/intel/mixins/groups/bluetooth/auto/BoardConfig.mk
+# Source: device/intel/mixins/groups/bluetooth/btusb/BoardConfig.mk
 ##############################################################
 BOARD_HAVE_BLUETOOTH_INTEL_ICNV := true
-BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := $(INTEL_PATH_COMMON)/bluetooth/tablet/
-
+BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := $(INTEL_PATH_COMMON)/bluetooth/intel/tablet/
 DEVICE_PACKAGE_OVERLAYS += $(INTEL_PATH_COMMON)/bluetooth/overlay-bt-pan
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/bluetooth/common
 ##############################################################

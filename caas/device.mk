@@ -130,7 +130,7 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.vendor.boot.moduleslocation=/$(KERNEL_M
 ##############################################################
 PRODUCT_PACKAGES += sepolicy-areq-checker
 ##############################################################
-# Source: device/intel/mixins/groups/bluetooth/auto/product.mk
+# Source: device/intel/mixins/groups/bluetooth/btusb/product.mk
 ##############################################################
 PRODUCT_PACKAGES += \
     hciconfig
@@ -734,8 +734,8 @@ $(call inherit-product,device/intel/common/firmware.mk)
 ##############################################################
 # Source: device/intel/mixins/groups/aaf/true/product.mk
 ##############################################################
-PRODUCT_PACKAGES += aafd \
-                    auto_detection.sh
+PRODUCT_PACKAGES += \
+    auto_detection.sh
 ##############################################################
 # Source: device/intel/mixins/groups/sensors/mediation/product.mk
 ##############################################################

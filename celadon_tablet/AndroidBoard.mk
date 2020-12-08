@@ -504,10 +504,6 @@ LOCAL_POST_INSTALL_CMD := $(INTEL_PATH_SEPOLICY)/tools/capchecker $(LOCAL_USER_O
 
 include $(BUILD_PHONY_PACKAGE)
 ##############################################################
-# Source: device/intel/mixins/groups/bluetooth/btusb/AndroidBoard.mk
-##############################################################
-LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/bluetooth/load_bt.in
-##############################################################
 # Source: device/intel/mixins/groups/audio/project-celadon/AndroidBoard.mk
 ##############################################################
 pfw_rebuild_settings := true
