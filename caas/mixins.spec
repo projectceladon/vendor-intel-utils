@@ -86,3 +86,4 @@ firmware: true(all_firmwares=false)
 aaf: true
 suspend: auto
 sensors: mediation
+bugreport: true
