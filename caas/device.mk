@@ -524,9 +524,15 @@ endif
 PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/extra_files/codecs/media_codecs_performance_bxt.xml:vendor/etc/media_codecs_performance.xml
 ##############################################################
-# Source: device/intel/mixins/groups/usb/host/product.mk
+# Source: device/intel/mixins/groups/usb/host+acc/product.mk
 ##############################################################
-PRODUCT_COPY_FILES += frameworks/native/data/etc/android.hardware.usb.host.xml:vendor/etc/permissions/android.hardware.usb.host.xml
+PRODUCT_COPY_FILES += \
+    frameworks/native/data/etc/android.hardware.usb.accessory.xml:vendor/etc/permissions/android.hardware.usb.accessory.xml \
+    frameworks/native/data/etc/android.hardware.usb.host.xml:vendor/etc/permissions/android.hardware.usb.host.xml
+
+# usb accessory
+PRODUCT_PACKAGES += \
+    com.android.future.usb.accessory
 
 ##############################################################
 # Source: device/intel/mixins/groups/midi/true/product.mk
