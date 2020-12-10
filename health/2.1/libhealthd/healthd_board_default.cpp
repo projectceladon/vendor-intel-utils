@@ -157,8 +157,8 @@ exit:
 
 void healthd_board_init(struct healthd_config *config)
 {
-    config->periodic_chores_interval_fast = 1;
-    config->periodic_chores_interval_slow = 1;
+    config->periodic_chores_interval_fast = 60;
+    config->periodic_chores_interval_slow = 60*10;
 
     
     vsock_thread = std::thread(recv_vsock);

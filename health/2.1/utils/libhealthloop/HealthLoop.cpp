@@ -240,8 +240,8 @@ int HealthLoop::InitInternal() {
     // Note that healthd_config_ is initialized before wakealarm_fd_; see
     // AdjustUeventWakealarmPeriods().
     Init(&healthd_config_);
-    healthd_config_.periodic_chores_interval_fast = 1;
-    healthd_config_.periodic_chores_interval_fast = 1; 
+    healthd_config_.periodic_chores_interval_fast = 60;
+    healthd_config_.periodic_chores_interval_slow = 60*10; 
     WakeAlarmInit();
     UeventInit();
 
