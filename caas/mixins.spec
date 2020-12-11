@@ -87,3 +87,4 @@ aaf: true
 suspend: auto
 sensors: mediation
 bugreport: true
+mainline-mod: true
