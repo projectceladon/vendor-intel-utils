@@ -259,6 +259,8 @@ PRODUCT_COPY_FILES += \
     $(LOCAL_PATH)/init.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/hw/init.$(TARGET_PRODUCT).rc \
     $(LOCAL_PATH)/ueventd.rc:$(TARGET_COPY_OUT_VENDOR)/ueventd.rc \
 
+PRODUCT_PACKAGES += vndservicemanager
+
 PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.keymaster@3.0-service \
                     android.hardware.usb@1.0-impl \
@@ -419,6 +421,14 @@ PRODUCT_PACKAGES += \
     gralloc.default
 
 PRODUCT_PACKAGES += ufo_prebuilts
+
+#Surface Flinger related Properties
+
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.surface_flinger.max_frame_buffer_acquired_buffers=3
+
+# System's VSYNC phase offsets in nanoseconds
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.surface_flinger.vsync_event_phase_offset_ns=7500000
+PRODUCT_DEFAULT_PROPERTY_OVERRIDES += ro.surface_flinger.vsync_sf_event_phase_offset_ns=3000000
 
 # i915 firmwares
 $(foreach fw,$(I915_FW),$(eval PRODUCT_PACKAGES += $(notdir $(fw))))
@@ -624,8 +634,7 @@ BOARD_SEPOLICY_DIRS += \
     $(INTEL_PATH_SEPOLICY)/light
 
 PRODUCT_PACKAGES += lights.$(TARGET_BOARD_PLATFORM) \
-    android.hardware.light@2.0-service \
-    android.hardware.light@2.0-impl
+    android.hardware.lights-service.example
 
 ##############################################################
 # Source: device/intel/mixins/groups/power/true/product.mk
