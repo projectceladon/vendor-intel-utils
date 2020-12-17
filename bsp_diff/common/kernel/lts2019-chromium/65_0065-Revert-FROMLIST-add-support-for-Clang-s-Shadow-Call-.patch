@@ -1,0 +1,470 @@
+From f7c8d778bb4a4f42aca80fea64bdc1b1f155069f Mon Sep 17 00:00:00 2001
+From: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+Date: Sat, 5 Dec 2020 20:47:47 +0530
+Subject: [PATCH 40/40] Revert "FROMLIST: add support for Clang's Shadow Call
+ Stack (SCS)"
+
+This reverts commit 1c595c2055b9c4e534ece145154d1b14128ef39b.
+---
+ Makefile                       |   6 --
+ arch/Kconfig                   |  34 ------
+ include/linux/compiler-clang.h |   6 --
+ include/linux/compiler_types.h |   4 -
+ include/linux/scs.h            |  57 ----------
+ init/init_task.c               |   8 --
+ kernel/Makefile                |   1 -
+ kernel/fork.c                  |   8 --
+ kernel/sched/core.c            |   2 -
+ kernel/scs.c                   | 187 ---------------------------------
+ 10 files changed, 313 deletions(-)
+ delete mode 100644 include/linux/scs.h
+ delete mode 100644 kernel/scs.c
+
+diff --git a/Makefile b/Makefile
+index 4d55b594e058..9b91da8cdc32 100644
+--- a/Makefile
++++ b/Makefile
+@@ -861,12 +861,6 @@ ifdef CONFIG_LIVEPATCH
+ KBUILD_CFLAGS += $(call cc-option, -flive-patching=inline-clone)
+ endif
+ 
+-ifdef CONFIG_SHADOW_CALL_STACK
+-CC_FLAGS_SCS	:= -fsanitize=shadow-call-stack
+-KBUILD_CFLAGS	+= $(CC_FLAGS_SCS)
+-export CC_FLAGS_SCS
+-endif
+-
+ # arch Makefile may override CC so keep this after arch Makefile is included
+ NOSTDINC_FLAGS += -nostdinc -isystem $(shell $(CC) -print-file-name=include)
+ 
+diff --git a/arch/Kconfig b/arch/Kconfig
+index 176652b2147c..84653a823d3b 100644
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -528,40 +528,6 @@ config STACKPROTECTOR_STRONG
+ 	  about 20% of all kernel functions, which increases the kernel code
+ 	  size by about 2%.
+ 
+-config ARCH_SUPPORTS_SHADOW_CALL_STACK
+-	bool
+-	help
+-	  An architecture should select this if it supports Clang's Shadow
+-	  Call Stack, has asm/scs.h, and implements runtime support for shadow
+-	  stack switching.
+-
+-config SHADOW_CALL_STACK
+-	bool "Clang Shadow Call Stack"
+-	depends on ARCH_SUPPORTS_SHADOW_CALL_STACK
+-	help
+-	  This option enables Clang's Shadow Call Stack, which uses a
+-	  shadow stack to protect function return addresses from being
+-	  overwritten by an attacker. More information can be found from
+-	  Clang's documentation:
+-
+-	    https://clang.llvm.org/docs/ShadowCallStack.html
+-
+-	  Note that security guarantees in the kernel differ from the ones
+-	  documented for user space. The kernel must store addresses of shadow
+-	  stacks used by other tasks and interrupt handlers in memory, which
+-	  means an attacker capable reading and writing arbitrary memory may
+-	  be able to locate them and hijack control flow by modifying shadow
+-	  stacks that are not currently in use.
+-
+-config SHADOW_CALL_STACK_VMAP
+-	bool "Use virtually mapped shadow call stacks"
+-	depends on SHADOW_CALL_STACK
+-	help
+-	  Use virtually mapped shadow call stacks. Selecting this option
+-	  provides better stack exhaustion protection, but increases per-thread
+-	  memory consumption as a full page is allocated for each shadow stack.
+-
+-
+ config HAVE_ARCH_WITHIN_STACK_FRAMES
+ 	bool
+ 	help
+diff --git a/include/linux/compiler-clang.h b/include/linux/compiler-clang.h
+index 18fc4d29ef27..333a6695a918 100644
+--- a/include/linux/compiler-clang.h
++++ b/include/linux/compiler-clang.h
+@@ -42,9 +42,3 @@
+  * compilers, like ICC.
+  */
+ #define barrier() __asm__ __volatile__("" : : : "memory")
+-
+-#if __has_feature(shadow_call_stack)
+-# define __noscs	__attribute__((__no_sanitize__("shadow-call-stack")))
+-#else
+-# define __noscs
+-#endif
+diff --git a/include/linux/compiler_types.h b/include/linux/compiler_types.h
+index be5d5be4b1ae..72393a8c1a6c 100644
+--- a/include/linux/compiler_types.h
++++ b/include/linux/compiler_types.h
+@@ -202,10 +202,6 @@ struct ftrace_likely_data {
+ # define randomized_struct_fields_end
+ #endif
+ 
+-#ifndef __noscs
+-# define __noscs
+-#endif
+-
+ #ifndef asm_volatile_goto
+ #define asm_volatile_goto(x...) asm goto(x)
+ #endif
+diff --git a/include/linux/scs.h b/include/linux/scs.h
+deleted file mode 100644
+index c5572fd770b0..000000000000
+--- a/include/linux/scs.h
++++ /dev/null
+@@ -1,57 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+-/*
+- * Shadow Call Stack support.
+- *
+- * Copyright (C) 2019 Google LLC
+- */
+-
+-#ifndef _LINUX_SCS_H
+-#define _LINUX_SCS_H
+-
+-#include <linux/gfp.h>
+-#include <linux/sched.h>
+-#include <asm/page.h>
+-
+-#ifdef CONFIG_SHADOW_CALL_STACK
+-
+-/*
+- * In testing, 1 KiB shadow stack size (i.e. 128 stack frames on a 64-bit
+- * architecture) provided ~40% safety margin on stack usage while keeping
+- * memory allocation overhead reasonable.
+- */
+-#define SCS_SIZE	1024UL
+-#define GFP_SCS		(GFP_KERNEL | __GFP_ZERO)
+-
+-/*
+- * A random number outside the kernel's virtual address space to mark the
+- * end of the shadow stack.
+- */
+-#define SCS_END_MAGIC	0xaf0194819b1635f6UL
+-
+-#define task_scs(tsk)	(task_thread_info(tsk)->shadow_call_stack)
+-
+-static inline void task_set_scs(struct task_struct *tsk, void *s)
+-{
+-	task_scs(tsk) = s;
+-}
+-
+-extern void scs_init(void);
+-extern void scs_task_reset(struct task_struct *tsk);
+-extern int scs_prepare(struct task_struct *tsk, int node);
+-extern bool scs_corrupted(struct task_struct *tsk);
+-extern void scs_release(struct task_struct *tsk);
+-
+-#else /* CONFIG_SHADOW_CALL_STACK */
+-
+-#define task_scs(tsk)	NULL
+-
+-static inline void task_set_scs(struct task_struct *tsk, void *s) {}
+-static inline void scs_init(void) {}
+-static inline void scs_task_reset(struct task_struct *tsk) {}
+-static inline int scs_prepare(struct task_struct *tsk, int node) { return 0; }
+-static inline bool scs_corrupted(struct task_struct *tsk) { return false; }
+-static inline void scs_release(struct task_struct *tsk) {}
+-
+-#endif /* CONFIG_SHADOW_CALL_STACK */
+-
+-#endif /* _LINUX_SCS_H */
+diff --git a/init/init_task.c b/init/init_task.c
+index 2e172b4203d6..bca4b8789b0d 100644
+--- a/init/init_task.c
++++ b/init/init_task.c
+@@ -11,7 +11,6 @@
+ #include <linux/mm.h>
+ #include <linux/audit.h>
+ #include <linux/numa.h>
+-#include <linux/scs.h>
+ 
+ #include <linux/alt-syscall.h>
+ 
+@@ -188,13 +187,6 @@ struct task_struct init_task
+ };
+ EXPORT_SYMBOL(init_task);
+ 
+-#ifdef CONFIG_SHADOW_CALL_STACK
+-unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] __init_task_data
+-		__aligned(SCS_SIZE) = {
+-	[(SCS_SIZE / sizeof(long)) - 1] = SCS_END_MAGIC
+-};
+-#endif
+-
+ /*
+  * Initial thread structure. Alignment of this is handled by a special
+  * linker map entry.
+diff --git a/kernel/Makefile b/kernel/Makefile
+index b5c8397f2fd2..75f3550f4643 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -105,7 +105,6 @@ obj-$(CONFIG_TRACEPOINTS) += trace/
+ obj-$(CONFIG_IRQ_WORK) += irq_work.o
+ obj-$(CONFIG_CPU_PM) += cpu_pm.o
+ obj-$(CONFIG_BPF) += bpf/
+-obj-$(CONFIG_SHADOW_CALL_STACK) += scs.o
+ 
+ obj-$(CONFIG_PERF_EVENTS) += events/
+ 
+diff --git a/kernel/fork.c b/kernel/fork.c
+index afa63645084c..6a66519ad82e 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -95,7 +95,6 @@
+ #include <linux/thread_info.h>
+ #include <linux/cpufreq_times.h>
+ #include <linux/stackleak.h>
+-#include <linux/scs.h>
+ 
+ #include <asm/pgtable.h>
+ #include <asm/pgalloc.h>
+@@ -454,7 +453,6 @@ void put_task_stack(struct task_struct *tsk)
+ void free_task(struct task_struct *tsk)
+ {
+ 	cpufreq_task_times_exit(tsk);
+-	scs_release(tsk);
+ 
+ #ifndef CONFIG_THREAD_INFO_IN_TASK
+ 	/*
+@@ -841,8 +839,6 @@ void __init fork_init(void)
+ 			  NULL, free_vm_stack_cache);
+ #endif
+ 
+-	scs_init();
+-
+ 	lockdep_init_task(&init_task);
+ 	uprobes_init();
+ }
+@@ -902,10 +898,6 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
+ 	if (err)
+ 		goto free_stack;
+ 
+-	err = scs_prepare(tsk, node);
+-	if (err)
+-		goto free_stack;
+-
+ #ifdef CONFIG_SECCOMP
+ 	/*
+ 	 * We must handle setting up seccomp filters once we're under
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index f18403eb641b..83eb26ff2f61 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -11,7 +11,6 @@
+ #include <linux/nospec.h>
+ 
+ #include <linux/kcov.h>
+-#include <linux/scs.h>
+ 
+ #include <asm/switch_to.h>
+ #include <asm/tlb.h>
+@@ -7258,7 +7257,6 @@ void init_idle(struct task_struct *idle, int cpu)
+ 	idle->se.exec_start = sched_clock();
+ 	idle->flags |= PF_IDLE;
+ 
+-	scs_task_reset(idle);
+ 	kasan_unpoison_task_stack(idle);
+ 
+ #ifdef CONFIG_SMP
+diff --git a/kernel/scs.c b/kernel/scs.c
+deleted file mode 100644
+index 28abed21950c..000000000000
+--- a/kernel/scs.c
++++ /dev/null
+@@ -1,187 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0
+-/*
+- * Shadow Call Stack support.
+- *
+- * Copyright (C) 2019 Google LLC
+- */
+-
+-#include <linux/cpuhotplug.h>
+-#include <linux/kasan.h>
+-#include <linux/mm.h>
+-#include <linux/mmzone.h>
+-#include <linux/scs.h>
+-#include <linux/slab.h>
+-#include <linux/vmalloc.h>
+-#include <asm/scs.h>
+-
+-static inline void *__scs_base(struct task_struct *tsk)
+-{
+-	/*
+-	 * To minimize risk the of exposure, architectures may clear a
+-	 * task's thread_info::shadow_call_stack while that task is
+-	 * running, and only save/restore the active shadow call stack
+-	 * pointer when the usual register may be clobbered (e.g. across
+-	 * context switches).
+-	 *
+-	 * The shadow call stack is aligned to SCS_SIZE, and grows
+-	 * upwards, so we can mask out the low bits to extract the base
+-	 * when the task is not running.
+-	 */
+-	return (void *)((unsigned long)task_scs(tsk) & ~(SCS_SIZE - 1));
+-}
+-
+-static inline unsigned long *scs_magic(void *s)
+-{
+-	return (unsigned long *)(s + SCS_SIZE) - 1;
+-}
+-
+-static inline void scs_set_magic(void *s)
+-{
+-	*scs_magic(s) = SCS_END_MAGIC;
+-}
+-
+-#ifdef CONFIG_SHADOW_CALL_STACK_VMAP
+-
+-/* Matches NR_CACHED_STACKS for VMAP_STACK */
+-#define NR_CACHED_SCS 2
+-static DEFINE_PER_CPU(void *, scs_cache[NR_CACHED_SCS]);
+-
+-static void *scs_alloc(int node)
+-{
+-	int i;
+-	void *s;
+-
+-	for (i = 0; i < NR_CACHED_SCS; i++) {
+-		s = this_cpu_xchg(scs_cache[i], NULL);
+-		if (s) {
+-			memset(s, 0, SCS_SIZE);
+-			goto out;
+-		}
+-	}
+-
+-	/*
+-	 * We allocate a full page for the shadow stack, which should be
+-	 * more than we need. Check the assumption nevertheless.
+-	 */
+-	BUILD_BUG_ON(SCS_SIZE > PAGE_SIZE);
+-
+-	s = __vmalloc_node_range(PAGE_SIZE, SCS_SIZE,
+-				 VMALLOC_START, VMALLOC_END,
+-				 GFP_SCS, PAGE_KERNEL, 0,
+-				 node, __builtin_return_address(0));
+-
+-out:
+-	if (s)
+-		scs_set_magic(s);
+-	/* TODO: poison for KASAN, unpoison in scs_free */
+-
+-	return s;
+-}
+-
+-static void scs_free(void *s)
+-{
+-	int i;
+-
+-	for (i = 0; i < NR_CACHED_SCS; i++)
+-		if (this_cpu_cmpxchg(scs_cache[i], 0, s) == NULL)
+-			return;
+-
+-	vfree_atomic(s);
+-}
+-
+-static int scs_cleanup(unsigned int cpu)
+-{
+-	int i;
+-	void **cache = per_cpu_ptr(scs_cache, cpu);
+-
+-	for (i = 0; i < NR_CACHED_SCS; i++) {
+-		vfree(cache[i]);
+-		cache[i] = NULL;
+-	}
+-
+-	return 0;
+-}
+-
+-void __init scs_init(void)
+-{
+-	WARN_ON(cpuhp_setup_state(CPUHP_BP_PREPARE_DYN, "scs:scs_cache", NULL,
+-			scs_cleanup) < 0);
+-}
+-
+-#else /* !CONFIG_SHADOW_CALL_STACK_VMAP */
+-
+-static struct kmem_cache *scs_cache;
+-
+-static inline void *scs_alloc(int node)
+-{
+-	void *s;
+-
+-	s = kmem_cache_alloc_node(scs_cache, GFP_SCS, node);
+-	if (s) {
+-		scs_set_magic(s);
+-		/*
+-		 * Poison the allocation to catch unintentional accesses to
+-		 * the shadow stack when KASAN is enabled.
+-		 */
+-		kasan_poison_object_data(scs_cache, s);
+-	}
+-
+-	return s;
+-}
+-
+-static inline void scs_free(void *s)
+-{
+-	kasan_unpoison_object_data(scs_cache, s);
+-	kmem_cache_free(scs_cache, s);
+-}
+-
+-void __init scs_init(void)
+-{
+-	scs_cache = kmem_cache_create("scs_cache", SCS_SIZE, SCS_SIZE,
+-				0, NULL);
+-	WARN_ON(!scs_cache);
+-}
+-
+-#endif /* CONFIG_SHADOW_CALL_STACK_VMAP */
+-
+-void scs_task_reset(struct task_struct *tsk)
+-{
+-	/*
+-	 * Reset the shadow stack to the base address in case the task
+-	 * is reused.
+-	 */
+-	task_set_scs(tsk, __scs_base(tsk));
+-}
+-
+-int scs_prepare(struct task_struct *tsk, int node)
+-{
+-	void *s;
+-
+-	s = scs_alloc(node);
+-	if (!s)
+-		return -ENOMEM;
+-
+-	task_set_scs(tsk, s);
+-	return 0;
+-}
+-
+-bool scs_corrupted(struct task_struct *tsk)
+-{
+-	unsigned long *magic = scs_magic(__scs_base(tsk));
+-
+-	return READ_ONCE_NOCHECK(*magic) != SCS_END_MAGIC;
+-}
+-
+-void scs_release(struct task_struct *tsk)
+-{
+-	void *s;
+-
+-	s = __scs_base(tsk);
+-	if (!s)
+-		return;
+-
+-	WARN_ON(scs_corrupted(tsk));
+-
+-	task_set_scs(tsk, NULL);
+-	scs_free(s);
+-}
+-- 
+2.17.1
+
