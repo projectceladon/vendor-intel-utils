@@ -528,7 +528,7 @@ POWER_THROTTLE := true
 
 
 BOARD_SEPOLICY_M4DEFS += module_power=true
-#BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/power
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/power
 ##############################################################
 # Source: device/intel/mixins/groups/intel_prop/true/BoardConfig.mk
 ##############################################################
