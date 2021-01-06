@@ -546,7 +546,7 @@ PRODUCT_COPY_FILES += \
 endif
 
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/extra_files/codecs/media_codecs_performance_bxt.xml:vendor/etc/media_codecs_performance.xml
+    $(LOCAL_PATH)/extra_files/codecs/media_codecs_performance_cml.xml:vendor/etc/media_codecs_performance.xml
 ##############################################################
 # Source: device/intel/mixins/groups/usb/host+acc/product.mk
 ##############################################################
