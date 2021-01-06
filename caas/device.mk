@@ -347,6 +347,11 @@ PRODUCT_PACKAGES += \
      toybox_static \
      toybox_vendor \
 ##############################################################
+# Source: device/intel/mixins/groups/vendor-boot/true/product.mk
+##############################################################
+PRODUCT_COPY_FILES += \
+        $(LOCAL_PATH)/fstab:$(TARGET_COPY_OUT_VENDOR_RAMDISK)/first_stage_ramdisk/fstab.$(TARGET_PRODUCT)
+##############################################################
 # Source: device/intel/mixins/groups/product-partition/true/product.mk
 ##############################################################
 
