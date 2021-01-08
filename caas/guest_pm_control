@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 # This script monitors shutdown and reboot event of guests through QEMU
 # Guest shutdown/reboot will trigger entire system, the Guest CiV first
@@ -17,20 +17,55 @@ import json
 import sys
 import os
 import time
+import glob
 import subprocess
 from sys import argv,exit
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../qemu-4.2.0/python'))
 from qemu import qmp
 
-# connection timeout of two minutes
-timeout = 8
+rtc_wakeup = 0
+current_rtc_wakeup_count = 0
+prev_rtc_wakeup_count = 0
+rtc_wakeup_src = '/sys/devices/platform/rtc_cmos/power/wakeup'
+
+def detect_rtc_wakeup_src():
+    for device in glob.glob('/sys/devices/pnp0/00:0*/power/wakeup'):
+        with open(device) as f:
+            for line in f:
+                wakeup_src = line.rstrip('\n')
+                if (wakeup_src == "enabled"):
+                    return "".join((device, "_active_count"));
+    with open(rtc_wakeup_src) as f:
+            for line in f:
+                wakeup_src = line.rstrip('\n')
+                if (wakeup_src == "enabled"):
+                    return "".join((rtc_wakeup_src, "_active_count"));
+
+    return "none"
+
+def wakeup(qemu_hdl):
+    if (qemu_hdl == None):
+        print("Invalid qmp handler")
+        return -1
+
+    resp = qemu_hdl.cmd('query-status')
+    if resp != None:
+        for val in resp.values():
+            if val['status'] == "suspended":
+                qemu_hdl.cmd('system_wakeup')
+                return 0
+            elif val['status'] == "running":
+                return 1
+    return -1
 
 def main():
 
     if len(argv) != 2:
         print(' <unix-socket> argument is not provided')
         exit(1)
+
+    rtc_wakeup_device = detect_rtc_wakeup_src()
 
     qemu = qmp.QEMUMonitorProtocol(argv[1])
 
@@ -51,7 +86,6 @@ def main():
         else:
             print("connected to QEMU QMP server")
             break
-
 
     while True:
         try:
@@ -93,19 +127,42 @@ def main():
                         time.sleep(3)
                         process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
                     elif val == "SUSPEND":
-                        if time.time() <= timeout + timeout_start:
-                            time.sleep(.75)
-                            cmdCommand = "./scripts/sendkey --vm 0 --power 0"
-                            process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
-                            continue
+
+                        # Read the previous RTC wakeup count
+                        if (rtc_wakeup_device != "none"):
+                            with open(rtc_wakeup_device) as f:
+                                for line in f:
+                                    prev_rtc_wakeup_count = line.rstrip('\n')
+
                         # Put the host in to sleep state
                         cmdCommand = "systemctl suspend"
                         process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
                         time.sleep(.75)
+
+                        # Read the current RTC wakeup count
+                        if (rtc_wakeup_device != "none"):
+                            with open(rtc_wakeup_device) as f:
+                                for line in f:
+                                    current_rtc_wakeup_count = line.rstrip('\n')
                         # Send power button event to wake the android
-                        timeout_start = time.time()
-                        cmdCommand = "./scripts/sendkey --vm 0 --power 0"
-                        process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
+                        if prev_rtc_wakeup_count == current_rtc_wakeup_count:
+                            # Send power button event to wake the android
+                            res = wakeup(qemu)
+                            if (res == 1):
+                                #guest already wakeup by pnp0. Need to send power button event
+                                rtc_wakeup = 0
+                            else:
+                                #guest is not wakeup by pnp0. wakeup() has wakeup the screen
+                                rtc_wakeup = 1
+                        else:
+                            #rtc alarm wake up
+                            rtc_wakeup = 1
+
+                    elif val == "WAKEUP":
+                        if rtc_wakeup == 0:
+                            time.sleep(1)
+                            cmdCommand = "./scripts/sendkey --vm 0 --power 0"
+                            process = subprocess.call(cmdCommand.split(), stdout=subprocess.PIPE)
 
         except KeyboardInterrupt:
             print('interrupted!')
