@@ -1,0 +1,97 @@
+From 8b841c83e8607c2d54599f1aff88558bbe40459d Mon Sep 17 00:00:00 2001
+From: Fred Gao <fred.gao@intel.com>
+Date: Fri, 6 Nov 2020 23:38:17 +0800
+Subject: [PATCH v1] vfio/pci: Add support for opregion v2.0+
+
+When VBT data exceeds 6KB size and cannot be within mailbox #4 starting
+from opregion v2.0+, Extended VBT region, next to opregion, is used to
+hold the VBT data, so the total size will be opregion size plus
+extended VBT region size.
+
+For opregion 2.1+: since rvda is relative offset from opregion base,
+rvda as extended VBT start offset should be same as opregion size.
+
+For opregion 2.0: the only difference between opregion 2.0 and 2.1 is
+rvda addressing mode besides the version. since rvda is physical host
+VBT address and cannot be directly used in guest, it is faked into
+opregion 2.1's relative offset.
+
+Cc: Zhenyu Wang <zhenyuw@linux.intel.com>
+Signed-off-by: Swee Yee Fonn <swee.yee.fonn@intel.com>
+Signed-off-by: Fred Gao <fred.gao@intel.com>
+---
+ drivers/vfio/pci/vfio_pci_igd.c | 44 +++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/drivers/vfio/pci/vfio_pci_igd.c b/drivers/vfio/pci/vfio_pci_igd.c
+index 53d97f459252..78919a289914 100644
+--- a/drivers/vfio/pci/vfio_pci_igd.c
++++ b/drivers/vfio/pci/vfio_pci_igd.c
+@@ -21,6 +21,17 @@
+ #define OPREGION_SIZE		(8 * 1024)
+ #define OPREGION_PCI_ADDR	0xfc
+ 
++/*
++ * opregion 2.0: rvda is the physical VBT address.
++ *
++ * opregion 2.1+: rvda is unsigned, relative offset from
++ * opregion base, and should never point within opregion.
++ */
++#define OPREGION_RDVA		0x3ba
++#define OPREGION_RDVS		0x3c2
++#define OPREGION_VERSION	22
++
++
+ static size_t vfio_pci_igd_rw(struct vfio_pci_device *vdev, char __user *buf,
+ 			      size_t count, loff_t *ppos, bool iswrite)
+ {
+@@ -58,6 +69,7 @@ static int vfio_pci_igd_opregion_init(struct vfio_pci_device *vdev)
+ 	u32 addr, size;
+ 	void *base;
+ 	int ret;
++	u16 version;
+ 
+ 	ret = pci_read_config_dword(vdev->pdev, OPREGION_PCI_ADDR, &addr);
+ 	if (ret)
+@@ -83,6 +95,38 @@ static int vfio_pci_igd_opregion_init(struct vfio_pci_device *vdev)
+ 
+ 	size *= 1024; /* In KB */
+ 
++	/* Support opregion v2.0+ */
++	version = le16_to_cpu(*(__le16 *)(base + OPREGION_VERSION));
++	if (version >= 0x0200) {
++		u64 rvda;
++		u32 rvds;
++
++		rvda = le64_to_cpu(*(__le64 *)(base + OPREGION_RDVA));
++		rvds = le32_to_cpu(*(__le32 *)(base + OPREGION_RDVS));
++		if (rvda && rvds) {
++			u32 offset;
++
++			if (version == 0x0200)
++				offset = (rvda - (u64)addr);
++			else
++				offset = rvda;
++
++			pci_WARN(vdev->pdev, offset != size,
++				"Extended VBT does not follow opregion !\n"
++				"opregion version 0x%x:offset 0x%x\n", version, offset);
++
++			if (version == 0x0200) {
++				/* opregion version v2.0 faked to v2.1 */
++				*(__le16 *)(base + OPREGION_VERSION) =
++					cpu_to_le16(0x0201);
++				/* rvda faked to relative offset */
++				(*(__le64 *)(base + OPREGION_RDVA)) =
++					cpu_to_le64((rvda - (u64)addr));
++			}
++			size = offset + rvds;
++		}
++	}
++
+ 	if (size != OPREGION_SIZE) {
+ 		memunmap(base);
+ 		base = memremap(addr, size, MEMREMAP_WB);
+-- 
+2.24.1.1.gb6d4d82bd5
+
