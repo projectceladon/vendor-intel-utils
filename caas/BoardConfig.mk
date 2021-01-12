@@ -450,10 +450,10 @@ endif
 
 USE_OPENGL_RENDERER := true
 USE_INTEL_UFO_DRIVER := false
-BOARD_GPU_DRIVERS := i965 virgl
+BOARD_GPU_DRIVERS := i965 virgl iris
 BOARD_USE_CUSTOMIZED_MESA := true
 
-BOARD_GPU_DRIVERS ?= i965 swrast virgl
+BOARD_GPU_DRIVERS ?= i965 swrast virgl iris
 ifneq ($(strip $(BOARD_GPU_DRIVERS)),)
 TARGET_HARDWARE_3D := true
 TARGET_USES_HWC2 := true
