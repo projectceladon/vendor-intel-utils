@@ -585,6 +585,7 @@ vendor_boot_prebuilt:
 	$(hide) if [ -d "$(BOARD_PREBUILT_VENDOR_BOOT_DIR)" ]; then \
 		$(ACP) -r $(BOARD_PREBUILT_VENDOR_BOOT_DIR)/* $(TARGET_VENDOR_RAMDISK_OUT)/; \
 	fi
+	$(ACP) $(TARGET_DEVICE_DIR)/fstab $(TARGET_VENDOR_RAMDISK_OUT)/first_stage_ramdisk/fstab.$(TARGET_PRODUCT)
 
 $(INTERNAL_VENDOR_RAMDISK_TARGET): vendor_boot_prebuilt
 ##############################################################
