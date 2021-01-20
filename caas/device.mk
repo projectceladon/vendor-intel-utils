@@ -273,9 +273,6 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
 PRODUCT_PROPERTY_OVERRIDES += ro.control_privapp_permissions=enforce
 PRODUCT_PROPERTY_OVERRIDES += dalvik.vm.useautofastjni=true
 
-PRODUCT_FS_CASEFOLD := 0
-PRODUCT_PROPERTY_OVERRIDES += external_storage.casefold.enabled=0
-
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.crypto.volume.metadata.method=dm-default-key \
     ro.crypto.dm_default_key.options_format.version=2 \
