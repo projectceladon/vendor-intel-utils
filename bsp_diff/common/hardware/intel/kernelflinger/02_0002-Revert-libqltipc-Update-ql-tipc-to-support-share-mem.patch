@@ -1,0 +1,3304 @@
+From feccbd051ddc71779908af45474624be43d4643e Mon Sep 17 00:00:00 2001
+From: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+Date: Fri, 5 Feb 2021 02:29:43 +0530
+Subject: [PATCH] Revert "libqltipc: Update ql-tipc to support share-memory
+ interface"
+
+This reverts commit e2ee01faedda843f14dd690efcdcb57ad3816e1e.
+
+Reverting due to boot instability issue.
+
+Tracked-On: OAM-95944
+Signed-off-by: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+---
+ libqltipc/ql-tipc/README.md                   |   4 +-
+ libqltipc/ql-tipc/include/trusty/arm_ffa.h    | 641 ------------------
+ libqltipc/ql-tipc/include/trusty/avb.h        |  28 +-
+ libqltipc/ql-tipc/include/trusty/libtipc.h    |  40 --
+ libqltipc/ql-tipc/include/trusty/rpmb.h       |  80 ---
+ libqltipc/ql-tipc/include/trusty/sm_err.h     |  58 --
+ libqltipc/ql-tipc/include/trusty/smc.h        |  55 --
+ libqltipc/ql-tipc/include/trusty/smcall.h     | 162 -----
+ libqltipc/ql-tipc/include/trusty/sysdeps.h    |  62 +-
+ libqltipc/ql-tipc/include/trusty/trusty_dev.h |  53 +-
+ libqltipc/ql-tipc/include/trusty/trusty_ipc.h | 125 ++--
+ libqltipc/ql-tipc/include/trusty/trusty_mem.h |  41 --
+ libqltipc/ql-tipc/include/trusty/util.h       |  75 +-
+ libqltipc/ql-tipc/ipc.c                       | 133 ++--
+ libqltipc/ql-tipc/ipc_dev.c                   | 340 ++++------
+ libqltipc/ql-tipc/libtipc.c                   |  41 +-
+ libqltipc/ql-tipc/trusty_dev_common.c         | 390 -----------
+ 17 files changed, 369 insertions(+), 1959 deletions(-)
+ delete mode 100644 libqltipc/ql-tipc/include/trusty/arm_ffa.h
+ delete mode 100644 libqltipc/ql-tipc/include/trusty/libtipc.h
+ delete mode 100644 libqltipc/ql-tipc/include/trusty/rpmb.h
+ delete mode 100644 libqltipc/ql-tipc/include/trusty/sm_err.h
+ delete mode 100644 libqltipc/ql-tipc/include/trusty/smc.h
+ delete mode 100644 libqltipc/ql-tipc/include/trusty/smcall.h
+ delete mode 100644 libqltipc/ql-tipc/include/trusty/trusty_mem.h
+ delete mode 100644 libqltipc/ql-tipc/trusty_dev_common.c
+
+diff --git a/libqltipc/ql-tipc/README.md b/libqltipc/ql-tipc/README.md
+index 76e3781..f5e9b79 100644
+--- a/libqltipc/ql-tipc/README.md
++++ b/libqltipc/ql-tipc/README.md
+@@ -10,7 +10,6 @@ It is intended to enable Trusty IPC in bootloader environments.
+ - libtipc - Functions to be called by library user
+ - ipc - IPC library
+ - ipc_dev - Helper functions for sending requests to the secure OS
+-- rpmb_proxy - Handles RPMB requests from secure storage service
+ - avb - Sends requests to the Android Verified Boot service
+ 
+ ### Misc
+@@ -22,8 +21,7 @@ It is intended to enable Trusty IPC in bootloader environments.
+ ## Portability Notes
+ 
+ The suggested approach to porting ql-tipc is to copy all header and C files
+-into the bootloader and integrate as needed. RPMB storage operations and
+-functions defined in trusty/sysdeps.h require system dependent implementations.
++into the bootloader and integrate as needed.
+ 
+ If the TIPC_ENABLE_DEBUG preprocessor symbol is set, the code will include
+ debug information and run-time checks. Production builds should not use this.
+diff --git a/libqltipc/ql-tipc/include/trusty/arm_ffa.h b/libqltipc/ql-tipc/include/trusty/arm_ffa.h
+deleted file mode 100644
+index ee7bda8..0000000
+--- a/libqltipc/ql-tipc/include/trusty/arm_ffa.h
++++ /dev/null
+@@ -1,641 +0,0 @@
+-/*
+- * Copyright (C) 2020 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-
+-#pragma once
+-
+-/*
+- * Subset of Arm PSA Firmware Framework for Arm v8-A 1.0 EAC
+- * (https://developer.arm.com/docs/den0077/a) needed for shared memory.
+- */
+-
+-#include <trusty/sysdeps.h>
+-
+-#include "smcall.h"
+-
+-#ifndef STATIC_ASSERT
+-#define STATIC_ASSERT(e) _Static_assert(e, #e)
+-#endif
+-
+-#define FFA_CURRENT_VERSION_MAJOR (1U)
+-#define FFA_CURRENT_VERSION_MINOR (0U)
+-
+-#define FFA_VERSION_TO_MAJOR(version) ((version) >> 16)
+-#define FFA_VERSION_TO_MINOR(version) ((version) & (0xffff))
+-#define FFA_VERSION(major, minor) (((major) << 16) | (minor))
+-#define FFA_CURRENT_VERSION \
+-    FFA_VERSION(FFA_CURRENT_VERSION_MAJOR, FFA_CURRENT_VERSION_MINOR)
+-
+-#define SMC_ENTITY_SHARED_MEMORY 4
+-
+-#define SMC_FASTCALL_NR_SHARED_MEMORY(nr) \
+-    SMC_FASTCALL_NR(SMC_ENTITY_SHARED_MEMORY, nr)
+-#define SMC_FASTCALL64_NR_SHARED_MEMORY(nr) \
+-    SMC_FASTCALL64_NR(SMC_ENTITY_SHARED_MEMORY, nr)
+-
+-#define FFA_PAGE_SIZE (4096)
+-
+-/**
+- * typedef ffa_endpoint_id16_t - Endpoint ID
+- *
+- * Current implementation only supports VMIDs. FFA spec also support stream
+- * endpoint ids.
+- */
+-typedef uint16_t ffa_endpoint_id16_t;
+-
+-/**
+- * struct ffa_cons_mrd - Constituent memory region descriptor
+- * @address:
+- *         Start address of contiguous memory region. Must be 4K page aligned.
+- * @page_count:
+- *         Number of 4K pages in region.
+- * @reserved_12_15:
+- *         Reserve bytes 12-15 to pad struct size to 16 bytes.
+- */
+-struct ffa_cons_mrd {
+-    uint64_t address;
+-    uint32_t page_count;
+-    uint32_t reserved_12_15;
+-};
+-STATIC_ASSERT(sizeof(struct ffa_cons_mrd) == 16);
+-
+-/**
+- * struct ffa_comp_mrd - Composite memory region descriptor
+- * @total_page_count:
+- *         Number of 4k pages in memory region. Must match sum of
+- *         @address_range_array[].page_count.
+- * @address_range_count:
+- *         Number of entries in @address_range_array.
+- * @reserved_8_15:
+- *         Reserve bytes 8-15 to pad struct size to 16 byte alignment and
+- *         make @address_range_array 16 byte aligned.
+- * @address_range_array:
+- *         Array of &struct ffa_cons_mrd entries.
+- */
+-struct ffa_comp_mrd {
+-    uint32_t total_page_count;
+-    uint32_t address_range_count;
+-    uint64_t reserved_8_15;
+-    struct ffa_cons_mrd address_range_array[];
+-};
+-STATIC_ASSERT(sizeof(struct ffa_comp_mrd) == 16);
+-
+-/**
+- * typedef ffa_mem_attr8_t - Memory region attributes
+- *
+- * * @FFA_MEM_ATTR_DEVICE_NGNRNE:
+- *     Device-nGnRnE.
+- * * @FFA_MEM_ATTR_DEVICE_NGNRE:
+- *     Device-nGnRE.
+- * * @FFA_MEM_ATTR_DEVICE_NGRE:
+- *     Device-nGRE.
+- * * @FFA_MEM_ATTR_DEVICE_GRE:
+- *     Device-GRE.
+- * * @FFA_MEM_ATTR_NORMAL_MEMORY_UNCACHED
+- *     Normal memory. Non-cacheable.
+- * * @FFA_MEM_ATTR_NORMAL_MEMORY_CACHED_WB
+- *     Normal memory. Write-back cached.
+- * * @FFA_MEM_ATTR_NON_SHAREABLE
+- *     Non-shareable. Combine with FFA_MEM_ATTR_NORMAL_MEMORY_*.
+- * * @FFA_MEM_ATTR_OUTER_SHAREABLE
+- *     Outer Shareable. Combine with FFA_MEM_ATTR_NORMAL_MEMORY_*.
+- * * @FFA_MEM_ATTR_INNER_SHAREABLE
+- *     Inner Shareable. Combine with FFA_MEM_ATTR_NORMAL_MEMORY_*.
+- */
+-typedef uint8_t ffa_mem_attr8_t;
+-#define FFA_MEM_ATTR_DEVICE_NGNRNE ((1U << 4) | (0x0U << 2))
+-#define FFA_MEM_ATTR_DEVICE_NGNRE ((1U << 4) | (0x1U << 2))
+-#define FFA_MEM_ATTR_DEVICE_NGRE ((1U << 4) | (0x2U << 2))
+-#define FFA_MEM_ATTR_DEVICE_GRE ((1U << 4) | (0x3U << 2))
+-#define FFA_MEM_ATTR_NORMAL_MEMORY_UNCACHED ((2U << 4) | (0x1U << 2))
+-#define FFA_MEM_ATTR_NORMAL_MEMORY_CACHED_WB ((2U << 4) | (0x3U << 2))
+-#define FFA_MEM_ATTR_NON_SHAREABLE (0x0U << 0)
+-#define FFA_MEM_ATTR_OUTER_SHAREABLE (0x2U << 0)
+-#define FFA_MEM_ATTR_INNER_SHAREABLE (0x3U << 0)
+-
+-/**
+- * typedef ffa_mem_perm8_t - Memory access permissions
+- *
+- * * @FFA_MEM_ATTR_RO
+- *     Request or specify read-only mapping.
+- * * @FFA_MEM_ATTR_RW
+- *     Request or allow read-write mapping.
+- * * @FFA_MEM_PERM_NX
+- *     Deny executable mapping.
+- * * @FFA_MEM_PERM_X
+- *     Request executable mapping.
+- */
+-typedef uint8_t ffa_mem_perm8_t;
+-#define FFA_MEM_PERM_RO (1U << 0)
+-#define FFA_MEM_PERM_RW (1U << 1)
+-#define FFA_MEM_PERM_NX (1U << 2)
+-#define FFA_MEM_PERM_X (1U << 3)
+-
+-/**
+- * typedef ffa_mem_flag8_t - Endpoint memory flags
+- *
+- * * @FFA_MEM_FLAG_NON_RETRIEVAL_BORROWER
+- *     Non-retrieval Borrower. Memory region must not be or was not retrieved on
+- *     behalf of this endpoint.
+- */
+-typedef uint8_t ffa_mem_flag8_t;
+-#define FFA_MEM_FLAG_NON_RETRIEVAL_BORROWER (1U << 0)
+-
+-/**
+- * typedef ffa_mtd_flag32_t - Memory transaction descriptor flags
+- *
+- * * @FFA_MTD_FLAG_ZERO_MEMORY
+- *     Zero memory after unmapping from sender (must be 0 for share).
+- * * @FFA_MTD_FLAG_TIME_SLICING
+- *     Not supported by this implementation.
+- * * @FFA_MTD_FLAG_ZERO_MEMORY_AFTER_RELINQUISH
+- *     Zero memory after unmapping from borrowers (must be 0 for share).
+- * * @FFA_MTD_FLAG_TYPE_MASK
+- *     Bit-mask to extract memory management transaction type from flags.
+- * * @FFA_MTD_FLAG_TYPE_SHARE_MEMORY
+- *     Share memory transaction flag.
+- *     Used by @SMC_FC_FFA_MEM_RETRIEVE_RESP to indicate that memory came from
+- *     @SMC_FC_FFA_MEM_SHARE and by @SMC_FC_FFA_MEM_RETRIEVE_REQ to specify that
+- *     it must have.
+- * * @FFA_MTD_FLAG_TYPE_LEND_MEMORY
+- *     Lend memory transaction flag.
+- *     Used by @SMC_FC_FFA_MEM_RETRIEVE_RESP to indicate that memory came from
+- *     @SMC_FC_FFA_MEM_LEND and by @SMC_FC_FFA_MEM_RETRIEVE_REQ to specify that
+- *     it must have.
+- * * @FFA_MTD_FLAG_ADDRESS_RANGE_ALIGNMENT_HINT_MASK
+- *     Not supported by this implementation.
+- */
+-typedef uint32_t ffa_mtd_flag32_t;
+-#define FFA_MTD_FLAG_ZERO_MEMORY (1U << 0)
+-#define FFA_MTD_FLAG_TIME_SLICING (1U << 1)
+-#define FFA_MTD_FLAG_ZERO_MEMORY_AFTER_RELINQUISH (1U << 2)
+-#define FFA_MTD_FLAG_TYPE_MASK (3U << 3)
+-#define FFA_MTD_FLAG_TYPE_SHARE_MEMORY (1U << 3)
+-#define FFA_MTD_FLAG_TYPE_LEND_MEMORY (2U << 3)
+-#define FFA_MTD_FLAG_ADDRESS_RANGE_ALIGNMENT_HINT_MASK (0x1FU << 5)
+-
+-/**
+- * struct ffa_mapd - Memory access permissions descriptor
+- * @endpoint_id:
+- *         Endpoint id that @memory_access_permissions and @flags apply to.
+- *         (&typedef ffa_endpoint_id16_t).
+- * @memory_access_permissions:
+- *         FFA_MEM_PERM_* values or'ed together (&typedef ffa_mem_perm8_t).
+- * @flags:
+- *         FFA_MEM_FLAG_* values or'ed together (&typedef ffa_mem_flag8_t).
+- */
+-struct ffa_mapd {
+-    ffa_endpoint_id16_t endpoint_id;
+-    ffa_mem_perm8_t memory_access_permissions;
+-    ffa_mem_flag8_t flags;
+-};
+-STATIC_ASSERT(sizeof(struct ffa_mapd) == 4);
+-
+-/**
+- * struct ffa_emad - Endpoint memory access descriptor.
+- * @mapd:  &struct ffa_mapd.
+- * @comp_mrd_offset:
+- *         Offset of &struct ffa_comp_mrd form start of &struct ffa_mtd.
+- * @reserved_8_15:
+- *         Reserved bytes 8-15. Must be 0.
+- */
+-struct ffa_emad {
+-    struct ffa_mapd mapd;
+-    uint32_t comp_mrd_offset;
+-    uint64_t reserved_8_15;
+-};
+-STATIC_ASSERT(sizeof(struct ffa_emad) == 16);
+-
+-/**
+- * struct ffa_mtd - Memory transaction descriptor.
+- * @sender_id:
+- *         Sender endpoint id.
+- * @memory_region_attributes:
+- *         FFA_MEM_ATTR_* values or'ed together (&typedef ffa_mem_attr8_t).
+- * @reserved_3:
+- *         Reserved bytes 3. Must be 0.
+- * @flags:
+- *         FFA_MTD_FLAG_* values or'ed together (&typedef ffa_mtd_flag32_t).
+- * @handle:
+- *         Id of shared memory object. Most be 0 for MEM_SHARE.
+- * @tag:   Client allocated tag. Must match original value.
+- * @reserved_24_27:
+- *         Reserved bytes 24-27. Must be 0.
+- * @emad_count:
+- *         Number of entries in @emad. Must be 1 in current implementation.
+- *         FFA spec allows more entries.
+- * @emad:
+- *         Endpoint memory access descriptor array (see @struct ffa_emad).
+- */
+-struct ffa_mtd {
+-    ffa_endpoint_id16_t sender_id;
+-    ffa_mem_attr8_t memory_region_attributes;
+-    uint8_t reserved_3;
+-    ffa_mtd_flag32_t flags;
+-    uint64_t handle;
+-    uint64_t tag;
+-    uint32_t reserved_24_27;
+-    uint32_t emad_count;
+-    struct ffa_emad emad[];
+-};
+-STATIC_ASSERT(sizeof(struct ffa_mtd) == 32);
+-
+-/**
+- * struct ffa_mem_relinquish_descriptor - Relinquish request descriptor.
+- * @handle:
+- *         Id of shared memory object to relinquish.
+- * @flags:
+- *         If bit 0 is set clear memory after unmapping from borrower. Must be 0
+- *         for share. Bit[1]: Time slicing. Not supported, must be 0. All other
+- *         bits are reserved 0.
+- * @endpoint_count:
+- *         Number of entries in @endpoint_array.
+- * @endpoint_array:
+- *         Array of endpoint ids.
+- */
+-struct ffa_mem_relinquish_descriptor {
+-    uint64_t handle;
+-    uint32_t flags;
+-    uint32_t endpoint_count;
+-    ffa_endpoint_id16_t endpoint_array[];
+-};
+-STATIC_ASSERT(sizeof(struct ffa_mem_relinquish_descriptor) == 16);
+-
+-/**
+- * typedef ffa_features2_t - FFA_FEATURES values returned in w2
+- *
+- * * @FFA_FEATURES2_RXTX_MAP_BUF_SIZE_MASK
+- *     For RXTX_MAP: min buffer size and alignment boundary mask.
+- * * @FFA_FEATURES2_RXTX_MAP_BUF_SIZE_4K
+- *     For RXTX_MAP: min buffer size and alignment boundary is 4K.
+- * * @FFA_FEATURES2_RXTX_MAP_BUF_SIZE_64K
+- *     For RXTX_MAP: min buffer size and alignment boundary is 64K.
+- * * @FFA_FEATURES2_RXTX_MAP_BUF_SIZE_16K
+- *     For RXTX_MAP: min buffer size and alignment boundary is 16K.
+- * * @FFA_FEATURES2_MEM_DYNAMIC_BUFFER
+- *     Supports custom buffers for memory transactions.
+- *
+- * For all other bits and commands: must be 0.
+- */
+-typedef uint32_t ffa_features2_t;
+-#define FFA_FEATURES2_RXTX_MAP_BUF_SIZE_MASK 0x3U
+-#define FFA_FEATURES2_RXTX_MAP_BUF_SIZE_4K 0x0U
+-#define FFA_FEATURES2_RXTX_MAP_BUF_SIZE_64K 0x1U
+-#define FFA_FEATURES2_RXTX_MAP_BUF_SIZE_16K 0x2U
+-#define FFA_FEATURES2_MEM_DYNAMIC_BUFFER 0x1U
+-
+-/**
+- * typedef ffa_features3_t - FFA_FEATURES values returned in w3
+- *
+- * * @FFA_FEATURES3_MEM_RETRIEVE_REQ_REFCOUNT_MASK
+- *     For FFA_MEM_RETRIEVE_REQ, bit[7-0]: Number of times receiver can
+- *     retrieve each memory region before relinquishing it specified as
+- *     ((1U << (value + 1)) - 1 (or value = bits in reference count - 1).
+- *
+- * For all other bits and commands: must be 0.
+- */
+-typedef uint32_t ffa_features3_t;
+-#define FFA_FEATURES3_MEM_RETRIEVE_REQ_REFCOUNT_MASK 0xffU
+-
+-/**
+- * enum ffa_error - FF-A error code
+- * @FFA_ERROR_NOT_SUPPORTED:
+- *         Operation contained possibly valid parameters not supported by the
+- *         current implementation. Does not match FF-A 1.0 EAC definition.
+- * @FFA_ERROR_INVALID_PARAMETERS:
+- *         Invalid parameters. Conditions function specific.
+- * @FFA_ERROR_NO_MEMORY:
+- *         Not enough memory.
+- * @FFA_ERROR_DENIED:
+- *         Operation not allowed. Conditions function specific.
+- *
+- * FF-A 1.0 EAC defines other error codes as well but the current implementation
+- * does not use them.
+- */
+-enum ffa_error {
+-    FFA_ERROR_NOT_SUPPORTED = -1,
+-    FFA_ERROR_INVALID_PARAMETERS = -2,
+-    FFA_ERROR_NO_MEMORY = -3,
+-    FFA_ERROR_DENIED = -6,
+-};
+-
+-/**
+- * SMC_FC32_FFA_MIN - First 32 bit SMC opcode reserved for FFA
+- */
+-#define SMC_FC32_FFA_MIN SMC_FASTCALL_NR_SHARED_MEMORY(0x60)
+-
+-/**
+- * SMC_FC32_FFA_MAX - Last 32 bit SMC opcode reserved for FFA
+- */
+-#define SMC_FC32_FFA_MAX SMC_FASTCALL_NR_SHARED_MEMORY(0x7F)
+-
+-/**
+- * SMC_FC64_FFA_MIN - First 64 bit SMC opcode reserved for FFA
+- */
+-#define SMC_FC64_FFA_MIN SMC_FASTCALL64_NR_SHARED_MEMORY(0x60)
+-
+-/**
+- * SMC_FC64_FFA_MAX - Last 64 bit SMC opcode reserved for FFA
+- */
+-#define SMC_FC64_FFA_MAX SMC_FASTCALL64_NR_SHARED_MEMORY(0x7F)
+-
+-/**
+- * SMC_FC_FFA_ERROR - SMC error return opcode
+- *
+- * Register arguments:
+- *
+- * * w1:     VMID in [31:16], vCPU in [15:0]
+- * * w2:     Error code (&enum ffa_error)
+- */
+-#define SMC_FC_FFA_ERROR SMC_FASTCALL_NR_SHARED_MEMORY(0x60)
+-
+-/**
+- * SMC_FC_FFA_SUCCESS - 32 bit SMC success return opcode
+- *
+- * Register arguments:
+- *
+- * * w1:     VMID in [31:16], vCPU in [15:0]
+- * * w2-w7:  Function specific
+- */
+-#define SMC_FC_FFA_SUCCESS SMC_FASTCALL_NR_SHARED_MEMORY(0x61)
+-
+-/**
+- * SMC_FC64_FFA_SUCCESS - 64 bit SMC success return opcode
+- *
+- * Register arguments:
+- *
+- * * w1:             VMID in [31:16], vCPU in [15:0]
+- * * w2/x2-w7/x7:    Function specific
+- */
+-#define SMC_FC64_FFA_SUCCESS SMC_FASTCALL64_NR_SHARED_MEMORY(0x61)
+-
+-/**
+- * SMC_FC_FFA_VERSION - SMC opcode to return supported FF-A version
+- *
+- * Register arguments:
+- *
+- * * w1:     Major version bit[30:16] and minor version in bit[15:0] supported
+- *           by caller. Bit[31] must be 0.
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- * * w2:     Major version bit[30:16], minor version in bit[15:0], bit[31] must
+- *           be 0.
+- *
+- * or
+- *
+- * * w0:     &SMC_FC_FFA_ERROR
+- * * w2:     %FFA_ERROR_NOT_SUPPORTED if major version passed in is less than
+- *           the minimum major version supported.
+- */
+-#define SMC_FC_FFA_VERSION SMC_FASTCALL_NR_SHARED_MEMORY(0x63)
+-
+-/**
+- * SMC_FC_FFA_FEATURES - SMC opcode to check optional feature support
+- *
+- * Register arguments:
+- *
+- * * w1:     FF-A function ID
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- * * w2:     &typedef ffa_features2_t
+- * * w3:     &typedef ffa_features3_t
+- *
+- * or
+- *
+- * * w0:     &SMC_FC_FFA_ERROR
+- * * w2:     %FFA_ERROR_NOT_SUPPORTED if function is not implemented, or
+- *           %FFA_ERROR_INVALID_PARAMETERS if function id is not valid.
+- */
+-#define SMC_FC_FFA_FEATURES SMC_FASTCALL_NR_SHARED_MEMORY(0x64)
+-
+-/**
+- * SMC_FC_FFA_RXTX_MAP - 32 bit SMC opcode to map message buffers
+- *
+- * Register arguments:
+- *
+- * * w1:     TX address
+- * * w2:     RX address
+- * * w3:     RX/TX page count in bit[5:0]
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- */
+-#define SMC_FC_FFA_RXTX_MAP SMC_FASTCALL_NR_SHARED_MEMORY(0x66)
+-
+-/**
+- * SMC_FC64_FFA_RXTX_MAP - 64 bit SMC opcode to map message buffers
+- *
+- * Register arguments:
+- *
+- * * x1:     TX address
+- * * x2:     RX address
+- * * x3:     RX/TX page count in bit[5:0]
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- */
+-#define SMC_FC64_FFA_RXTX_MAP SMC_FASTCALL64_NR_SHARED_MEMORY(0x66)
+-
+-/**
+- * SMC_FC_FFA_RXTX_UNMAP - SMC opcode to unmap message buffers
+- *
+- * Register arguments:
+- *
+- * * w1:     ID in [31:16]
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- */
+-#define SMC_FC_FFA_RXTX_UNMAP SMC_FASTCALL_NR_SHARED_MEMORY(0x67)
+-
+-/**
+- * SMC_FC_FFA_ID_GET - SMC opcode to get endpoint id of caller
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- * * w2:     ID in bit[15:0], bit[31:16] must be 0.
+- */
+-#define SMC_FC_FFA_ID_GET SMC_FASTCALL_NR_SHARED_MEMORY(0x69)
+-
+-/**
+- * SMC_FC_FFA_MEM_DONATE - 32 bit SMC opcode to donate memory
+- *
+- * Not supported.
+- */
+-#define SMC_FC_FFA_MEM_DONATE SMC_FASTCALL_NR_SHARED_MEMORY(0x71)
+-
+-/**
+- * SMC_FC_FFA_MEM_LEND - 32 bit SMC opcode to lend memory
+- *
+- * Not currently supported.
+- */
+-#define SMC_FC_FFA_MEM_LEND SMC_FASTCALL_NR_SHARED_MEMORY(0x72)
+-
+-/**
+- * SMC_FC_FFA_MEM_SHARE - 32 bit SMC opcode to share memory
+- *
+- * Register arguments:
+- *
+- * * w1:     Total length
+- * * w2:     Fragment length
+- * * w3:     Address
+- * * w4:     Page count
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- * * w2/w3:  Handle
+- *
+- * or
+- *
+- * * w0:     &SMC_FC_FFA_MEM_FRAG_RX
+- * * w1-:    See &SMC_FC_FFA_MEM_FRAG_RX
+- *
+- * or
+- *
+- * * w0:     &SMC_FC_FFA_ERROR
+- * * w2:     Error code (&enum ffa_error)
+- */
+-#define SMC_FC_FFA_MEM_SHARE SMC_FASTCALL_NR_SHARED_MEMORY(0x73)
+-
+-/**
+- * SMC_FC64_FFA_MEM_SHARE - 64 bit SMC opcode to share memory
+- *
+- * Register arguments:
+- *
+- * * w1:     Total length
+- * * w2:     Fragment length
+- * * x3:     Address
+- * * w4:     Page count
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- * * w2/w3:  Handle
+- *
+- * or
+- *
+- * * w0:     &SMC_FC_FFA_MEM_FRAG_RX
+- * * w1-:    See &SMC_FC_FFA_MEM_FRAG_RX
+- *
+- * or
+- *
+- * * w0:     &SMC_FC_FFA_ERROR
+- * * w2:     Error code (&enum ffa_error)
+- */
+-#define SMC_FC64_FFA_MEM_SHARE SMC_FASTCALL64_NR_SHARED_MEMORY(0x73)
+-
+-/**
+- * SMC_FC_FFA_MEM_RETRIEVE_REQ - 32 bit SMC opcode to retrieve shared memory
+- *
+- * Register arguments:
+- *
+- * * w1:     Total length
+- * * w2:     Fragment length
+- * * w3:     Address
+- * * w4:     Page count
+- *
+- * Return:
+- * * w0:             &SMC_FC_FFA_MEM_RETRIEVE_RESP
+- * * w1/x1-w5/x5:    See &SMC_FC_FFA_MEM_RETRIEVE_RESP
+- */
+-#define SMC_FC_FFA_MEM_RETRIEVE_REQ SMC_FASTCALL_NR_SHARED_MEMORY(0x74)
+-
+-/**
+- * SMC_FC64_FFA_MEM_RETRIEVE_REQ - 64 bit SMC opcode to retrieve shared memory
+- *
+- * Register arguments:
+- *
+- * * w1:     Total length
+- * * w2:     Fragment length
+- * * x3:     Address
+- * * w4:     Page count
+- *
+- * Return:
+- * * w0:             &SMC_FC_FFA_MEM_RETRIEVE_RESP
+- * * w1/x1-w5/x5:    See &SMC_FC_FFA_MEM_RETRIEVE_RESP
+- */
+-#define SMC_FC64_FFA_MEM_RETRIEVE_REQ SMC_FASTCALL64_NR_SHARED_MEMORY(0x74)
+-
+-/**
+- * SMC_FC_FFA_MEM_RETRIEVE_RESP - Retrieve 32 bit SMC return opcode
+- *
+- * Register arguments:
+- *
+- * * w1:     Total length
+- * * w2:     Fragment length
+- */
+-#define SMC_FC_FFA_MEM_RETRIEVE_RESP SMC_FASTCALL_NR_SHARED_MEMORY(0x75)
+-
+-/**
+- * SMC_FC_FFA_MEM_RELINQUISH - SMC opcode to relinquish shared memory
+- *
+- * Input in &struct ffa_mem_relinquish_descriptor format in message buffer.
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- */
+-#define SMC_FC_FFA_MEM_RELINQUISH SMC_FASTCALL_NR_SHARED_MEMORY(0x76)
+-
+-/**
+- * SMC_FC_FFA_MEM_RECLAIM - SMC opcode to reclaim shared memory
+- *
+- * Register arguments:
+- *
+- * * w1/w2:  Handle
+- * * w3:     Flags
+- *
+- * Return:
+- * * w0:     &SMC_FC_FFA_SUCCESS
+- */
+-#define SMC_FC_FFA_MEM_RECLAIM SMC_FASTCALL_NR_SHARED_MEMORY(0x77)
+-
+-/**
+- * SMC_FC_FFA_MEM_FRAG_RX - SMC opcode to request next fragment.
+- *
+- * Register arguments:
+- *
+- * * w1/w2:  Cookie
+- * * w3:     Fragment offset.
+- * * w4:     Endpoint id ID in [31:16], if client is hypervisor.
+- *
+- * Return:
+- * * w0:             &SMC_FC_FFA_MEM_FRAG_TX
+- * * w1/x1-w5/x5:    See &SMC_FC_FFA_MEM_FRAG_TX
+- */
+-#define SMC_FC_FFA_MEM_FRAG_RX SMC_FASTCALL_NR_SHARED_MEMORY(0x7A)
+-
+-/**
+- * SMC_FC_FFA_MEM_FRAG_TX - SMC opcode to transmit next fragment
+- *
+- * Register arguments:
+- *
+- * * w1/w2:  Cookie
+- * * w3:     Fragment length.
+- * * w4:     Sender endpoint id ID in [31:16], if client is hypervisor.
+- *
+- * Return:
+- * * w0:             &SMC_FC_FFA_MEM_FRAG_RX or &SMC_FC_FFA_SUCCESS.
+- * * w1/x1-w5/x5:    See opcode in w0.
+- */
+-#define SMC_FC_FFA_MEM_FRAG_TX SMC_FASTCALL_NR_SHARED_MEMORY(0x7B)
+diff --git a/libqltipc/ql-tipc/include/trusty/avb.h b/libqltipc/ql-tipc/include/trusty/avb.h
+index b20928d..92bd9bd 100755
+--- a/libqltipc/ql-tipc/include/trusty/avb.h
++++ b/libqltipc/ql-tipc/include/trusty/avb.h
+@@ -25,22 +25,22 @@
+ #ifndef TRUSTY_AVB_H_
+ #define TRUSTY_AVB_H_
+ 
+-#include <interface/avb/avb.h>
+ #include <trusty/sysdeps.h>
+ #include <trusty/trusty_ipc.h>
++#include "interface/avb/avb.h"
+ 
+ /*
+  * Initialize AVB TIPC client. Returns one of trusty_err.
+  *
+  * @dev: initialized with trusty_ipc_dev_create
+  */
+-int avb_tipc_init(struct trusty_ipc_dev* dev);
++int avb_tipc_init(struct trusty_ipc_dev *dev);
+ /*
+  * Shutdown AVB TIPC client.
+  *
+  * @dev: initialized with trusty_ipc_dev_create
+  */
+-void avb_tipc_shutdown(struct trusty_ipc_dev* dev);
++void avb_tipc_shutdown(struct trusty_ipc_dev *dev);
+ /*
+  * Send request to secure side to read rollback index.
+  * Returns one of trusty_err.
+@@ -48,7 +48,7 @@ void avb_tipc_shutdown(struct trusty_ipc_dev* dev);
+  * @slot:    rollback index slot
+  * @value:   rollback index value stored here
+  */
+-int trusty_read_rollback_index(uint32_t slot, uint64_t* value);
++int trusty_read_rollback_index(uint32_t slot, uint64_t *value);
+ /*
+  * Send request to secure side to write rollback index
+  * Returns one of trusty_err.
+@@ -59,7 +59,7 @@ int trusty_read_rollback_index(uint32_t slot, uint64_t* value);
+ int trusty_write_rollback_index(uint32_t slot, uint64_t value);
+ /*
+  * Send request to secure side to read permanent attributes. When permanent
+- * attributes are stored in RPMB, a hash of the permanent attributes which is
++ * attributes are stored in secure storage, a hash of the permanent attributes which is
+  * given to AVB during verification MUST still be backed by write-once hardware.
+  *
+  * Copies attributes received by secure side to |attributes|. If |size| does not
+@@ -69,34 +69,26 @@ int trusty_write_rollback_index(uint32_t slot, uint64_t value);
+  * @attributes:  caller allocated buffer
+  * @size:        size of |attributes|
+  */
+-int trusty_read_permanent_attributes(uint8_t* attributes, uint32_t size);
++int trusty_read_permanent_attributes(uint8_t *attributes, uint32_t size);
+ /*
+  * Send request to secure side to write permanent attributes. Permanent
+  * attributes can only be written to storage once.
+  *
+  * Returns one of trusty_err.
+  */
+-int trusty_write_permanent_attributes(uint8_t* attributes, uint32_t size);
++int trusty_write_permanent_attributes(uint8_t *attributes, uint32_t size);
+ /*
+- * Send request to secure side to read device lock state from RPMB.
++ * Send request to secure side to read device lock state from secure storage.
+  *
+  * Returns one of trusty_err.
+  */
+-int trusty_read_lock_state(uint8_t* lock_state);
++int trusty_read_lock_state(uint8_t *lock_state);
+ /*
+- * Send request to secure side to write device lock state to RPMB. If the lock
++ * Send request to secure side to write device lock state to secure storage. If the lock
+  * state is changed, all rollback index data will be cleared.
+  *
+  * Returns one of trusty_err.
+  */
+ int trusty_write_lock_state(uint8_t lock_state);
+-/*
+- * Send request to secure side to lock the boot state. After this is invoked,
+- * the non-secure side will not be able to write to data managed by the AVB
+- * service until next boot.
+- *
+- * Returns one of trusty_err.
+- */
+-int trusty_lock_boot_state(void);
+ 
+ #endif /* TRUSTY_AVB_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/libtipc.h b/libqltipc/ql-tipc/include/trusty/libtipc.h
+deleted file mode 100644
+index 69e4801..0000000
+--- a/libqltipc/ql-tipc/include/trusty/libtipc.h
++++ /dev/null
+@@ -1,40 +0,0 @@
+-/*
+- * Copyright (C) 2016 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-#ifndef TRUSTY_LIBTIPC_H_
+-#define TRUSTY_LIBTIPC_H_
+-
+-#include <trusty/avb.h>
+-#include <trusty/keymaster.h>
+-#include <trusty/sysdeps.h>
+-
+-/*
+- * Initialize TIPC library
+- */
+-int trusty_ipc_init(void);
+-/*
+- * Shutdown TIPC library
+- */
+-void trusty_ipc_shutdown(void);
+-
+-#endif /* TRUSTY_LIBTIPC_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/rpmb.h b/libqltipc/ql-tipc/include/trusty/rpmb.h
+deleted file mode 100644
+index 2342487..0000000
+--- a/libqltipc/ql-tipc/include/trusty/rpmb.h
++++ /dev/null
+@@ -1,80 +0,0 @@
+-/*
+- * Copyright (C) 2016 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-
+-#ifndef TRUSTY_RPMB_H_
+-#define TRUSTY_RPMB_H_
+-
+-#include <trusty/sysdeps.h>
+-#include <trusty/trusty_ipc.h>
+-
+-#define MMC_BLOCK_SIZE 512
+-
+-/*
+- * Initialize RPMB storage proxy. Returns one of trusty_err.
+- *
+- * @dev:      initialized with trusty_ipc_dev_create
+- * @rpmb_dev: Context of RPMB device, initialized with rpmb_storage_get_ctx
+- */
+-int rpmb_storage_proxy_init(struct trusty_ipc_dev* dev, void* rpmb_dev);
+-/*
+- * Shutdown RPMB storage proxy
+- *
+- * @dev: initialized with trusty_ipc_dev_create
+- */
+-void rpmb_storage_proxy_shutdown(struct trusty_ipc_dev* dev);
+-/*
+- * Execute RPMB command. Implementation is platform specific.
+- * Returns one of trusty_err.
+- *
+- * @rpmb_dev:            Context of RPMB device, initialized with
+- *                       rpmb_storage_get_ctx
+- * @reliable_write_data: Buffer containing RPMB structs for reliable write
+- * @reliable_write_size: Size of reliable_write_data
+- * @write_data:          Buffer containing RPMB structs for write
+- * @write_size:          Size of write_data
+- * @read_data:           Buffer to be filled with RPMB structs read from RPMB
+- *                       partition
+- * @read_size:           Size of read_data
+- */
+-int rpmb_storage_send(void* rpmb_dev,
+-                      const void* reliable_write_data,
+-                      size_t reliable_write_size,
+-                      const void* write_data,
+-                      size_t write_size,
+-                      void* read_buf,
+-                      size_t read_size);
+-/*
+- * Return context for RPMB device. This is called when the RPMB storage proxy is
+- * initialized, and subsequently used when issuing RPMB storage requests.
+- * Implementation is platform specific.
+- */
+-void* rpmb_storage_get_ctx(void);
+-
+-/*
+- * Release a previously obtained RPMB context.
+- * Implementation is platform specific.
+- */
+-void rpmb_storage_put_ctx(void* dev);
+-
+-#endif /* TRUSTY_RPMB_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/sm_err.h b/libqltipc/ql-tipc/include/trusty/sm_err.h
+deleted file mode 100644
+index 3ce4912..0000000
+--- a/libqltipc/ql-tipc/include/trusty/sm_err.h
++++ /dev/null
+@@ -1,58 +0,0 @@
+-/*
+- * Copyright (C) 2016 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-
+-#ifndef QL_TIPC_SM_ERR_H_
+-#define QL_TIPC_SM_ERR_H_
+-
+-/* Errors from the secure monitor */
+-
+-/* Unknown SMC (defined by ARM DEN 0028A(0.9.0) */
+-#define SM_ERR_UNDEFINED_SMC 0xFFFFFFFF
+-#define SM_ERR_INVALID_PARAMETERS -2
+-/* Got interrupted. Call back with restart SMC */
+-#define SM_ERR_INTERRUPTED -3
+-/* Got an restart SMC when we didn't expect it */
+-#define SM_ERR_UNEXPECTED_RESTART -4
+-/* Temporarily busy. Call back with original args */
+-#define SM_ERR_BUSY -5
+-/* Got a trusted_service SMC when a restart SMC is required */
+-#define SM_ERR_INTERLEAVED_SMC -6
+-/* Unknown error */
+-#define SM_ERR_INTERNAL_FAILURE -7
+-#define SM_ERR_NOT_SUPPORTED -8
+-/* SMC call not allowed */
+-#define SM_ERR_NOT_ALLOWED -9
+-#define SM_ERR_END_OF_INPUT -10
+-/* Secure OS crashed */
+-#define SM_ERR_PANIC -11
+-/* Got interrupted by FIQ. Call back with SMC_SC_RESTART_FIQ on same CPU */
+-#define SM_ERR_FIQ_INTERRUPTED -12
+-/* SMC call waiting for another CPU */
+-#define SM_ERR_CPU_IDLE -13
+-/* Got interrupted. Call back with new SMC_SC_NOP */
+-#define SM_ERR_NOP_INTERRUPTED -14
+-/* Cpu idle after SMC_SC_NOP (not an error) */
+-#define SM_ERR_NOP_DONE -15
+-
+-#endif /* QL_TIPC_SM_ERR_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/smc.h b/libqltipc/ql-tipc/include/trusty/smc.h
+deleted file mode 100644
+index 2d7701a..0000000
+--- a/libqltipc/ql-tipc/include/trusty/smc.h
++++ /dev/null
+@@ -1,55 +0,0 @@
+-
+-/*
+- * Copyright (C) 2016 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-
+-/*
+- * Execute SMC call into trusty or el3
+- */
+-
+-struct smc_ret8 {
+-    unsigned long r0;
+-    unsigned long r1;
+-    unsigned long r2;
+-    unsigned long r3;
+-    unsigned long r4;
+-    unsigned long r5;
+-    unsigned long r6;
+-    unsigned long r7;
+-};
+-
+-struct smc_ret8 smc8(unsigned long r0,
+-                     unsigned long r1,
+-                     unsigned long r2,
+-                     unsigned long r3,
+-                     unsigned long r4,
+-                     unsigned long r5,
+-                     unsigned long r6,
+-                     unsigned long r7);
+-
+-static inline unsigned long smc(unsigned long r0,
+-                                unsigned long r1,
+-                                unsigned long r2,
+-                                unsigned long r3) {
+-    return smc8(r0, r1, r2, r3, 0, 0, 0, 0).r0;
+-}
+diff --git a/libqltipc/ql-tipc/include/trusty/smcall.h b/libqltipc/ql-tipc/include/trusty/smcall.h
+deleted file mode 100644
+index c480be3..0000000
+--- a/libqltipc/ql-tipc/include/trusty/smcall.h
++++ /dev/null
+@@ -1,162 +0,0 @@
+-/*
+- * Copyright (C) 2016 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-
+-#ifndef QL_TIPC_SMCALL_H_
+-#define QL_TIPC_SMCALL_H_
+-
+-#define SMC_NUM_ENTITIES 64
+-#define SMC_NUM_ARGS 4
+-#define SMC_NUM_PARAMS (SMC_NUM_ARGS - 1)
+-
+-#define SMC_IS_FASTCALL(smc_nr) ((smc_nr)&0x80000000)
+-#define SMC_IS_SMC64(smc_nr) ((smc_nr)&0x40000000)
+-#define SMC_ENTITY(smc_nr) (((smc_nr)&0x3F000000) >> 24)
+-#define SMC_FUNCTION(smc_nr) ((smc_nr)&0x0000FFFF)
+-
+-#define SMC_NR(entity, fn, fastcall, smc64)               \
+-    ((((fastcall)&0x1U) << 31) | (((smc64)&0x1U) << 30) | \
+-     (((entity)&0x3FU) << 24) | ((fn)&0xFFFFU))
+-
+-#define SMC_FASTCALL_NR(entity, fn) SMC_NR((entity), (fn), 1, 0)
+-#define SMC_STDCALL_NR(entity, fn) SMC_NR((entity), (fn), 0, 0)
+-#define SMC_FASTCALL64_NR(entity, fn) SMC_NR((entity), (fn), 1, 1)
+-#define SMC_STDCALL64_NR(entity, fn) SMC_NR((entity), (fn), 0, 1)
+-
+-/* ARM Architecture calls */
+-#define SMC_ENTITY_ARCH 0
+-/* CPU Service calls */
+-#define SMC_ENTITY_CPU 1
+-/* SIP Service calls */
+-#define SMC_ENTITY_SIP 2
+-/* OEM Service calls */
+-#define SMC_ENTITY_OEM 3
+-/* Standard Service calls */
+-#define SMC_ENTITY_STD 4
+-/* Reserved for future use */
+-#define SMC_ENTITY_RESERVED 5
+-/* Trusted Application calls */
+-#define SMC_ENTITY_TRUSTED_APP 48
+-/* Trusted OS calls */
+-#define SMC_ENTITY_TRUSTED_OS 50
+-/* Used for secure -> nonsecure logging */
+-#define SMC_ENTITY_LOGGING 51
+-/* Trusted OS calls internal to secure monitor */
+-#define SMC_ENTITY_SECURE_MONITOR 60
+-
+-/* FC = Fast call, SC = Standard call */
+-#define SMC_SC_RESTART_LAST SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR, 0)
+-#define SMC_SC_LOCKED_NOP SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR, 1)
+-
+-/**
+- * SMC_SC_RESTART_FIQ - Re-enter trusty after it was interrupted by an fiq
+- *
+- * No arguments, no return value.
+- *
+- * Re-enter trusty after returning to ns to process an fiq. Must be called iff
+- * trusty returns SM_ERR_FIQ_INTERRUPTED.
+- *
+- * Enable by selecting api version TRUSTY_API_VERSION_RESTART_FIQ (1) or later.
+- */
+-#define SMC_SC_RESTART_FIQ SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR, 2)
+-
+-/**
+- * SMC_SC_NOP - Enter trusty to run pending work.
+- *
+- * No arguments.
+- *
+- * Returns SM_ERR_NOP_INTERRUPTED or SM_ERR_NOP_DONE.
+- * If SM_ERR_NOP_INTERRUPTED is returned, the call must be repeated.
+- *
+- * Enable by selecting api version TRUSTY_API_VERSION_SMP (2) or later.
+- */
+-#define SMC_SC_NOP SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR, 3)
+-
+-/*
+- * Return from secure os to non-secure os with return value in r1
+- */
+-#define SMC_SC_NS_RETURN SMC_STDCALL_NR(SMC_ENTITY_SECURE_MONITOR, 0)
+-
+-#define SMC_FC_RESERVED SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 0)
+-#define SMC_FC_FIQ_EXIT SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 1)
+-#define SMC_FC_REQUEST_FIQ SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 2)
+-
+-#define TRUSTY_IRQ_TYPE_NORMAL (0)
+-#define TRUSTY_IRQ_TYPE_PER_CPU (1)
+-#define TRUSTY_IRQ_TYPE_DOORBELL (2)
+-#define SMC_FC_GET_NEXT_IRQ SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 3)
+-
+-#define SMC_FC_FIQ_ENTER SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 4)
+-
+-#define SMC_FC64_SET_FIQ_HANDLER SMC_FASTCALL64_NR(SMC_ENTITY_SECURE_MONITOR, 5)
+-#define SMC_FC64_GET_FIQ_REGS SMC_FASTCALL64_NR(SMC_ENTITY_SECURE_MONITOR, 6)
+-
+-#define SMC_FC_CPU_SUSPEND SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 7)
+-#define SMC_FC_CPU_RESUME SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 8)
+-
+-#define SMC_FC_AARCH_SWITCH SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 9)
+-#define SMC_FC_GET_VERSION_STR SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 10)
+-
+-/**
+- * SMC_FC_API_VERSION - Find and select supported API version.
+- *
+- * @r1: Version supported by client.
+- *
+- * Returns version supported by trusty.
+- *
+- * If multiple versions are supported, the client should start by calling
+- * SMC_FC_API_VERSION with the largest version it supports. Trusty will then
+- * return a version it supports. If the client does not support the version
+- * returned by trusty and the version returned is less than the version
+- * requested, repeat the call with the largest supported version less than the
+- * last returned version.
+- *
+- * This call must be made before any calls that are affected by the api version.
+- */
+-#define TRUSTY_API_VERSION_RESTART_FIQ (1)
+-#define TRUSTY_API_VERSION_SMP (2)
+-#define TRUSTY_API_VERSION_SMP_NOP (3)
+-#define TRUSTY_API_VERSION_PHYS_MEM_OBJ (4)
+-#define TRUSTY_API_VERSION_MEM_OBJ (5)
+-#define TRUSTY_API_VERSION_CURRENT (5)
+-#define SMC_FC_API_VERSION SMC_FASTCALL_NR(SMC_ENTITY_SECURE_MONITOR, 11)
+-
+-/* TRUSTED_OS entity calls */
+-#define SMC_SC_VIRTIO_GET_DESCR SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 20)
+-#define SMC_SC_VIRTIO_START SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 21)
+-#define SMC_SC_VIRTIO_STOP SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 22)
+-
+-#define SMC_SC_VDEV_RESET SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 23)
+-#define SMC_SC_VDEV_KICK_VQ SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 24)
+-#define SMC_NC_VDEV_KICK_VQ SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 25)
+-
+-/* Queueless Trusty IPC Interface */
+-#define SMC_SC_TRUSTY_IPC_CREATE_QL_DEV \
+-    SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 30)
+-#define SMC_SC_TRUSTY_IPC_SHUTDOWN_QL_DEV \
+-    SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 31)
+-#define SMC_SC_TRUSTY_IPC_HANDLE_QL_DEV_CMD \
+-    SMC_STDCALL_NR(SMC_ENTITY_TRUSTED_OS, 32)
+-#define SMC_FC_HANDLE_QL_TIPC_DEV_CMD SMC_FASTCALL_NR(SMC_ENTITY_TRUSTED_OS, 32)
+-
+-#endif /* QL_TIPC_SMCALL_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/sysdeps.h b/libqltipc/ql-tipc/include/trusty/sysdeps.h
+index bd44b2d..e7d222f 100644
+--- a/libqltipc/ql-tipc/include/trusty/sysdeps.h
++++ b/libqltipc/ql-tipc/include/trusty/sysdeps.h
+@@ -29,12 +29,9 @@
+  * types available in a normal C runtime. At least things like uint64_t,
+  * uintptr_t, and bool (with |false|, |true| keywords) must be present.
+  */
+-#include <compiler.h>
++//#include <compiler.h>
+ #include <stdarg.h>
+ #include <stdbool.h>
+-#include <stddef.h>
+-#include <stdint.h>
+-
+ /*
+  * These attribute macros may need to be adjusted if not using gcc or clang.
+  */
+@@ -43,17 +40,12 @@
+ #define TRUSTY_ATTR_SENTINEL __attribute__((__sentinel__))
+ #define TRUSTY_ATTR_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
+ 
+-#define PAGE_SHIFT 12
+-#define PAGE_SIZE (1 << PAGE_SHIFT)
+-
++#define PAGE_SIZE 4096
+ /*
+  * Struct containing attributes for memory to be shared with secure size.
+  */
+ struct ns_mem_page_info {
+     uint64_t attr;
+-    uint64_t paddr;
+-    uint8_t ffa_mem_attr;
+-    uint8_t ffa_mem_perm;
+ };
+ 
+ struct trusty_dev;
+@@ -64,77 +56,67 @@ struct trusty_dev;
+  *
+  * @dev: Trusty device initialized with trusty_dev_init
+  */
+-void trusty_lock(struct trusty_dev* dev);
+-void trusty_unlock(struct trusty_dev* dev);
++void trusty_lock(struct trusty_dev *dev);
++void trusty_unlock(struct trusty_dev *dev);
+ /*
+  * Disable/enable IRQ interrupts and save/restore @state
+  */
+-void trusty_local_irq_disable(unsigned long* state);
+-void trusty_local_irq_restore(unsigned long* state);
++void trusty_local_irq_disable(unsigned long *state);
++void trusty_local_irq_restore(unsigned long *state);
+ /*
+  * Put in standby state waiting for interrupt.
+  *
+  * @dev: Trusty device initialized with trusty_dev_init
+- * @event_poll: If true this function is entered after trusty_ipc_poll_for_event
+- *              returned TRUSTY_EVENT_NONE. In this case this call needs to
+- *              return without waiting for another interrupt if a secondary CPU
+- *              (any CPU other than the CPU that is waiting for a message) has
+- *              entered idle since the last such call. If there is only one CPU
+- *              calling into trusty this argument can be ignored.
+  */
+-void trusty_idle(struct trusty_dev* dev, bool event_poll);
++void trusty_idle(struct trusty_dev *dev);
+ /*
+  * Aborts the program or reboots the device.
+  */
+ void trusty_abort(void) TRUSTY_ATTR_NO_RETURN;
+ /*
+- * Print a formatted string. @format must point to a NULL-terminated string, and
+- * is followed by arguments to be printed.
++ * Print a formatted string. @format must point to a NULL-terminated UTF-8
++ * string, and is followed by arguments to be printed.
+  */
+-void trusty_printf(const char* format, ...);
++void trusty_printf(const char *format, ...);
+ /*
+  * Copy @n bytes from @src to @dest.
+  */
+-void* trusty_memcpy(void* dest, const void* src, size_t n);
++void *trusty_memcpy(void *dest, void *src, size_t n);
+ /*
+  * Set @n bytes starting at @dest to @c. Returns @dest.
+  */
+-void* trusty_memset(void* dest, const int c, size_t n);
++void *trusty_memset(void *dest, const int c, size_t n);
+ /*
+  * Copy string from @src to @dest, including the terminating NULL byte.
+  *
+  * The size of the array at @dest should be long enough to contain the string
+  * at @src, and should not overlap in memory with @src.
+  */
+-char* trusty_strcpy(char* dest, const char* src);
++char *trusty_strcpy(char *dest, const char *src);
+ /*
+  * Returns the length of @str, excluding the terminating NULL byte.
+  */
+-size_t trusty_strlen(const char* str);
+-/*
+- * Compare two strings, returns zero if strings are identical, else returns
+- * integer less than or greater than zero respectively if @str1 if less than
+- * or greater than @str2.
+- */
+-int trusty_strcmp(const char* str1, const char* str2);
++size_t trusty_strlen(const char *str);
+ /*
+  * Allocate @n elements of size @size. Initializes memory to 0, returns pointer
+  * to it.
+  */
+-void* trusty_calloc(size_t n, size_t size) TRUSTY_ATTR_WARN_UNUSED_RESULT;
++void *trusty_calloc(size_t n, size_t size) TRUSTY_ATTR_WARN_UNUSED_RESULT;
+ /*
+  * Free memory at @addr allocated with trusty_calloc.
+  */
+-void trusty_free(void* addr);
++void trusty_free(void *addr);
+ /*
+- * Allocate @count contiguous pages to be shared with secure side.
++ * Allocate @size bytes of page aligned memory to be shared with secure side.
+  *
++ * @mem_inf:  Stores cache attributes
+  * Returns:   vaddr of allocated memory
+  */
+-void* trusty_alloc_pages(unsigned count) TRUSTY_ATTR_WARN_UNUSED_RESULT;
++void *trusty_membuf_alloc_page_aligned(struct ns_mem_page_info *mem_inf,
++                          size_t size) TRUSTY_ATTR_WARN_UNUSED_RESULT;
+ /*
+- * Free @count pages at @vaddr allocated by trusty_alloc_pages
++ * Frees memory at @vaddr allocated by trusty_membuf_alloc_page_aligned
+  */
+-void trusty_free_pages(void* vaddr, unsigned count);
++void trusty_membuf_free_page_aligned(void *vaddr, size_t size);
+ 
+ #endif /* TRUSTY_SYSDEPS_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/trusty_dev.h b/libqltipc/ql-tipc/include/trusty/trusty_dev.h
+index 733261c..27ae8cc 100644
+--- a/libqltipc/ql-tipc/include/trusty/trusty_dev.h
++++ b/libqltipc/ql-tipc/include/trusty/trusty_dev.h
+@@ -27,8 +27,6 @@
+ 
+ #include <trusty/sysdeps.h>
+ 
+-typedef uint64_t trusty_shared_mem_id_t;
+-
+ /*
+  * Architecture specific Trusty device struct.
+  *
+@@ -36,29 +34,20 @@ typedef uint64_t trusty_shared_mem_id_t;
+  * @api_version: TIPC version
+  */
+ struct trusty_dev {
+-    void* priv_data;
++    void *priv_data;
+     uint32_t api_version;
+-    uint16_t ffa_local_id;
+-    uint16_t ffa_remote_id;
+-    void* ffa_tx;
+-    void* ffa_rx;
+ };
+ 
+ /*
+  * Initializes @dev with @priv, and gets the API version by calling
+  * into Trusty. Returns negative on error.
+  */
+-int trusty_dev_init(struct trusty_dev* dev, void* priv);
++int trusty_dev_init(struct trusty_dev *dev, void *priv);
+ 
+ /*
+  * Cleans up anything related to @dev. Returns negative on error.
+  */
+-int trusty_dev_shutdown(struct trusty_dev* dev);
+-
+-/*
+- * Enter trusty on cpus that are not in an ipc call
+- */
+-int trusty_dev_nop(struct trusty_dev* dev);
++int trusty_dev_shutdown(struct trusty_dev *dev);
+ 
+ /*
+  * Invokes creation of queueless Trusty IPC device on the secure side.
+@@ -68,8 +57,7 @@ int trusty_dev_nop(struct trusty_dev* dev);
+  * @buf:      physical address info of buffer to share with Trusty
+  * @buf_size: size of @buf
+  */
+-int trusty_dev_init_ipc(struct trusty_dev* dev,
+-                        trusty_shared_mem_id_t buf_id,
++int trusty_dev_init_ipc(struct trusty_dev *dev, struct ns_mem_page_info *buf,
+                         uint32_t buf_size);
+ /*
+  * Invokes execution of command on the secure side.
+@@ -78,14 +66,8 @@ int trusty_dev_init_ipc(struct trusty_dev* dev,
+  * @buf:      physical address info of shared buffer containing command
+  * @buf_size: size of command data
+  */
+-int trusty_dev_exec_ipc(struct trusty_dev* dev,
+-                        trusty_shared_mem_id_t buf_id,
++int trusty_dev_exec_ipc(struct trusty_dev *dev, struct ns_mem_page_info *buf,
+                         uint32_t buf_size);
+-
+-int trusty_dev_exec_fc_ipc(struct trusty_dev* dev,
+-                           trusty_shared_mem_id_t buf_id,
+-                           uint32_t buf_size);
+-
+ /*
+  * Invokes deletion of queueless Trusty IPC device on the secure side.
+  * @buf is unmapped, and all open channels are closed.
+@@ -94,28 +76,7 @@ int trusty_dev_exec_fc_ipc(struct trusty_dev* dev,
+  * @buf:      physical address info of shared buffer
+  * @buf_size: size of @buf
+  */
+-int trusty_dev_shutdown_ipc(struct trusty_dev* dev,
+-                            trusty_shared_mem_id_t buf_id,
+-                            uint32_t buf_size);
+-
+-/**
+- * trusty_dev_share_memory - Share a contiguous memory region
+- * @dev:        trusty device, initialized with trusty_dev_init.
+- * @idp:        pointer to return shared memory object id in.
+- * @pinfo:      physical address and memory attributes
+- * @page_count: number of 4k pages to share.
+- */
+-int trusty_dev_share_memory(struct trusty_dev* dev,
+-                            trusty_shared_mem_id_t* idp,
+-                            struct ns_mem_page_info* pinfo,
+-                            size_t page_count);
+-
+-/**
+- * trusty_dev_reclaim_memory - Reclaim a contiguous memory region
+- * @dev:        trusty device, initialized with trusty_dev_init.
+- * @id:         shared memory object id returned from trusty_dev_share_memory.
+- */
+-int trusty_dev_reclaim_memory(struct trusty_dev* dev,
+-                              trusty_shared_mem_id_t id);
++int trusty_dev_shutdown_ipc(struct trusty_dev *dev,
++                            struct ns_mem_page_info *buf, uint32_t buf_size);
+ 
+ #endif /* TRUSTY_TRUSTY_DEV_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/trusty_ipc.h b/libqltipc/ql-tipc/include/trusty/trusty_ipc.h
+index 23339ca..03ef935 100644
+--- a/libqltipc/ql-tipc/include/trusty/trusty_ipc.h
++++ b/libqltipc/ql-tipc/include/trusty/trusty_ipc.h
+@@ -26,7 +26,6 @@
+ #define TRUSTY_TRUSTY_IPC_H_
+ 
+ #include <trusty/sysdeps.h>
+-#include <trusty/trusty_dev.h>
+ 
+ /*
+  * handle_t is an opaque 32 bit value that is used to reference an
+@@ -34,29 +33,29 @@
+  */
+ typedef uint32_t handle_t;
+ 
+-#define INVALID_IPC_HANDLE 0
++#define INVALID_IPC_HANDLE  0
+ 
+ /*
+  * Error codes returned by Trusty IPC device function calls
+  */
+ enum trusty_err {
+-    TRUSTY_ERR_NONE = 0,
+-    TRUSTY_ERR_GENERIC = -1,
+-    TRUSTY_ERR_NOT_SUPPORTED = -2,
+-    TRUSTY_ERR_NO_MEMORY = -3,
+-    TRUSTY_ERR_INVALID_ARGS = -4,
+-    TRUSTY_ERR_SECOS_ERR = -5,
+-    TRUSTY_ERR_MSG_TOO_BIG = -6,
+-    TRUSTY_ERR_NO_MSG = -7,
+-    TRUSTY_ERR_CHANNEL_CLOSED = -8,
+-    TRUSTY_ERR_SEND_BLOCKED = -9,
++    TRUSTY_ERR_NONE            =  0,
++    TRUSTY_ERR_GENERIC         = -1,
++    TRUSTY_ERR_NOT_SUPPORTED   = -2,
++    TRUSTY_ERR_NO_MEMORY       = -3,
++    TRUSTY_ERR_INVALID_ARGS    = -4,
++    TRUSTY_ERR_SECOS_ERR       = -5,
++    TRUSTY_ERR_MSG_TOO_BIG     = -6,
++    TRUSTY_ERR_NO_MSG          = -7,
++    TRUSTY_ERR_CHANNEL_CLOSED  = -8,
++    TRUSTY_ERR_SEND_BLOCKED    = -9,
+ };
+ /*
+  * Return codes for successful Trusty IPC events (failures return trusty_err)
+  */
+ enum trusty_event_result {
+-    TRUSTY_EVENT_HANDLED = 1,
+-    TRUSTY_EVENT_NONE = 2,
++    TRUSTY_EVENT_HANDLED   = 1,
++    TRUSTY_EVENT_NONE      = 2
+ };
+ 
+ /*
+@@ -64,11 +63,11 @@ enum trusty_event_result {
+  * of trusty_ipc_event structure.
+  */
+ enum trusty_ipc_event_type {
+-    IPC_HANDLE_POLL_NONE = 0x0,
++    IPC_HANDLE_POLL_NONE  = 0x0,
+     IPC_HANDLE_POLL_READY = 0x1,
+     IPC_HANDLE_POLL_ERROR = 0x2,
+-    IPC_HANDLE_POLL_HUP = 0x4,
+-    IPC_HANDLE_POLL_MSG = 0x8,
++    IPC_HANDLE_POLL_HUP   = 0x4,
++    IPC_HANDLE_POLL_MSG   = 0x8,
+     IPC_HANDLE_POLL_SEND_UNBLOCKED = 0x10,
+ };
+ 
+@@ -89,7 +88,7 @@ struct trusty_ipc_event {
+ };
+ 
+ struct trusty_ipc_iovec {
+-    void* base;
++    void *base;
+     size_t len;
+ };
+ 
+@@ -102,23 +101,22 @@ struct trusty_ipc_iovec {
+  * @tdev:      trusty device
+  */
+ struct trusty_ipc_dev {
+-    void* buf_vaddr;
++    void  *buf_vaddr;
+     size_t buf_size;
+-    trusty_shared_mem_id_t buf_id;
+     struct ns_mem_page_info buf_ns;
+-    struct trusty_dev* tdev;
++    struct trusty_dev *tdev;
+ };
+ 
+ /*
+  * Trusty IPC event handlers.
+  */
+ struct trusty_ipc_ops {
+-    int (*on_raw_event)(struct trusty_ipc_chan* chan,
+-                        struct trusty_ipc_event* evt);
+-    int (*on_connect_complete)(struct trusty_ipc_chan* chan);
+-    int (*on_send_unblocked)(struct trusty_ipc_chan* chan);
+-    int (*on_message)(struct trusty_ipc_chan* chan);
+-    int (*on_disconnect)(struct trusty_ipc_chan* chan);
++    int (*on_raw_event)(struct trusty_ipc_chan *chan,
++                        struct trusty_ipc_event *evt);
++    int (*on_connect_complete)(struct trusty_ipc_chan *chan);
++    int (*on_send_unblocked)(struct trusty_ipc_chan *chan);
++    int (*on_message)(struct trusty_ipc_chan *chan);
++    int (*on_disconnect)(struct trusty_ipc_chan *chan);
+ };
+ 
+ /*
+@@ -132,11 +130,11 @@ struct trusty_ipc_ops {
+  * @ops:      callbacks for Trusty events
+  */
+ struct trusty_ipc_chan {
+-    void* ops_ctx;
++    void *ops_ctx;
+     handle_t handle;
+     volatile int complete;
+-    struct trusty_ipc_dev* dev;
+-    struct trusty_ipc_ops* ops;
++    struct trusty_ipc_dev *dev;
++    struct trusty_ipc_ops *ops;
+ };
+ 
+ /*
+@@ -145,16 +143,16 @@ struct trusty_ipc_chan {
+  *
+  * @ipc_dev:  new Trusty IPC device to be initialized
+  * @tdev:     associated Trusty device
+- * @shared_buf_size: size of shared buffer to be allocated
++ * @buf_size: size of shared buffer to be allocated
+  */
+-int trusty_ipc_dev_create(struct trusty_ipc_dev** ipc_dev,
+-                          struct trusty_dev* tdev,
+-                          size_t shared_buf_size);
++int trusty_ipc_dev_create(struct trusty_ipc_dev **ipc_dev,
++                          struct trusty_dev *tdev,
++                          size_t buf_size);
+ /*
+  * Shutdown @dev. Frees shared buffer, and calls trusty_dev_shutdown_ipc
+  * to shutdown on the secure side.
+  */
+-void trusty_ipc_dev_shutdown(struct trusty_ipc_dev* dev);
++void trusty_ipc_dev_shutdown(struct trusty_ipc_dev *dev);
+ 
+ /*
+  * Calls into secure OS to initiate a new connection to a Trusty IPC service.
+@@ -164,8 +162,7 @@ void trusty_ipc_dev_shutdown(struct trusty_ipc_dev* dev);
+  * @port:   name of port to connect to on secure side
+  * @cookie: cookie associated with new channel.
+  */
+-int trusty_ipc_dev_connect(struct trusty_ipc_dev* dev,
+-                           const char* port,
++int trusty_ipc_dev_connect(struct trusty_ipc_dev *dev, const char *port,
+                            uint64_t cookie);
+ /*
+  * Calls into secure OS to close connection to Trusty IPC service.
+@@ -174,15 +171,7 @@ int trusty_ipc_dev_connect(struct trusty_ipc_dev* dev,
+  * @dev:  Trusty IPC device
+  * @chan: handle for connection, opened with trusty_ipc_dev_connect
+  */
+-int trusty_ipc_dev_close(struct trusty_ipc_dev* dev, handle_t chan);
+-
+-/*
+- * Calls into secure OS to check if there is a pending event. Returns a bool.
+- *
+- * @dev:   Trusty IPC device
+- * @chan:  handle for connection. Must be 0 which indicates any connection.
+- */
+-bool trusty_ipc_dev_has_event(struct trusty_ipc_dev* dev, handle_t chan);
++int trusty_ipc_dev_close(struct trusty_ipc_dev *dev, handle_t chan);
+ 
+ /*
+  * Calls into secure OS to receive pending event. Returns a trusty_err.
+@@ -191,9 +180,8 @@ bool trusty_ipc_dev_has_event(struct trusty_ipc_dev* dev, handle_t chan);
+  * @chan:  handle for connection
+  * @event: pointer to output event struct
+  */
+-int trusty_ipc_dev_get_event(struct trusty_ipc_dev* dev,
+-                             handle_t chan,
+-                             struct trusty_ipc_event* event);
++int trusty_ipc_dev_get_event(struct trusty_ipc_dev *dev, handle_t chan,
++                             struct trusty_ipc_event *event);
+ /*
+  * Calls into secure OS to send message to channel. Returns a trusty_err.
+  *
+@@ -202,10 +190,8 @@ int trusty_ipc_dev_get_event(struct trusty_ipc_dev* dev,
+  * @iovs:     contains messages to be sent
+  * @iovs_cnt: number of iovecs to be sent
+  */
+-int trusty_ipc_dev_send(struct trusty_ipc_dev* dev,
+-                        handle_t chan,
+-                        const struct trusty_ipc_iovec* iovs,
+-                        size_t iovs_cnt);
++int trusty_ipc_dev_send(struct trusty_ipc_dev *dev, handle_t chan,
++                        const struct trusty_ipc_iovec *iovs, size_t iovs_cnt);
+ /*
+  * Calls into secure OS to receive message on channel. Returns number of bytes
+  * received on success, trusty_err on failure.
+@@ -215,18 +201,16 @@ int trusty_ipc_dev_send(struct trusty_ipc_dev* dev,
+  * @iovs:     contains received messages
+  * @iovs_cnt: number of iovecs received
+  */
+-int trusty_ipc_dev_recv(struct trusty_ipc_dev* dev,
+-                        handle_t chan,
+-                        const struct trusty_ipc_iovec* iovs,
+-                        size_t iovs_cnt);
++int trusty_ipc_dev_recv(struct trusty_ipc_dev *dev, handle_t chan,
++                        const struct trusty_ipc_iovec *iovs, size_t iovs_cnt);
+ 
+-void trusty_ipc_dev_idle(struct trusty_ipc_dev* dev, bool event_poll);
++void trusty_ipc_dev_idle(struct trusty_ipc_dev *dev);
+ 
+ /*
+  * Initializes @chan with default values and @dev.
+  */
+-void trusty_ipc_chan_init(struct trusty_ipc_chan* chan,
+-                          struct trusty_ipc_dev* dev);
++void trusty_ipc_chan_init(struct trusty_ipc_chan *chan,
++                          struct trusty_ipc_dev *dev);
+ /*
+  * Calls trusty_ipc_dev_connect to get a handle for channel.
+  * Returns a trusty_err.
+@@ -236,18 +220,17 @@ void trusty_ipc_chan_init(struct trusty_ipc_chan* chan,
+  * @wait: flag to wait for connect to complete by polling for
+  *        IPC_HANDLE_POLL_READY event
+  */
+-int trusty_ipc_connect(struct trusty_ipc_chan* chan,
+-                       const char* port,
++int trusty_ipc_connect(struct trusty_ipc_chan *chan, const char *port,
+                        bool wait);
+ /*
+  * Calls trusty_ipc_dev_close and invalidates @chan. Returns a trusty_err.
+  */
+-int trusty_ipc_close(struct trusty_ipc_chan* chan);
++int trusty_ipc_close(struct trusty_ipc_chan *chan);
+ /*
+- * Calls trusty_ipc_dev_get_event to poll @dev for events. Handles
+- * events by calling appropriate callbacks. Returns nonnegative on success.
++ * Calls trusty_ipc_dev_get_event to poll for an event on @chan. Handles
++ * event by calling appropriate callback. Returns nonnegative on success.
+  */
+-int trusty_ipc_poll_for_event(struct trusty_ipc_dev* dev);
++int trusty_ipc_poll_for_event(struct trusty_ipc_chan *chan);
+ /*
+  * Calls trusty_ipc_dev_send to send a message. Returns a trusty_err.
+  *
+@@ -256,9 +239,8 @@ int trusty_ipc_poll_for_event(struct trusty_ipc_dev* dev);
+  * @iovs_cnt: number of iovecs to be sent
+  * @wait:     flag to wait for send to complete
+  */
+-int trusty_ipc_send(struct trusty_ipc_chan* chan,
+-                    const struct trusty_ipc_iovec* iovs,
+-                    size_t iovs_cnt,
++int trusty_ipc_send(struct trusty_ipc_chan *chan,
++                    const struct trusty_ipc_iovec *iovs, size_t iovs_cnt,
+                     bool wait);
+ /*
+  * Calls trusty_ipc_dev_recv to receive a message. Return number of bytes
+@@ -269,9 +251,8 @@ int trusty_ipc_send(struct trusty_ipc_chan* chan,
+  * @iovs_cnt: number of iovecs received
+  * @wait:     flag to wait for a message to receive
+  */
+-int trusty_ipc_recv(struct trusty_ipc_chan* chan,
+-                    const struct trusty_ipc_iovec* iovs,
+-                    size_t iovs_cnt,
++int trusty_ipc_recv(struct trusty_ipc_chan *chan,
++                    const struct trusty_ipc_iovec *iovs, size_t iovs_cnt,
+                     bool wait);
+ 
+ #endif /* TRUSTY_TRUSTY_IPC_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/trusty_mem.h b/libqltipc/ql-tipc/include/trusty/trusty_mem.h
+deleted file mode 100644
+index 14d4440..0000000
+--- a/libqltipc/ql-tipc/include/trusty/trusty_mem.h
++++ /dev/null
+@@ -1,41 +0,0 @@
+-/*
+- * Copyright (C) 2018 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-
+-#ifndef TRUSTY_TRUSTY_MEM_H_
+-#define TRUSTY_TRUSTY_MEM_H_
+-
+-#include <trusty/sysdeps.h>
+-
+-/*
+- * Encodes the memory attributes of @va into @inf
+- *
+- * @inf:    ns_mem_page_info allocated by the caller
+- * @va:     virtual addresses to retrieve attributes for
+- *
+- * Returns 0 on success and -1 on failure
+- */
+-
+-int trusty_encode_page_info(struct ns_mem_page_info* inf, void* va);
+-
+-#endif /* TRUSTY_TRUSTY_MEM_H_ */
+diff --git a/libqltipc/ql-tipc/include/trusty/util.h b/libqltipc/ql-tipc/include/trusty/util.h
+index 437f9b5..9e7326d 100644
+--- a/libqltipc/ql-tipc/include/trusty/util.h
++++ b/libqltipc/ql-tipc/include/trusty/util.h
+@@ -42,12 +42,12 @@ const char* trusty_basename(const char* str);
+  * This has no effect unless TIPC_ENABLE_DEBUG is defined.
+  */
+ #ifdef TIPC_ENABLE_DEBUG
+-#define trusty_assert(expr)                           \
+-    do {                                              \
+-        if (!(expr)) {                                \
+-            trusty_fatal("assert fail: " #expr "\n"); \
+-        }                                             \
+-    } while (0)
++#define trusty_assert(expr)                     \
++  do {                                          \
++    if (!(expr)) {                              \
++      trusty_fatal("assert fail: " #expr "\n"); \
++    }                                           \
++  } while(0)
+ #else
+ #define trusty_assert(expr)
+ #endif
+@@ -58,14 +58,16 @@ const char* trusty_basename(const char* str);
+  * This has no effect unless TIPC_ENABLE_DEBUG and LOCAL_LOG is defined.
+  */
+ #ifdef TIPC_ENABLE_DEBUG
+-#define trusty_debug(message, ...)                                    \
+-    do {                                                              \
+-        if (LOCAL_LOG) {                                              \
+-            trusty_printf(trusty_basename(__FILE__));                 \
+-            trusty_printf(":" TRUSTY_TO_STRING(__LINE__) ": DEBUG "); \
+-            trusty_printf(message, ##__VA_ARGS__);                    \
+-        }                                                             \
+-    } while (0)
++#define trusty_debug(message, ...)                              \
++  do {                                                          \
++    if (LOCAL_LOG) {                                            \
++      trusty_printf("%a:" TRUSTY_TO_STRING(__LINE__)            \
++                    ": DEBUG "                                  \
++                    message,                                    \
++                    trusty_basename(__FILE__),                  \
++                    ##__VA_ARGS__);                             \
++    }                                                           \
++  } while(0)
+ #else
+ #define trusty_debug(message, ...)
+ #endif
+@@ -73,32 +75,39 @@ const char* trusty_basename(const char* str);
+ /*
+  * Prints info message.
+  */
+-#define trusty_info(message, ...)                 \
+-    do {                                          \
+-        trusty_printf(trusty_basename(__FILE__)); \
+-        trusty_printf(": INFO ");                 \
+-        trusty_printf(message, ##__VA_ARGS__);    \
+-    } while (0)
++#define trusty_info(message, ...)             \
++  do {                                        \
++    if (LOCAL_LOG) {                          \
++        trusty_printf("%a: INFO "             \
++                  message,                    \
++                  trusty_basename(__FILE__),  \
++                  ##__VA_ARGS__);             \
++    }                                         \
++  } while(0)
+ 
+ /*
+  * Prints error message.
+  */
+-#define trusty_error(message, ...)                                \
+-    do {                                                          \
+-        trusty_printf(trusty_basename(__FILE__));                 \
+-        trusty_printf(":" TRUSTY_TO_STRING(__LINE__) ": ERROR "); \
+-        trusty_printf(message, ##__VA_ARGS__);                    \
+-    } while (0)
++#define trusty_error(message, ...)                            \
++  do {                                                        \
++    trusty_printf("%a:" TRUSTY_TO_STRING(__LINE__)            \
++                  ": ERROR "                                  \
++                  message,                                    \
++                  trusty_basename(__FILE__),                  \
++                  ##__VA_ARGS__);                             \
++  } while(0)
+ 
+ /*
+  * Prints message and calls trusty_abort.
+  */
+-#define trusty_fatal(message, ...)                                \
+-    do {                                                          \
+-        trusty_printf(trusty_basename(__FILE__));                 \
+-        trusty_printf(":" TRUSTY_TO_STRING(__LINE__) ": FATAL "); \
+-        trusty_printf(message, ##__VA_ARGS__);                    \
+-        trusty_abort();                                           \
+-    } while (0)
++#define trusty_fatal(message, ...)                             \
++  do {                                                         \
++    trusty_printf("%a:" TRUSTY_TO_STRING(__LINE__)             \
++                  ": FATAL "                                   \
++                  message,                                     \
++                  trusty_basename(__FILE__),                   \
++                  ##__VA_ARGS__);                              \
++    trusty_abort();                                            \
++  } while(0)
+ 
+ #endif /* TRUSTY_UTIL_H_ */
+diff --git a/libqltipc/ql-tipc/ipc.c b/libqltipc/ql-tipc/ipc.c
+index e4aad9f..ba9f177 100644
+--- a/libqltipc/ql-tipc/ipc.c
++++ b/libqltipc/ql-tipc/ipc.c
+@@ -22,79 +22,90 @@
+  * SOFTWARE.
+  */
+ 
+-#include <trusty/trusty_ipc.h>
+-#include <trusty/util.h>
++#include "trusty/trusty_ipc.h"
++#include "trusty/util.h"
++#include <lib.h>
+ 
+ #define LOCAL_LOG 0
++#if !defined(__clang__)
++typedef unsigned long uintptr_t;
++#endif
+ 
+-static int sync_ipc_on_connect_complete(struct trusty_ipc_chan* chan) {
++static int sync_ipc_on_connect_complete(struct trusty_ipc_chan *chan)
++{
+     trusty_assert(chan);
+ 
+     chan->complete = 1;
+     return TRUSTY_EVENT_HANDLED;
+ }
+ 
+-static int sync_ipc_on_message(struct trusty_ipc_chan* chan) {
++static int sync_ipc_on_message(struct trusty_ipc_chan *chan)
++{
+     trusty_assert(chan);
+ 
+     chan->complete = 1;
+     return TRUSTY_EVENT_HANDLED;
+ }
+ 
+-static int sync_ipc_on_disconnect(struct trusty_ipc_chan* chan) {
++static int sync_ipc_on_disconnect(struct trusty_ipc_chan *chan)
++{
+     trusty_assert(chan);
+ 
+     chan->complete = TRUSTY_ERR_CHANNEL_CLOSED;
+     return TRUSTY_EVENT_HANDLED;
+ }
+ 
+-static int wait_for_complete(struct trusty_ipc_chan* chan) {
++static int wait_for_complete(struct trusty_ipc_chan *chan)
++{
+     int rc;
+ 
+     chan->complete = 0;
+     for (;;) {
+-        rc = trusty_ipc_poll_for_event(chan->dev);
++        rc = trusty_ipc_poll_for_event(chan);
+         if (rc < 0)
+             return rc;
+ 
+         if (chan->complete)
+             break;
+ 
+-        if (rc == TRUSTY_EVENT_NONE && !trusty_ipc_dev_has_event(chan->dev, 0))
+-            trusty_ipc_dev_idle(chan->dev, true);
++        trusty_ipc_dev_idle(chan->dev);
+     }
+ 
+     return chan->complete;
+ }
+ 
+-static int wait_for_connect(struct trusty_ipc_chan* chan) {
+-    trusty_debug("%s: chan %x: waiting for connect\n", __func__,
++static int wait_for_connect(struct trusty_ipc_chan *chan)
++{
++    trusty_debug("%a: chan %x: waiting for connect\n", __func__,
+                  (int)chan->handle);
+     return wait_for_complete(chan);
+ }
+ 
+-static int wait_for_send(struct trusty_ipc_chan* chan) {
+-    trusty_debug("%s: chan %d: waiting for send\n", __func__, chan->handle);
++static int wait_for_send(struct trusty_ipc_chan *chan)
++{
++    trusty_debug("%a: chan %d: waiting for send\n", __func__, chan->handle);
+     return wait_for_complete(chan);
+ }
+ 
+-static int wait_for_reply(struct trusty_ipc_chan* chan) {
+-    trusty_debug("%s: chan %d: waiting for reply\n", __func__, chan->handle);
++static int wait_for_reply(struct trusty_ipc_chan *chan)
++{
++    trusty_debug("%a: chan %d: waiting for reply\n", __func__, chan->handle);
+     return wait_for_complete(chan);
+ }
+ 
+ static struct trusty_ipc_ops sync_ipc_ops = {
+-        .on_connect_complete = sync_ipc_on_connect_complete,
+-        .on_message = sync_ipc_on_message,
+-        .on_disconnect = sync_ipc_on_disconnect,
++    .on_connect_complete = sync_ipc_on_connect_complete,
++    .on_message = sync_ipc_on_message,
++    .on_disconnect = sync_ipc_on_disconnect,
+ };
+ 
+-void trusty_ipc_chan_init(struct trusty_ipc_chan* chan,
+-                          struct trusty_ipc_dev* dev) {
++void trusty_ipc_chan_init(struct trusty_ipc_chan *chan,
++                          struct trusty_ipc_dev *dev)
++{
+     trusty_assert(chan);
+     trusty_assert(dev);
+ 
+-    trusty_memset(chan, 0, sizeof(*chan));
++    memset(chan, 0, sizeof(*chan));
+ 
+     chan->handle = INVALID_IPC_HANDLE;
+     chan->dev = dev;
+@@ -102,9 +113,9 @@ void trusty_ipc_chan_init(struct trusty_ipc_chan* chan,
+     chan->ops_ctx = chan;
+ }
+ 
+-int trusty_ipc_connect(struct trusty_ipc_chan* chan,
+-                       const char* port,
+-                       bool wait) {
++int trusty_ipc_connect(struct trusty_ipc_chan *chan, const char *port,
++                       bool wait)
++{
+     int rc;
+ 
+     trusty_assert(chan);
+@@ -114,7 +125,7 @@ int trusty_ipc_connect(struct trusty_ipc_chan* chan,
+ 
+     rc = trusty_ipc_dev_connect(chan->dev, port, (uint64_t)(uintptr_t)chan);
+     if (rc < 0) {
+-        trusty_error("%s: init connection failed (%d)\n", __func__, rc);
++        trusty_error("%a: init connection failed (%d)\n", __func__, rc);
+         return rc;
+     }
+     chan->handle = (handle_t)rc;
+@@ -124,7 +135,7 @@ int trusty_ipc_connect(struct trusty_ipc_chan* chan,
+     if (wait) {
+         rc = wait_for_connect(chan);
+         if (rc < 0) {
+-            trusty_error("%s: wait for connect failed (%d)\n", __func__, rc);
++            trusty_error("%a: wait for connect failed (%d)\n", __func__, rc);
+             trusty_ipc_close(chan);
+         }
+     }
+@@ -132,7 +143,8 @@ int trusty_ipc_connect(struct trusty_ipc_chan* chan,
+     return rc;
+ }
+ 
+-int trusty_ipc_close(struct trusty_ipc_chan* chan) {
++int trusty_ipc_close(struct trusty_ipc_chan *chan)
++{
+     int rc;
+ 
+     trusty_assert(chan);
+@@ -143,10 +155,10 @@ int trusty_ipc_close(struct trusty_ipc_chan* chan) {
+     return rc;
+ }
+ 
+-int trusty_ipc_send(struct trusty_ipc_chan* chan,
+-                    const struct trusty_ipc_iovec* iovs,
+-                    size_t iovs_cnt,
+-                    bool wait) {
++int trusty_ipc_send(struct trusty_ipc_chan *chan,
++                    const struct trusty_ipc_iovec *iovs, size_t iovs_cnt,
++                    bool wait)
++{
+     int rc;
+ 
+     trusty_assert(chan);
+@@ -159,7 +171,7 @@ Again:
+         if (wait) {
+             rc = wait_for_send(chan);
+             if (rc < 0) {
+-                trusty_error("%s: wait to send failed (%d)\n", __func__, rc);
++                trusty_error("%a: wait to send failed (%d)\n", __func__, rc);
+                 return rc;
+             }
+             goto Again;
+@@ -168,58 +180,55 @@ Again:
+     return rc;
+ }
+ 
+-int trusty_ipc_recv(struct trusty_ipc_chan* chan,
+-                    const struct trusty_ipc_iovec* iovs,
+-                    size_t iovs_cnt,
+-                    bool wait) {
++int trusty_ipc_recv(struct trusty_ipc_chan *chan,
++                    const struct trusty_ipc_iovec *iovs, size_t iovs_cnt,
++                    bool wait)
++{
+     int rc;
+     trusty_assert(chan);
+     trusty_assert(chan->dev);
+     trusty_assert(chan->handle);
+ 
+-    if (wait) {
+-        rc = wait_for_reply(chan);
+-        if (rc < 0) {
+-            trusty_error("%s: wait to reply failed (%d)\n", __func__, rc);
+-            return rc;
++Again:
++    rc = trusty_ipc_dev_recv(chan->dev, chan->handle, iovs, iovs_cnt);
++    if (rc == TRUSTY_ERR_NO_MSG) {
++        if (wait) {
++            rc = wait_for_reply(chan);
++            if (rc < 0) {
++                trusty_error("%a: wait to reply failed (%d)\n", __func__, rc);
++                return rc;
++            }
++            goto Again;
+         }
+     }
+ 
+-    rc = trusty_ipc_dev_recv(chan->dev, chan->handle, iovs, iovs_cnt);
+-    if (rc < 0)
+-        trusty_error("%s: ipc recv failed (%d)\n", __func__, rc);
+-
+     return rc;
+ }
+ 
+-int trusty_ipc_poll_for_event(struct trusty_ipc_dev* ipc_dev) {
++int trusty_ipc_poll_for_event(struct trusty_ipc_chan *chan)
++{
+     int rc;
+     struct trusty_ipc_event evt;
+-    struct trusty_ipc_chan* chan;
+-
+-    trusty_assert(ipc_dev);
++    trusty_assert(chan && chan->ops);
+ 
+-    rc = trusty_ipc_dev_get_event(ipc_dev, 0, &evt);
++    rc = trusty_ipc_dev_get_event(chan->dev, chan->handle, &evt);
+     if (rc) {
+-        trusty_error("%s: get event failed (%d)\n", __func__, rc);
++        trusty_error("%a: get event failed (%d)\n", __func__, rc);
+         return rc;
+     }
+ 
+     /* check if we have an event */
+     if (!evt.event) {
+-        trusty_debug("%s: no event\n", __func__);
++        trusty_debug("%a: no event\n", __func__);
+         return TRUSTY_EVENT_NONE;
+     }
+ 
+-    chan = (struct trusty_ipc_chan*)(uintptr_t)evt.cookie;
+-    trusty_assert(chan && chan->ops);
+-
+     /* check if we have raw event handler */
+     if (chan->ops->on_raw_event) {
+         /* invoke it first */
+         rc = chan->ops->on_raw_event(chan, &evt);
+         if (rc < 0) {
+-            trusty_error("%s: chan %d: raw event cb returned (%d)\n", __func__,
++            trusty_error("%a: chan %d: raw event cb returned (%d)\n", __func__,
+                          chan->handle, rc);
+             return rc;
+         }
+@@ -229,7 +238,7 @@ int trusty_ipc_poll_for_event(struct trusty_ipc_dev* ipc_dev) {
+ 
+     if (evt.event & IPC_HANDLE_POLL_ERROR) {
+         /* something is very wrong */
+-        trusty_error("%s: chan %d: chan in error state\n", __func__,
++        trusty_error("%a: chan %d: chan in error state\n", __func__,
+                      chan->handle);
+         return TRUSTY_ERR_GENERIC;
+     }
+@@ -239,7 +248,7 @@ int trusty_ipc_poll_for_event(struct trusty_ipc_dev* ipc_dev) {
+         if (chan->ops->on_send_unblocked) {
+             rc = chan->ops->on_send_unblocked(chan);
+             if (rc < 0) {
+-                trusty_error("%s: chan %d: send unblocked cb returned (%d)\n",
++                trusty_error("%a: chan %d: send unblocked cb returned (%d)\n",
+                              __func__, chan->handle, rc);
+                 return rc;
+             }
+@@ -253,7 +262,7 @@ int trusty_ipc_poll_for_event(struct trusty_ipc_dev* ipc_dev) {
+         if (chan->ops->on_connect_complete) {
+             rc = chan->ops->on_connect_complete(chan);
+             if (rc < 0) {
+-                trusty_error("%s: chan %d: ready cb returned (%d)\n", __func__,
++                trusty_error("%a: chan %d: ready cb returned (%d)\n", __func__,
+                              chan->handle, rc);
+                 return rc;
+             }
+@@ -267,7 +276,7 @@ int trusty_ipc_poll_for_event(struct trusty_ipc_dev* ipc_dev) {
+         if (chan->ops->on_message) {
+             rc = chan->ops->on_message(chan);
+             if (rc < 0) {
+-                trusty_error("%s: chan %d: msg cb returned (%d)\n", __func__,
++                trusty_error("%a: chan %d: msg cb returned (%d)\n", __func__,
+                              chan->handle, rc);
+                 return rc;
+             }
+@@ -281,12 +290,12 @@ int trusty_ipc_poll_for_event(struct trusty_ipc_dev* ipc_dev) {
+         if (chan->ops->on_disconnect) {
+             rc = chan->ops->on_disconnect(chan);
+             if (rc < 0) {
+-                trusty_error("%s: chan %d: hup cb returned (%d)\n", __func__,
++                trusty_error("%a: chan %d: hup cb returned (%d)\n", __func__,
+                              chan->handle, rc);
+                 return rc;
+             }
+             if (rc > 0)
+-                return rc;
++                return TRUSTY_ERR_CHANNEL_CLOSED;
+         }
+     }
+ 
+diff --git a/libqltipc/ql-tipc/ipc_dev.c b/libqltipc/ql-tipc/ipc_dev.c
+index d24eb2c..54cd76c 100644
+--- a/libqltipc/ql-tipc/ipc_dev.c
++++ b/libqltipc/ql-tipc/ipc_dev.c
+@@ -22,31 +22,31 @@
+  * SOFTWARE.
+  */
+ 
+-#include <trusty/trusty_dev.h>
+-#include <trusty/trusty_ipc.h>
+-#include <trusty/trusty_mem.h>
+-#include <trusty/util.h>
++#include "trusty/trusty_dev.h"
++#include "trusty/trusty_ipc.h"
++#include "trusty/util.h"
++#include <lib.h>
+ 
+-#define NS_PTE_PHYSADDR(pte) ((pte)&0xFFFFFFFFF000ULL)
++#define NS_PTE_PHYSADDR(pte)       ((pte) & 0xFFFFFFFFF000ULL)
+ 
+-#define QL_TIPC_DEV_RESP 0x8000
+-#define QL_TIPC_DEV_CONNECT 0x1
+-#define QL_TIPC_DEV_GET_EVENT 0x2
+-#define QL_TIPC_DEV_SEND 0x3
+-#define QL_TIPC_DEV_RECV 0x4
+-#define QL_TIPC_DEV_DISCONNECT 0x5
+-
+-#define QL_TIPC_DEV_FC_HAS_EVENT 0x100
++#define QL_TIPC_DEV_RESP     0x8000
++#define QL_TIPC_DEV_CONNECT     0x1
++#define QL_TIPC_DEV_GET_EVENT   0x2
++#define QL_TIPC_DEV_SEND        0x3
++#define QL_TIPC_DEV_RECV        0x4
++#define QL_TIPC_DEV_DISCONNECT  0x5
+ 
+ #define LOCAL_LOG 0
+ 
++#define UNUSED(x) (void)(x)
++
+ struct trusty_ipc_cmd_hdr {
+     uint16_t opcode;
+     uint16_t flags;
+     uint32_t status;
+     uint32_t handle;
+     uint32_t payload_len;
+-    uint8_t payload[0];
++    uint8_t  payload[0];
+ };
+ 
+ struct trusty_ipc_wait_req {
+@@ -56,10 +56,11 @@ struct trusty_ipc_wait_req {
+ struct trusty_ipc_connect_req {
+     uint64_t cookie;
+     uint64_t reserved;
+-    uint8_t name[0];
++    uint8_t  name[0];
+ };
+ 
+-static size_t iovec_size(const struct trusty_ipc_iovec* iovs, size_t iovs_cnt) {
++static size_t iovec_size(const struct trusty_ipc_iovec *iovs, size_t iovs_cnt)
++{
+     size_t i;
+     size_t cb = 0;
+ 
+@@ -72,10 +73,10 @@ static size_t iovec_size(const struct trusty_ipc_iovec* iovs, size_t iovs_cnt) {
+     return cb;
+ }
+ 
+-static size_t iovec_to_buf(void* buf,
+-                           size_t buf_len,
+-                           const struct trusty_ipc_iovec* iovs,
+-                           size_t iovs_cnt) {
++static size_t iovec_to_buf(void *buf, size_t buf_len,
++                           const struct trusty_ipc_iovec *iovs, size_t iovs_cnt)
++{
++    EFI_STATUS ret;
+     size_t i;
+     size_t buf_pos = 0;
+ 
+@@ -90,7 +91,11 @@ static size_t iovec_to_buf(void* buf,
+         if (to_copy > buf_len)
+             to_copy = buf_len;
+ 
+-        trusty_memcpy((uint8_t*)buf + buf_pos, iovs[i].base, to_copy);
++        ret = memcpy_s((uint8_t *)buf + buf_pos, buf_len, iovs[i].base, to_copy);
++        if (EFI_ERROR(ret)) {
++            buf_pos = 0;
++            break;
++        }
+ 
+         buf_pos += to_copy;
+         buf_len -= to_copy;
+@@ -102,13 +107,13 @@ static size_t iovec_to_buf(void* buf,
+     return buf_pos;
+ }
+ 
+-static size_t buf_to_iovec(const struct trusty_ipc_iovec* iovs,
+-                           size_t iovs_cnt,
+-                           const void* buf,
+-                           size_t buf_len) {
++static size_t buf_to_iovec(const struct trusty_ipc_iovec *iovs, size_t iovs_cnt,
++                           const void *buf, size_t buf_len)
++{
++    EFI_STATUS ret;
+     size_t i;
+     size_t copied = 0;
+-    const uint8_t* buf_ptr = buf;
++    const uint8_t *buf_ptr = buf;
+ 
+     trusty_assert(buf_ptr);
+     trusty_assert(iovs);
+@@ -125,9 +130,13 @@ static size_t buf_to_iovec(const struct trusty_ipc_iovec* iovs,
+         if (!to_copy)
+             continue;
+ 
+-        trusty_memcpy(iovs[i].base, buf_ptr, to_copy);
++        ret = memcpy_s(iovs[i].base, iovs[i].len, buf_ptr, to_copy);
++        if (EFI_ERROR(ret)) {
++            copied = 0;
++            break;
++        }
+ 
+-        copied += to_copy;
++        copied  += to_copy;
+         buf_ptr += to_copy;
+         buf_len -= to_copy;
+ 
+@@ -138,163 +147,143 @@ static size_t buf_to_iovec(const struct trusty_ipc_iovec* iovs,
+     return copied;
+ }
+ 
+-static int check_response(struct trusty_ipc_dev* dev,
+-                          volatile struct trusty_ipc_cmd_hdr* hdr,
+-                          uint16_t cmd) {
++static int check_response(struct trusty_ipc_dev *dev,
++                          volatile struct trusty_ipc_cmd_hdr *hdr, uint16_t cmd)
++{
++    UNUSED(*dev);
+     if (hdr->opcode != (cmd | QL_TIPC_DEV_RESP)) {
+         /* malformed response */
+-        trusty_error("%s: malformed response cmd: 0x%x\n", __func__,
+-                     hdr->opcode);
++        trusty_error("%a: malformed response cmd: 0x%x\n",
++                     __func__, hdr->opcode);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     if (hdr->status) {
+         /* secure OS responded with error: TODO need error code */
+-        trusty_error("%s: cmd 0x%x: status = %d\n", __func__, hdr->opcode,
+-                     hdr->status);
++        trusty_error("%a: cmd 0x%x: status = %d\n",
++                     __func__, hdr->opcode, hdr->status);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     return TRUSTY_ERR_NONE;
+ }
+ 
+-int trusty_ipc_dev_create(struct trusty_ipc_dev** idev,
+-                          struct trusty_dev* tdev,
+-                          size_t shared_buf_size) {
++int trusty_ipc_dev_create(struct trusty_ipc_dev **idev,
++                          struct trusty_dev *tdev,
++                          size_t buf_size)
++{
+     int rc;
+-    int rc2;
+-    struct trusty_ipc_dev* dev;
++    struct trusty_ipc_dev *dev;
+ 
+     trusty_assert(idev);
+-    trusty_assert(!(shared_buf_size % PAGE_SIZE));
+-    trusty_debug("%s: Create new Trusty IPC device (%zu)\n", __func__,
+-                 shared_buf_size);
++
++    trusty_debug("%a: Create new Trusty IPC device (%zu)\n", __func__, buf_size);
+ 
+     /* allocate device context */
+     dev = trusty_calloc(1, sizeof(*dev));
+     if (!dev) {
+-        trusty_error("%s: failed to allocate Trusty IPC device\n", __func__);
++        trusty_error("%a: failed to allocate Trusty IPC device\n", __func__);
+         return TRUSTY_ERR_NO_MEMORY;
+     }
+     dev->tdev = tdev;
+ 
+     /* allocate shared buffer */
+-    dev->buf_size = shared_buf_size;
+-    dev->buf_vaddr = trusty_alloc_pages(shared_buf_size / PAGE_SIZE);
++    dev->buf_size = buf_size;
++    dev->buf_vaddr = trusty_membuf_alloc_page_aligned(&dev->buf_ns, buf_size);
+     if (!dev->buf_vaddr) {
+-        trusty_error("%s: failed to allocate shared memory\n", __func__);
++        trusty_error("%a: failed to allocate shared memory\n", __func__);
+         rc = TRUSTY_ERR_NO_MEMORY;
+-        goto err_alloc_pages;
++        goto err_alloc_membuf;
+     }
+ 
+-    /* Get memory attributes */
+-    rc = trusty_encode_page_info(&dev->buf_ns, dev->buf_vaddr);
+-    if (rc != 0) {
+-        trusty_error("%s: failed to get shared memory attributes\n", __func__);
+-        rc = TRUSTY_ERR_GENERIC;
+-        goto err_page_info;
+-    }
+     /* call secure OS to register shared buffer */
+-    rc = trusty_dev_share_memory(dev->tdev, &dev->buf_id, &dev->buf_ns,
+-                                 dev->buf_size / PAGE_SIZE);
+-    if (rc != 0) {
+-        trusty_error("%s: failed (%d) to share memory\n", __func__, rc);
+-        rc = TRUSTY_ERR_SECOS_ERR;
+-        goto err_share_memory;
+-    }
+-
+-    rc = trusty_dev_init_ipc(dev->tdev, dev->buf_id, dev->buf_size);
++    rc = trusty_dev_init_ipc(dev->tdev, &dev->buf_ns, dev->buf_size);
+     if (rc != 0) {
+-        trusty_error("%s: failed (%d) to create Trusty IPC device\n", __func__,
+-                     rc);
++        trusty_error("%a: failed (%d) to create Trusty IPC device\n",
++                     __func__, rc);
+         rc = TRUSTY_ERR_SECOS_ERR;
+         goto err_create_sec_dev;
+     }
+ 
+-    trusty_debug("%s: new Trusty IPC device (%p)\n", __func__, dev);
++    trusty_debug("%a: new Trusty IPC device (%p)\n", __func__, dev);
+ 
+     *idev = dev;
+     return TRUSTY_ERR_NONE;
+ 
+-err_page_info:
+ err_create_sec_dev:
+-    rc2 = trusty_dev_reclaim_memory(dev->tdev, dev->buf_id);
+-    if (rc2) {
+-        trusty_fatal("%s: failed to remove shared memory\n", __func__);
+-    }
+-err_share_memory:
+-    trusty_free_pages(dev->buf_vaddr, dev->buf_size / PAGE_SIZE);
+-err_alloc_pages:
++err_alloc_membuf:
++    trusty_membuf_free_page_aligned(dev->buf_vaddr, dev->buf_size);
+     trusty_free(dev);
+     return rc;
+ }
+ 
+-void trusty_ipc_dev_shutdown(struct trusty_ipc_dev* dev) {
++void trusty_ipc_dev_shutdown(struct trusty_ipc_dev *dev)
++{
+     int rc;
+     trusty_assert(dev);
+ 
+-    trusty_debug("%s: shutting down Trusty IPC device (%p)\n", __func__, dev);
++    trusty_debug("%a: shutting down Trusty IPC device (%p)\n", __func__, dev);
+ 
+     /* shutdown Trusty IPC device */
+-    rc = trusty_dev_shutdown_ipc(dev->tdev, dev->buf_id, dev->buf_size);
++    rc = trusty_dev_shutdown_ipc(dev->tdev, &dev->buf_ns, dev->buf_size);
+     trusty_assert(!rc);
+     if (rc != 0) {
+-        trusty_error("%s: failed (%d) to shutdown Trusty IPC device\n",
++        trusty_error("%a: failed (%d) to shutdown Trusty IPC device\n",
+                      __func__, rc);
+     }
+-    rc = trusty_dev_reclaim_memory(dev->tdev, dev->buf_id);
+-    if (rc) {
+-        trusty_fatal("%s: failed to remove shared memory\n", __func__);
+-    }
+-    trusty_free_pages(dev->buf_vaddr, dev->buf_size / PAGE_SIZE);
++    trusty_membuf_free_page_aligned(dev->buf_vaddr, dev->buf_size);
+     trusty_free(dev);
+ }
+ 
+-int trusty_ipc_dev_connect(struct trusty_ipc_dev* dev,
+-                           const char* port,
+-                           uint64_t cookie) {
++int trusty_ipc_dev_connect(struct trusty_ipc_dev *dev, const char *port,
++                           uint64_t cookie)
++{
++    EFI_STATUS ret;
+     int rc;
+     size_t port_len;
+-    volatile struct trusty_ipc_cmd_hdr* cmd;
+-    struct trusty_ipc_connect_req* req;
++    volatile struct trusty_ipc_cmd_hdr *cmd;
++    struct trusty_ipc_connect_req *req;
+ 
+     trusty_assert(dev);
+     trusty_assert(port);
+ 
+-    trusty_debug("%s: connecting to '%s'\n", __func__, port);
++    trusty_debug("%a: connecting to '%a'\n", __func__, port);
+ 
+     /* check port name length */
+-    port_len = trusty_strlen(port) + 1;
++    port_len = strlen((CHAR8 *)port) + 1;
+     if (port_len > (dev->buf_size - sizeof(*cmd) + sizeof(*req))) {
+         /* it would not fit into buffer */
+-        trusty_error("%s: port name is too long (%zu)\n", __func__, port_len);
++        trusty_error("%a: port name is too long (%zu)\n", __func__, port_len);
+         return TRUSTY_ERR_INVALID_ARGS;
+     }
+ 
+     /* prepare command */
+     cmd = dev->buf_vaddr;
+-    trusty_memset((void*)cmd, 0, sizeof(*cmd));
++    memset((void *)cmd, 0, sizeof(*cmd));
+     cmd->opcode = QL_TIPC_DEV_CONNECT;
+ 
+     /* prepare payload  */
+-    req = (struct trusty_ipc_connect_req*)cmd->payload;
+-    trusty_memset((void*)req, 0, sizeof(*req));
++    req = (struct trusty_ipc_connect_req *)cmd->payload;
++    memset((void *)req, 0, sizeof(*req));
+     req->cookie = cookie;
+-    trusty_strcpy((char*)req->name, port);
++    ret = strcpy_s((CHAR8 *)req->name, port_len, (CHAR8 *)port);
++    if (EFI_ERROR(ret))
++        return TRUSTY_ERR_GENERIC;
++
+     cmd->payload_len = sizeof(*req) + port_len;
+ 
+     /* call secure os */
+-    rc = trusty_dev_exec_ipc(dev->tdev, dev->buf_id,
+-                             sizeof(*cmd) + cmd->payload_len);
++    rc = trusty_dev_exec_ipc(dev->tdev,
++                             &dev->buf_ns, sizeof(*cmd) + cmd->payload_len);
+     if (rc) {
+         /* secure OS returned an error */
+-        trusty_error("%s: secure OS returned (%d)\n", __func__, rc);
++        trusty_error("%a: secure OS returned (%d)\n", __func__, rc);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     rc = check_response(dev, cmd, QL_TIPC_DEV_CONNECT);
+     if (rc) {
+-        trusty_error("%s: connect cmd failed (%d)\n", __func__, rc);
++        trusty_error("%a: connect cmd failed (%d)\n", __func__, rc);
+         return rc;
+     }
+ 
+@@ -302,215 +291,180 @@ int trusty_ipc_dev_connect(struct trusty_ipc_dev* dev,
+     return cmd->handle;
+ }
+ 
+-int trusty_ipc_dev_close(struct trusty_ipc_dev* dev, handle_t handle) {
++int trusty_ipc_dev_close(struct trusty_ipc_dev *dev, handle_t handle)
++{
+     int rc;
+-    volatile struct trusty_ipc_cmd_hdr* cmd;
++    volatile struct trusty_ipc_cmd_hdr *cmd;
+ 
+     trusty_assert(dev);
+ 
+-    trusty_debug("%s: chan %d: closing\n", __func__, handle);
++    trusty_debug("%a: chan %d: closing\n", __func__, handle);
+ 
+     /* prepare command */
+     cmd = dev->buf_vaddr;
+-    trusty_memset((void*)cmd, 0, sizeof(*cmd));
++    memset((void *)cmd, 0, sizeof(*cmd));
+     cmd->opcode = QL_TIPC_DEV_DISCONNECT;
+     cmd->handle = handle;
+     /* no payload */
+ 
+     /* call into secure os */
+-    rc = trusty_dev_exec_ipc(dev->tdev, dev->buf_id,
+-                             sizeof(*cmd) + cmd->payload_len);
++    rc = trusty_dev_exec_ipc(dev->tdev,
++                             &dev->buf_ns, sizeof(*cmd) + cmd->payload_len);
+     if (rc) {
+-        trusty_error("%s: secure OS returned (%d)\n", __func__, rc);
++        trusty_error("%a: secure OS returned (%d)\n", __func__, rc);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     rc = check_response(dev, cmd, QL_TIPC_DEV_DISCONNECT);
+     if (rc) {
+-        trusty_error("%s: disconnect cmd failed (%d)\n", __func__, rc);
++        trusty_error("%a: disconnect cmd failed (%d)\n", __func__, rc);
+         return rc;
+     }
+ 
+-    trusty_debug("%s: chan %d: closed\n", __func__, handle);
++    trusty_debug("%a: chan %d: closed\n", __func__, handle);
+ 
+     return TRUSTY_ERR_NONE;
+ }
+ 
+-bool trusty_ipc_dev_has_event(struct trusty_ipc_dev* dev, handle_t chan) {
++int trusty_ipc_dev_get_event(struct trusty_ipc_dev *dev, handle_t chan,
++                             struct trusty_ipc_event *event)
++{
++    EFI_STATUS ret;
+     int rc;
+-    bool has_event;
+-    volatile struct trusty_ipc_cmd_hdr* cmd;
+-
+-    trusty_assert(dev);
+-
+-    /* prepare command */
+-    cmd = dev->buf_vaddr;
+-    trusty_memset((void*)cmd, 0, sizeof(*cmd));
+-    cmd->opcode = QL_TIPC_DEV_FC_HAS_EVENT;
+-    cmd->handle = chan;
+-
+-    /* prepare payload  */
+-    cmd->payload_len = 0;
+-
+-    /* call into secure os */
+-    rc = trusty_dev_exec_fc_ipc(dev->tdev, dev->buf_id,
+-                                sizeof(*cmd) + cmd->payload_len);
+-    if (rc) {
+-        trusty_error("%s: secure OS returned (%d)\n", __func__, rc);
+-        return false;
+-    }
+-
+-    rc = check_response(dev, cmd, QL_TIPC_DEV_FC_HAS_EVENT);
+-    if (rc) {
+-        trusty_error("%s: get event cmd failed (%d)\n", __func__, rc);
+-        return false;
+-    }
+-
+-    if ((size_t)cmd->payload_len < sizeof(has_event)) {
+-        trusty_error("%s: invalid response length (%zd)\n", __func__,
+-                     (size_t)cmd->payload_len);
+-        return false;
+-    }
+-
+-    /* copy out event */
+-    trusty_memcpy(&has_event, (const void*)cmd->payload, sizeof(has_event));
+-    return has_event;
+-}
+-
+-int trusty_ipc_dev_get_event(struct trusty_ipc_dev* dev,
+-                             handle_t chan,
+-                             struct trusty_ipc_event* event) {
+-    int rc;
+-    volatile struct trusty_ipc_cmd_hdr* cmd;
++    volatile struct trusty_ipc_cmd_hdr *cmd;
+ 
+     trusty_assert(dev);
+     trusty_assert(event);
+ 
+     /* prepare command */
+     cmd = dev->buf_vaddr;
+-    trusty_memset((void*)cmd, 0, sizeof(*cmd));
++    memset((void *)cmd, 0, sizeof(*cmd));
+     cmd->opcode = QL_TIPC_DEV_GET_EVENT;
+     cmd->handle = chan;
+ 
+     /* prepare payload  */
+-    trusty_memset((void*)cmd->payload, 0, sizeof(struct trusty_ipc_wait_req));
++    memset((void *)cmd->payload, 0, sizeof(struct trusty_ipc_wait_req));
+     cmd->payload_len = sizeof(struct trusty_ipc_wait_req);
+ 
+     /* call into secure os */
+-    rc = trusty_dev_exec_ipc(dev->tdev, dev->buf_id,
+-                             sizeof(*cmd) + cmd->payload_len);
++    rc = trusty_dev_exec_ipc(dev->tdev,
++                             &dev->buf_ns, sizeof(*cmd) + cmd->payload_len);
+     if (rc) {
+-        trusty_error("%s: secure OS returned (%d)\n", __func__, rc);
++        trusty_error("%a: secure OS returned (%d)\n", __func__, rc);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     rc = check_response(dev, cmd, QL_TIPC_DEV_GET_EVENT);
+     if (rc) {
+-        trusty_error("%s: get event cmd failed (%d)\n", __func__, rc);
++        trusty_error("%a: get event cmd failed (%d)\n", __func__, rc);
+         return rc;
+     }
+ 
+     if ((size_t)cmd->payload_len < sizeof(*event)) {
+-        trusty_error("%s: invalid response length (%zd)\n", __func__,
+-                     (size_t)cmd->payload_len);
++        trusty_error("%a: invalid response length (%zd)\n",
++                     __func__, (size_t)cmd->payload_len);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     /* copy out event */
+-    trusty_memcpy(event, (const void*)cmd->payload, sizeof(*event));
++    ret = memcpy_s(event, sizeof(*event), (const void *)cmd->payload, sizeof(*event));
++    if (EFI_ERROR(ret))
++        return TRUSTY_ERR_GENERIC;
++
+     return TRUSTY_ERR_NONE;
+ }
+ 
+-int trusty_ipc_dev_send(struct trusty_ipc_dev* dev,
+-                        handle_t chan,
+-                        const struct trusty_ipc_iovec* iovs,
+-                        size_t iovs_cnt) {
++int trusty_ipc_dev_send(struct trusty_ipc_dev *dev, handle_t chan,
++                        const struct trusty_ipc_iovec *iovs, size_t iovs_cnt)
++{
+     int rc;
+     size_t msg_size;
+-    volatile struct trusty_ipc_cmd_hdr* cmd;
++    volatile struct trusty_ipc_cmd_hdr *cmd;
+ 
+     trusty_assert(dev);
+     /* calc message length */
+     msg_size = iovec_size(iovs, iovs_cnt);
+     if (msg_size > dev->buf_size - sizeof(*cmd)) {
+         /* msg is too big to fit provided buffer */
+-        trusty_error("%s: chan %d: msg is too long (%zu)\n", __func__, chan,
+-                     msg_size);
++        trusty_error("%a: chan %d: msg is too long (%zu)\n", __func__,
++                     chan, msg_size);
+         return TRUSTY_ERR_MSG_TOO_BIG;
+     }
+ 
+     /* prepare command */
+     cmd = dev->buf_vaddr;
+-    trusty_memset((void*)cmd, 0, sizeof(*cmd));
++    memset((void *)cmd, 0, sizeof(*cmd));
+     cmd->opcode = QL_TIPC_DEV_SEND;
+     cmd->handle = chan;
+ 
+     /* copy in message data */
+     cmd->payload_len = (uint32_t)msg_size;
+-    msg_size = iovec_to_buf(dev->buf_vaddr + sizeof(*cmd),
+-                            dev->buf_size - sizeof(*cmd), iovs, iovs_cnt);
++    msg_size = iovec_to_buf(dev->buf_vaddr + sizeof(*cmd), dev->buf_size - sizeof(*cmd),
++                          iovs,  iovs_cnt);
+     trusty_assert(msg_size == (size_t)cmd->payload_len);
+ 
+     /* call into secure os */
+-    rc = trusty_dev_exec_ipc(dev->tdev, dev->buf_id,
+-                             sizeof(*cmd) + cmd->payload_len);
++    rc = trusty_dev_exec_ipc(dev->tdev,
++                             &dev->buf_ns, sizeof(*cmd) + cmd->payload_len);
+     if (rc < 0) {
+-        trusty_error("%s: secure OS returned (%d)\n", __func__, rc);
++        trusty_error("%a: secure OS returned (%d)\n", __func__, rc);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     rc = check_response(dev, cmd, QL_TIPC_DEV_SEND);
+     if (rc) {
+-        trusty_error("%s: send msg failed (%d)\n", __func__, rc);
++        trusty_error("%a: send msg failed (%d)\n", __func__, rc);
+     }
+ 
+     return rc;
+ }
+ 
+-int trusty_ipc_dev_recv(struct trusty_ipc_dev* dev,
+-                        handle_t chan,
+-                        const struct trusty_ipc_iovec* iovs,
+-                        size_t iovs_cnt) {
++
++int trusty_ipc_dev_recv(struct trusty_ipc_dev *dev, handle_t chan,
++                        const struct trusty_ipc_iovec *iovs, size_t iovs_cnt)
++{
+     int rc;
+     size_t copied;
+-    volatile struct trusty_ipc_cmd_hdr* cmd;
++    volatile struct trusty_ipc_cmd_hdr *cmd;
+ 
+     trusty_assert(dev);
+ 
+     /* prepare command */
+     cmd = dev->buf_vaddr;
+-    trusty_memset((void*)cmd, 0, sizeof(*cmd));
++    memset((void *)cmd, 0, sizeof(*cmd));
+     cmd->opcode = QL_TIPC_DEV_RECV;
+     cmd->handle = chan;
+     /* no payload */
+ 
+     /* call into secure os */
+-    rc = trusty_dev_exec_ipc(dev->tdev, dev->buf_id,
+-                             sizeof(*cmd) + cmd->payload_len);
++    rc = trusty_dev_exec_ipc(dev->tdev,
++                             &dev->buf_ns, sizeof(*cmd) + cmd->payload_len);
+     if (rc < 0) {
+-        trusty_error("%s: secure OS returned (%d)\n", __func__, rc);
++        trusty_error("%a: secure OS returned (%d)\n", __func__, rc);
+         return TRUSTY_ERR_SECOS_ERR;
+     }
+ 
+     rc = check_response(dev, cmd, QL_TIPC_DEV_RECV);
+     if (rc) {
+-        trusty_error("%s: recv cmd failed (%d)\n", __func__, rc);
++        trusty_error("%a: recv cmd failed (%d)\n", __func__, rc);
+         return rc;
+     }
+ 
+     /* copy data out to proper destination */
+-    copied = buf_to_iovec(iovs, iovs_cnt, (const void*)cmd->payload,
+-                          cmd->payload_len);
++    copied = buf_to_iovec(iovs, iovs_cnt,
++                          (const void *)cmd->payload, cmd->payload_len);
+     if (copied != (size_t)cmd->payload_len) {
+         /* msg is too big to fit provided buffer */
+-        trusty_error("%s: chan %d: buffer too small (%zu vs. %zu)\n", __func__,
+-                     chan, copied, (size_t)cmd->payload_len);
++        trusty_error("%a: chan %d: buffer too small (%zu vs. %zu)\n",
++                     __func__, chan, copied, (size_t)cmd->payload_len);
+         return TRUSTY_ERR_MSG_TOO_BIG;
+     }
+ 
+     return (int)copied;
+ }
+ 
+-void trusty_ipc_dev_idle(struct trusty_ipc_dev* dev, bool event_poll) {
+-    trusty_idle(dev->tdev, event_poll);
++void trusty_ipc_dev_idle(struct trusty_ipc_dev *dev)
++{
++    trusty_idle(dev->tdev);
+ }
++
+diff --git a/libqltipc/ql-tipc/libtipc.c b/libqltipc/ql-tipc/libtipc.c
+index 7d75bdc..14b43de 100644
+--- a/libqltipc/ql-tipc/libtipc.c
++++ b/libqltipc/ql-tipc/libtipc.c
+@@ -23,24 +23,20 @@
+  */
+ 
+ #include <trusty/avb.h>
+-#include <trusty/keymaster.h>
+-#include <trusty/rpmb.h>
+ #include <trusty/trusty_dev.h>
+ #include <trusty/trusty_ipc.h>
+ #include <trusty/util.h>
++#include <trusty/keymaster.h>
++#include "storage.h"
+ 
+ #define LOCAL_LOG 0
++#define TRUSTY_QL_TIPC_MAX_BUFFER_LEN PAGE_SIZE
+ 
+-typedef uintptr_t vaddr_t;
+-
+-static struct trusty_ipc_dev* _ipc_dev;
++static struct trusty_ipc_dev *_ipc_dev;
+ static struct trusty_dev _tdev; /* There should only be one trusty device */
+-static void* rpmb_ctx;
+-
+-void trusty_ipc_shutdown(void) {
+-    (void)rpmb_storage_proxy_shutdown(_ipc_dev);
+-    (void)rpmb_storage_put_ctx(rpmb_ctx);
+ 
++void trusty_ipc_shutdown(void)
++{
+     (void)avb_tipc_shutdown(_ipc_dev);
+     (void)km_tipc_shutdown(_ipc_dev);
+ 
+@@ -51,8 +47,10 @@ void trusty_ipc_shutdown(void) {
+     (void)trusty_dev_shutdown(&_tdev);
+ }
+ 
+-int trusty_ipc_init(void) {
+-    int rc;
++int trusty_ipc_init(void)
++{
++    int rc = 0;
++
+     /* init Trusty device */
+     trusty_info("Initializing Trusty device\n");
+     rc = trusty_dev_init(&_tdev, NULL);
+@@ -63,35 +61,28 @@ int trusty_ipc_init(void) {
+ 
+     /* create Trusty IPC device */
+     trusty_info("Initializing Trusty IPC device\n");
+-    rc = trusty_ipc_dev_create(&_ipc_dev, &_tdev, PAGE_SIZE);
++    rc = trusty_ipc_dev_create(&_ipc_dev, &_tdev,
++                               TRUSTY_QL_TIPC_MAX_BUFFER_LEN);
+     if (rc != 0) {
+         trusty_error("Initializing Trusty IPC device failed (%d)\n", rc);
+         return rc;
+     }
+ 
+-    /* get storage rpmb */
+-    rpmb_ctx = rpmb_storage_get_ctx();
+-
+-    /* start secure storage proxy service */
+-    trusty_info("Initializing RPMB storage proxy service\n");
+-    rc = rpmb_storage_proxy_init(_ipc_dev, rpmb_ctx);
+-    if (rc != 0) {
+-        trusty_error("Initlializing RPMB storage proxy service failed (%d)\n",
+-                     rc);
+-        return rc;
+-    }
+-
++    /*
+     trusty_info("Initializing Trusty AVB client\n");
+     rc = avb_tipc_init(_ipc_dev);
+     if (rc != 0) {
+         trusty_error("Initlializing Trusty AVB client failed (%d)\n", rc);
+         return rc;
+     }
++    */
+ 
+     trusty_info("Initializing Trusty Keymaster client\n");
+     rc = km_tipc_init(_ipc_dev);
+     if (rc != 0) {
++#ifndef USER
+         trusty_error("Initlializing Trusty Keymaster client failed (%d)\n", rc);
++#endif
+         return rc;
+     }
+ 
+diff --git a/libqltipc/ql-tipc/trusty_dev_common.c b/libqltipc/ql-tipc/trusty_dev_common.c
+deleted file mode 100644
+index 92901e2..0000000
+--- a/libqltipc/ql-tipc/trusty_dev_common.c
++++ /dev/null
+@@ -1,390 +0,0 @@
+-/*
+- * Copyright (C) 2016 The Android Open Source Project
+- *
+- * Permission is hereby granted, free of charge, to any person
+- * obtaining a copy of this software and associated documentation
+- * files (the "Software"), to deal in the Software without
+- * restriction, including without limitation the rights to use, copy,
+- * modify, merge, publish, distribute, sublicense, and/or sell copies
+- * of the Software, and to permit persons to whom the Software is
+- * furnished to do so, subject to the following conditions:
+- *
+- * The above copyright notice and this permission notice shall be
+- * included in all copies or substantial portions of the Software.
+- *
+- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+- * SOFTWARE.
+- */
+-
+-#include <trusty/arm_ffa.h>
+-#include <trusty/sm_err.h>
+-#include <trusty/smc.h>
+-#include <trusty/smcall.h>
+-#include <trusty/trusty_dev.h>
+-#include <trusty/trusty_mem.h>
+-#include <trusty/util.h>
+-
+-struct trusty_dev;
+-
+-#define LOCAL_LOG 0
+-
+-/*
+- * Select RXTX map smc variant based on register size. Note that the FF-A spec
+- * does not support passing a 64 bit paddr from a 32 bit client, so the
+- * allocated buffer has to be below 4G if this is called from 32 bit code.
+- */
+-#define SMC_FCZ_FFA_RXTX_MAP \
+-    ((sizeof(unsigned long) <= 4) ? SMC_FC_FFA_RXTX_MAP : SMC_FC64_FFA_RXTX_MAP)
+-
+-static int32_t trusty_fast_call32(struct trusty_dev* dev,
+-                                  uint32_t smcnr,
+-                                  uint32_t a0,
+-                                  uint32_t a1,
+-                                  uint32_t a2) {
+-    trusty_assert(dev);
+-    trusty_assert(SMC_IS_FASTCALL(smcnr));
+-
+-    return smc(smcnr, a0, a1, a2);
+-}
+-
+-static unsigned long trusty_std_call_inner(struct trusty_dev* dev,
+-                                           unsigned long smcnr,
+-                                           unsigned long a0,
+-                                           unsigned long a1,
+-                                           unsigned long a2) {
+-    unsigned long ret;
+-    int retry = 5;
+-
+-    trusty_debug("%s(0x%lx 0x%lx 0x%lx 0x%lx)\n", __func__, smcnr, a0, a1, a2);
+-
+-    while (true) {
+-        ret = smc(smcnr, a0, a1, a2);
+-        while ((int32_t)ret == SM_ERR_FIQ_INTERRUPTED)
+-            ret = smc(SMC_SC_RESTART_FIQ, 0, 0, 0);
+-        if ((int)ret != SM_ERR_BUSY || !retry)
+-            break;
+-
+-        trusty_debug("%s(0x%lx 0x%lx 0x%lx 0x%lx) returned busy, retry\n",
+-                     __func__, smcnr, a0, a1, a2);
+-
+-        retry--;
+-    }
+-
+-    return ret;
+-}
+-
+-static unsigned long trusty_std_call_helper(struct trusty_dev* dev,
+-                                            unsigned long smcnr,
+-                                            unsigned long a0,
+-                                            unsigned long a1,
+-                                            unsigned long a2) {
+-    unsigned long ret;
+-    unsigned long irq_state;
+-
+-    while (true) {
+-        trusty_local_irq_disable(&irq_state);
+-        ret = trusty_std_call_inner(dev, smcnr, a0, a1, a2);
+-        trusty_local_irq_restore(&irq_state);
+-
+-        if ((int)ret != SM_ERR_BUSY)
+-            break;
+-
+-        trusty_idle(dev, false);
+-    }
+-
+-    return ret;
+-}
+-
+-static int32_t trusty_std_call32(struct trusty_dev* dev,
+-                                 uint32_t smcnr,
+-                                 uint32_t a0,
+-                                 uint32_t a1,
+-                                 uint32_t a2) {
+-    int ret;
+-
+-    trusty_assert(dev);
+-    trusty_assert(!SMC_IS_FASTCALL(smcnr));
+-
+-    if (smcnr != SMC_SC_NOP) {
+-        trusty_lock(dev);
+-    }
+-
+-    trusty_debug("%s(0x%x 0x%x 0x%x 0x%x) started\n", __func__, smcnr, a0, a1,
+-                 a2);
+-
+-    ret = trusty_std_call_helper(dev, smcnr, a0, a1, a2);
+-    while (ret == SM_ERR_INTERRUPTED || ret == SM_ERR_CPU_IDLE) {
+-        trusty_debug("%s(0x%x 0x%x 0x%x 0x%x) interrupted\n", __func__, smcnr,
+-                     a0, a1, a2);
+-        if (ret == SM_ERR_CPU_IDLE) {
+-            trusty_idle(dev, false);
+-        }
+-        ret = trusty_std_call_helper(dev, SMC_SC_RESTART_LAST, 0, 0, 0);
+-    }
+-
+-    trusty_debug("%s(0x%x 0x%x 0x%x 0x%x) returned 0x%x\n", __func__, smcnr, a0,
+-                 a1, a2, ret);
+-
+-    if (smcnr != SMC_SC_NOP) {
+-        trusty_unlock(dev);
+-    }
+-
+-    return ret;
+-}
+-
+-static int trusty_call32_mem_buf_id(struct trusty_dev* dev,
+-                                    uint32_t smcnr,
+-                                    trusty_shared_mem_id_t buf_id,
+-                                    uint32_t size) {
+-    trusty_assert(dev);
+-
+-    if (SMC_IS_FASTCALL(smcnr)) {
+-        return trusty_fast_call32(dev, smcnr, (uint32_t)buf_id,
+-                                  (uint32_t)(buf_id >> 32), size);
+-    } else {
+-        return trusty_std_call32(dev, smcnr, (uint32_t)buf_id,
+-                                 (uint32_t)(buf_id >> 32), size);
+-    }
+-}
+-
+-int trusty_dev_init_ipc(struct trusty_dev* dev,
+-                        trusty_shared_mem_id_t buf_id,
+-                        uint32_t buf_size) {
+-    return trusty_call32_mem_buf_id(dev, SMC_SC_TRUSTY_IPC_CREATE_QL_DEV,
+-                                    buf_id, buf_size);
+-}
+-
+-int trusty_dev_exec_ipc(struct trusty_dev* dev,
+-                        trusty_shared_mem_id_t buf_id,
+-                        uint32_t buf_size) {
+-    return trusty_call32_mem_buf_id(dev, SMC_SC_TRUSTY_IPC_HANDLE_QL_DEV_CMD,
+-                                    buf_id, buf_size);
+-}
+-
+-int trusty_dev_exec_fc_ipc(struct trusty_dev* dev,
+-                           trusty_shared_mem_id_t buf_id,
+-                           uint32_t buf_size) {
+-    return trusty_call32_mem_buf_id(dev, SMC_FC_HANDLE_QL_TIPC_DEV_CMD, buf_id,
+-                                    buf_size);
+-}
+-
+-int trusty_dev_shutdown_ipc(struct trusty_dev* dev,
+-                            trusty_shared_mem_id_t buf_id,
+-                            uint32_t buf_size) {
+-    return trusty_call32_mem_buf_id(dev, SMC_SC_TRUSTY_IPC_SHUTDOWN_QL_DEV,
+-                                    buf_id, buf_size);
+-}
+-
+-static int trusty_init_api_version(struct trusty_dev* dev) {
+-    uint32_t api_version;
+-
+-    api_version = trusty_fast_call32(dev, SMC_FC_API_VERSION,
+-                                     TRUSTY_API_VERSION_CURRENT, 0, 0);
+-    if (api_version == SM_ERR_UNDEFINED_SMC)
+-        api_version = 0;
+-
+-    if (api_version > TRUSTY_API_VERSION_CURRENT) {
+-        trusty_error("unsupported trusty api version %u > %u\n", api_version,
+-                     TRUSTY_API_VERSION_CURRENT);
+-        return -1;
+-    }
+-
+-    trusty_info("selected trusty api version: %u (requested %u)\n", api_version,
+-                TRUSTY_API_VERSION_CURRENT);
+-
+-    dev->api_version = api_version;
+-
+-    return 0;
+-}
+-
+-int trusty_dev_init(struct trusty_dev* dev, void* priv_data) {
+-    int ret;
+-    struct smc_ret8 smc_ret;
+-    struct ns_mem_page_info tx_pinfo;
+-    struct ns_mem_page_info rx_pinfo;
+-    const size_t rxtx_page_count = 1;
+-    trusty_assert(dev);
+-
+-    dev->priv_data = priv_data;
+-    dev->ffa_tx = NULL;
+-    ret = trusty_init_api_version(dev);
+-    if (ret) {
+-        return ret;
+-    }
+-    if (dev->api_version < TRUSTY_API_VERSION_MEM_OBJ) {
+-        return 0;
+-    }
+-
+-    /* Get supported FF-A version and check if it is compatible */
+-    smc_ret = smc8(SMC_FC_FFA_VERSION, FFA_CURRENT_VERSION, 0, 0, 0, 0, 0, 0);
+-    if (FFA_VERSION_TO_MAJOR(smc_ret.r0) != FFA_CURRENT_VERSION_MAJOR) {
+-        /* TODO: support more than one (minor) version. */
+-        trusty_error("%s: unsupported FF-A version 0x%lx, expected 0x%x\n",
+-                     __func__, smc_ret.r0, FFA_CURRENT_VERSION);
+-        goto err_version;
+-    }
+-
+-    /* Check that SMC_FC_FFA_MEM_SHARE is implemented */
+-    smc_ret = smc8(SMC_FC_FFA_FEATURES, SMC_FC_FFA_MEM_SHARE, 0, 0, 0, 0, 0, 0);
+-    if (smc_ret.r0 != SMC_FC_FFA_SUCCESS) {
+-        trusty_error(
+-                "%s: SMC_FC_FFA_FEATURES(SMC_FC_FFA_MEM_SHARE) failed 0x%lx 0x%lx 0x%lx\n",
+-                __func__, smc_ret.r0, smc_ret.r1, smc_ret.r2);
+-        goto err_features;
+-    }
+-
+-    /*
+-     * Set FF-A endpoint IDs.
+-     *
+-     * Hardcode 0x8000 for the secure os.
+-     * TODO: Use FFA call or device tree to configure this dynamically
+-     */
+-    smc_ret = smc8(SMC_FC_FFA_ID_GET, 0, 0, 0, 0, 0, 0, 0);
+-    if (smc_ret.r0 != SMC_FC_FFA_SUCCESS) {
+-        trusty_error("%s: SMC_FC_FFA_ID_GET failed 0x%lx 0x%lx 0x%lx\n",
+-                     __func__, smc_ret.r0, smc_ret.r1, smc_ret.r2);
+-        goto err_id_get;
+-    }
+-    dev->ffa_local_id = smc_ret.r2;
+-    dev->ffa_remote_id = 0x8000;
+-
+-    dev->ffa_tx = trusty_alloc_pages(rxtx_page_count);
+-    if (!dev->ffa_tx) {
+-        goto err_alloc_ffa_tx;
+-    }
+-    dev->ffa_rx = trusty_alloc_pages(rxtx_page_count);
+-    if (!dev->ffa_rx) {
+-        goto err_alloc_ffa_rx;
+-    }
+-    ret = trusty_encode_page_info(&tx_pinfo, dev->ffa_tx);
+-    if (ret) {
+-        goto err_encode_page_info;
+-    }
+-    ret = trusty_encode_page_info(&rx_pinfo, dev->ffa_rx);
+-    if (ret) {
+-        goto err_encode_page_info;
+-    }
+-
+-    /*
+-     * TODO: check or pass memory attributes. The FF-A spec says the buffer has
+-     * to be cached, but we currently have callers that don't match this.
+-     */
+-
+-    smc_ret = smc8(SMC_FCZ_FFA_RXTX_MAP, tx_pinfo.paddr, rx_pinfo.paddr,
+-                   rxtx_page_count, 0, 0, 0, 0);
+-    if (smc_ret.r0 != SMC_FC_FFA_SUCCESS) {
+-        trusty_error("%s: FFA_RXTX_MAP failed 0x%lx 0x%lx 0x%lx\n", __func__,
+-                     smc_ret.r0, smc_ret.r1, smc_ret.r2);
+-        goto err_rxtx_map;
+-    }
+-
+-    if (ret) {
+-        goto err_setup_msg_buf;
+-    }
+-    return 0;
+-
+-err_setup_msg_buf:
+-err_rxtx_map:
+-err_encode_page_info:
+-err_alloc_ffa_rx:
+-err_alloc_ffa_tx:
+-err_id_get:
+-err_features:
+-err_version:
+-    trusty_fatal("%s: init failed\n", __func__, ret);
+-}
+-
+-int trusty_dev_shutdown(struct trusty_dev* dev) {
+-    trusty_assert(dev);
+-
+-    if (dev->ffa_tx) {
+-        smc(SMC_FC_FFA_RXTX_UNMAP, 0, 0, 0);
+-    }
+-    dev->priv_data = NULL;
+-    return 0;
+-}
+-
+-int trusty_dev_nop(struct trusty_dev* dev) {
+-    int ret = trusty_std_call32(dev, SMC_SC_NOP, 0, 0, 0);
+-    return ret == SM_ERR_NOP_DONE ? 0 : ret == SM_ERR_NOP_INTERRUPTED ? 1 : -1;
+-}
+-
+-int trusty_dev_share_memory(struct trusty_dev* dev,
+-                            trusty_shared_mem_id_t* idp,
+-                            struct ns_mem_page_info* pinfo,
+-                            size_t page_count) {
+-    struct smc_ret8 smc_ret;
+-    struct ffa_mtd* mtd = dev->ffa_tx;
+-    size_t comp_mrd_offset = offsetof(struct ffa_mtd, emad[1]);
+-    struct ffa_comp_mrd* comp_mrd = dev->ffa_tx + comp_mrd_offset;
+-    struct ffa_cons_mrd* cons_mrd = comp_mrd->address_range_array;
+-    size_t tx_size = ((void*)cons_mrd - dev->ffa_tx) + sizeof(*cons_mrd);
+-
+-    if (!dev->ffa_tx) {
+-        /*
+-         * If the trusty api version is before TRUSTY_API_VERSION_MEM_OBJ, fall
+-         * back to old api of passing the 64 bit paddr/attr value directly.
+-         */
+-        *idp = pinfo->attr;
+-        return 0;
+-    }
+-
+-    trusty_memset(mtd, 0, tx_size);
+-    mtd->sender_id = dev->ffa_local_id;
+-    mtd->memory_region_attributes = pinfo->ffa_mem_attr;
+-    mtd->emad_count = 1;
+-    mtd->emad[0].mapd.endpoint_id = dev->ffa_remote_id;
+-    mtd->emad[0].mapd.memory_access_permissions = pinfo->ffa_mem_perm;
+-    mtd->emad[0].comp_mrd_offset = comp_mrd_offset;
+-    comp_mrd->total_page_count = page_count;
+-    comp_mrd->address_range_count = 1;
+-    cons_mrd->address = pinfo->paddr;
+-    cons_mrd->page_count = page_count;
+-
+-    /*
+-     * Tell the SPM/Hypervisor to share the memory.
+-     */
+-    smc_ret = smc8(SMC_FC_FFA_MEM_SHARE, tx_size, tx_size, 0, 0, 0, 0, 0);
+-    if ((unsigned int)smc_ret.r0 != SMC_FC_FFA_SUCCESS) {
+-        trusty_error("%s: SMC_FC_FFA_MEM_SHARE failed 0x%lx 0x%lx 0x%lx\n",
+-                     __func__, smc_ret.r0, smc_ret.r1, smc_ret.r2);
+-        return -1;
+-    }
+-
+-    *idp = smc_ret.r2;
+-
+-    return 0;
+-}
+-
+-int trusty_dev_reclaim_memory(struct trusty_dev* dev,
+-                              trusty_shared_mem_id_t id) {
+-    struct smc_ret8 smc_ret;
+-
+-    if (!dev->ffa_tx) {
+-        /*
+-         * If the trusty api version is before TRUSTY_API_VERSION_MEM_OBJ, fall
+-         * back to old api.
+-         */
+-        return 0;
+-    }
+-
+-    /*
+-     * Tell the SPM/Hypervisor to reclaim the memory. If the memory is still in
+-     * use this will fail.
+-     */
+-    smc_ret =
+-            smc8(SMC_FC_FFA_MEM_RECLAIM, (uint32_t)id, id >> 32, 0, 0, 0, 0, 0);
+-    if ((unsigned int)smc_ret.r0 != SMC_FC_FFA_SUCCESS) {
+-        trusty_error("%s: SMC_FC_FFA_MEM_RECLAIM failed 0x%lx 0x%lx 0x%lx\n",
+-                     __func__, smc_ret.r0, smc_ret.r1, smc_ret.r2);
+-        return -1;
+-    }
+-
+-    return 0;
+-}
+-- 
+2.17.1
+
