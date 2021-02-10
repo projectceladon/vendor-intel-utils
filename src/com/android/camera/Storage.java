@@ -286,8 +286,8 @@ Log.e(TAG, "shiva addEmptyPlaceHolder title"+uri);
            Location location, int orientation, ExifInterface exif,
            byte[] jpeg, int width, int height, String mimeType) throws IOException {
         String path = generateFilepath(title, mimeType);
-Log.e(TAG, "shiva update Image"+title);
-Log.e(TAG, "shiv update image"+path);
+Log.e(TAG, "shiva update Image "+title);
+Log.e(TAG, "shiv update image "+path);
 
 
         writeFile(path, jpeg, exif);
@@ -422,7 +422,7 @@ Log.e(TAG, "shiv update image"+path);
 
 
         Uri resultUri = imageUri;
-Log.e(TAG, "shiva updateImage resultUri"+resultUri);
+Log.e(TAG, "shiva updateImage resultUri 1"+resultUri);
 
         if (Storage.isSessionUri(imageUri)) {
             // If this is a session uri, then we need to add the image
@@ -430,11 +430,15 @@ Log.e(TAG, "shiva updateImage resultUri"+resultUri);
                     jpegLength, path, width, height, mimeType);
             sSessionsToContentUris.put(imageUri, resultUri);
             sContentUrisToSessions.put(resultUri, imageUri);
+Log.e(TAG, "shiva updateImage resultUri 3"+title);
+
         } else {
             // Update the MediaStore
             resolver.update(imageUri, values, null, null);
+Log.e(TAG, "shiva updateImage resultUri 4"+imageUri);
+
         }
-Log.e(TAG, "shiva updateImage resultUri"+resultUri);
+Log.e(TAG, "shiva updateImage resultUri 2"+resultUri);
 
         return resultUri;
     }
