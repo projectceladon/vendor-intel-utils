@@ -791,6 +791,10 @@ $(provdata_zip): $(provdata_zip_deps) | $(ACP)
 INSTALLED_RADIOIMAGE_TARGET += $(provdata_zip)
 
 ##############################################################
+# Source: device/intel/mixins/groups/power/true/AndroidBoard.mk
+##############################################################
+AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/power/auto_hal.in
+##############################################################
 # Source: device/intel/mixins/groups/usb-init/true/AndroidBoard.mk
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/usb-init/load_usb_modules.in
