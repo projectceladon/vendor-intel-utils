@@ -14,7 +14,6 @@ sepolicy: enforcing
 bluetooth: btusb(ivi=false)
 audio: project-celadon
 vendor-partition: true(partition_size=600,partition_name=vendor)
-vendor-boot: true(partition_size=16)
 acpio-partition: true(partition_size=2)
 config-partition: true
 product-partition: true
