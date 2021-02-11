@@ -166,6 +166,7 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/load_iwlwifi
 
 BOARD_SEPOLICY_M4DEFS += module_iwlwifi=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/iwlwifi
+WIFI_HIDL_UNIFIED_SUPPLICANT_SERVICE_RC_ENTRY := true
 ##############################################################
 # Source: device/intel/mixins/groups/kernel/gmin64/BoardConfig.mk.1
 ##############################################################
@@ -354,14 +355,6 @@ TARGET_COPY_OUT_VENDOR := vendor
 BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
 VENDOR_PARTITION_SIZE := $(shell echo 600*1048576 | bc)
 AB_OTA_PARTITIONS += vendor
-##############################################################
-# Source: device/intel/mixins/groups/vendor-boot/true/BoardConfig.mk
-##############################################################
-BOARD_BOOT_HEADER_VERSION := 3
-BOARD_MKBOOTIMG_ARGS := --header_version $(BOARD_BOOT_HEADER_VERSION)
-BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := $(shell echo 16*1048576 | bc)
-
-AB_OTA_PARTITIONS += vendor_boot
 ##############################################################
 # Source: device/intel/mixins/groups/acpio-partition/true/BoardConfig.mk
 ##############################################################

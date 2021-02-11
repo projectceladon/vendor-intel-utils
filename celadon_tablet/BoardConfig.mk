@@ -170,6 +170,7 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/load_iwlwifi
 
 BOARD_SEPOLICY_M4DEFS += module_iwlwifi=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/wlan/iwlwifi
+WIFI_HIDL_UNIFIED_SUPPLICANT_SERVICE_RC_ENTRY := true
 ##############################################################
 # Source: device/intel/mixins/groups/kernel/gmin64/BoardConfig.mk.1
 ##############################################################
