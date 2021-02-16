@@ -1,0 +1,1026 @@
+From b425f2b5559118ff776b9f90802bac7620e3fffc Mon Sep 17 00:00:00 2001
+From: Evan Laird <evanlaird@google.com>
+Date: Tue, 29 Sep 2020 01:09:12 -0400
+Subject: [PATCH] DO NOT MERGE: Associate notif cancels with notif posts
+
+CancelNotificationRunnables just spin on the work handler of
+NotificationManagerService, hoping that they get executed at the correct
+moment after a PostNotificationRunnable and before the next
+EnqueueNotificationRunnable completes. Otherwise, you end up in a bad
+state where the cancel either is canceling notifications before they get
+a chance to post, or missing its only chance to cancel the notification
+(for instance, ActivityManagerService is the only caller that can cancel
+FGS notifications).
+
+This change attempts to execute a CancelNotificationRunnable at the
+moment its run() method is called, otherwise it associates the runnable
+with the latest enqueued notificaiton record which has yet to post.
+
+It then associates PostNotificationRunnable with the delayed cancel
+list, executing any missed cancel operations immediately upon finishing
+the PostNotificationRunnable.
+
+Test: atest SystemUITests; manual
+Bug: 162652224
+Change-Id: I88d3c5f4fd910a83974c2f84ae3e8a9498d18133
+---
+ .../notification/InjectableSystemClock.java   |  43 +++
+ .../InjectableSystemClockImpl.java            |  51 +++
+ .../NotificationManagerService.java           | 300 ++++++++++++------
+ .../notification/BuzzBeepBlinkTest.java       |   3 +-
+ .../server/notification/FakeSystemClock.java  | 110 +++++++
+ .../NotificationManagerServiceTest.java       | 145 ++++++++-
+ .../server/notification/RoleObserverTest.java |   6 +-
+ 7 files changed, 545 insertions(+), 113 deletions(-)
+ create mode 100644 services/core/java/com/android/server/notification/InjectableSystemClock.java
+ create mode 100644 services/core/java/com/android/server/notification/InjectableSystemClockImpl.java
+ create mode 100644 services/tests/uiservicestests/src/com/android/server/notification/FakeSystemClock.java
+
+diff --git a/services/core/java/com/android/server/notification/InjectableSystemClock.java b/services/core/java/com/android/server/notification/InjectableSystemClock.java
+new file mode 100644
+index 00000000000..5809365d390
+--- /dev/null
++++ b/services/core/java/com/android/server/notification/InjectableSystemClock.java
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (C) 2020 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.notification;
++
++/**
++ * Testable wrapper around {@link android.os.SystemClock}.
++ *
++ * The default implementation at InjectableSystemClockImpl just proxies calls to the real
++ * SystemClock
++ *
++ * In tests, pass an instance of FakeSystemClock, which allows you to control the values returned by
++ * the various getters below.
++ */
++public interface InjectableSystemClock {
++    /** @see android.os.SystemClock#uptimeMillis() */
++    long uptimeMillis();
++
++    /** @see android.os.SystemClock#elapsedRealtime() */
++    long elapsedRealtime();
++
++    /** @see android.os.SystemClock#elapsedRealtimeNanos() */
++    long elapsedRealtimeNanos();
++
++    /** @see android.os.SystemClock#currentThreadTimeMillis() */
++    long currentThreadTimeMillis();
++
++    /** @see System#currentTimeMillis()  */
++    long currentTimeMillis();
++}
+diff --git a/services/core/java/com/android/server/notification/InjectableSystemClockImpl.java b/services/core/java/com/android/server/notification/InjectableSystemClockImpl.java
+new file mode 100644
+index 00000000000..43d756f4617
+--- /dev/null
++++ b/services/core/java/com/android/server/notification/InjectableSystemClockImpl.java
+@@ -0,0 +1,51 @@
++/*
++ * Copyright (C) 2020 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.notification;
++
++/**
++ * Default implementation of {@link InjectableSystemClock}.
++ *
++ * @hide
++ */
++public class InjectableSystemClockImpl implements InjectableSystemClock {
++    public InjectableSystemClockImpl() {}
++
++    @Override
++    public long uptimeMillis() {
++        return android.os.SystemClock.uptimeMillis();
++    }
++
++    @Override
++    public long elapsedRealtime() {
++        return android.os.SystemClock.elapsedRealtime();
++    }
++
++    @Override
++    public long elapsedRealtimeNanos() {
++        return android.os.SystemClock.elapsedRealtimeNanos();
++    }
++
++    @Override
++    public long currentThreadTimeMillis() {
++        return android.os.SystemClock.currentThreadTimeMillis();
++    }
++
++    @Override
++    public long currentTimeMillis() {
++        return System.currentTimeMillis();
++    }
++}
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index 5d0981da190..9ae3f120302 100755
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -186,7 +186,6 @@ import android.os.RemoteException;
+ import android.os.ResultReceiver;
+ import android.os.ServiceManager;
+ import android.os.ShellCallback;
+-import android.os.SystemClock;
+ import android.os.SystemProperties;
+ import android.os.Trace;
+ import android.os.UserHandle;
+@@ -472,6 +471,11 @@ public class NotificationManagerService extends SystemService {
+     final ArrayMap<Integer, ArrayMap<String, String>> mAutobundledSummaries = new ArrayMap<>();
+     final ArrayList<ToastRecord> mToastQueue = new ArrayList<>();
+     final ArrayMap<String, NotificationRecord> mSummaryByGroupKey = new ArrayMap<>();
++    // Keep track of `CancelNotificationRunnable`s which have been delayed due to awaiting
++    // enqueued notifications to post
++    @GuardedBy("mNotificationLock")
++    final ArrayMap<NotificationRecord, ArrayList<CancelNotificationRunnable>> mDelayedCancelations =
++            new ArrayMap<>();
+ 
+     // The last key in this list owns the hardware.
+     ArrayList<String> mLights = new ArrayList<>();
+@@ -534,6 +538,7 @@ public class NotificationManagerService extends SystemService {
+     private NotificationRecordLogger mNotificationRecordLogger;
+     private InstanceIdSequence mNotificationInstanceIdSequence;
+     private Set<String> mMsgPkgsAllowedAsConvos = new HashSet();
++    private final InjectableSystemClock mSystemClock;
+ 
+     static class Archive {
+         final SparseArray<Boolean> mEnabled;
+@@ -747,7 +752,7 @@ public class NotificationManagerService extends SystemService {
+                         parser, mAllowedManagedServicePackages, forRestore, userId);
+                 migratedManagedServices = true;
+             } else if (mSnoozeHelper.XML_TAG_NAME.equals(parser.getName())) {
+-                mSnoozeHelper.readXml(parser, System.currentTimeMillis());
++                mSnoozeHelper.readXml(parser, mSystemClock.currentTimeMillis());
+             }
+             if (LOCKSCREEN_ALLOW_SECURE_NOTIFICATIONS_TAG.equals(parser.getName())) {
+                 if (forRestore && userId != UserHandle.USER_SYSTEM) {
+@@ -900,7 +905,7 @@ public class NotificationManagerService extends SystemService {
+                     Slog.w(TAG, "No notification with key: " + key);
+                     return;
+                 }
+-                final long now = System.currentTimeMillis();
++                final long now = mSystemClock.currentTimeMillis();
+                 MetricsLogger.action(r.getItemLogMaker()
+                         .setType(MetricsEvent.TYPE_ACTION)
+                         .addTaggedData(MetricsEvent.NOTIFICATION_SHADE_INDEX, nv.rank)
+@@ -932,7 +937,7 @@ public class NotificationManagerService extends SystemService {
+                     Slog.w(TAG, "No notification with key: " + key);
+                     return;
+                 }
+-                final long now = System.currentTimeMillis();
++                final long now = mSystemClock.currentTimeMillis();
+                 MetricsLogger.action(r.getLogMaker(now)
+                         .setCategory(MetricsEvent.NOTIFICATION_ITEM_ACTION)
+                         .setType(MetricsEvent.TYPE_ACTION)
+@@ -1696,15 +1701,18 @@ public class NotificationManagerService extends SystemService {
+     public NotificationManagerService(Context context) {
+         this(context,
+                 new NotificationRecordLoggerImpl(),
++                new InjectableSystemClockImpl(),
+                 new InstanceIdSequence(NOTIFICATION_INSTANCE_ID_MAX));
+     }
+ 
+     @VisibleForTesting
+     public NotificationManagerService(Context context,
+             NotificationRecordLogger notificationRecordLogger,
++            InjectableSystemClock systemClock,
+             InstanceIdSequence notificationInstanceIdSequence) {
+         super(context);
+         mNotificationRecordLogger = notificationRecordLogger;
++        mSystemClock = systemClock;
+         mNotificationInstanceIdSequence = notificationInstanceIdSequence;
+         Notification.processWhitelistToken = WHITELIST_TOKEN;
+     }
+@@ -2063,6 +2071,11 @@ public class NotificationManagerService extends SystemService {
+         return getContext().getResources().getStringArray(key);
+     }
+ 
++    @VisibleForTesting
++    protected Handler getWorkHandler() {
++        return mHandler;
++    }
++
+     @Override
+     public void onStart() {
+         SnoozeHelper snoozeHelper = new SnoozeHelper(getContext(), (userId, r, muteOnReturn) -> {
+@@ -2336,7 +2349,8 @@ public class NotificationManagerService extends SystemService {
+             mHistoryManager.onBootPhaseAppsCanStart();
+             registerDeviceConfigChange();
+         } else if (phase == SystemService.PHASE_ACTIVITY_MANAGER_READY) {
+-            mSnoozeHelper.scheduleRepostsForPersistedNotifications(System.currentTimeMillis());
++            mSnoozeHelper.scheduleRepostsForPersistedNotifications(
++                    mSystemClock.currentTimeMillis());
+         }
+     }
+ 
+@@ -2696,7 +2710,7 @@ public class NotificationManagerService extends SystemService {
+                         .setUserId(r.getSbn().getNormalizedUserId())
+                         .setChannelId(r.getChannel().getId())
+                         .setChannelName(r.getChannel().getName().toString())
+-                        .setPostedTimeMs(System.currentTimeMillis())
++                        .setPostedTimeMs(mSystemClock.currentTimeMillis())
+                         .setTitle(getHistoryTitle(r.getNotification()))
+                         .setText(getHistoryText(
+                                 r.getSbn().getPackageContext(getContext()), r.getNotification()))
+@@ -5222,7 +5236,7 @@ public class NotificationManagerService extends SystemService {
+                                 GroupHelper.AUTOGROUP_KEY, adjustedSbn.getUid(),
+                                 adjustedSbn.getInitialPid(), summaryNotification,
+                                 adjustedSbn.getUser(), GroupHelper.AUTOGROUP_KEY,
+-                                System.currentTimeMillis());
++                                mSystemClock.currentTimeMillis());
+                 summaryRecord = new NotificationRecord(getContext(), summarySbn,
+                         notificationRecord.getChannel());
+                 summaryRecord.setIsAppImportanceLocked(
+@@ -5457,6 +5471,22 @@ public class NotificationManagerService extends SystemService {
+ 
+                     mSnoozeHelper.dump(pw, filter);
+                 }
++
++                // Log delayed notification cancels
++                pw.println();
++                pw.println("  Delayed notification cancels:");
++                if (mDelayedCancelations.isEmpty()) {
++                    pw.println("    None");
++                } else {
++                    Set<NotificationRecord> delayedKeys = mDelayedCancelations.keySet();
++                    for (NotificationRecord record : delayedKeys) {
++                        ArrayList<CancelNotificationRunnable> queuedCancels =
++                                mDelayedCancelations.get(record);
++                        pw.println("    (" + queuedCancels.size() + ") cancels enqueued for"
++                                + record.getKey());
++                    }
++                }
++                pw.println();
+             }
+ 
+             if (!zenOnly) {
+@@ -5675,7 +5705,7 @@ public class NotificationManagerService extends SystemService {
+ 
+         final StatusBarNotification n = new StatusBarNotification(
+                 pkg, opPkg, id, tag, notificationUid, callingPid, notification,
+-                user, null, System.currentTimeMillis());
++                user, null, mSystemClock.currentTimeMillis());
+ 
+         // setup local book-keeping
+         String channelId = notification.getChannelId();
+@@ -6008,7 +6038,7 @@ public class NotificationManagerService extends SystemService {
+                     final float appEnqueueRate = mUsageStats.getAppEnqueueRate(pkg);
+                     if (appEnqueueRate > mMaxPackageEnqueueRate) {
+                         mUsageStats.registerOverRateQuota(pkg);
+-                        final long now = SystemClock.elapsedRealtime();
++                        final long now = mSystemClock.elapsedRealtime();
+                         if ((now - mLastOverRateLogTime) > MIN_PACKAGE_OVERRATE_LOG_INTERVAL) {
+                             Slog.e(TAG, "Package enqueue rate is " + appEnqueueRate
+                                     + ". Shedding " + r.getSbn().getKey() + ". package=" + pkg);
+@@ -6220,7 +6250,73 @@ public class NotificationManagerService extends SystemService {
+             this.mRank = rank;
+             this.mCount = count;
+             this.mListener = listener;
+-            this.mWhen = System.currentTimeMillis();
++            this.mWhen = mSystemClock.currentTimeMillis();
++        }
++
++        // Move the work to this function so it can be called from PostNotificationRunnable
++        private void doNotificationCancelLocked() {
++            // Look for the notification in the posted list, since we already checked enqueued.
++            String listenerName = mListener == null ? null : mListener.component.toShortString();
++            NotificationRecord r =
++                    findNotificationByListLocked(mNotificationList, mPkg, mTag, mId, mUserId);
++            if (r != null) {
++                // The notification was found, check if it should be removed.
++
++                // Ideally we'd do this in the caller of this method. However, that would
++                // require the caller to also find the notification.
++                if (mReason == REASON_CLICK) {
++                    mUsageStats.registerClickedByUser(r);
++                }
++
++                if (mReason == REASON_LISTENER_CANCEL
++                        && (r.getNotification().flags & FLAG_BUBBLE) != 0) {
++                    mNotificationDelegate.onBubbleNotificationSuppressionChanged(
++                            r.getKey(), /* suppressed */ true);
++                    return;
++                }
++
++                if ((r.getNotification().flags & mMustHaveFlags) != mMustHaveFlags) {
++                    return;
++                }
++                if ((r.getNotification().flags & mMustNotHaveFlags) != 0) {
++                    return;
++                }
++
++                // Bubbled children get to stick around if the summary was manually cancelled
++                // (user removed) from systemui.
++                FlagChecker childrenFlagChecker = null;
++                if (mReason == REASON_CANCEL
++                        || mReason == REASON_CLICK
++                        || mReason == REASON_CANCEL_ALL) {
++                    childrenFlagChecker = (flags) -> {
++                        if ((flags & FLAG_BUBBLE) != 0) {
++                            return false;
++                        }
++                        return true;
++                    };
++                }
++
++                // Cancel the notification.
++                boolean wasPosted = removePreviousFromNotificationListsLocked(r, mWhen);
++                cancelNotificationLocked(
++                        r, mSendDelete, mReason, mRank, mCount, wasPosted, listenerName);
++                cancelGroupChildrenLocked(r, mCallingUid, mCallingPid, listenerName,
++                        mSendDelete, childrenFlagChecker, mReason);
++                updateLightsLocked();
++                if (mShortcutHelper != null) {
++                    mShortcutHelper.maybeListenForShortcutChangesForBubbles(r,
++                            true /* isRemoved */,
++                            mHandler);
++                }
++            } else {
++                // No notification was found, assume that it is snoozed and cancel it.
++                if (mReason != REASON_SNOOZED) {
++                    final boolean wasSnoozed = mSnoozeHelper.cancel(mUserId, mPkg, mTag, mId);
++                    if (wasSnoozed) {
++                        handleSavePolicyFile();
++                    }
++                }
++            }
+         }
+ 
+         @Override
+@@ -6236,91 +6332,24 @@ public class NotificationManagerService extends SystemService {
+                 // chance to post yet.
+                 List<NotificationRecord> enqueued = findEnqueuedNotificationsForCriteria(
+                         mPkg, mTag, mId, mUserId);
+-                boolean repost = false;
+                 if (enqueued.size() > 0) {
+-                    // Found something, let's see what it was
+-                    repost = true;
+-                    // If all enqueues happened before this cancel then wait for them to happen,
+-                    // otherwise we should let this cancel through so the next enqueue happens
+-                    for (NotificationRecord r : enqueued) {
+-                        if (r.mUpdateTimeMs > mWhen) {
+-                            // At least one enqueue was posted after the cancel, so we're invalid
+-                            Slog.i(TAG, "notification cancel ignored due to newer enqueued entry"
+-                                    + "key=" + r.getSbn().getKey());
+-                            return;
+-                        }
++                    // We have found notifications that were enqueued before this cancel, but not
++                    // yet posted. Attach this cancel to the last enqueue (the most recent), and
++                    // we will be executed in that notification's PostNotificationRunnable
++                    NotificationRecord enqueuedToAttach = enqueued.get(enqueued.size() - 1);
++
++                    ArrayList<CancelNotificationRunnable> delayed =
++                            mDelayedCancelations.get(enqueuedToAttach);
++                    if (delayed == null) {
++                        delayed = new ArrayList<>();
+                     }
+-                }
+-                if (repost) {
+-                    mHandler.post(this);
++
++                    delayed.add(this);
++                    mDelayedCancelations.put(enqueuedToAttach, delayed);
+                     return;
+                 }
+ 
+-                // Look for the notification in the posted list, since we already checked enqueued.
+-                NotificationRecord r =
+-                        findNotificationByListLocked(mNotificationList, mPkg, mTag, mId, mUserId);
+-                if (r != null) {
+-                    // The notification was found, check if it should be removed.
+-
+-                    // Ideally we'd do this in the caller of this method. However, that would
+-                    // require the caller to also find the notification.
+-                    if (mReason == REASON_CLICK) {
+-                        mUsageStats.registerClickedByUser(r);
+-                    }
+-
+-                    if (mReason == REASON_LISTENER_CANCEL
+-                        && (r.getNotification().flags & FLAG_BUBBLE) != 0) {
+-                        mNotificationDelegate.onBubbleNotificationSuppressionChanged(
+-                            r.getKey(), /* suppressed */ true);
+-                        return;
+-                    }
+-
+-                    if ((r.getNotification().flags & mMustHaveFlags) != mMustHaveFlags) {
+-                        return;
+-                    }
+-                    if ((r.getNotification().flags & mMustNotHaveFlags) != 0) {
+-                        return;
+-                    }
+-                    if (r.getUpdateTimeMs() > mWhen) {
+-                        // In this case, a post must have slipped by when this runnable reposted
+-                        return;
+-                    }
+-
+-                    // Bubbled children get to stick around if the summary was manually cancelled
+-                    // (user removed) from systemui.
+-                    FlagChecker childrenFlagChecker = null;
+-                    if (mReason == REASON_CANCEL
+-                            || mReason == REASON_CLICK
+-                            || mReason == REASON_CANCEL_ALL) {
+-                        childrenFlagChecker = (flags) -> {
+-                            if ((flags & FLAG_BUBBLE) != 0) {
+-                                return false;
+-                            }
+-                            return true;
+-                        };
+-                    }
+-
+-                    // Cancel the notification.
+-                    boolean wasPosted = removeFromNotificationListsLocked(r);
+-                    cancelNotificationLocked(
+-                            r, mSendDelete, mReason, mRank, mCount, wasPosted, listenerName);
+-                    cancelGroupChildrenLocked(r, mCallingUid, mCallingPid, listenerName,
+-                            mSendDelete, childrenFlagChecker, mReason);
+-                    updateLightsLocked();
+-                    if (mShortcutHelper != null) {
+-                        mShortcutHelper.maybeListenForShortcutChangesForBubbles(r,
+-                                true /* isRemoved */,
+-                                mHandler);
+-                    }
+-                } else {
+-                    // No notification was found, assume that it is snoozed and cancel it.
+-                    if (mReason != REASON_SNOOZED) {
+-                        final boolean wasSnoozed = mSnoozeHelper.cancel(mUserId, mPkg, mTag, mId);
+-                        if (wasSnoozed) {
+-                            handleSavePolicyFile();
+-                        }
+-                    }
+-                }
++                doNotificationCancelLocked();
+             }
+         }
+     }
+@@ -6343,7 +6372,7 @@ public class NotificationManagerService extends SystemService {
+                         mSnoozeHelper.getSnoozeTimeForUnpostedNotification(
+                                 r.getUser().getIdentifier(),
+                                 r.getSbn().getPackageName(), r.getSbn().getKey());
+-                final long currentTime = System.currentTimeMillis();
++                final long currentTime = mSystemClock.currentTimeMillis();
+                 if (snoozeAt.longValue() > currentTime) {
+                     (new SnoozeNotificationRunnable(r.getSbn().getKey(),
+                             snoozeAt.longValue() - currentTime, null)).snoozeLocked(r);
+@@ -6403,18 +6432,29 @@ public class NotificationManagerService extends SystemService {
+                             enqueueStatus);
+                 }
+ 
+-                // tell the assistant service about the notification
+-                if (mAssistants.isEnabled()) {
+-                    mAssistants.onNotificationEnqueuedLocked(r);
+-                    mHandler.postDelayed(new PostNotificationRunnable(r.getKey()),
+-                            DELAY_FOR_ASSISTANT_TIME);
+-                } else {
+-                    mHandler.post(new PostNotificationRunnable(r.getKey()));
+-                }
++                postPostNotificationRunnableMaybeDelayedLocked(
++                        r, new PostNotificationRunnable(r.getKey()));
+             }
+         }
+     }
+ 
++    /**
++     * Mainly needed as a hook for tests which require setting up enqueued-but-not-posted
++     * notification records
++     */
++    @GuardedBy("mNotificationLock")
++    protected void postPostNotificationRunnableMaybeDelayedLocked(
++            NotificationRecord r,
++            PostNotificationRunnable runnable) {
++        // tell the assistant service about the notification
++        if (mAssistants.isEnabled()) {
++            mAssistants.onNotificationEnqueuedLocked(r);
++            mHandler.postDelayed(runnable, DELAY_FOR_ASSISTANT_TIME);
++        } else {
++            mHandler.post(runnable);
++        }
++    }
++
+     @GuardedBy("mNotificationLock")
+     boolean isPackagePausedOrSuspended(String pkg, int uid) {
+         boolean isPaused;
+@@ -6563,13 +6603,23 @@ public class NotificationManagerService extends SystemService {
+                             buzzBeepBlinkLoggingCode, getGroupInstanceId(n.getGroupKey()));
+                 } finally {
+                     int N = mEnqueuedNotifications.size();
++                    NotificationRecord enqueued = null;
+                     for (int i = 0; i < N; i++) {
+-                        final NotificationRecord enqueued = mEnqueuedNotifications.get(i);
++                        enqueued = mEnqueuedNotifications.get(i);
+                         if (Objects.equals(key, enqueued.getKey())) {
+                             mEnqueuedNotifications.remove(i);
+                             break;
+                         }
+                     }
++
++                    // If the enqueued notification record had a cancel attached after it, execute
++                    // it right now
++                    if (enqueued != null && mDelayedCancelations.get(enqueued) != null) {
++                        for (CancelNotificationRunnable r : mDelayedCancelations.get(enqueued)) {
++                            r.doNotificationCancelLocked();
++                        }
++                        mDelayedCancelations.remove(enqueued);
++                    }
+                 }
+             }
+         }
+@@ -6798,7 +6848,8 @@ public class NotificationManagerService extends SystemService {
+                             .putExtra(EXTRA_KEY, record.getKey()),
+                     PendingIntent.FLAG_UPDATE_CURRENT);
+             mAlarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+-                    SystemClock.elapsedRealtime() + record.getNotification().getTimeoutAfter(), pi);
++                    mSystemClock.elapsedRealtime() + record.getNotification().getTimeoutAfter(),
++                    pi);
+         }
+     }
+ 
+@@ -7319,7 +7370,7 @@ public class NotificationManagerService extends SystemService {
+                     || visibilityChanged
+                     || interruptiveChanged;
+             if (interceptBefore && !record.isIntercepted()
+-                    && record.isNewEnoughForAlerting(System.currentTimeMillis())) {
++                    && record.isNewEnoughForAlerting(mSystemClock.currentTimeMillis())) {
+                 buzzBeepBlinkLocked(record);
+             }
+         }
+@@ -7606,6 +7657,34 @@ public class NotificationManagerService extends SystemService {
+         return wasPosted;
+     }
+ 
++    /**
++     * Similar to the above method, removes all NotificationRecords with the same key as the given
++     * NotificationRecord, but skips any records which are newer than the given one.
++     */
++    private boolean removePreviousFromNotificationListsLocked(NotificationRecord r,
++            long removeBefore) {
++        // Remove notification records that occurred before the given record from both lists,
++        // specifically allowing newer ones to respect ordering
++        boolean wasPosted = false;
++        List<NotificationRecord> matching =
++                findNotificationsByListLocked(mNotificationList, r.getKey());
++        for (NotificationRecord record : matching) {
++            // We don't need to check against update time for posted notifs
++            mNotificationList.remove(record);
++            mNotificationsByKey.remove(record.getSbn().getKey());
++            wasPosted = true;
++        }
++
++        matching = findNotificationsByListLocked(mEnqueuedNotifications, r.getKey());
++        for (NotificationRecord record : matching) {
++            if (record.getUpdateTimeMs() <= removeBefore) {
++                mNotificationList.remove(record);
++            }
++        }
++
++        return wasPosted;
++    }
++
+     @GuardedBy("mNotificationLock")
+     private void cancelNotificationLocked(NotificationRecord r, boolean sendDelete,
+             @NotificationListenerService.NotificationCancelReason int reason,
+@@ -7721,7 +7800,7 @@ public class NotificationManagerService extends SystemService {
+         // Save it for users of getHistoricalNotifications()
+         mArchive.record(r.getSbn(), reason);
+ 
+-        final long now = System.currentTimeMillis();
++        final long now = mSystemClock.currentTimeMillis();
+         final LogMaker logMaker = r.getItemLogMaker()
+                 .setType(MetricsEvent.TYPE_DISMISS)
+                 .setSubtype(reason);
+@@ -8277,6 +8356,21 @@ public class NotificationManagerService extends SystemService {
+         return null;
+     }
+ 
++    @GuardedBy("mNotificationLock")
++    private List<NotificationRecord> findNotificationsByListLocked(
++            ArrayList<NotificationRecord> list,
++            String key) {
++        List<NotificationRecord> matching = new ArrayList<>();
++        final int n = list.size();
++        for (int i = 0; i < n; i++) {
++            NotificationRecord r = list.get(i);
++            if (key.equals(r.getKey())) {
++                matching.add(r);
++            }
++        }
++        return matching;
++    }
++
+     /**
+      * There may be multiple records that match your criteria. For instance if there have been
+      * multiple notifications posted which are enqueued for the same pkg, tag, id, userId. This
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/BuzzBeepBlinkTest.java b/services/tests/uiservicestests/src/com/android/server/notification/BuzzBeepBlinkTest.java
+index afd10ddb8ec..2e0f1992478 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/BuzzBeepBlinkTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/BuzzBeepBlinkTest.java
+@@ -103,6 +103,7 @@ public class BuzzBeepBlinkTest extends UiServiceTestCase {
+     NotificationRecordLoggerFake mNotificationRecordLogger = new NotificationRecordLoggerFake();
+     private InstanceIdSequence mNotificationInstanceIdSequence = new InstanceIdSequenceFake(
+             1 << 30);
++    private InjectableSystemClock mSystemClock = new FakeSystemClock();
+ 
+     private NotificationManagerService mService;
+     private String mPkg = "com.android.server.notification";
+@@ -154,7 +155,7 @@ public class BuzzBeepBlinkTest extends UiServiceTestCase {
+         assertTrue(accessibilityManager.isEnabled());
+ 
+         mService = spy(new NotificationManagerService(getContext(), mNotificationRecordLogger,
+-                mNotificationInstanceIdSequence));
++                mSystemClock, mNotificationInstanceIdSequence));
+         mService.setAudioManager(mAudioManager);
+         mService.setVibrator(mVibrator);
+         mService.setSystemReady(true);
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/FakeSystemClock.java b/services/tests/uiservicestests/src/com/android/server/notification/FakeSystemClock.java
+new file mode 100644
+index 00000000000..92b5c591a05
+--- /dev/null
++++ b/services/tests/uiservicestests/src/com/android/server/notification/FakeSystemClock.java
+@@ -0,0 +1,110 @@
++/*
++ * Copyright (C) 2020 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.notification;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * A fake {@link InjectableSystemClock}
++ *
++ * Attempts to simulate the behavior of a real system clock. Time can be moved forward but not
++ * backwards. uptimeMillis, elapsedRealtime, and currentThreadTimeMillis are all kept in sync.
++ *
++ * Unless otherwise specified, uptimeMillis and elapsedRealtime will advance the same amount with
++ * every call to {@link #advanceTime(long)}. Thread time always lags by 50% of the uptime
++ * advancement to simulate time loss due to scheduling.
++ *
++ * @hide
++ */
++public class FakeSystemClock implements InjectableSystemClock {
++    private long mUptimeMillis = 10000;
++    private long mElapsedRealtime = 10000;
++    private long mCurrentThreadTimeMillis = 10000;
++
++    private long mCurrentTimeMillis = 1555555500000L;
++
++    private final List<ClockTickListener> mListeners = new ArrayList<>();
++    @Override
++    public long uptimeMillis() {
++        return mUptimeMillis;
++    }
++
++    @Override
++    public long elapsedRealtime() {
++        return mElapsedRealtime;
++    }
++
++    @Override
++    public long elapsedRealtimeNanos() {
++        return mElapsedRealtime * 1000000 + 447;
++    }
++
++    @Override
++    public long currentThreadTimeMillis() {
++        return mCurrentThreadTimeMillis;
++    }
++
++    @Override
++    public long currentTimeMillis() {
++        return mCurrentTimeMillis;
++    }
++
++    public void setUptimeMillis(long uptime) {
++        advanceTime(uptime - mUptimeMillis);
++    }
++
++    public void setCurrentTimeMillis(long millis) {
++        mCurrentTimeMillis = millis;
++    }
++
++    public void advanceTime(long uptime) {
++        advanceTime(uptime, 0);
++    }
++
++    public void advanceTime(long uptime, long sleepTime) {
++        if (uptime < 0 || sleepTime < 0) {
++            throw new IllegalArgumentException("Time cannot go backwards.");
++        }
++
++        if (uptime > 0 || sleepTime > 0) {
++            mUptimeMillis += uptime;
++            mElapsedRealtime += uptime + sleepTime;
++            mCurrentTimeMillis += uptime + sleepTime;
++
++            mCurrentThreadTimeMillis += Math.ceil(uptime * 0.5);
++
++            for (ClockTickListener listener : mListeners) {
++                listener.onClockTick();
++            }
++        }
++    }
++
++    public void addListener(ClockTickListener listener) {
++        mListeners.add(listener);
++    }
++
++    public void removeListener(ClockTickListener listener) {
++        mListeners.remove(listener);
++    }
++
++    public interface ClockTickListener {
++        void onClockTick();
++    }
++
++    private static final long START_TIME = 10000;
++}
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+index 52e08187b2c..7f0b4dbabc3 100755
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -199,6 +199,7 @@ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ import java.util.function.Consumer;
+ 
+ 
+@@ -287,18 +288,26 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+             1 << 30);
+     @Mock
+     StatusBarManagerInternal mStatusBar;
++    private final FakeSystemClock mSystemClock = new FakeSystemClock();
+ 
+     // Use a Testable subclass so we can simulate calls from the system without failing.
+     private static class TestableNotificationManagerService extends NotificationManagerService {
+         int countSystemChecks = 0;
+         boolean isSystemUid = true;
+         int countLogSmartSuggestionsVisible = 0;
++        // If true, don't enqueue the PostNotificationRunnables, just trap them
++        boolean trapEnqueuedNotifications = false;
++        final ArrayList<NotificationManagerService.PostNotificationRunnable> trappedRunnables =
++                new ArrayList<>();
+         @Nullable
+         NotificationAssistantAccessGrantedCallback mNotificationAssistantAccessGrantedCallback;
+ 
+-        TestableNotificationManagerService(Context context, NotificationRecordLogger logger,
++        TestableNotificationManagerService(
++                Context context,
++                NotificationRecordLogger logger,
++                InjectableSystemClock systemClock,
+                 InstanceIdSequence notificationInstanceIdSequence) {
+-            super(context, logger, notificationInstanceIdSequence);
++            super(context, logger, systemClock, notificationInstanceIdSequence);
+         }
+ 
+         RankingHelper getRankingHelper() {
+@@ -353,6 +362,23 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+             return new String[] {PKG_O};
+         }
+ 
++        @Override
++        protected void postPostNotificationRunnableMaybeDelayedLocked(NotificationRecord record,
++                PostNotificationRunnable runnable) {
++            if (trapEnqueuedNotifications) {
++                trappedRunnables.add(runnable);
++                return;
++            }
++
++            super.postPostNotificationRunnableMaybeDelayedLocked(record, runnable);
++        }
++
++        void drainTrappedRunnableQueue() {
++            for (Runnable r : trappedRunnables) {
++                getWorkHandler().post(r);
++            }
++        }
++
+         private void setNotificationAssistantAccessGrantedCallback(
+                 @Nullable NotificationAssistantAccessGrantedCallback callback) {
+             this.mNotificationAssistantAccessGrantedCallback = callback;
+@@ -402,7 +428,7 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         doNothing().when(mContext).sendBroadcastAsUser(any(), any(), any());
+ 
+         mService = new TestableNotificationManagerService(mContext, mNotificationRecordLogger,
+-                mNotificationInstanceIdSequence);
++                mSystemClock, mNotificationInstanceIdSequence);
+ 
+         // Use this testable looper.
+         mTestableLooper = TestableLooper.get(this);
+@@ -1344,10 +1370,10 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         final StatusBarNotification sbn = generateNotificationRecord(null).getSbn();
+         mBinderService.enqueueNotificationWithTag(PKG, PKG, "tag", sbn.getId(),
+                 sbn.getNotification(), sbn.getUserId());
+-        Thread.sleep(1);  // make sure the system clock advances before the next step
++        mSystemClock.advanceTime(1);
+         // THEN it is canceled
+         mBinderService.cancelNotificationWithTag(PKG, PKG, "tag", sbn.getId(), sbn.getUserId());
+-        Thread.sleep(1);  // here too
++        mSystemClock.advanceTime(1);
+         // THEN it is posted again (before the cancel has a chance to finish)
+         mBinderService.enqueueNotificationWithTag(PKG, PKG, "tag", sbn.getId(),
+                 sbn.getNotification(), sbn.getUserId());
+@@ -1361,6 +1387,60 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         assertEquals(1, mService.getNotificationRecordCount());
+     }
+ 
++    @Test
++    public void testChangeSystemTimeAfterPost_thenCancel_noFgs() throws Exception {
++        // GIVEN time X
++        mSystemClock.setCurrentTimeMillis(10000);
++
++        // GIVEN a notification is posted
++        final StatusBarNotification sbn = generateNotificationRecord(null).getSbn();
++        mBinderService.enqueueNotificationWithTag(PKG, PKG, "tag", sbn.getId(),
++                sbn.getNotification(), sbn.getUserId());
++        mSystemClock.advanceTime(1);
++        waitForIdle();
++
++        // THEN the system time is changed to an earlier time
++        mSystemClock.setCurrentTimeMillis(5000);
++
++        // THEN a cancel is requested
++        mBinderService.cancelNotificationWithTag(PKG, PKG, "tag", sbn.getId(), sbn.getUserId());
++        waitForIdle();
++
++        // It should work
++        StatusBarNotification[] notifs =
++                mBinderService.getActiveNotifications(PKG);
++        assertEquals(0, notifs.length);
++        assertEquals(0, mService.getNotificationRecordCount());
++    }
++
++    @Test
++    public void testChangeSystemTimeAfterPost_thenCancel_fgs() throws Exception {
++        // GIVEN time X
++        mSystemClock.setCurrentTimeMillis(10000);
++
++        // GIVEN a notification is posted
++        final StatusBarNotification sbn = generateNotificationRecord(null).getSbn();
++        sbn.getNotification().flags =
++                Notification.FLAG_ONGOING_EVENT | FLAG_FOREGROUND_SERVICE;
++        mBinderService.enqueueNotificationWithTag(PKG, PKG, "tag", sbn.getId(),
++                sbn.getNotification(), sbn.getUserId());
++        mSystemClock.advanceTime(1);
++        waitForIdle();
++
++        // THEN the system time is changed to an earlier time
++        mSystemClock.setCurrentTimeMillis(5000);
++
++        // THEN a cancel is requested
++        mBinderService.cancelNotificationWithTag(PKG, PKG, "tag", sbn.getId(), sbn.getUserId());
++        waitForIdle();
++
++        // It should work
++        StatusBarNotification[] notifs =
++                mBinderService.getActiveNotifications(PKG);
++        assertEquals(0, notifs.length);
++        assertEquals(0, mService.getNotificationRecordCount());
++    }
++
+     @Test
+     public void testCancelNotificationWhilePostedAndEnqueued() throws Exception {
+         mBinderService.enqueueNotificationWithTag(PKG, PKG,
+@@ -1382,6 +1462,56 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         assertEquals(NotificationStats.DISMISSAL_OTHER, captor.getValue().getDismissalSurface());
+     }
+ 
++    @Test
++    public void testDelayCancelWhenEnqueuedHasNotPosted() throws Exception {
++        // Don't allow PostNotificationRunnables to execute so we can set up problematic state
++        mService.trapEnqueuedNotifications = true;
++        // GIVEN an enqueued notification
++        mBinderService.enqueueNotificationWithTag(PKG, PKG,
++                "testDelayCancelWhenEnqueuedHasNotPosted", 0,
++                generateNotificationRecord(null).getNotification(), 0);
++        mSystemClock.advanceTime(1);
++        // WHEN a cancel is requested before it has posted
++        mBinderService.cancelNotificationWithTag(PKG, PKG,
++                "testDelayCancelWhenEnqueuedHasNotPosted", 0, 0);
++
++        waitForIdle();
++
++        // THEN the cancel notification runnable is captured and associated with that record
++        ArrayMap<NotificationRecord,
++                ArrayList<NotificationManagerService.CancelNotificationRunnable>> delayed =
++                        mService.mDelayedCancelations;
++        Set<NotificationRecord> keySet = delayed.keySet();
++        assertEquals(1, keySet.size());
++    }
++
++    @Test
++    public void testDelayedCancelsExecuteAfterPost() throws Exception {
++        // Don't allow PostNotificationRunnables to execute so we can set up problematic state
++        mService.trapEnqueuedNotifications = true;
++        // GIVEN an enqueued notification
++        mBinderService.enqueueNotificationWithTag(PKG, PKG,
++                "testDelayCancelWhenEnqueuedHasNotPosted", 0,
++                generateNotificationRecord(null).getNotification(), 0);
++        mSystemClock.advanceTime(1);
++        // WHEN a cancel is requested before it has posted
++        mBinderService.cancelNotificationWithTag(PKG, PKG,
++                "testDelayCancelWhenEnqueuedHasNotPosted", 0, 0);
++
++        waitForIdle();
++
++        // We're now in a state with an a notification awaiting PostNotificationRunnable to execute
++        // WHEN the PostNotificationRunnable is allowed to execute
++        mService.drainTrappedRunnableQueue();
++        waitForIdle();
++
++        // THEN the cancel executes and the notification is removed
++        StatusBarNotification[] notifs =
++                mBinderService.getActiveNotifications(PKG);
++        assertEquals(0, notifs.length);
++        assertEquals(0, mService.getNotificationRecordCount());
++    }
++
+     @Test
+     public void testCancelNotificationsFromListenerImmediatelyAfterEnqueue() throws Exception {
+         NotificationRecord r = generateNotificationRecord(null);
+@@ -2529,8 +2659,9 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testHasCompanionDevice_noService() {
+-        mService = new TestableNotificationManagerService(mContext,  mNotificationRecordLogger,
+-                mNotificationInstanceIdSequence);
++        mService =
++                new TestableNotificationManagerService(mContext, mNotificationRecordLogger,
++                mSystemClock, mNotificationInstanceIdSequence);
+ 
+         assertFalse(mService.hasCompanionDevice(mListener));
+     }
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java b/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java
+index 3281c3f4cfb..ac2c6193c67 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java
+@@ -103,12 +103,14 @@ public class RoleObserverTest extends UiServiceTestCase {
+     private InstanceIdSequence mNotificationInstanceIdSequence = new InstanceIdSequenceFake(
+             1 << 30);
+     private List<UserInfo> mUsers;
++    private InjectableSystemClock mSystemClock = new FakeSystemClock();
+ 
+     private static class TestableNotificationManagerService extends NotificationManagerService {
+         TestableNotificationManagerService(Context context,
+                 NotificationRecordLogger logger,
++                InjectableSystemClock systemClock,
+                 InstanceIdSequence notificationInstanceIdSequence) {
+-            super(context, logger, notificationInstanceIdSequence);
++            super(context, logger, systemClock, notificationInstanceIdSequence);
+         }
+ 
+         @Override
+@@ -136,7 +138,7 @@ public class RoleObserverTest extends UiServiceTestCase {
+         when(mUm.getUsers()).thenReturn(mUsers);
+ 
+         mService = new TestableNotificationManagerService(mContext, mNotificationRecordLogger,
+-                mNotificationInstanceIdSequence);
++                mSystemClock, mNotificationInstanceIdSequence);
+         mRoleObserver = mService.new RoleObserver(mRoleManager, mPm, mExecutor);
+ 
+         try {
+-- 
+2.29.0
+
