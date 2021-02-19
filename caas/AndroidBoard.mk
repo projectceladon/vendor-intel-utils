@@ -344,6 +344,10 @@ CHECK_CONFIG_LOG :=  $(LOCAL_KERNEL_PATH)/.config.check
 
 KERNEL_DEPS := $(shell find $(LOCAL_KERNEL_SRC) \( -name *.git -prune \) -o -print )
 
+KERNEL_MAKE_CMD:= \
+      PATH="$(PWD)/prebuilts/build-tools/linux-x86/bin:$(TARGET_KERNEL_CLANG_PATH):$(PWD)/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/x86_64-linux/bin:$$PATH" \
+      make -j24
+
 # Before building final defconfig with debug diffconfigs
 # Check that base defconfig is correct. Check is performed
 # by comparing generated .config with .config.old if it exists.
@@ -357,7 +361,7 @@ $(CHECK_CONFIG_LOG): $(KERNEL_DEFCONFIG) $(KERNEL_DEPS)
 	-$(hide) [[ -e $(KERNEL_CONFIG) ]] && mv -f $(KERNEL_CONFIG) $(KERNEL_CONFIG).save
 	$(hide) rm -f $(KERNEL_CONFIG).old
 	$(hide) cat $< > $(KERNEL_CONFIG)
-	$(hide) $(MAKE) $(KERNEL_MAKE_OPTIONS) olddefconfig
+	$(hide) $(KERNEL_MAKE_CMD) $(KERNEL_MAKE_OPTIONS) olddefconfig
 	$(hide) if [[ -e  $(KERNEL_CONFIG).old ]] ; then \
 	  $(CHECK_CONFIG_SCRIPT) $(KERNEL_CONFIG).old $(KERNEL_CONFIG) > $@ ;  fi;
 	-$(hide) [[ -e $(KERNEL_CONFIG).save ]] && mv -f $(KERNEL_CONFIG).save $(KERNEL_CONFIG)
@@ -375,7 +379,7 @@ $(CHECK_CONFIG_LOG): $(KERNEL_DEFCONFIG) $(KERNEL_DEPS)
 .PHONY: menuconfig xconfig gconfig
 
 menuconfig xconfig gconfig: $(CHECK_CONFIG_LOG)
-	$(hide) xterm -e $(MAKE) $(KERNEL_MAKE_OPTIONS) $@
+	$(hide) xterm -e $(KERNEL_MAKE_CMD) $(KERNEL_MAKE_OPTIONS) $@
 	$(hide) cp -f $(KERNEL_CONFIG) $(KERNEL_DEFCONFIG)
 	@echo ===========
 	@echo $(KERNEL_DEFCONFIG) has been modified !
@@ -384,7 +388,7 @@ menuconfig xconfig gconfig: $(CHECK_CONFIG_LOG)
 $(KERNEL_CONFIG): $(KERNEL_CONFIG_DEPS) | $(CHECK_CONFIG_LOG)
 	$(hide) cat $(KERNEL_CONFIG_DEPS) > $@
 	@echo "Generating Kernel configuration, using $(KERNEL_CONFIG_DEPS)"
-	$(hide) $(MAKE) $(KERNEL_MAKE_OPTIONS) olddefconfig </dev/null
+	$(hide) $(KERNEL_MAKE_CMD) $(KERNEL_MAKE_OPTIONS) olddefconfig </dev/null
 
 # BOARD_KERNEL_CONFIG_FILE and BOARD_KERNEL_VERSION can be used to override the values extracted
 # from INSTALLED_KERNEL_TARGET.
@@ -429,9 +433,9 @@ $(LOCAL_KERNEL): $(DM_VERITY_CERT)
 endif
 
 $(LOCAL_KERNEL): $(MINIGZIP) $(KERNEL_CONFIG) $(BOARD_DTB) $(KERNEL_DEPS)
-	$(MAKE) $(KERNEL_MAKE_OPTIONS)
-	$(MAKE) $(KERNEL_MAKE_OPTIONS) modules
-	$(MAKE) $(KERNEL_MAKE_OPTIONS) INSTALL_MOD_STRIP=1 modules_install
+	$(KERNEL_MAKE_CMD) $(KERNEL_MAKE_OPTIONS)
+	$(KERNEL_MAKE_CMD) $(KERNEL_MAKE_OPTIONS) modules
+	$(KERNEL_MAKE_CMD) $(KERNEL_MAKE_OPTIONS) INSTALL_MOD_STRIP=1 modules_install
 
 
 # disable the modules built in parallel due to some modules symbols has dependency,
@@ -446,12 +450,12 @@ $(eval MODULE_DEPS_$(2) := $(shell find kernel/modules/$(1) \( -name *.git -prun
 $(LOCAL_KERNEL_PATH)/build_$(2): $(LOCAL_KERNEL) $(MODULE_DEPS_$(2)) $(PREVIOUS_KERNEL_MODULE)
 	@echo BUILDING $(1)
 	@mkdir -p $(LOCAL_KERNEL_PATH)/../modules/$(1)
-	$(hide) $(MAKE) $$(KERNEL_MAKE_OPTIONS) M=$(EXTMOD_SRC)/$(1) V=1 $(ADDITIONAL_ARGS_$(subst /,_,$(1))) modules
+	$(hide) $(KERNEL_MAKE_CMD) $$(KERNEL_MAKE_OPTIONS) M=$(EXTMOD_SRC)/$(1) V=1 $(ADDITIONAL_ARGS_$(subst /,_,$(1))) modules
 	@touch $$(@)
 
 $(LOCAL_KERNEL_PATH)/install_$(2): $(LOCAL_KERNEL_PATH)/build_$(2) $(PREVIOUS_KERNEL_MODULE)
 	@echo INSTALLING $(1)
-	$(hide) $(MAKE) $$(KERNEL_MAKE_OPTIONS) M=$(EXTMOD_SRC)/$(1) INSTALL_MOD_STRIP=1 modules_install
+	$(hide) $(KERNEL_MAKE_CMD) $$(KERNEL_MAKE_OPTIONS) M=$(EXTMOD_SRC)/$(1) INSTALL_MOD_STRIP=1 modules_install
 	@touch $$(@)
 
 $(LOCAL_KERNEL_PATH)/copy_modules: $(LOCAL_KERNEL_PATH)/install_$(2)
@@ -508,18 +512,24 @@ KERNEL_DIFFCONFIG += $(KERNEL_caas_DIFFCONFIG)
 # Specify /dev/mmcblk0 size here
 BOARD_MMC_SIZE = 15335424K
 
+LOCAL_CLANG_PATH = $(CLANG_PREBUILTS_PATH)/host/$(HOST_OS)-x86/$(KERNEL_CLANG_VERSION)/bin
+
+LOCAL_MAKE:= \
+        PATH="$(LOCAL_CLANG_PATH):$(PWD)/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/x86_64-linux/bin:$$PATH" \
+	$(PWD)/prebuilts/build-tools/linux-x86/bin/make
+
 .PHONY: vinput-manager
 vinput-manager:
-	cd device/intel/civ/host/virtual-input-manager && make
+	cd device/intel/civ/host/virtual-input-manager && $(LOCAL_MAKE)
 	cp device/intel/civ/host/virtual-input-manager/vinput-manager $(PRODUCT_OUT)/scripts/
 	cp device/intel/civ/host/virtual-input-manager/sendkey $(PRODUCT_OUT)/scripts/
 
 .PHONY: em-host-utilities
 em-host-utilities:
 	mkdir -p $(PRODUCT_OUT)/scripts/
-	cd device/intel/civ/host/backend/battery/vm_battery_utility && make
+	cd device/intel/civ/host/backend/battery/vm_battery_utility && $(LOCAL_MAKE)
 	cp device/intel/civ/host/backend/battery/vm_battery_utility/batsys $(PRODUCT_OUT)/scripts/
-	cd device/intel/civ/host/backend/thermal/vm_thermal_utility && make
+	cd device/intel/civ/host/backend/thermal/vm_thermal_utility && $(LOCAL_MAKE)
 	cp device/intel/civ/host/backend/thermal/vm_thermal_utility/thermsys $(PRODUCT_OUT)/scripts/
 
 .PHONY: host-pkg
@@ -532,8 +542,11 @@ host-pkg: em-host-utilities vinput-manager
 EVMM_PKG := $(TOP)/$(PRODUCT_OUT)/obj/trusty/evmm_pkg.bin
 EVMM_LK_PKG := $(TOP)/$(PRODUCT_OUT)/obj/trusty/evmm_lk_pkg.bin
 
-LOCAL_MAKE := make
+LOCAL_CLANG_PATH = $(CLANG_PREBUILTS_PATH)/host/$(HOST_OS)-x86/$(KERNEL_CLANG_VERSION)/bin
 
+LOCAL_MAKE := \
+        PATH="$(LOCAL_CLANG_PATH):$(PWD)/prebuilts/gcc/linux-x86/host/x86_64-linux-glibc2.17-4.8/x86_64-linux/bin:$$PATH" \
+        $(PWD)/prebuilts/build-tools/linux-x86/bin/make
 $(EVMM_PKG):
 	@echo "making evmm.."
 	$(hide) (cd $(TOPDIR)$(INTEL_PATH_VENDOR)/fw/evmm && $(TRUSTY_ENV_VAR) $(LOCAL_MAKE))
