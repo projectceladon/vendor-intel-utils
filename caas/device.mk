@@ -265,7 +265,6 @@ PRODUCT_PACKAGES += android.hardware.keymaster@3.0-impl \
                     android.hardware.usb@1.0-service \
                     camera.device@1.0-impl \
                     android.hardware.camera.provider@2.4-impl \
-                    android.hardware.camera.provider@2.4-service \
                     android.hardware.graphics.mapper@4.0-impl.minigbm \
                     android.hardware.graphics.allocator@4.0-service.minigbm \
                     android.hardware.renderscript@1.0-impl \
