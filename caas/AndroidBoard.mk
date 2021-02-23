@@ -590,6 +590,22 @@ $(RECOVERY_VENDOR_LINKS):
 
 ALL_DEFAULT_INSTALLED_MODULES += $(RECOVERY_VENDOR_LINKS)
 ##############################################################
+# Source: device/intel/mixins/groups/vendor-boot/true/AndroidBoard.mk
+##############################################################
+BOARD_PREBUILT_VENDOR_BOOT_DIR := $(TARGET_DEVICE_DIR)/vendor-boot-ramdisk
+INTERNAL_VENDOR_RAMDISK_TARGET := $(call intermediates-dir-for,PACKAGING,vendor-boot)/vendor-ramdisk.cpio.gz
+
+.PHONY: vendor_boot_prebuilt
+vendor_boot_prebuilt:
+	$(hide) rm -rf $(TARGET_VENDOR_RAMDISK_OUT)/*
+	$(hide) mkdir -p $(TARGET_VENDOR_RAMDISK_OUT)/first_stage_ramdisk
+	$(hide) if [ -d "$(BOARD_PREBUILT_VENDOR_BOOT_DIR)" ]; then \
+		$(ACP) -r $(BOARD_PREBUILT_VENDOR_BOOT_DIR)/* $(TARGET_VENDOR_RAMDISK_OUT)/; \
+	fi
+	$(ACP) $(TARGET_DEVICE_DIR)/fstab $(TARGET_VENDOR_RAMDISK_OUT)/first_stage_ramdisk/fstab.$(TARGET_PRODUCT)
+
+$(INTERNAL_VENDOR_RAMDISK_TARGET): vendor_boot_prebuilt
+##############################################################
 # Source: device/intel/mixins/groups/acpio-partition/true/AndroidBoard.mk
 ##############################################################
 ACPIO_OUT := $(PRODUCT_OUT)/acpio
@@ -899,6 +915,7 @@ $(GPTIMAGE_BIN): \
 		--vbmeta $(INSTALLED_VBMETAIMAGE_TARGET) \
 		--super $(INSTALLED_SUPERIMAGE_TARGET).raw \
 		--acpio $(raw_acpio) \
+		--vendor_boot $(INSTALLED_VENDOR_BOOTIMAGE_TARGET) \
 		--config $(raw_config) \
 		--factory $(raw_factory)
 
