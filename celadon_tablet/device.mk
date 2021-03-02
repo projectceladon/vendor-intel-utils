@@ -223,11 +223,7 @@ PRODUCT_PACKAGES += \
 
 #Audio policy engine configuration files
 PRODUCT_COPY_FILES += \
-    $(LOCAL_PATH)/audio/default/policy/audio_policy_criteria.conf:vendor/etc/audio_policy_criteria.conf \
-    $(LOCAL_PATH)/audio/default/policy/audio_policy_engine_product_strategies.xml:vendor/etc/audio_policy_engine_product_strategies.xml \
-    $(LOCAL_PATH)/audio/default/policy/audio_policy_engine_configuration.xml:vendor/etc/audio_policy_engine_configuration.xml \
-    $(LOCAL_PATH)/audio/default/policy/audio_policy_engine_criteria.xml:vendor/etc/audio_policy_engine_criteria.xml \
-    $(LOCAL_PATH)/audio/default/policy/audio_policy_engine_criterion_types.xml.in:vendor/etc/audio_policy_engine_criterion_types.xml.in
+    $(LOCAL_PATH)/audio/default/policy/audio_policy_criteria.conf:vendor/etc/audio_policy_criteria.conf
 
 # Vendor audio configuration files
 PRODUCT_COPY_FILES += \
