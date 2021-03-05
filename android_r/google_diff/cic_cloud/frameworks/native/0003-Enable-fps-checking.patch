@@ -1,0 +1,145 @@
+From 7aafbbd42876eaf4a61a22789ce70d75e59d7231 Mon Sep 17 00:00:00 2001
+From: "Chen, Yu" <yu.y.chen@intel.com>
+Date: Fri, 5 Mar 2021 12:32:14 +0800
+Subject: [PATCH] Enable fps checking
+
+Tracked-On: ACP-1516
+Signed-off-by: Zhiwei Li <zhiwei.li@intel.com>
+---
+ opengl/libs/Android.bp                   |  2 ++
+ opengl/libs/EGL/egl_display.cpp          |  4 +++-
+ opengl/libs/EGL/egl_display.h            |  1 +
+ opengl/libs/EGL/egl_object.cpp           |  2 ++
+ opengl/libs/EGL/egl_object.h             |  2 ++
+ opengl/libs/EGL/egl_platform_entries.cpp | 21 ++++++++++++++++++++-
+ 6 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/opengl/libs/Android.bp b/opengl/libs/Android.bp
+index e8d3684e4..a2e081a8c 100644
+--- a/opengl/libs/Android.bp
++++ b/opengl/libs/Android.bp
+@@ -101,6 +101,8 @@ cc_defaults {
+         "libnativewindow",
+         "libbacktrace",
+         "libbase",
++	"liblog",
++	"libcutils",
+     ],
+     target: {
+         vendor: {
+diff --git a/opengl/libs/EGL/egl_display.cpp b/opengl/libs/EGL/egl_display.cpp
+index 3b1cf712a..8f941ed5d 100644
+--- a/opengl/libs/EGL/egl_display.cpp
++++ b/opengl/libs/EGL/egl_display.cpp
+@@ -38,6 +38,7 @@
+ 
+ #include <android/hardware/configstore/1.0/ISurfaceFlingerConfigs.h>
+ #include <configstore/Utils.h>
++#include <cutils/properties.h>
+ 
+ using namespace android::hardware::configstore;
+ using namespace android::hardware::configstore::V1_0;
+@@ -85,7 +86,7 @@ int egl_get_init_count(EGLDisplay dpy) {
+ egl_display_t egl_display_t::sDisplay[NUM_DISPLAYS];
+ 
+ egl_display_t::egl_display_t() :
+-    magic('_dpy'), finishOnSwap(false), traceGpuCompletion(false), refs(0), eglIsInitialized(false) {
++    magic('_dpy'), finishOnSwap(false), traceGpuCompletion(false), printFPS(0), refs(0), eglIsInitialized(false) {
+ }
+ 
+ egl_display_t::~egl_display_t() {
+@@ -372,6 +373,7 @@ EGLBoolean egl_display_t::initialize(EGLint *major, EGLint *minor) {
+ 
+         finishOnSwap = base::GetBoolProperty("debug.egl.finish", false);
+         traceGpuCompletion = base::GetBoolProperty("debug.egl.traceGpuCompletion", false);
++        printFPS = base::GetIntProperty("debug.egl.printFPS", 0);
+ 
+         // TODO: If device doesn't provide 1.4 or 1.5 then we'll be
+         // changing the behavior from the past where we always advertise
+diff --git a/opengl/libs/EGL/egl_display.h b/opengl/libs/EGL/egl_display.h
+index e117314d7..f90878262 100644
+--- a/opengl/libs/EGL/egl_display.h
++++ b/opengl/libs/EGL/egl_display.h
+@@ -116,6 +116,7 @@ public:
+     bool    finishOnSwap;       // property: debug.egl.finish
+     bool    traceGpuCompletion; // property: debug.egl.traceGpuCompletion
+     bool    hasColorSpaceSupport;
++    int     printFPS;
+ 
+ private:
+     friend class egl_display_ptr;
+diff --git a/opengl/libs/EGL/egl_object.cpp b/opengl/libs/EGL/egl_object.cpp
+index ff4fe2dd9..d1c9897cd 100644
+--- a/opengl/libs/EGL/egl_object.cpp
++++ b/opengl/libs/EGL/egl_object.cpp
+@@ -62,6 +62,8 @@ egl_surface_t::egl_surface_t(egl_display_t* dpy, EGLConfig config, EGLNativeWind
+         config(config),
+         win(win),
+         cnx(cnx),
++        lastSwapTime(0),
++        swapCount(0),    
+         connected(true),
+         colorSpace(colorSpace),
+         egl_smpte2086_dirty(false),
+diff --git a/opengl/libs/EGL/egl_object.h b/opengl/libs/EGL/egl_object.h
+index fb2bdf4c5..59aafe767 100644
+--- a/opengl/libs/EGL/egl_object.h
++++ b/opengl/libs/EGL/egl_object.h
+@@ -155,6 +155,8 @@ private:
+     ANativeWindow* win;
+ public:
+     egl_connection_t const* cnx;
++    int64_t lastSwapTime;
++    int     swapCount;
+ private:
+     bool connected;
+     void disconnect();
+diff --git a/opengl/libs/EGL/egl_platform_entries.cpp b/opengl/libs/EGL/egl_platform_entries.cpp
+index aa24e8ee6..564868f36 100644
+--- a/opengl/libs/EGL/egl_platform_entries.cpp
++++ b/opengl/libs/EGL/egl_platform_entries.cpp
+@@ -35,6 +35,8 @@
+ 
+ #include <cutils/compiler.h>
+ #include <log/log.h>
++#include <cutils/properties.h>
++#include <utils/Timers.h>
+ 
+ #include <condition_variable>
+ #include <deque>
+@@ -1385,7 +1387,7 @@ private:
+ EGLBoolean eglSwapBuffersWithDamageKHRImpl(EGLDisplay dpy, EGLSurface draw,
+         EGLint *rects, EGLint n_rects)
+ {
+-    const egl_display_ptr dp = validate_display(dpy);
++    egl_display_ptr dp = validate_display(dpy);
+     if (!dp) return EGL_FALSE;
+ 
+     SurfaceRef _s(dp.get(), draw);
+@@ -1421,6 +1423,23 @@ EGLBoolean eglSwapBuffersWithDamageKHRImpl(EGLDisplay dpy, EGLSurface draw,
+         }
+     }
+ 
++    if(dp->printFPS > 0) {
++        int frameCount = dp->printFPS;
++        s->swapCount++;
++        if(s->swapCount % frameCount == 0) {
++            int64_t currentNS = systemTime(SYSTEM_TIME_MONOTONIC);
++            int64_t lastNS = s->lastSwapTime;
++
++            // ALOGI("currentNS = %ld, lastNS = %ld, deltaMS = %f, frameCount = %d", currentNS, lastNS, (currentNS - lastNS) / 1000000.0, frameCount);
++
++            float deltaMS = (currentNS - lastNS) / 1000000.0;
++            float fps = 1000.0 * frameCount / deltaMS;
++            ALOGE("EGLSurface %p fps = %.2f", draw, fps);
++
++            s->lastSwapTime = currentNS;
++        }
++    }
++
+     if (n_rects == 0) {
+         return s->cnx->egl.eglSwapBuffers(dp->disp.dpy, s->surface);
+     }
+-- 
+2.29.0
+
