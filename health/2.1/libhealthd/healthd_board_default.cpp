@@ -21,7 +21,7 @@
 #include "battery_notifypkt.h"
 #include <cutils/klog.h>
 #include <unistd.h>
-#define HLOG_TAG "android.hardware.health@2.0-impl.intel"
+#define HLOG_TAG "android.hardware.health@2.1-impl.intel"
 #define KLOG_LEVEL 6
 #define HEALTH_PORT 14196
 
@@ -175,7 +175,7 @@ int healthd_board_battery_update(struct android::BatteryProperties *props)
 	props->batteryHealth = android::BATTERY_HEALTH_UNKNOWN;
 	props->batteryLevel = 0;
 	props->batteryChargeCounter= 1000000;
-	props->batteryCurrent= 1000000;
+	props->batteryCurrent= 0;
 	props->chargerAcOnline = true;
 	props->chargerUsbOnline= false;
 	props->chargerWirelessOnline = false;
