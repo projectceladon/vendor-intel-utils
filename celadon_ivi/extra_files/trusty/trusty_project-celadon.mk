@@ -18,7 +18,8 @@ $(INSTALLED_TOS_IMAGE_TARGET): $(LK_ELF) $(EVMM_LK_PKG) $(MKBOOTIMG) $(AVBTOOL)
 	$(hide) $(AVBTOOL) add_hash_footer \
 		--image $@ \
 		--partition_size $(BOARD_TOSIMAGE_PARTITION_SIZE) \
-		--partition_name tos
+		--partition_name tos \
+		--algorithm $(BOARD_AVB_ALGORITHM) --key $(BOARD_AVB_KEY_PATH)
 	$(hide) mkdir -p $(INTEL_PATH_PREBUILTS_OUT)
 	$(hide) (cp $@ $(INTEL_PATH_PREBUILTS_OUT))
 else # BOARD_AVB_ENABLE == false
