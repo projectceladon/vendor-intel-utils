@@ -92,6 +92,8 @@ public class Storage {
             Location location, int orientation, ExifInterface exif, byte[] jpeg, int width,
             int height) throws IOException {
 
+Log.e(TAG, "shiva addImage title"+title);
+
         return addImage(resolver, title, date, location, orientation, exif, jpeg, width, height,
               FilmstripItemData.MIME_TYPE_JPEG);
     }
@@ -123,6 +125,9 @@ public class Storage {
 
         String path = generateFilepath(title, mimeType);
         long fileLength = writeFile(path, data, exif);
+Log.e(TAG, "shiva addImage title"+title);
+Log.e(TAG, "shiva addImage path"+path);
+
         if (fileLength >= 0) {
             return addImageToMediaStore(resolver, title, date, location, orientation, fileLength,
                     path, width, height, mimeType);
@@ -149,6 +154,9 @@ public class Storage {
     public static Uri addImageToMediaStore(ContentResolver resolver, String title, long date,
             Location location, int orientation, long jpegLength, String path, int width, int height,
             String mimeType) {
+Log.e(TAG, "shiva addImage title"+title);
+Log.e(TAG, "shiva addImageToMediaStore title"+path);
+
         // Insert into MediaStore.
         ContentValues values =
                 getContentValuesForData(title, date, location, orientation, jpegLength, path, width,
@@ -175,6 +183,10 @@ public class Storage {
 
         File file = new File(path);
         long dateModifiedSeconds = TimeUnit.MILLISECONDS.toSeconds(file.lastModified());
+
+Log.e(TAG, "shiva getContentValuesForDate title"+title);
+Log.e(TAG, "shiva getContentValuesForData title"+path);
+
 
         ContentValues values = new ContentValues(11);
         values.put(ImageColumns.TITLE, title);
@@ -204,6 +216,8 @@ public class Storage {
      */
     public static Uri addPlaceholder(Bitmap placeholder) {
         Uri uri = generateUniquePlaceholderUri();
+Log.e(TAG, "shiva addPlaceHolder title"+uri);
+
         replacePlaceholder(uri, placeholder);
         return uri;
     }
@@ -226,7 +240,7 @@ public class Storage {
      * @return A URI used to reference this placeholder
      */
     public static void replacePlaceholder(Uri uri, Bitmap placeholder) {
-        Log.v(TAG, "session bitmap cache size: " + sSessionsToPlaceholderBitmap.size());
+        Log.e(TAG, "session bitmap cache size: " + sSessionsToPlaceholderBitmap.size());
         Point size = new Point(placeholder.getWidth(), placeholder.getHeight());
         sSessionsToSizes.put(uri, size);
         sSessionsToPlaceholderBitmap.put(uri, placeholder);
@@ -243,6 +257,8 @@ public class Storage {
     @Nonnull
     public static Uri addEmptyPlaceholder(@Nonnull Size size) {
         Uri uri = generateUniquePlaceholderUri();
+Log.e(TAG, "shiva addEmptyPlaceHolder title"+uri);
+
         sSessionsToSizes.put(uri, new Point(size.getWidth(), size.getHeight()));
         sSessionsToPlaceholderBitmap.remove(uri);
         Integer currentVersion = sSessionsToPlaceholderVersions.get(uri);
@@ -270,6 +286,10 @@ public class Storage {
            Location location, int orientation, ExifInterface exif,
            byte[] jpeg, int width, int height, String mimeType) throws IOException {
         String path = generateFilepath(title, mimeType);
+Log.e(TAG, "shiva update Image"+title);
+Log.e(TAG, "shiv update image"+path);
+
+
         writeFile(path, jpeg, exif);
         return updateImage(imageUri, resolver, title, date, location, orientation, jpeg.length, path,
                 width, height, mimeType);
@@ -402,6 +422,8 @@ public class Storage {
 
 
         Uri resultUri = imageUri;
+Log.e(TAG, "shiva updateImage resultUri"+resultUri);
+
         if (Storage.isSessionUri(imageUri)) {
             // If this is a session uri, then we need to add the image
             resultUri = addImageToMediaStore(resolver, title, date, location, orientation,
@@ -412,6 +434,8 @@ public class Storage {
             // Update the MediaStore
             resolver.update(imageUri, values, null, null);
         }
+Log.e(TAG, "shiva updateImage resultUri"+resultUri);
+
         return resultUri;
     }
 
