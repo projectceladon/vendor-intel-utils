@@ -46,6 +46,10 @@ apply_patch() {
     previous_project=$current_project
 
     cd $top_dir/$current_project
+    if [ $? -ne 0 ]; then
+        return
+    fi
+
     remote=`git remote -v | grep "https://android.googlesource.com/"`
     if [[ -z "$remote" ]]; then
       default_revision="remotes/m/master"
@@ -87,6 +91,9 @@ function fpnat() # find patch files and apply them
     # either aosp_diff/preliminary or aosp_diff/${TARGET_PRODUCT}
     # and bsp_diff/preliminary bsp_diff/${TARGET_PRODUCT} directories.
     cd ${patch_top_dir}
+    if [ $? -ne 0 ]; then
+        fi
+
     patch_file_number=`find . -iname "*.patch" |wc -l`
     echo "Path: `basename ${patch_top_dir}` has ${patch_file_number} patch file(s) to apply!"
     if [[ ${patch_file_number} != 0 ]];then
