@@ -30,6 +30,15 @@ previous_project=""
 conflict=""
 conflict_list=""
 applied_already=""
+git_select=""
+
+usage() {
+	echo "USAGE"
+	echo "Run below cmd to apply patches only to a specific repo:"
+	echo "$ TARGET_PRODUCT=<name> vendor/intel/utils/autopatch.sh <repo name>"
+	echo "OR just run to apply patches to all repos"
+	echo "$ TARGET_PRODUCT=<name> vendor/intel/utils/autopatch.sh"
+}
 
 apply_patch() {
 
@@ -47,7 +56,7 @@ apply_patch() {
 
     cd $top_dir/$current_project
     if [ $? -ne 0 ]; then
-        return
+        continue
     fi
 
     remote=`git remote -v | grep "https://android.googlesource.com/"`
@@ -90,15 +99,16 @@ function fpnat() # find patch files and apply them
     # arg #1 should be the .patch files' top directory,
     # either aosp_diff/preliminary or aosp_diff/${TARGET_PRODUCT}
     # and bsp_diff/preliminary bsp_diff/${TARGET_PRODUCT} directories.
+    echo "fpnat cd " ${patch_top_dir}
     cd ${patch_top_dir}
     if [ $? -ne 0 ]; then
 	return
     fi
 
-    patch_file_number=`find . -iname "*.patch" |wc -l`
+    patch_file_number=`find ./$git_select -iname "*.patch" 2>/dev/null |wc -l`
     echo "Path: `basename ${patch_top_dir}` has ${patch_file_number} patch file(s) to apply!"
     if [[ ${patch_file_number} != 0 ]];then
-        patch_list=`find * -iname "*.patch" | sort -u`
+        patch_list=`find ./$git_select -iname "*.patch" 2>/dev/null | sort -u`
         apply_patch "${patch_list}" "${patch_top_dir}"
         if [[ $? != 0 ]]; then
             echo "Apply ${patch_top_dir} patches failure!"
@@ -106,6 +116,21 @@ function fpnat() # find patch files and apply them
     fi
     unset patch_list patch_top_dir
 }
+
+if [[ $# -eq 1 ]]; then
+	if [[ -d $top_dir/$1 ]]; then
+		git_select="$1"
+	else
+		echo "$1 - this git doesn't exist"
+		usage
+		exit -1
+	fi
+fi
+
+if [[ $# -gt 1 || $# -lt 0 ]]; then
+	usage
+	exit -1
+fi
 
 if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
     echo -e "\nApply utils/aosp_diff/preliminary patches:"
