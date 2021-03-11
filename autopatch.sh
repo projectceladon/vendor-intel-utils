@@ -99,7 +99,6 @@ function fpnat() # find patch files and apply them
     # arg #1 should be the .patch files' top directory,
     # either aosp_diff/preliminary or aosp_diff/${TARGET_PRODUCT}
     # and bsp_diff/preliminary bsp_diff/${TARGET_PRODUCT} directories.
-    echo "fpnat cd " ${patch_top_dir}
     cd ${patch_top_dir}
     if [ $? -ne 0 ]; then
 	return
