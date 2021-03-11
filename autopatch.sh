@@ -92,7 +92,8 @@ function fpnat() # find patch files and apply them
     # and bsp_diff/preliminary bsp_diff/${TARGET_PRODUCT} directories.
     cd ${patch_top_dir}
     if [ $? -ne 0 ]; then
-        fi
+	return
+    fi
 
     patch_file_number=`find . -iname "*.patch" |wc -l`
     echo "Path: `basename ${patch_top_dir}` has ${patch_file_number} patch file(s) to apply!"
