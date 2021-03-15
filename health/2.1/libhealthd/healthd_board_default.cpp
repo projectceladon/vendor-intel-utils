@@ -174,17 +174,8 @@ int healthd_board_battery_update(struct android::BatteryProperties *props)
 	props->batteryStatus = android::BATTERY_STATUS_UNKNOWN;
 	props->batteryHealth = android::BATTERY_HEALTH_UNKNOWN;
 	props->batteryLevel = 0;
-	props->batteryChargeCounter= 1000000;
-	props->batteryCurrent= 0;
-	props->chargerAcOnline = true;
-	props->chargerUsbOnline= false;
-	props->chargerWirelessOnline = false;
-	props->maxChargingCurrent= 2500000;
-	props->maxChargingVoltage= 4300000;
 	props->batteryPresent= false;
-	props->batteryVoltage= 1200000;
-	props->batteryTemperature= 25;
-	props->batteryFullCharge= 4200000;
+	props->chargerAcOnline = true;
     }	    
     return 0;
 }
