@@ -1101,7 +1101,7 @@ public class VideoModule extends CameraModule
 
     // Prepares media recorder.
     private void initializeRecorder() {
-        Log.i(TAG, "initializeRecorder: " + Thread.currentThread());
+        Log.i(TAG, "shiva initializeRecorder: " + Thread.currentThread());
         // If the mCameraDevice is null, then this activity is going to finish
         if (mCameraDevice == null) {
             Log.w(TAG, "null camera proxy, not recording");
@@ -1120,6 +1120,7 @@ public class VideoModule extends CameraModule
                     mVideoFileDescriptor =
                             mContentResolver.openFileDescriptor(saveUri, "rw");
                     mCurrentVideoUri = saveUri;
+Log.i(TAG,"shiva mCurrentVideoUri"+mCurrentVideoUri);
                 } catch (java.io.FileNotFoundException ex) {
                     // invalid uri
                     Log.e(TAG, ex.toString());
@@ -1158,11 +1159,11 @@ public class VideoModule extends CameraModule
             mAudioManager.getDevices(AudioManager.GET_DEVICES_INPUTS);
         for (AudioDeviceInfo audioDeviceInfo : deviceList) {
             if (audioDeviceInfo.getType() == AudioDeviceInfo.TYPE_USB_DEVICE) {
-                Log.d(TAG, "Setting preferred device to USB_DEVIVE");
+                Log.d(TAG, "shiva Setting preferred device to USB_DEVIVE");
                 mMediaRecorder.setPreferredDevice(audioDeviceInfo);
                 break;
             } else if (audioDeviceInfo.getType() == AudioDeviceInfo.TYPE_USB_HEADSET) {
-                Log.d(TAG, "Setting preferred device to TYPE_USB_HEADSET");
+                Log.d(TAG, "shiva Setting preferred device to TYPE_USB_HEADSET");
                 mMediaRecorder.setPreferredDevice(audioDeviceInfo);
                 break;
             }
@@ -1172,9 +1173,14 @@ public class VideoModule extends CameraModule
         // Try Uri in the intent first. If it doesn't exist, use our own
         // instead.
         if (mVideoFileDescriptor != null) {
+Log.i(TAG,"shiva mVideoFileDesc NULL");
             mMediaRecorder.setOutputFile(mVideoFileDescriptor.getFileDescriptor());
         } else {
+Log.i(TAG," shiva mVideoFileDesc not null"+mVideoFilename);
             generateVideoFilename(mProfile.fileFormat);
+Uri videoUri = Uri.fromFile(new File( mVideoFilename));
+Log.i(TAG," shiva mVideoFileDesc not null "+videoUri);
+
             mMediaRecorder.setOutputFile(mVideoFilename);
         }
 

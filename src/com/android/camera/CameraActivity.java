@@ -160,7 +160,7 @@ import com.bumptech.glide.MemoryCategory;
 import com.bumptech.glide.load.DecodeFormat;
 import com.bumptech.glide.load.engine.executor.FifoPriorityThreadPoolExecutor;
 import com.android.camera.exif.ExifInterface;
-
+import android.os.StrictMode;
 import com.google.common.base.Optional;
 import com.google.common.logging.eventprotos;
 import com.google.common.logging.eventprotos.ForegroundEvent.ForegroundSource;
@@ -1439,6 +1439,9 @@ public class CameraActivity extends QuickActivity
         mSoundPlayer = new SoundPlayer(mAppContext);
         mFeatureConfig = OneCameraFeatureConfigCreator.createDefault(getContentResolver(),
                 getServices().getMemoryManager());
+        StrictMode.VmPolicy.Builder builder = new StrictMode.VmPolicy.Builder();
+        StrictMode.setVmPolicy(builder.build());
+
         mFatalErrorHandler = new FatalErrorHandlerImpl(this);
         checkPermissions();
         if (!mHasCriticalPermissions) {
