@@ -72,7 +72,6 @@ hdcpd: true
 treble: true
 swap: zram_auto(size=1073741824,swappiness=true,hardware=gordon_peak,disk_based_swap=true)
 art-config: true
-psdapp: true
 debugfs: true
 disk-encryption: true
 factory-scripts: true

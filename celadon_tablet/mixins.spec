@@ -68,7 +68,6 @@ neuralnetworks: true
 treble: true
 swap: zram_auto(size=1073741824,swappiness=true,hardware=gordon_peak)
 art-config: true
-psdapp: true
 debugfs: true
 disk-encryption: true
 factory-scripts: true
