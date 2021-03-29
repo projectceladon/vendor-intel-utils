@@ -1,0 +1,237 @@
+From 0f51d0d3b3c4eb97ea7610a2a29650265b73f8fb Mon Sep 17 00:00:00 2001
+From: "Yuanzhe, Liu" <yuanzhe.liu@intel.com>
+Date: Mon, 22 Mar 2021 15:06:22 +0800
+Subject: [PATCH] Porting light HIDL implement to AIDL side
+
+Change-Id: I3ae6cb2406fd219e98564a3c359674e30bd87d17
+Tracked-On: OAM-95912
+Signed-Off-By: Liu, Yuanzhe <yuanzhe.liu@intel.com>
+---
+ light/aidl/default/Android.bp |   3 +
+ light/aidl/default/Lights.cpp | 124 ++++++++++++++++++++++++++++++++--
+ light/aidl/default/Lights.h   |  15 +++-
+ light/aidl/default/main.cpp   |   6 +-
+ 4 files changed, 138 insertions(+), 10 deletions(-)
+
+diff --git a/light/aidl/default/Android.bp b/light/aidl/default/Android.bp
+index ae3f4630d..510e76354 100644
+--- a/light/aidl/default/Android.bp
++++ b/light/aidl/default/Android.bp
+@@ -7,6 +7,9 @@ cc_binary {
+     shared_libs: [
+         "libbase",
+         "libbinder_ndk",
++        "liblog",
++        "libhardware",
++        "libutils",
+         "android.hardware.light-ndk_platform",
+     ],
+     srcs: [
+diff --git a/light/aidl/default/Lights.cpp b/light/aidl/default/Lights.cpp
+index 74747d57b..580928c32 100644
+--- a/light/aidl/default/Lights.cpp
++++ b/light/aidl/default/Lights.cpp
+@@ -14,25 +14,137 @@
+  * limitations under the License.
+  */
+ 
+-#include "Lights.h"
++#define LOG_TAG "light"
++
++#include <log/log.h>
++
++#include <stdio.h>
+ 
+-#include <android-base/logging.h>
++#include "Lights.h"
+ 
+ namespace aidl {
+ namespace android {
+ namespace hardware {
+ namespace light {
++namespace impl {
++namespace example {
++
++static_assert(LIGHT_FLASH_NONE == static_cast<int>(FlashMode::NONE),
++    "Flash::NONE must match legacy value.");
++static_assert(LIGHT_FLASH_TIMED == static_cast<int>(FlashMode::TIMED),
++    "Flash::TIMED must match legacy value.");
++static_assert(LIGHT_FLASH_HARDWARE == static_cast<int>(FlashMode::HARDWARE),
++    "Flash::HARDWARE must match legacy value.");
++
++static_assert(BRIGHTNESS_MODE_USER == static_cast<int>(BrightnessMode::USER),
++    "Brightness::USER must match legacy value.");
++static_assert(BRIGHTNESS_MODE_SENSOR == static_cast<int>(BrightnessMode::SENSOR),
++    "Brightness::SENSOR must match legacy value.");
++static_assert(BRIGHTNESS_MODE_LOW_PERSISTENCE ==
++    static_cast<int>(BrightnessMode::LOW_PERSISTENCE),
++    "Brightness::LOW_PERSISTENCE must match legacy value.");
++
++Lights::Lights(std::map<int, light_device_t*> &&lights)
++  : mLights(std::move(lights)) {}
+ 
+ ndk::ScopedAStatus Lights::setLightState(int id, const HwLightState& state) {
+-    LOG(INFO) << "Lights setting state for id=" << id << " to color " << std::hex << state.color;
+-    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    auto it = mLights.find(id);
++
++    if (it == mLights.end()) {
++        return ndk::ScopedAStatus::fromStatus(STATUS_BAD_VALUE);
++    }
++
++    light_device_t* hwLight = it->second;
++
++    light_state_t legacyState {
++        .color = (unsigned int)state.color,
++        .flashMode = static_cast<int>(state.flashMode),
++        .flashOnMS = state.flashOnMs,
++        .flashOffMS = state.flashOffMs,
++        .brightnessMode = static_cast<int>(state.brightnessMode),
++    };
++
++    int ret = hwLight->set_light(hwLight, &legacyState);
++
++    switch (ret) {
++        case -ENOSYS:
++            return ndk::ScopedAStatus::fromStatus(STATUS_BAD_VALUE);
++        case 0:
++            return ndk::ScopedAStatus::ok();
++        default:
++            return ndk::ScopedAStatus::fromStatus(STATUS_UNKNOWN_ERROR);
++    }
+ }
+ 
+-ndk::ScopedAStatus Lights::getLights(std::vector<HwLight>* /*lights*/) {
+-    LOG(INFO) << "Lights reporting supported lights";
++ndk::ScopedAStatus Lights::getLights(std::vector<HwLight>* types/*lights*/) {
++    for(auto const &pair : mLights) {
++        HwLight light = HwLight();
++        light.id = pair.first;
++        light.type = static_cast<LightType>(pair.first);
++        (*types).push_back(light);
++    }
+     return ndk::ScopedAStatus::ok();
+ }
+ 
++const static std::map<LightType, const char*> kLogicalLights = {
++    {LightType::BACKLIGHT,     LIGHT_ID_BACKLIGHT},
++    {LightType::KEYBOARD,      LIGHT_ID_KEYBOARD},
++    {LightType::BUTTONS,       LIGHT_ID_BUTTONS},
++    {LightType::BATTERY,       LIGHT_ID_BATTERY},
++    {LightType::NOTIFICATIONS, LIGHT_ID_NOTIFICATIONS},
++    {LightType::ATTENTION,     LIGHT_ID_ATTENTION},
++    {LightType::BLUETOOTH,     LIGHT_ID_BLUETOOTH},
++    {LightType::WIFI,          LIGHT_ID_WIFI}
++};
++
++light_device_t* getLightDevice(const char* name) {
++    light_device_t* lightDevice;
++    const hw_module_t* hwModule = NULL;
++
++    int ret = hw_get_module (LIGHTS_HARDWARE_MODULE_ID, &hwModule);
++    if (ret == 0) {
++        ret = hwModule->methods->open(hwModule, name,
++            reinterpret_cast<hw_device_t**>(&lightDevice));
++        if (ret != 0) {
++            ALOGE("light_open %s %s failed: %d", LIGHTS_HARDWARE_MODULE_ID, name, ret);
++        }
++    } else {
++        ALOGE("hw_get_module %s %s failed: %d", LIGHTS_HARDWARE_MODULE_ID, name, ret);
++    }
++
++    if (ret == 0) {
++        return lightDevice;
++    } else {
++        ALOGE("Light passthrough failed to load legacy HAL.");
++        return nullptr;
++    }
++}
++
++std::map<int, light_device_t*> AIDL_FETCH_ILight(const char* /* name */) {
++    std::map<int, light_device_t*> lights;
++
++    for(auto const &pair : kLogicalLights) {
++        int type = static_cast<int>(pair.first);
++        const char* name = pair.second;
++
++        light_device_t* light = getLightDevice(name);
++
++        if (light != nullptr) {
++            lights[type] = light;
++        }
++    }
++
++    if (lights.size() == 0) {
++        // Log information, but still return new Light.
++        // Some devices may not have any lights.
++        ALOGI("Could not open any lights.");
++    }
++
++    return lights;
++}
++
++}  // namespace example
++}  // namespace impl
+ }  // namespace light
+ }  // namespace hardware
+ }  // namespace android
+diff --git a/light/aidl/default/Lights.h b/light/aidl/default/Lights.h
+index 8cba5a1cf..e6bec4d6c 100644
+--- a/light/aidl/default/Lights.h
++++ b/light/aidl/default/Lights.h
+@@ -17,18 +17,31 @@
+ #pragma once
+ 
+ #include <aidl/android/hardware/light/BnLights.h>
++#include <hardware/lights.h>
++#include <map>
+ 
+ namespace aidl {
+ namespace android {
+ namespace hardware {
+ namespace light {
++namespace impl {
++namespace example {
+ 
+-// Default implementation that reports no supported lights.
+ class Lights : public BnLights {
++   public:
++    Lights(std::map<int, light_device_t*> &&lights);
++
+     ndk::ScopedAStatus setLightState(int id, const HwLightState& state) override;
+     ndk::ScopedAStatus getLights(std::vector<HwLight>* types) override;
++
++   private:
++    std::map<int, light_device_t*> mLights;
+ };
+ 
++extern std::map<int, light_device_t*> AIDL_FETCH_ILight(const char* name);
++
++}  // namespace example
++}  // namespace impl
+ }  // namespace light
+ }  // namespace hardware
+ }  // namespace android
+diff --git a/light/aidl/default/main.cpp b/light/aidl/default/main.cpp
+index a860bf4a9..e3ba04864 100644
+--- a/light/aidl/default/main.cpp
++++ b/light/aidl/default/main.cpp
+@@ -20,12 +20,12 @@
+ #include <android/binder_manager.h>
+ #include <android/binder_process.h>
+ 
+-using ::aidl::android::hardware::light::Lights;
++using ::aidl::android::hardware::light::impl::example::Lights;
+ 
+ int main() {
+     ABinderProcess_setThreadPoolMaxThreadCount(0);
+-    std::shared_ptr<Lights> lights = ndk::SharedRefBase::make<Lights>();
+-
++    std::shared_ptr<Lights> lights = ndk::SharedRefBase::make<Lights>(
++        aidl::android::hardware::light::impl::example::AIDL_FETCH_ILight(nullptr));
+     const std::string instance = std::string() + Lights::descriptor + "/default";
+     binder_status_t status = AServiceManager_addService(lights->asBinder().get(), instance.c_str());
+     CHECK(status == STATUS_OK);
+-- 
+2.21.0
+
