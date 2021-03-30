@@ -591,11 +591,6 @@ BOARD_SEPOLICY_M4DEFS += module_swap=true
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/low-mem
 BOARD_SEPOLICY_M4DEFS += module_low-mem=true
 ##############################################################
-# Source: device/intel/mixins/groups/psdapp/true/BoardConfig.mk
-##############################################################
-BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/psdapp
-TARGET_FS_CONFIG_GEN += $(INTEL_PATH_COMMON)/psdapp/filesystem_config/config.fs
-##############################################################
 # Source: device/intel/mixins/groups/debugfs/true/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/debugfs
