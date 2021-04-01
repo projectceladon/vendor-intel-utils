@@ -90,7 +90,9 @@ PRODUCT_PACKAGES += \
     wifilogd \
     wpa_supplicant \
     wpa_cli \
-    iw
+    iw \
+    TetheringConfigOverlay \
+    TetheringConfigOverlayGsi
 
 PRODUCT_PACKAGES += \
     android.hardware.wifi@1.0-service
