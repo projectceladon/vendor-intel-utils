@@ -589,9 +589,7 @@ endif
 # Source: device/intel/mixins/groups/default-drm/true/product.mk
 ##############################################################
 #only enable default drm service
-PRODUCT_PACKAGES += android.hardware.drm@1.0-service \
-                    android.hardware.drm@1.0-impl \
-                    android.hardware.drm@1.3-service.clearkey
+PRODUCT_PACKAGES += android.hardware.drm@1.3-service.clearkey
 
 ##############################################################
 # Source: device/intel/mixins/groups/thermal/thermal-daemon/product.mk
