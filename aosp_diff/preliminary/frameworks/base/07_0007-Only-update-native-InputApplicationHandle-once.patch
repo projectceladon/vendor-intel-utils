@@ -1,0 +1,248 @@
+From 80ae0c78f8f69bba269f8cb8d2efaaf3710fcafc Mon Sep 17 00:00:00 2001
+From: Riddle Hsu <riddlehsu@google.com>
+Date: Thu, 3 Dec 2020 15:57:36 +0800
+Subject: [PATCH] Only update native InputApplicationHandle once
+
+This makes sure the write operation (NativeInputApplicationHandle
+::updateInfo) is always called from window manager side once when
+calling SurfaceControl.Transaction#setInputWindowInfo or
+InputManagerService#setFocusedApplication. If the info of input
+application handle is changed, a new instance will be created.
+That avoids the race condition of reading the fields of the same
+InputApplicationInfo instance from input dispatcher.
+
+Bug: 171857140
+Bug: 161334769
+Bug: 174768985
+Test: WindowInputTests
+
+Merged-In: Ief84bbe6e6fa4da5309912059904932ccf775b75
+Merged-In: I70de9835c7699fe6f56fc3655b0fee5c317ecc3a
+Change-Id: I70de9835c7699fe6f56fc3655b0fee5c317ecc3a
+(cherry picked from commit a68473ce978f3e3ad73bd127cdcfcf663d9fd4d9)
+---
+ .../android/view/InputApplicationHandle.java   | 10 +++++++---
+ core/java/android/view/InputWindowHandle.java  |  2 +-
+ ...d_hardware_input_InputApplicationHandle.cpp |  5 +++++
+ .../com/android/server/wm/ActivityRecord.java  | 18 ++++++++++++++++--
+ .../java/com/android/server/wm/DragState.java  |  6 ++----
+ .../android/server/wm/InputConsumerImpl.java   |  6 ++----
+ .../com/android/server/wm/InputMonitor.java    | 14 ++++----------
+ .../com/android/server/wm/TaskPositioner.java  |  6 ++----
+ .../com/android/server/wm/WindowState.java     |  3 ++-
+ 9 files changed, 41 insertions(+), 29 deletions(-)
+
+diff --git a/core/java/android/view/InputApplicationHandle.java b/core/java/android/view/InputApplicationHandle.java
+index 3d05e2a0b9f6..9b96f7fd1c5c 100644
+--- a/core/java/android/view/InputApplicationHandle.java
++++ b/core/java/android/view/InputApplicationHandle.java
+@@ -16,6 +16,7 @@
+
+ package android.view;
+
++import android.annotation.NonNull;
+ import android.os.IBinder;
+
+ /**
+@@ -31,17 +32,20 @@ public final class InputApplicationHandle {
+     private long ptr;
+
+     // Application name.
+-    public String name;
++    public final @NonNull String name;
+
+     // Dispatching timeout.
+-    public long dispatchingTimeoutNanos;
++    public final long dispatchingTimeoutNanos;
+
+     public final IBinder token;
+
+     private native void nativeDispose();
+
+-    public InputApplicationHandle(IBinder token) {
++    public InputApplicationHandle(@NonNull IBinder token, @NonNull String name,
++            long dispatchingTimeoutNanos) {
+         this.token = token;
++        this.name = name;
++        this.dispatchingTimeoutNanos = dispatchingTimeoutNanos;
+     }
+
+     public InputApplicationHandle(InputApplicationHandle handle) {
+diff --git a/core/java/android/view/InputWindowHandle.java b/core/java/android/view/InputWindowHandle.java
+index 5f74b2a510ca..71d26b8880f7 100644
+--- a/core/java/android/view/InputWindowHandle.java
++++ b/core/java/android/view/InputWindowHandle.java
+@@ -36,7 +36,7 @@ public final class InputWindowHandle {
+     private long ptr;
+
+     // The input application handle.
+-    public final InputApplicationHandle inputApplicationHandle;
++    public InputApplicationHandle inputApplicationHandle;
+
+     // The token associates input data with a window and its input channel. The client input
+     // channel and the server input channel will both contain this token.
+diff --git a/core/jni/android_hardware_input_InputApplicationHandle.cpp b/core/jni/android_hardware_input_InputApplicationHandle.cpp
+index 71edfd553e7e..c1ecae861827 100644
+--- a/core/jni/android_hardware_input_InputApplicationHandle.cpp
++++ b/core/jni/android_hardware_input_InputApplicationHandle.cpp
+@@ -58,6 +58,11 @@ bool NativeInputApplicationHandle::updateInfo() {
+     if (!obj) {
+         return false;
+     }
++    if (mInfo.token.get() != nullptr) {
++        // The java fields are immutable, so it doesn't need to update again.
++        env->DeleteLocalRef(obj);
++        return true;
++    }
+
+     mInfo.name = getStringField(env, obj, gInputApplicationHandleClassInfo.name, "<null>");
+
+diff --git a/services/core/java/com/android/server/wm/ActivityRecord.java b/services/core/java/com/android/server/wm/ActivityRecord.java
+index 1a13d0fc64c4..dc4caf8de0fd 100644
+--- a/services/core/java/com/android/server/wm/ActivityRecord.java
++++ b/services/core/java/com/android/server/wm/ActivityRecord.java
+@@ -416,7 +416,7 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+     // mOccludesParent field.
+     final boolean hasWallpaper;
+     // Input application handle used by the input dispatcher.
+-    final InputApplicationHandle mInputApplicationHandle;
++    private InputApplicationHandle mInputApplicationHandle;
+
+     final int launchedFromPid; // always the pid who started the activity.
+     final int launchedFromUid; // always the uid who started the activity.
+@@ -1501,7 +1501,6 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+         info = aInfo;
+         mUserId = UserHandle.getUserId(info.applicationInfo.uid);
+         packageName = info.applicationInfo.packageName;
+-        mInputApplicationHandle = new InputApplicationHandle(appToken);
+         intent = _intent;
+
+         // If the class name in the intent doesn't match that of the target, this is probably an
+@@ -1686,6 +1685,21 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+         return lockTaskLaunchMode;
+     }
+
++    @NonNull InputApplicationHandle getInputApplicationHandle(boolean update) {
++        if (mInputApplicationHandle == null) {
++            mInputApplicationHandle = new InputApplicationHandle(appToken, toString(),
++                    mInputDispatchingTimeoutNanos);
++        } else if (update) {
++            final String name = toString();
++            if (mInputDispatchingTimeoutNanos != mInputApplicationHandle.dispatchingTimeoutNanos
++                    || !name.equals(mInputApplicationHandle.name)) {
++                mInputApplicationHandle = new InputApplicationHandle(appToken, name,
++                        mInputDispatchingTimeoutNanos);
++            }
++        }
++        return mInputApplicationHandle;
++    }
++
+     @Override
+     ActivityRecord asActivityRecord() {
+         // I am an activity record!
+diff --git a/services/core/java/com/android/server/wm/DragState.java b/services/core/java/com/android/server/wm/DragState.java
+index f840d9273f60..7b562a9f4446 100644
+--- a/services/core/java/com/android/server/wm/DragState.java
++++ b/services/core/java/com/android/server/wm/DragState.java
+@@ -269,10 +269,8 @@ class DragState {
+             mInputEventReceiver = new DragInputEventReceiver(mClientChannel,
+                     mService.mH.getLooper(), mDragDropController);
+
+-            mDragApplicationHandle = new InputApplicationHandle(new Binder());
+-            mDragApplicationHandle.name = "drag";
+-            mDragApplicationHandle.dispatchingTimeoutNanos =
+-                    WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS;
++            mDragApplicationHandle = new InputApplicationHandle(new Binder(), "drag",
++                    WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS);
+
+             mDragWindowHandle = new InputWindowHandle(mDragApplicationHandle,
+                     display.getDisplayId());
+diff --git a/services/core/java/com/android/server/wm/InputConsumerImpl.java b/services/core/java/com/android/server/wm/InputConsumerImpl.java
+index 3b39b6ba18c5..19185736fc89 100644
+--- a/services/core/java/com/android/server/wm/InputConsumerImpl.java
++++ b/services/core/java/com/android/server/wm/InputConsumerImpl.java
+@@ -67,10 +67,8 @@ class InputConsumerImpl implements IBinder.DeathRecipient {
+         }
+         mService.mInputManager.registerInputChannel(mServerChannel);
+
+-        mApplicationHandle = new InputApplicationHandle(new Binder());
+-        mApplicationHandle.name = name;
+-        mApplicationHandle.dispatchingTimeoutNanos =
+-                WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS;
++        mApplicationHandle = new InputApplicationHandle(new Binder(), name,
++                WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS);
+
+         mWindowHandle = new InputWindowHandle(mApplicationHandle, displayId);
+         mWindowHandle.name = name;
+diff --git a/services/core/java/com/android/server/wm/InputMonitor.java b/services/core/java/com/android/server/wm/InputMonitor.java
+index 3663ee14ea99..8366fde24d54 100644
+--- a/services/core/java/com/android/server/wm/InputMonitor.java
++++ b/services/core/java/com/android/server/wm/InputMonitor.java
+@@ -43,7 +43,6 @@ import android.os.Trace;
+ import android.os.UserHandle;
+ import android.util.ArrayMap;
+ import android.util.Slog;
+-import android.view.InputApplicationHandle;
+ import android.view.InputChannel;
+ import android.view.InputEventReceiver;
+ import android.view.InputWindowHandle;
+@@ -268,6 +267,8 @@ final class InputMonitor {
+             final boolean hasFocus, final boolean hasWallpaper) {
+         // Add a window to our list of input windows.
+         inputWindowHandle.name = child.toString();
++        inputWindowHandle.inputApplicationHandle = child.mActivityRecord != null
++                ? child.mActivityRecord.getInputApplicationHandle(false /* update */) : null;
+         flags = child.getSurfaceTouchableRegion(inputWindowHandle, flags);
+         inputWindowHandle.layoutParamsFlags = flags;
+         inputWindowHandle.layoutParamsType = type;
+@@ -386,15 +387,8 @@ final class InputMonitor {
+
+     public void setFocusedAppLw(ActivityRecord newApp) {
+         // Focused app has changed.
+-        if (newApp == null) {
+-            mService.mInputManager.setFocusedApplication(mDisplayId, null);
+-        } else {
+-            final InputApplicationHandle handle = newApp.mInputApplicationHandle;
+-            handle.name = newApp.toString();
+-            handle.dispatchingTimeoutNanos = newApp.mInputDispatchingTimeoutNanos;
+-
+-            mService.mInputManager.setFocusedApplication(mDisplayId, handle);
+-        }
++        mService.mInputManager.setFocusedApplication(mDisplayId,
++                newApp != null ? newApp.getInputApplicationHandle(true /* update */) : null);
+     }
+
+     public void pauseDispatchingLw(WindowToken window) {
+diff --git a/services/core/java/com/android/server/wm/TaskPositioner.java b/services/core/java/com/android/server/wm/TaskPositioner.java
+index c68b660bb76f..44f4a58af7ab 100644
+--- a/services/core/java/com/android/server/wm/TaskPositioner.java
++++ b/services/core/java/com/android/server/wm/TaskPositioner.java
+@@ -228,10 +228,8 @@ class TaskPositioner implements IBinder.DeathRecipient {
+                 mClientChannel, mService.mAnimationHandler.getLooper(),
+                 mService.mAnimator.getChoreographer());
+
+-        mDragApplicationHandle = new InputApplicationHandle(new Binder());
+-        mDragApplicationHandle.name = TAG;
+-        mDragApplicationHandle.dispatchingTimeoutNanos =
+-                WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS;
++        mDragApplicationHandle = new InputApplicationHandle(new Binder(), TAG,
++                WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS);
+
+         mDragWindowHandle = new InputWindowHandle(mDragApplicationHandle,
+                 displayContent.getDisplayId());
+diff --git a/services/core/java/com/android/server/wm/WindowState.java b/services/core/java/com/android/server/wm/WindowState.java
+index bab83dc6ea70..faa483a48ea4 100644
+--- a/services/core/java/com/android/server/wm/WindowState.java
++++ b/services/core/java/com/android/server/wm/WindowState.java
+@@ -943,7 +943,8 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
+         mLastRequestedHeight = 0;
+         mLayer = 0;
+         mInputWindowHandle = new InputWindowHandle(
+-                mActivityRecord != null ? mActivityRecord.mInputApplicationHandle : null,
++                mActivityRecord != null
++                        ? mActivityRecord.getInputApplicationHandle(false /* update */) : null,
+                     getDisplayId());
+
+         // Make sure we initial all fields before adding to parentWindow, to prevent exception
+--
+2.29.0
