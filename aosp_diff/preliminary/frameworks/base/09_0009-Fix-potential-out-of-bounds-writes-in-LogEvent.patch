@@ -1,0 +1,216 @@
+From 582fd3fd4d1ab590f8c5a3507fed37ddf19f2724 Mon Sep 17 00:00:00 2001
+From: Muhammad Qureshi <muhammadq@google.com>
+Date: Fri, 15 Jan 2021 12:58:50 -0800
+Subject: [PATCH] Fix potential out of bounds writes in LogEvent.
+
+mUidFieldIndex, mExclusiveStateFieldIndex,
+mAttributionChain{Start|End}Index are stored using int8_t.
+These values can overflow when mValues.size() exceeds INT8_MAX.
+Add proper bounds checking to ensure these values don't exceed
+INT8_MAX.
+
+Bug: 174488848
+Bug: 174485572
+Test: m
+Test: statsd_test
+Test: TreeHugger
+Change-Id: I416e2de06ca2935017e15d4e91000652831e6b6c
+(cherry picked from commit 53251a491faab1fb88e28b7cafe5913842b8d71d)
+---
+ cmds/statsd/src/logd/LogEvent.cpp   |  27 ++++++-
+ cmds/statsd/tests/LogEvent_test.cpp | 110 ++++++++++++++++++++++++++++
+ 2 files changed, 133 insertions(+), 4 deletions(-)
+
+diff --git a/cmds/statsd/src/logd/LogEvent.cpp b/cmds/statsd/src/logd/LogEvent.cpp
+index f56fa6221bc9..4f031724763f 100644
+--- a/cmds/statsd/src/logd/LogEvent.cpp
++++ b/cmds/statsd/src/logd/LogEvent.cpp
+@@ -19,6 +19,7 @@
+
+ #include <android-base/stringprintf.h>
+ #include <android/binder_ibinder.h>
++#include <log/log.h>
+ #include <private/android_filesystem_config.h>
+
+ #include "annotations.h"
+@@ -216,13 +217,18 @@ void LogEvent::parseAttributionChain(int32_t* pos, int32_t depth, bool* last,
+         last[2] = true;
+         parseString(pos, /*depth=*/2, last, /*numAnnotations=*/0);
+     }
+-    // Check if at least one node was successfully parsed.
+-    if (mValues.size() - 1 > firstUidInChainIndex) {
++
++    if (mValues.size() - 1 > INT8_MAX) {
++        mValid = false;
++    } else if (mValues.size() - 1 > firstUidInChainIndex) {
++        // At least one node was successfully parsed.
+         mAttributionChainStartIndex = static_cast<int8_t>(firstUidInChainIndex);
+         mAttributionChainEndIndex = static_cast<int8_t>(mValues.size() - 1);
+     }
+
+-    parseAnnotations(numAnnotations, firstUidInChainIndex);
++    if (mValid) {
++        parseAnnotations(numAnnotations, firstUidInChainIndex);
++    }
+
+     pos[1] = pos[2] = 1;
+     last[1] = last[2] = false;
+@@ -234,7 +240,8 @@ bool LogEvent::checkPreviousValueType(Type expected) {
+ }
+
+ void LogEvent::parseIsUidAnnotation(uint8_t annotationType) {
+-    if (mValues.empty() || !checkPreviousValueType(INT) || annotationType != BOOL_TYPE) {
++    if (mValues.empty() || mValues.size() - 1 > INT8_MAX || !checkPreviousValueType(INT)
++            || annotationType != BOOL_TYPE) {
+         mValid = false;
+         return;
+     }
+@@ -270,6 +277,12 @@ void LogEvent::parsePrimaryFieldFirstUidAnnotation(uint8_t annotationType,
+         return;
+     }
+
++    if (static_cast<int>(mValues.size() - 1) < firstUidInChainIndex) { // AttributionChain is empty.
++        mValid = false;
++        android_errorWriteLog(0x534e4554, "174485572");
++        return;
++    }
++
+     const bool primaryField = readNextValue<uint8_t>();
+     mValues[firstUidInChainIndex].mAnnotations.setPrimaryField(primaryField);
+ }
+@@ -280,6 +293,12 @@ void LogEvent::parseExclusiveStateAnnotation(uint8_t annotationType) {
+         return;
+     }
+
++    if (mValues.size() - 1 > INT8_MAX) {
++        android_errorWriteLog(0x534e4554, "174488848");
++        mValid = false;
++        return;
++    }
++
+     const bool exclusiveState = readNextValue<uint8_t>();
+     mExclusiveStateFieldIndex = static_cast<int8_t>(mValues.size() - 1);
+     mValues[getExclusiveStateFieldIndex()].mAnnotations.setExclusiveState(exclusiveState);
+diff --git a/cmds/statsd/tests/LogEvent_test.cpp b/cmds/statsd/tests/LogEvent_test.cpp
+index 5c170c07eb7d..aed25475da11 100644
+--- a/cmds/statsd/tests/LogEvent_test.cpp
++++ b/cmds/statsd/tests/LogEvent_test.cpp
+@@ -363,6 +363,116 @@ TEST(LogEventTest, TestResetStateAnnotation) {
+     EXPECT_EQ(event.getResetState(), resetState);
+ }
+
++TEST(LogEventTest, TestExclusiveStateAnnotationAfterTooManyFields) {
++    AStatsEvent* event = AStatsEvent_obtain();
++    AStatsEvent_setAtomId(event, 100);
++
++    const unsigned int numAttributionNodes = 64;
++
++    uint32_t uids[numAttributionNodes];
++    const char* tags[numAttributionNodes];
++
++    for (unsigned int i = 1; i <= numAttributionNodes; i++) {
++        uids[i-1] = i;
++        tags[i-1] = std::to_string(i).c_str();
++    }
++
++    AStatsEvent_writeAttributionChain(event, uids, tags, numAttributionNodes);
++    AStatsEvent_writeInt32(event, 1);
++    AStatsEvent_addBoolAnnotation(event, ANNOTATION_ID_EXCLUSIVE_STATE, true);
++
++    AStatsEvent_build(event);
++
++    size_t size;
++    uint8_t* buf = AStatsEvent_getBuffer(event, &size);
++
++    LogEvent logEvent(/*uid=*/1000, /*pid=*/1001);
++    EXPECT_FALSE(logEvent.parseBuffer(buf, size));
++    EXPECT_EQ(-1, logEvent.getExclusiveStateFieldIndex());
++
++    AStatsEvent_release(event);
++}
++
++TEST(LogEventTest, TestUidAnnotationAfterTooManyFields) {
++    AStatsEvent* event = AStatsEvent_obtain();
++    AStatsEvent_setAtomId(event, 100);
++
++    const unsigned int numAttributionNodes = 64;
++
++    uint32_t uids[numAttributionNodes];
++    const char* tags[numAttributionNodes];
++
++    for (unsigned int i = 1; i <= numAttributionNodes; i++) {
++        uids[i-1] = i;
++        tags[i-1] = std::to_string(i).c_str();
++    }
++
++    AStatsEvent_writeAttributionChain(event, uids, tags, numAttributionNodes);
++    AStatsEvent_writeInt32(event, 1);
++    AStatsEvent_addBoolAnnotation(event, ANNOTATION_ID_IS_UID, true);
++
++    AStatsEvent_build(event);
++
++    size_t size;
++    uint8_t* buf = AStatsEvent_getBuffer(event, &size);
++
++    LogEvent logEvent(/*uid=*/1000, /*pid=*/1001);
++    EXPECT_FALSE(logEvent.parseBuffer(buf, size));
++    EXPECT_EQ(-1, logEvent.getUidFieldIndex());
++
++    AStatsEvent_release(event);
++}
++
++TEST(LogEventTest, TestAttributionChainEndIndexAfterTooManyFields) {
++    AStatsEvent* event = AStatsEvent_obtain();
++    AStatsEvent_setAtomId(event, 100);
++
++    const unsigned int numAttributionNodes = 65;
++
++    uint32_t uids[numAttributionNodes];
++    const char* tags[numAttributionNodes];
++
++    for (unsigned int i = 1; i <= numAttributionNodes; i++) {
++        uids[i-1] = i;
++        tags[i-1] = std::to_string(i).c_str();
++    }
++
++    AStatsEvent_writeAttributionChain(event, uids, tags, numAttributionNodes);
++
++    AStatsEvent_build(event);
++
++    size_t size;
++    uint8_t* buf = AStatsEvent_getBuffer(event, &size);
++
++    LogEvent logEvent(/*uid=*/1000, /*pid=*/1001);
++    EXPECT_FALSE(logEvent.parseBuffer(buf, size));
++    EXPECT_FALSE(logEvent.hasAttributionChain());
++
++    AStatsEvent_release(event);
++}
++
++TEST(LogEventTest, TestEmptyAttributionChainWithPrimaryFieldFirstUidAnnotation) {
++    AStatsEvent* event = AStatsEvent_obtain();
++    AStatsEvent_setAtomId(event, 100);
++
++    uint32_t uids[] = {};
++    const char* tags[] = {};
++
++    AStatsEvent_writeInt32(event, 10);
++    AStatsEvent_writeAttributionChain(event, uids, tags, 0);
++    AStatsEvent_addBoolAnnotation(event, ANNOTATION_ID_PRIMARY_FIELD_FIRST_UID, true);
++
++    AStatsEvent_build(event);
++
++    size_t size;
++    uint8_t* buf = AStatsEvent_getBuffer(event, &size);
++
++    LogEvent logEvent(/*uid=*/1000, /*pid=*/1001);
++    EXPECT_FALSE(logEvent.parseBuffer(buf, size));
++
++    AStatsEvent_release(event);
++}
++
+ }  // namespace statsd
+ }  // namespace os
+ }  // namespace android
+--
+2.29.0
