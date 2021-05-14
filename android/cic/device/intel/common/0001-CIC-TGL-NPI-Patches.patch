@@ -1,0 +1,694 @@
+From 007581130fcee3bacce5e421918130855649fb3c Mon Sep 17 00:00:00 2001
+From: sgnanase <sundar.gnanasekaran@intel.com>
+Date: Thu, 13 May 2021 15:42:40 +0530
+Subject: [PATCH] CIC TGL NPI Patches
+
+Resolve compilation issues
+
+Change-Id: Id7360d0da3b87493193d480fc0c78c65dc1fc103
+Tracked-On: OAM-97081
+Signed-off-by: sgnanase <sundar.gnanasekaran@intel.com>
+---
+ action-authorization/Android.mk             |  16 -
+ action-authorization/action-authorization.c | 508 --------------------
+ set_storage/Android.mk                      |  34 --
+ set_storage/set_storage.c                   |  88 ----
+ 4 files changed, 646 deletions(-)
+ delete mode 100644 action-authorization/Android.mk
+ delete mode 100644 action-authorization/action-authorization.c
+ delete mode 100644 set_storage/Android.mk
+ delete mode 100644 set_storage/set_storage.c
+
+diff --git a/action-authorization/Android.mk b/action-authorization/Android.mk
+deleted file mode 100644
+index de98d87..0000000
+--- a/action-authorization/Android.mk
++++ /dev/null
+@@ -1,16 +0,0 @@
+-LOCAL_PATH := $(call my-dir)
+-
+-include $(CLEAR_VARS)
+-
+-LOCAL_LDLIBS_windows := -lws2_32 -lgdi32
+-LOCAL_LDLIBS_linux := -lrt -ldl -lpthread
+-LOCAL_CXX_STL := libc++_static
+-
+-LOCAL_MODULE := action-authorization
+-#LOCAL_MODULE_HOST_OS := linux windows
+-LOCAL_SRC_FILES := action-authorization.c
+-LOCAL_C_INCLUDES := vendor/intel/external/openssl/include/
+-LOCAL_CFLAGS := -Wall -Wextra -Werror
+-LOCAL_STATIC_LIBRARIES := libcrypto
+-
+-include $(BUILD_HOST_EXECUTABLE)
+diff --git a/action-authorization/action-authorization.c b/action-authorization/action-authorization.c
+deleted file mode 100644
+index e60f606..0000000
+--- a/action-authorization/action-authorization.c
++++ /dev/null
+@@ -1,508 +0,0 @@
+-/*
+- * Copyright (c) 2015, Intel Corporation
+- * All rights reserved.
+- *
+- * Author: Jeremy Compostella <jeremy.compostella@intel.com>
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-#include <stdlib.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include <libgen.h>
+-#include <getopt.h>
+-#include <stdint.h>
+-#include <stdbool.h>
+-#include <ctype.h>
+-#include <sys/time.h>
+-#include <openssl/pem.h>
+-#include <openssl/err.h>
+-#include <openssl/pkcs12.h>
+-#include <openssl/rand.h>
+-
+-#define ARRAY_SIZE(x) (sizeof(x) / sizeof(*x))
+-
+-static BIO *err_bio;
+-static int verbose;
+-
+-static uint8_t SUPPORTED_VERSION = 0;
+-static uint8_t SUPPORTED_ACTIONS[] = { 0 };
+-
+-#define RANDOM_BYTE_LENGTH	16
+-
+-#define error(fmt, ...) do {					\
+-		BIO_printf(err_bio, fmt "\n", ##__VA_ARGS__);	\
+-		if (verbose)					\
+-			ERR_print_errors(err_bio);		\
+-	} while (0)
+-
+-static X509 *load_cert_from_PEM_file(const char *file)
+-{
+-	X509 *cert;
+-	BIO *cert_bio;
+-
+-	cert_bio = BIO_new_file(file, "rb");
+-	if (!cert_bio)
+-		return NULL;
+-
+-	cert = PEM_read_bio_X509_AUX(cert_bio, NULL, NULL, NULL);
+-	BIO_free(cert_bio);
+-
+-	return cert;
+-}
+-
+-static EVP_PKEY *load_key_from_DER_file(const char *file, const char *password)
+-{
+-	EVP_PKEY *key = NULL;
+-	BIO *key_bio = NULL;
+-	X509_SIG *p8 = NULL;
+-	PKCS8_PRIV_KEY_INFO *p8inf = NULL;
+-	char pass[50];
+-
+-	key_bio = BIO_new_file(file, "rb");
+-	if (!key_bio)
+-		return NULL;
+-
+-	if (!password) {	/* Try as not encrypted private key */
+-		key = d2i_PrivateKey_bio(key_bio, NULL);
+-		if (key)
+-			goto out;
+-		BIO_seek(key_bio, 0);
+-	}
+-
+-	OpenSSL_add_all_algorithms();
+-
+-	p8 = d2i_PKCS8_bio(key_bio, NULL);
+-	if (!p8) {
+-		error("Failed to read PKCS8");
+-		goto out;
+-	}
+-
+-	if (!password) {
+-		EVP_read_pw_string(pass, sizeof(pass), "Enter Password:", 0);
+-		password = pass;
+-	}
+-
+-	p8inf = PKCS8_decrypt(p8, password, strlen(password));
+-	if (!p8inf) {
+-		error("Failed to decrypt key");
+-		goto out;
+-	}
+-
+-	key = EVP_PKCS82PKEY(p8inf);
+-	if (!key)
+-		error("Failed to convert the key");
+-
+-out:
+-	if (p8)
+-		X509_SIG_free(p8);
+-	if (p8inf)
+-		PKCS8_PRIV_KEY_INFO_free(p8inf);
+-	BIO_free(key_bio);
+-	return key;
+-}
+-
+-static int gen_pkcs7(const char *key_file, const char *cert_file, const char *add_cert_file,
+-		     char *str, const char *out_file, char *password)
+-{
+-	const EVP_MD *DIGEST = EVP_sha256();
+-	EVP_PKEY *key = NULL;
+-	X509 *cert = NULL, *add_cert = NULL;
+-	BIO *in_bio = NULL, *out_bio = NULL;
+-	PKCS7 *p7 = NULL;
+-	PKCS7_SIGNER_INFO *signer_info;
+-	int ret = EXIT_FAILURE, internal_ret;
+-
+-	key = load_key_from_DER_file(key_file, password);
+-	if (!key) {
+-		error("Failed to load the private key");
+-		goto out;
+-	}
+-
+-	cert = load_cert_from_PEM_file(cert_file);
+-	if (!cert) {
+-		error("Failed to load the certificate");
+-		goto out;
+-	}
+-
+-	in_bio = BIO_new_mem_buf(str, strlen(str) + 1);
+-	if (!in_bio) {
+-		error("Failed to create input data BIO");
+-		goto out;
+-	}
+-
+-	p7 = PKCS7_sign(NULL, NULL, NULL, NULL, PKCS7_PARTIAL);
+-	if (!p7) {
+-		error("Failed to generate PKCS7");
+-		goto out;
+-	}
+-
+-	signer_info = PKCS7_sign_add_signer(p7, cert, key, DIGEST, 0);
+-	if (!signer_info) {
+-		error("Failed to add signer info");
+-		goto out;
+-	}
+-
+-	if (add_cert_file != NULL) {
+-		add_cert = load_cert_from_PEM_file(add_cert_file);
+-		if (!add_cert) {
+-			error("Failed to load additional certificate");
+-			goto out;
+-		}
+-		internal_ret = PKCS7_add_certificate(p7, add_cert);
+-		if (internal_ret != 1) {
+-			error("Failed to add certificate in PKCS7");
+-			goto out;
+-		}
+-	}
+-
+-	EVP_add_digest(DIGEST);
+-	internal_ret = PKCS7_final(p7, in_bio, 0);
+-	if (internal_ret != 1) {
+-		error("Failed to finalize PKCS7");
+-		goto out;
+-	}
+-
+-	out_bio = BIO_new_file(out_file, "wb");
+-	if (!out_bio) {
+-		error("Failed to create output data BIO");
+-		goto out;
+-	}
+-
+-	internal_ret = i2d_PKCS7_bio(out_bio, p7);
+-	if (internal_ret != 1) {
+-		error("Failed to write PKCS7 file");
+-		goto out;
+-	}
+-
+-	ret = EXIT_SUCCESS;
+-
+-out:
+-	if (key)
+-		EVP_PKEY_free(key);
+-	if (cert)
+-		X509_free(cert);
+-	if (add_cert)
+-		X509_free(add_cert);
+-	if (in_bio)
+-		BIO_free(in_bio);
+-	if (out_bio)
+-		BIO_free(out_bio);
+-	if (p7)
+-		PKCS7_free(p7);
+-
+-	return ret;
+-}
+-
+-void bytes_to_hex_str(unsigned char *bytes, size_t length, char *str)
+-{
+-	char hex;
+-	size_t i;
+-
+-	if (!bytes || !str)
+-		return;
+-
+-	for (i = 0; i < length * 2; i++) {
+-		hex = ((i & 1) ? bytes[i / 2] & 0xf : bytes[i / 2] >> 4);
+-		*str++ = (hex > 9 ? (hex + 'a' - 10) : (hex + '0'));
+-	}
+-	*str = '\0';
+-}
+-
+-#ifdef USE_MINGW
+-static inline BOOLEAN is_in_char_set(char c, const char *set)
+-{
+-        size_t i, len;
+-
+-        for (i = 0, len = strlen(set); i < len; i++)
+-                if (c == set[i])
+-                        return true;
+-
+-        return false;
+-}
+-
+-char *strtok_r(char *str, const char *delim, char **saveptr)
+-{
+-        char *p, *res;
+-
+-        if (!delim || !saveptr || (!str && !*saveptr))
+-                return NULL;
+-
+-        if (str)
+-                *saveptr = str;
+-
+-        if (**saveptr == '\0')
+-                return NULL;
+-
+-        res = *saveptr;
+-        for (p = *saveptr; *p != '\0' && !is_in_char_set(*p, delim); p++)
+-                ;
+-
+-        for (; *p != '\0' && is_in_char_set(*p, delim); p++)
+-                *p = '\0';
+-
+-        *saveptr = p;
+-
+-        return res;
+-}
+-#endif
+-
+-static bool is_valid_nonce_message(char *message)
+-{
+-	uint8_t msg_version, msg_action;
+-	char *version, *serial, *action, *random, *saveptr, *tmp, *msgcopy;
+-	size_t i;
+-
+-	msgcopy = strdup(message);
+-	if (!msgcopy) {
+-		error("Failed to make a copy of the message");
+-		return false;
+-	}
+-
+-	/* Version */
+-	version = strtok_r(msgcopy, ":", &saveptr);
+-	if (!version) {
+-		error("No version found");
+-		goto parse_error;
+-	}
+-
+-	if (strlen(version) != sizeof(SUPPORTED_VERSION) * 2) {
+-		error("Version string length is invalid");
+-		goto parse_error;
+-	}
+-
+-	msg_version = strtoul(version, &tmp, 16);
+-	if (*tmp != '\0' || msg_version != SUPPORTED_VERSION) {
+-		error("Unsupported version");
+-		goto parse_error;
+-	}
+-
+-	/* Serial: per Android CDD, the value must be 7-bit ASCII and
+-	   match the regex ^[a-zA-Z0-9](6,20)$ */
+-	serial = strtok_r(NULL, ":", &saveptr);
+-	if (!serial) {
+-		error("No serial found");
+-		goto parse_error;
+-	}
+-	if (strlen(serial) < 6 || strlen(serial) > 20) {
+-		error("Serial too short or too long");
+-		goto parse_error;
+-	}
+-	for (i = 0; serial[i] != '\0'; i++)
+-		if (!isalnum(serial[i])) {
+-			error("Invalid serial number for Android device");
+-			goto parse_error;
+-		}
+-
+-	/* Action */
+-	action = strtok_r(NULL, ":", &saveptr);
+-	if (!action) {
+-		error("No action found");
+-		goto parse_error;
+-	}
+-
+-	if (strlen(action) != sizeof(*SUPPORTED_ACTIONS) * 2) {
+-		error("Action string length is invalid");
+-		goto parse_error;
+-	}
+-
+-	msg_action = strtoul(action, &tmp, 16);
+-	if (*tmp != '\0') {
+-		error("Invalid action ID");
+-		goto parse_error;
+-	}
+-
+-	for (i = 0; i < ARRAY_SIZE(SUPPORTED_ACTIONS); i++)
+-		if (msg_action == SUPPORTED_ACTIONS[i])
+-			break;
+-
+-	if (i == ARRAY_SIZE(SUPPORTED_ACTIONS)) {
+-		error("Unsupported action ID");
+-		goto parse_error;
+-	}
+-
+-	/* Device random */
+-	random = strtok_r(NULL, ":", &saveptr);
+-	if (!random) {
+-		error("No random string found");
+-		goto parse_error;
+-	}
+-	if (strlen(random) != RANDOM_BYTE_LENGTH * 2) {
+-		error("Random string is too short");
+-		goto parse_error;
+-	}
+-
+-	free(msgcopy);
+-	return true;
+-
+-parse_error:
+-	error("Invalid nonce message");
+-	free(msgcopy);
+-	return false;
+-}
+-
+-static char *build_answer_message(char *message)
+-{
+-	unsigned char newrandom[RANDOM_BYTE_LENGTH];
+-	char newrandom_str[RANDOM_BYTE_LENGTH * 2 + 1];
+-	char *output;
+-	int ret, output_size;
+-
+-	ret = RAND_bytes(newrandom, sizeof(newrandom));
+-	if (ret != 1) {
+-		error("Failed to generate random numbers");
+-		return NULL;
+-	}
+-
+-	bytes_to_hex_str(newrandom, sizeof(newrandom), newrandom_str);
+-
+-	output_size = strlen(message) + 1 + strlen(newrandom_str) + 1;
+-	output = malloc(output_size);
+-	if (!output) {
+-		error("Failed to allocate the result message buffer");
+-		return NULL;
+-	}
+-
+-	ret = snprintf(output, output_size, "%s:%s", message, newrandom_str);
+-	if (ret != output_size - 1) {
+-		error("Failed to format the result message");
+-		return NULL;
+-	}
+-
+-	return output;
+-}
+-
+-static void usage(char *cmd, int status)
+-{
+-	FILE *out = status == EXIT_SUCCESS ? stdout : stderr;
+-
+-	fprintf(out, "Usage: %s OPTIONS\n\
+-\n\
+-  Produce a PKCS7 answer message to a fastboot get-action-nonce.\n\
+-  This PKCS7 can be sent using the fastboot flash action-authorization\n\
+-  <file> command.\n\
+-\n\
+-   --oak-cert, -O <file>          OAK certificate (PEM)\n\
+-   --oak-private-key, -K <file>   private key file (PEM)\n\
+-   --additional-cert, -A <file>   additional certificate (PEM)\n\
+-   --message, -M <string>         message received from get-action-nonce\n\
+-                                  fastboot command\n\
+-   --output-file, -F <file>       output file for the PKCS7 message\n\
+-   --password <password>          private key password\n\
+-   --verbose                      print all debug messages\n\
+-   --supported-version, -V        print the nonce version supported\n\
+-   --help, -h                     display this help and exit\n", cmd);
+-
+-	exit(status);
+-}
+-
+-static struct option long_options[] = {
+-	{"help", no_argument, 0, 'h'},
+-	{"oak-cert", required_argument, 0, 'O'},
+-	{"oak-private-key", required_argument, 0, 'K'},
+-	{"additional-cert", required_argument, 0, 'A'},
+-	{"message", required_argument, 0, 'M'},
+-	{"output-file", required_argument, 0, 'F' },
+-	{"password", required_argument, 0, 'P' },
+-	{"supported-version", no_argument, &verbose, 'V' },
+-	{"verbose", no_argument, &verbose, 1 },
+-	{0, 0, 0, 0}
+-};
+-
+-int main(int argc, char **argv)
+-{
+-	char *key_file = NULL, *cert_file = NULL, *add_cert_file = NULL, *out_file = NULL, *message = NULL;
+-	char *password = NULL;
+-	char c, *new_message, *cmd;
+-	int option_index = 0, ret = EXIT_FAILURE;
+-
+-	cmd = basename(argv[0]);
+-
+-	err_bio = BIO_new(BIO_s_file());
+-	if (!err_bio) {
+-		fprintf(stderr, "Failed to initialized the BIO error\n");
+-		return EXIT_FAILURE;
+-	}
+-
+-	BIO_set_fp(err_bio, stderr, BIO_NOCLOSE|BIO_FP_TEXT);
+-
+-	while (1) {
+-		c = getopt_long(argc, argv, "hO:K:A:M:F:P:V",
+-				long_options, &option_index);
+-		if (c == -1)
+-			break;
+-		switch(c) {
+-		case 0:
+-			break;
+-
+-		case 'h':
+-			usage(cmd, EXIT_SUCCESS);
+-			break;
+-
+-		case 'O':
+-			cert_file = optarg;
+-			break;
+-
+-		case 'K':
+-			key_file = optarg;
+-			break;
+-
+-		case 'A':
+-			add_cert_file = optarg;
+-			break;
+-
+-		case 'M':
+-			message = optarg;
+-			break;
+-
+-		case 'F':
+-			out_file = optarg;
+-			break;
+-
+-		case 'P':
+-			password = optarg;
+-			break;
+-
+-		case 'V':
+-			fprintf(stdout, "Supported version: %d\n",
+-				SUPPORTED_VERSION);
+-			exit(EXIT_SUCCESS);
+-			break;
+-
+-		default:
+-			usage(cmd, EXIT_FAILURE);
+-			break;
+-		}
+-	}
+-
+-	if (!key_file || !cert_file || !out_file || !message)
+-		usage(cmd, EXIT_FAILURE);
+-
+-	if (!is_valid_nonce_message(message))
+-		goto out;
+-
+-	new_message = build_answer_message(message);
+-	if (!new_message)
+-		goto out;
+-
+-	ret = gen_pkcs7(key_file, cert_file, add_cert_file, new_message, out_file, password);
+-	free(new_message);
+-
+-out:
+-	BIO_free(err_bio);
+-
+-	if (ret == EXIT_SUCCESS)
+-		fprintf(stdout, "%s successfully generated.\n", out_file);
+-	return ret;
+-}
+diff --git a/set_storage/Android.mk b/set_storage/Android.mk
+deleted file mode 100644
+index e4a94f1..0000000
+--- a/set_storage/Android.mk
++++ /dev/null
+@@ -1,34 +0,0 @@
+-LOCAL_PATH := $(call my-dir)
+-
+-include $(CLEAR_VARS)
+-
+-LOCAL_MODULE := set_storage
+-LOCAL_SRC_FILES := set_storage.c
+-LOCAL_CFLAGS := -Wall -Wextra -Werror
+-
+-LOCAL_FORCE_STATIC_EXECUTABLE := true
+-LOCAL_MODULE_PATH := $(TARGET_ROOT_OUT_SBIN)
+-LOCAL_UNSTRIPPED_PATH := $(TARGET_ROOT_OUT_SBIN_UNSTRIPPED)
+-
+-LOCAL_STATIC_LIBRARIES := \
+-	libcutils \
+-	libc \
+-	liblog
+-
+-include $(BUILD_EXECUTABLE)
+-
+-
+-include $(CLEAR_VARS)
+-
+-LOCAL_MODULE := set_storage.vendor
+-LOCAL_SRC_FILES := set_storage.c
+-LOCAL_CFLAGS := -Wall -Wextra -Werror
+-
+-LOCAL_PROPRIETARY_MODULE := true
+-
+-LOCAL_SHARED_LIBRARIES := \
+-	libcutils \
+-	libc \
+-	liblog
+-
+-include $(BUILD_EXECUTABLE)
+diff --git a/set_storage/set_storage.c b/set_storage/set_storage.c
+deleted file mode 100644
+index 32a246b..0000000
+--- a/set_storage/set_storage.c
++++ /dev/null
+@@ -1,88 +0,0 @@
+-/*
+- * Copyright (C) 2015 Intel Corporation
+- *
+- * Author: Sylvain Chouleur <sylvain.chouleur@intel.com>
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-#include <stdlib.h>
+-#include <unistd.h>
+-#include <cutils/properties.h>
+-#include <ctype.h>
+-#include <sys/types.h>
+-#include <pwd.h>
+-#include <sys/stat.h>
+-#include <string.h>
+-#include <errno.h>
+-#define LOG_TAG "set_storage"
+-#include <log/log.h>
+-
+-#define LINK_PATH "/dev/block/by-name"
+-static const char *diskbus_prop = "ro.boot.diskbus";
+-static const char *storage_path = "/dev/block/pci/pci0000:00/0000:00:%s/by-name";
+-static const char *link_device = LINK_PATH;
+-static const char *diskbus_format = "dd.f"; /* Device.Function */
+-static const char *persistent_partition = LINK_PATH "/persistent";
+-
+-int main(__attribute__((unused)) int argc, __attribute__((unused)) char **argv)
+-{
+-	int ret;
+-	char pci_id[PROPERTY_VALUE_MAX];
+-	unsigned i;
+-	char *path;
+-	struct passwd *passwd;
+-
+-	ret = property_get(diskbus_prop, pci_id, "");
+-	if (ret != (int)strlen(diskbus_format)) {
+-		ALOGE("Inconsistent boot device pci id: ret=%d\n", ret);
+-		return EXIT_FAILURE;
+-	}
+-
+-	for (i = 0; i < strlen(pci_id); i++)
+-		pci_id[i] = (char)tolower(pci_id[i]);
+-
+-	ret = asprintf(&path, storage_path, pci_id);
+-	if (ret == -1) {
+-		ALOGE("Failed to format storage path\n");
+-		return EXIT_FAILURE;
+-	}
+-
+-	ret = symlink(path, link_device);
+-	if (ret) {
+-		ALOGE("Failed to symlink storage device %s\n", path);
+-		free(path);
+-		return EXIT_FAILURE;
+-	}
+-	free(path);
+-
+-	passwd = getpwnam("system");
+-	if (!passwd) {
+-		ALOGE("Failed to get 'system' uid/gid\n");
+-		return EXIT_FAILURE;
+-	}
+-
+-	ret = chown(persistent_partition, passwd->pw_uid, passwd->pw_gid);
+-	if (ret) {
+-		ALOGE("Failed to set owner of persistent partition %d %d\n", ret, errno);
+-		return EXIT_FAILURE;
+-	}
+-
+-	ret = chmod(persistent_partition, S_IRGRP | S_IWGRP | S_IRUSR | S_IWUSR);
+-	if (ret) {
+-		ALOGE("Failed to set permissions of persistent partition %d %d\n", ret, errno);
+-		return EXIT_FAILURE;
+-	}
+-
+-	return EXIT_SUCCESS;
+-}
+-- 
+2.30.0
+

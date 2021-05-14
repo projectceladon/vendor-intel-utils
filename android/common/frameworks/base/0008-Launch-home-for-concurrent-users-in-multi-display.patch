@@ -1,0 +1,152 @@
+From 9dbcee6f70c6e27fdd7fd57345dafc3cd1a08ade Mon Sep 17 00:00:00 2001
+From: Hongcheng Xie <hongcheng.xie@intel.com>
+Date: Fri, 9 Oct 2020 10:24:41 +0800
+Subject: [PATCH] Launch home for concurrent users in multi display
+
+Always allow to launch home when support concurrent multi users.
+
+Associate user id with display port by aidl interface, start
+separated home for concurrent multi users in different displays.
+
+Don't launch home in framework when in headless system user mode,
+will do that in concurrent user service in order to more flexibly
+launch home ui with correct userid and display id.
+
+Change-Id: I41782db2d80c63ead809d2519750be8d19240d15
+Tracked-On: ACP-1302
+Signed-off-by: Hongcheng Xie <hongcheng.xie@intel.com>
+---
+ .../server/am/ActivityManagerService.java     |  5 +-
+ .../server/wm/RootWindowContainer.java        | 57 ++++++++++++++++++-
+ 2 files changed, 60 insertions(+), 2 deletions(-)
+
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index ec24014f77d..b143230c0bd 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -327,6 +327,7 @@ import com.android.internal.os.BinderInternal;
+ import com.android.internal.os.ByteTransferPipe;
+ import com.android.internal.os.IResultReceiver;
+ import com.android.internal.os.ProcessCpuTracker;
++import com.android.internal.os.RoSystemProperties;
+ import com.android.internal.os.TransferPipe;
+ import com.android.internal.os.Zygote;
+ import com.android.internal.util.ArrayUtils;
+@@ -9684,7 +9685,9 @@ public class ActivityManagerService extends IActivityManager.Stub
+                 t.traceEnd();
+             }
+ 
+-            if (bootingSystemUser) {
++            if (bootingSystemUser
++                 && !(RoSystemProperties.SUPPORT_CONCURRENT_USER
++                       && UserManager.isHeadlessSystemUserMode())) {
+                 t.traceBegin("startHomeOnAllDisplays");
+                 mAtmInternal.startHomeOnAllDisplays(currentUserId, "systemReady");
+                 t.traceEnd();
+diff --git a/services/core/java/com/android/server/wm/RootWindowContainer.java b/services/core/java/com/android/server/wm/RootWindowContainer.java
+index 4700864c03b..d27a4067ed6 100644
+--- a/services/core/java/com/android/server/wm/RootWindowContainer.java
++++ b/services/core/java/com/android/server/wm/RootWindowContainer.java
+@@ -1,3 +1,6 @@
++
++
++
+ /*
+  * Copyright (C) 2016 The Android Open Source Project
+  *
+@@ -122,9 +125,12 @@ import android.os.Looper;
+ import android.os.Message;
+ import android.os.PowerManager;
+ import android.os.RemoteException;
++import android.os.ServiceManager;
+ import android.os.SystemClock;
+ import android.os.Trace;
+ import android.os.UserHandle;
++import android.os.UserManager;
++import android.os.UserManagerInternal;
+ import android.os.storage.StorageManager;
+ import android.provider.Settings;
+ import android.service.voice.IVoiceInteractionSession;
+@@ -138,6 +144,7 @@ import android.util.SparseIntArray;
+ import android.util.TimeUtils;
+ import android.util.proto.ProtoOutputStream;
+ import android.view.Display;
++import android.view.DisplayAddress;
+ import android.view.DisplayInfo;
+ import android.view.SurfaceControl;
+ import android.view.WindowManager;
+@@ -145,6 +152,8 @@ import android.window.WindowContainerToken;
+ 
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.app.ResolverActivity;
++import com.android.internal.os.IConcurrentMultiUser;
++import com.android.internal.os.RoSystemProperties;
+ import com.android.internal.util.function.pooled.PooledConsumer;
+ import com.android.internal.util.function.pooled.PooledFunction;
+ import com.android.internal.util.function.pooled.PooledLambda;
+@@ -1749,6 +1758,11 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
+             return true;
+         }
+ 
++        if (RoSystemProperties.SUPPORT_CONCURRENT_USER) {
++            Slog.i(TAG, "Always can start home when support concurrent multi users in display " + displayId);
++            return true;
++        }
++
+         if (!shouldPlaceSecondaryHomeOnDisplayArea(taskDisplayArea)) {
+             return false;
+         }
+@@ -2544,8 +2558,49 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
+         }
+     }
+ 
++    private int getDisplayPort(Display display) {
++        DisplayAddress address = display.getAddress();
++        Byte rawPortAddress = null;
++        if (address instanceof DisplayAddress.Physical) {
++            DisplayAddress.Physical physicalAddress = (DisplayAddress.Physical) address;
++            if (physicalAddress != null) {
++                rawPortAddress = physicalAddress.getPort();
++            }
++        }
++
++        return Byte.toUnsignedInt(rawPortAddress);
++    }
++
+     private void startSystemDecorations(final DisplayContent displayContent) {
+-        startHomeOnDisplay(mCurrentUser, "displayAdded", displayContent.getDisplayId());
++        int userId = mCurrentUser;
++        if (RoSystemProperties.SUPPORT_CONCURRENT_USER) {
++            if (UserManager.isHeadlessSystemUserMode()) {
++                Slog.d(TAG, "Waiting concurrent user service to start home for display " + displayContent.getDisplayId());
++                displayContent.getDisplayPolicy().notifyDisplayReady();
++                return;
++            }
++            int id = -1;
++            IConcurrentMultiUser cmu = IConcurrentMultiUser.Stub.asInterface(
++                    ServiceManager.getService("concurrent_user_service"));
++            if (cmu != null) {
++                try {
++                    final int port = getDisplayPort(displayContent.getDisplay());
++                    id = cmu.getUserIdForDisplayPort(port);
++                } catch (RemoteException e) {
++                    Slog.e(TAG, "startSystemDecoration(): exception when get user " + id + " for display " + displayContent.getDisplayId());
++                }
++            }
++            final UserManagerInternal um = LocalServices.getService(UserManagerInternal.class);
++            if (um.isUserRunning(id)) {
++                userId = id;
++            } else {
++                Slog.w(TAG, "startSystemDecorations(): can't find the running user " + id + " for display " + displayContent.getDisplayId());
++                displayContent.getDisplayPolicy().notifyDisplayReady();
++                return;
++            }
++        }
++        Slog.i(TAG, "Start home on display " + displayContent.getDisplayId() + " for user u" + userId);
++        startHomeOnDisplay(userId, "displayAdded", displayContent.getDisplayId());
+         displayContent.getDisplayPolicy().notifyDisplayReady();
+     }
+ 
+-- 
+2.17.1
+

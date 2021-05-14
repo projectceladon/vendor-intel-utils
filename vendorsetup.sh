@@ -28,7 +28,7 @@ rm -f ${tmp_lunch}
 
 function lunch {
     aosp_lunch $*
-    vendor/intel/utils/android/apply_patch.sh
+    vendor/intel/utils/android/apply_patch.sh && vendor/intel/utils_priv/patches/apply_patch.sh
 }
 
 add_lunch_combo cic-userdebug
