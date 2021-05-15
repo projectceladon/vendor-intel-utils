@@ -27,7 +27,7 @@ function apply()
 				echo "Error! change_id is missing in the patch"
 				exit
 			fi
-            ret=`git log | grep -w "^    Change-Id: ${change_id}" 2>/dev/null`
+            ret=`git log -50 | grep -w "^    Change-Id: ${change_id}" 2>/dev/null`
             if [ "${ret}" == "" ]
             then
                 echo "Applying ${patch_name}"
