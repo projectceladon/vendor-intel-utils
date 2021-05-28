@@ -451,7 +451,7 @@ endif
 
 USE_OPENGL_RENDERER := true
 USE_INTEL_UFO_DRIVER := false
-BOARD_GPU_DRIVERS := i965 virgl iris
+BOARD_GPU_DRIVERS := i965 swrast virgl iris
 BOARD_USE_CUSTOMIZED_MESA := true
 
 BOARD_GPU_DRIVERS ?= i965 swrast virgl iris
