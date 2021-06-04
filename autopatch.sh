@@ -68,7 +68,7 @@ apply_patch() {
     fi
 
     cd $top_dir/$current_project
-    a=`grep "Date: " ${pd}/$i`
+    a=`grep "Date: " ${pd}/$i | head -1`
     b=`echo ${a#"Date: "}`
     c=`git log -100 --pretty=format:%aD | grep "$b"`
 
