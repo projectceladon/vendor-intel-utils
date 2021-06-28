@@ -20,12 +20,13 @@
 #include <android-base/logging.h>
 #include <hidl/HidlTransportSupport.h>
 #include <sys/socket.h>
+#include <sys/sysinfo.h>
 #include <linux/vm_sockets.h>
 
 #include "Thermal.h"
 
 #define SYSFS_TEMPERATURE_CPU       "/sys/class/thermal/thermal_zone0/temp"
-#define CPU_NUM_MAX                 12
+#define CPU_NUM_MAX                 Thermal::getNumCpu()
 #define CPU_USAGE_PARAS_NUM         5
 #define CPU_USAGE_FILE              "/proc/stat"
 #define CPU_ONLINE_FILE             "/sys/devices/system/cpu/online"
@@ -55,7 +56,11 @@ static const char *CPU_LABEL[] = {"CPU0",
                                   "CPU8",
                                   "CPU9",
                                   "CPU10",
-                                  "CPU11"};
+                                  "CPU11",
+                                  "CPU12",
+                                  "CPU13",
+                                  "CPU14",
+                                  "CPU15"};
 struct zone_info {
 	uint32_t temperature;
 	uint32_t trip_0;
@@ -190,9 +195,9 @@ static int get_soc_pkg_temperature(float* temp)
     return 0;
 }
 
-static int thermal_get_cpu_usages(CpuUsage *list)
+int Thermal::thermal_get_cpu_usages(CpuUsage *list)
 {
-    int vals, cpu_num, i, j;
+    int vals, cpu_num, i, j, length;
     bool online;
     ssize_t read;
     unsigned long long user, nice, system, idle, active, total;
@@ -258,14 +263,24 @@ static int thermal_get_cpu_usages(CpuUsage *list)
             online = 1;
         }
 
-        list[size] = (CpuUsage) {
-            .name = CPU_LABEL[size],
-            .active = active,
-            .total = total,
-            .isOnline = online
-        };
+	//Current Max size supported is 16 cores, for more CPU add check
+	length = sizeof(CPU_LABEL) / sizeof(CPU_LABEL[0]);
+	if (j < length) {
+            list[size] = (CpuUsage) {
+                .name = CPU_LABEL[size],
+                .active = active,
+                .total = total,
+                .isOnline = online
+            };
+            size++;
+        } else {
+            ALOGE("%s: Current CPU core support exceeds Max CPU core support  ", __func__);
+            free(line);
+            fclose(cpu_file);
+            fclose(file);
+            return errno ? -errno : -EIO;
+        }
 
-        size++;
     }
 
     free(line);
@@ -389,6 +404,7 @@ static int recv_vsock(int *vsock_fd)
 Thermal::Thermal() {
     mCheckThread = std::thread(&Thermal::CheckThermalServerity, this);
     mCheckThread.detach();
+    mNumCpu = get_nprocs();
 }
 
 

@@ -76,12 +76,15 @@ class Thermal : public IThermal {
         unregisterThermalChangedCallback_cb _hidl_cb) override;
     Return<void> getCurrentCoolingDevices(bool filterType, CoolingType type,
                                           getCurrentCoolingDevices_cb _hidl_cb) override;
+    int getNumCpu(void){ return mNumCpu;};
 
    private:
     std::mutex thermal_temp_mutex;
     std::mutex thermal_callback_mutex_;
     std::vector<CallbackSetting> callbacks_;
     std::thread mCheckThread;
+    int mNumCpu;
+    int thermal_get_cpu_usages(CpuUsage *list) ;
 };
 
 }  // namespace implementation
