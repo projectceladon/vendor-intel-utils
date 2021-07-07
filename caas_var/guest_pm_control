@@ -1,0 +1,172 @@
+#!/usr/bin/python3
+
+# This script monitors shutdown and reboot event of guests through QEMU
+# Guest shutdown/reboot will trigger entire system, the Guest CiV first
+# and then Host CPU.
+#
+# It start QEMU with below comand:
+#
+# # qemu [...] -qmp unix:./qmp-sock,server
+#
+# and then Run the QMP shell to minitor the VM events :
+#
+# $ qmp-shell ./qmp-sock
+
+from __future__ import print_function
+import json
+import sys
+import os
+import time
+import glob
+import subprocess
+from sys import argv,exit
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '../qemu-4.2.0/python'))
+from qemu import qmp
+
+rtc_wakeup = 0
+current_rtc_wakeup_count = 0
+prev_rtc_wakeup_count = 0
+rtc_wakeup_src = '/sys/devices/platform/rtc_cmos/power/wakeup'
+
+def detect_rtc_wakeup_src():
+    for device in glob.glob('/sys/devices/pnp0/00:0*/power/wakeup'):
+        with open(device) as f:
+            for line in f:
+                wakeup_src = line.rstrip('\n')
+                if (wakeup_src == "enabled"):
+                    return "".join((device, "_active_count"));
+    with open(rtc_wakeup_src) as f:
+            for line in f:
+                wakeup_src = line.rstrip('\n')
+                if (wakeup_src == "enabled"):
+                    return "".join((rtc_wakeup_src, "_active_count"));
+
+    return "none"
+
+def wakeup(qemu_hdl):
+    if (qemu_hdl == None):
+        print("Invalid qmp handler")
+        return -1
+
+    resp = qemu_hdl.cmd('query-status')
+    if resp != None:
+        for val in resp.values():
+            if val['status'] == "suspended":
+                qemu_hdl.cmd('system_wakeup')
+                return 0
+            elif val['status'] == "running":
+                return 1
+    return -1
+
+def main():
+
+    if len(argv) != 2:
+        print(' <unix-socket> argument is not provided')
+        exit(1)
+
+    rtc_wakeup_device = detect_rtc_wakeup_src()
+
+    qemu = qmp.QEMUMonitorProtocol(argv[1])
+
+    # Make a connection to QMP server. Break while loop only when the connection is made.
+    # put a timeout 2 minutes if connection is not successful
+    timeout_start = time.time()
+    while True:
+        try:
+            qemu.connect()
+        except qmp.QMPConnectError:
+            print('Didn\'t get QMP greeting message from QEMU QMP server')
+        except qmp.QMPCapabilitiesError:
+            print('Could not negotiate capabilities with QEMU QMP server')
+        except qemu.error:
+            print
+        except qmp.QMPTimeoutError:
+            print('Connection Timeout Error')
+        else:
+            print("connected to QEMU QMP server")
+            break
+
+    while True:
+        try:
+            # Pull the VM shutdown and reboot event from QEMU QMP Server
+            resp = qemu.pull_event(wait=True)
+            if resp != None:
+                for val in resp.values():
+                    if val == "SHUTDOWN" or val == "RESET":
+                        if "guest-reset" in json.dumps(resp["data"]):
+                            print("VM is rebooting")
+                            print("Reason: guest reset request")
+                            cmdCommand = "reboot"
+                            time.sleep(3)
+                            process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
+                            break
+                        elif "host-qmp-system-reset" in json.dumps(resp["data"]):
+                            print("VM is rebooting")
+                            print("Reason: Reboot triggered by host")
+                            cmdCommand = "reboot"
+                            time.sleep(3)
+                            process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
+                            break
+                        elif "host-qmp-quit" in json.dumps(resp["data"]):
+                            print("VM is getting Shutdown")
+                            print("Reason: this is in reaction to qmp quit command by host")
+                        elif "host-signal" in json.dumps(resp["data"]):
+                            print("VM is getting Shutdown")
+                            print("Reason: this is in reaction to a signal, such as SIGINT")
+                        elif "guest-shutdown" in json.dumps(resp["data"]):
+                            print("VM is getting Shutdown")
+                            print("Reason: guest Shutdown request, via ACPI or other hardware specific means")
+                        elif "guest-panic" in json.dumps(resp["data"]):
+                            print("VM is getting Shutdown")
+                            print("Reason: guest panic results in to shutdown")
+                        elif "host-error" in json.dumps(resp["data"]):
+                            print("VM is getting Shutdown")
+                            print("Reason: An error prevents further use of guest and results in shutdown")
+                        cmdCommand = "shutdown -h now"
+                        time.sleep(3)
+                        process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
+                    elif val == "SUSPEND":
+
+                        # Read the previous RTC wakeup count
+                        if (rtc_wakeup_device != "none"):
+                            with open(rtc_wakeup_device) as f:
+                                for line in f:
+                                    prev_rtc_wakeup_count = line.rstrip('\n')
+
+                        # Put the host in to sleep state
+                        cmdCommand = "systemctl suspend"
+                        process = subprocess.Popen(cmdCommand.split(), stdout=subprocess.PIPE)
+                        time.sleep(.75)
+
+                        # Read the current RTC wakeup count
+                        if (rtc_wakeup_device != "none"):
+                            with open(rtc_wakeup_device) as f:
+                                for line in f:
+                                    current_rtc_wakeup_count = line.rstrip('\n')
+                        # Send power button event to wake the android
+                        if prev_rtc_wakeup_count == current_rtc_wakeup_count:
+                            # Send power button event to wake the android
+                            res = wakeup(qemu)
+                            if (res == 1):
+                                #guest already wakeup by pnp0. Need to send power button event
+                                rtc_wakeup = 0
+                            else:
+                                #guest is not wakeup by pnp0. wakeup() has wakeup the screen
+                                rtc_wakeup = 1
+                        else:
+                            #rtc alarm wake up
+                            rtc_wakeup = 1
+
+                    elif val == "WAKEUP":
+                        if rtc_wakeup == 0:
+                            time.sleep(1)
+                            cmdCommand = "./scripts/sendkey --vm 0 --power 0"
+                            process = subprocess.call(cmdCommand.split(), stdout=subprocess.PIPE)
+
+        except KeyboardInterrupt:
+            print('interrupted!')
+            break
+
+if __name__ == '__main__':
+    main()
