@@ -19,11 +19,11 @@ PRODUCT_MAKEFILES := \
     $(LOCAL_DIR)/celadon_tablet/celadon_tablet.mk \
     $(LOCAL_DIR)/caas/caas.mk \
     $(LOCAL_DIR)/cic/cic.mk \
-	$(LOCAL_DIR)/caas_var/caas_var.mk
+	$(LOCAL_DIR)/caas_cfc/caas_cfc.mk
 
 COMMON_LUNCH_CHOICES += \
     celadon_ivi-userdebug \
     celadon_tablet-userdebug \
     caas-userdebug \
     cic-userdebug \
-	caas_var-userdebug
+	caas_cfc-userdebug

@@ -502,7 +502,7 @@ pfw_rebuild_settings := true
 include $(TARGET_DEVICE_DIR)/audio/AndroidBoard.mk
 AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/audio/auto_hal.in
 ##############################################################
-# Source: device/intel/mixins/groups/device-specific/caas_var/AndroidBoard.mk
+# Source: device/intel/mixins/groups/device-specific/caas_cfc/AndroidBoard.mk
 ##############################################################
 KERNEL_APL_DIFFCONFIG = $(wildcard $(KERNEL_CONFIG_PATH)/apl_nuc_diffconfig)
 KERNEL_DIFFCONFIG += $(KERNEL_APL_DIFFCONFIG)

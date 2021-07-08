@@ -242,7 +242,7 @@ PRODUCT_COPY_FILES += \
     frameworks/native/data/etc/android.software.freeform_window_management.xml:vendor/etc/permissions/android.software.freeform_window_management.xml
 
 ##############################################################
-# Source: device/intel/mixins/groups/device-specific/caas_var/product.mk
+# Source: device/intel/mixins/groups/device-specific/caas_cfc/product.mk
 ##############################################################
 TARGET_BOARD_PLATFORM := celadon
 

@@ -67,7 +67,7 @@ usb-audio-init: false
 usb-otg-switch: true
 vndk: true
 public-libraries: true
-device-specific: caas_var
+device-specific: caas_cfc
 hdcpd: true
 treble: true
 swap: zram_auto(size=1073741824,swappiness=true,hardware=gordon_peak,disk_based_swap=true)
