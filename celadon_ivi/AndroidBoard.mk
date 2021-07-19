@@ -678,6 +678,10 @@ _EXTRA_FW_ += $(I915_FW)
 ##############################################################
 LOAD_MODULES_IN += $(TARGET_DEVICE_DIR)/extra_files/ethernet/load_eth_modules.in
 ##############################################################
+# Source: device/intel/mixins/groups/codecs/configurable/AndroidBoard.mk
+##############################################################
+AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/codecs/auto_hal.in
+##############################################################
 # Source: device/intel/mixins/groups/thermal/thermal-daemon/AndroidBoard.mk
 ##############################################################
 AUTO_IN += $(TARGET_DEVICE_DIR)/extra_files/thermal/auto_hal.in

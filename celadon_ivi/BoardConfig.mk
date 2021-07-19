@@ -486,6 +486,10 @@ BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/camera-ext/ext-camera-only
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/rfkill
 ##############################################################
+# Source: device/intel/mixins/groups/codecs/configurable/BoardConfig.mk
+##############################################################
+BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/codecs
+##############################################################
 # Source: device/intel/mixins/groups/usb-gadget/configfs/BoardConfig.mk
 ##############################################################
 BOARD_SEPOLICY_DIRS += $(INTEL_PATH_SEPOLICY)/usb-gadget/configfs
