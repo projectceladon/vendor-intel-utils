@@ -1,0 +1,328 @@
+From 4f6879dff430e4389e28361c920cb3b37c6dcbc9 Mon Sep 17 00:00:00 2001
+From: "Li, HaihongX" <haihongx.li@intel.com>
+Date: Thu, 26 Aug 2021 09:46:08 +0800
+Subject: [PATCH 2/3] Fix issue and add some properties
+
+1. Fix issue caused by crtc count and connector count doesn't match.
+2. Multi-plane support
+   Multi-plane can be enabled by property
+   vendor.hwcomposer.planes.enabling.
+   By default, only one plane is used if the property is not set.
+   vendor.hwcomposer.planes.enabling=1 #support all planes
+   vendor.hwcomposer.planes.enabling=0 #only support PRIMARY by default
+3. Select preferred mode
+   If the property 'vendor.hwcomposer.preferred.mode.limit' does not
+   exist, or set to '1' then only support preferred mode.
+   If the property 'vendor.hwcomposer.preferred.mode.limit' is set to
+   '0', support all modes.
+   vendor.hwcomposer.preferred.mode.limit=1#only support preferred mode
+   vendor.hwcomposer.preferred.mode.limit=0#support all modes
+4. Select specific mode
+   This function is controlled by 2 properties.
+      vendor.hwcomposer.connector.id
+      vendor.hwcomposer.mode.id
+   If the properties 'vendor.hwcomposer.connector.id' and
+   'vendor.hwcomposer.mode.id' are all set, then only support the
+   selected mode indicated by 'vendor.hwcomposer.mode.id'.
+   If any one of the properties 'vendor.hwcomposer.connector.id' and
+   'vendor.hwcomposer.mode.id' is not set, then to check the property
+   'vendor.hwcomposer.preferred.mode.limit'.
+      vendor.hwcomposer.connector.id=117
+      vendor.hwcomposer.mode.id=2
+5. With these properties, hwc can provide flexibility for performance
+   tuning and bug triage.
+6. Find mode id
+cat /sys/kernel/debug/dri/0/i915_display_info.The output like below:
+[CONNECTOR:117:DP-4]: status: connected
+modes:
+"1920x1080": 62 144500 1920 1968 2000 2080 1080 1083 1088 1112 0x48 0x9
+"1920x1080": 60 148500 1920 2008 2052 2200 1080 1084 1089 1125 0x40 0xa
+"1680x1050": 60 146250 1680 1784 1960 2240 1050 1053 1059 1089 0x40 0x6
+"1680x945": 60 131481 1680 1784 1960 2240 945 946 949 978 0x0 0x6
+mode id starts from 1, and increases with a step of 1 in order.
+mode id is 1:
+"1920x1080": 62 144500 1920 1968 2000 2080 1080 1083 1088 1112 0x48 0x9
+mode id is 2:
+"1920x1080": 60 148500 1920 2008 2052 2200 1080 1084 1089 1125 0x40 0xa
+mode id is 3:
+"1680x1050": 60 146250 1680 1784 1960 2240 1050 1053 1059 1089 0x40 0x6
+mode id is 4:
+"1680x945": 60 131481 1680 1784 1960 2240 945 946 949 978 0x0 0x6
+7. The property can be set in /vendor/default.prop.
+8. Support 'SetActiveConfigWithConstraints' interface needed by vts.
+9. Fix multi-display issue.
+
+Tracked-On: OAM-97985
+Signed-off-by: Li, HaihongX <haihongx.li@intel.com>
+---
+ DrmHwcTwo.cpp        | 12 +++++--
+ drm/DrmConnector.cpp | 79 +++++++++++++++++++++++++++++++++++++++++++-
+ drm/DrmDevice.cpp    | 55 ++++++++++++++++++++++++++++--
+ drm/DrmDevice.h      |  3 ++
+ 4 files changed, 143 insertions(+), 6 deletions(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index d141f16..2273303 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -914,7 +914,7 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayVsyncPeriod(
+ }
+ 
+ HWC2::Error DrmHwcTwo::HwcDisplay::SetActiveConfigWithConstraints(
+-    hwc2_config_t /*config*/,
++    hwc2_config_t config,
+     hwc_vsync_period_change_constraints_t *vsyncPeriodChangeConstraints,
+     hwc_vsync_period_change_timeline_t *outTimeline) {
+   supported(__func__);
+@@ -922,8 +922,14 @@ HWC2::Error DrmHwcTwo::HwcDisplay::SetActiveConfigWithConstraints(
+   if (vsyncPeriodChangeConstraints == nullptr || outTimeline == nullptr) {
+     return HWC2::Error::BadParameter;
+   }
+-
+-  return HWC2::Error::BadConfig;
++  uint32_t num_configs;
++  HWC2::Error err = GetDisplayConfigs(&num_configs, NULL);
++  if (err != HWC2::Error::None || !num_configs)
++    return err;
++  if (num_configs < config)
++    return HWC2::Error::BadConfig;
++  else
++    return SetActiveConfig(config);
+ }
+ 
+ HWC2::Error DrmHwcTwo::HwcDisplay::SetAutoLowLatencyMode(bool /*on*/) {
+diff --git a/drm/DrmConnector.cpp b/drm/DrmConnector.cpp
+index 0468527..972660c 100644
+--- a/drm/DrmConnector.cpp
++++ b/drm/DrmConnector.cpp
+@@ -19,7 +19,7 @@
+ #include "DrmConnector.h"
+ 
+ #include <xf86drmMode.h>
+-
++#include <cutils/properties.h>
+ #include <array>
+ #include <cerrno>
+ #include <cstdint>
+@@ -170,14 +170,85 @@ int DrmConnector::UpdateModes() {
+ 
+   state_ = c->connection;
+ 
++  int32_t connector_id;
++  int32_t mode_id;
++
++  char property[PROPERTY_VALUE_MAX];
++  memset(property, 0 , PROPERTY_VALUE_MAX);
++  property_get("vendor.hwcomposer.connector.id", property, "-1");
++  connector_id = atoi(property);
++  ALOGD("The property 'vendor.hwcomposer.connector.id' value is %d", connector_id);
++
++  memset(property, 0 , PROPERTY_VALUE_MAX);
++  property_get("vendor.hwcomposer.mode.id", property, "-1");
++  mode_id = atoi(property);
++  ALOGD("The property 'vendor.hwcomposer.mode.id' value is %d", mode_id);
++
+   bool preferred_mode_found = false;
+   std::vector<DrmMode> new_modes;
++
++  if (mode_id <= 0 || mode_id > c->count_modes)
++    mode_id = -1;
++
++  bool have_preferred_mode = false;
++  for (int i = 0; i < c->count_modes; ++i) {
++    if (c->modes[i].type & DRM_MODE_TYPE_PREFERRED) {
++      have_preferred_mode = true;
++      break;
++    }
++  }
++
+   for (int i = 0; i < c->count_modes; ++i) {
++    if (drm_->preferred_mode_limit_ && connector_id == -1) {
++      if (have_preferred_mode) {
++        if (!(c->modes[i].type & DRM_MODE_TYPE_PREFERRED)) {
++          drm_->next_mode_id();
++          continue;
++        }
++      } else {
++        have_preferred_mode = true;
++      }
++    }
++    if (c->connector_id == connector_id) {
++      if (mode_id == -1) {
++        if (drm_->preferred_mode_limit_) {
++          if (have_preferred_mode) {
++            if (!(c->modes[i].type & DRM_MODE_TYPE_PREFERRED)) {
++              drm_->next_mode_id();
++              continue;
++            }
++          } else {
++            have_preferred_mode = true;
++         }
++        }
++      } else {
++        if (mode_id != (i + 1)) {
++          drm_->next_mode_id();
++          continue;
++        }
++      }
++    } else {
++      if (connector_id != -1) {
++        if (drm_->preferred_mode_limit_) {
++          if (have_preferred_mode) {
++            if (!(c->modes[i].type & DRM_MODE_TYPE_PREFERRED)) {
++              drm_->next_mode_id();
++              continue;
++            }
++          } else {
++            have_preferred_mode = true;
++          }
++        }
++      }
++    }
++
+     bool exists = false;
+     for (const DrmMode &mode : modes_) {
+       if (mode == c->modes[i]) {
+         new_modes.push_back(mode);
+         exists = true;
++        ALOGD("CONNECTOR:%d select one mode, id = %d, name = %s, refresh = %f",
++          id_, mode.id(), mode.name().c_str(), mode.v_refresh());
+         break;
+       }
+     }
+@@ -185,17 +256,23 @@ int DrmConnector::UpdateModes() {
+       DrmMode m(&c->modes[i]);
+       m.set_id(drm_->next_mode_id());
+       new_modes.push_back(m);
++      ALOGD("CONNECTOR:%d select one mode, id = %d, name = %s, refresh = %f", 
++        id_, m.id(), m.name().c_str(), m.v_refresh());
+     }
+     // Use only the first DRM_MODE_TYPE_PREFERRED mode found
+     if (!preferred_mode_found &&
+         (new_modes.back().type() & DRM_MODE_TYPE_PREFERRED)) {
+       preferred_mode_id_ = new_modes.back().id();
+       preferred_mode_found = true;
++      ALOGD("CONNECTOR:%d preferred mode found, set preferred mode id = %d, name = %s, refresh = %f",
++        id_, preferred_mode_id_, new_modes.back().name().c_str(), new_modes.back().v_refresh());
+     }
+   }
+   modes_.swap(new_modes);
+   if (!preferred_mode_found && !modes_.empty()) {
+     preferred_mode_id_ = modes_[0].id();
++    ALOGD("CONNECTOR:%d preferred mode not found, set preferred mode id = %d, name = %s, refresh = %f",
++      id_, preferred_mode_id_, modes_[0].name().c_str(), modes_[0].v_refresh());
+   }
+   return 0;
+ }
+diff --git a/drm/DrmDevice.cpp b/drm/DrmDevice.cpp
+index abc8edc..5abe2f4 100644
+--- a/drm/DrmDevice.cpp
++++ b/drm/DrmDevice.cpp
+@@ -167,6 +167,18 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+     return std::make_tuple(-ENODEV, 0);
+   }
+ 
++  char property[PROPERTY_VALUE_MAX];
++  memset(property, 0 , PROPERTY_VALUE_MAX);
++  property_get("vendor.hwcomposer.preferred.mode.limit", property, "1");
++  preferred_mode_limit_ = atoi(property) != 0 ? true : false;
++  ALOGD("The property 'vendor.hwcomposer.preferred.mode.limit' value is %d", preferred_mode_limit_);
++
++  memset(property, 0 , PROPERTY_VALUE_MAX);
++  property_get("vendor.hwcomposer.planes.enabling", property, "0");
++  planes_enabling_ = atoi(property) != 0 ? true : false;
++  ALOGD("The property 'vendor.hwcomposer.planes.enabling' value is %d, %s",
++    planes_enabling_, planes_enabling_ ? "support all planes":"only support primary plane");
++
+   min_resolution_ = std::pair<uint32_t, uint32_t>(res->min_width,
+                                                   res->min_height);
+   max_resolution_ = std::pair<uint32_t, uint32_t>(res->max_width,
+@@ -282,6 +294,15 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+         "\"vendor.hwc.drm.primary_display_order\" property");
+   }
+ 
++  for (auto &primary_conn : primary_candidates) {
++    if (primary_conn == *std::begin(primary_candidates))
++      continue;
++    primary_conn->set_display(num_displays);
++    displays_[num_displays] = num_displays;
++    ++num_displays;
++  }
++
++  int max_pipe_count = std::min(res->count_crtcs, res->count_connectors);
+   // If no priority display were found then pick first available as primary and
+   // for the others assign consecutive display_numbers.
+   for (auto &conn : connectors_) {
+@@ -291,7 +312,7 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+         displays_[num_displays] = num_displays;
+         found_primary = true;
+         ++num_displays;
+-      } else if (conn->display() < 0) {
++      } else if (conn->display() < 0 && num_displays < max_pipe_count) {
+         conn->set_display(num_displays);
+         displays_[num_displays] = num_displays;
+         ++num_displays;
+@@ -330,7 +351,12 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+       break;
+     }
+ 
+-    planes_.emplace_back(std::move(plane));
++    if (!planes_enabling_) {
++      if (plane->type() == DRM_PLANE_TYPE_PRIMARY)
++        planes_.emplace_back(std::move(plane));
++    } else {
++      planes_.emplace_back(std::move(plane));
++    }
+   }
+   drmModeFreePlaneResources(plane_res);
+   if (ret)
+@@ -342,7 +368,32 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+     return std::make_tuple(ret, 0);
+   }
+ 
++  for (auto conn : primary_candidates) {
++    if (max_pipe_count-- <= 0)
++      break;
++
++    ret = CreateDisplayPipe(conn);
++    if (ret) {
++          ALOGE("Failed CreateDisplayPipe %d with %d", conn->id(), ret);
++          return std::make_tuple(ret, 0);
++    }
++    if (!AttachWriteback(conn)) {
++          ALOGI("Display %d has writeback attach to it", conn->display());
++    }
++  }
++
+   for (auto &conn : connectors_) {
++    auto it = std::find_if(std::begin(primary_candidates),
++                           std::end(primary_candidates),
++                           [&conn](const DrmConnector *conn_pri) {
++                             return conn->id() == conn_pri->id();
++                           });
++    if (it != std::end(primary_candidates))
++      continue;
++
++    if (max_pipe_count-- <= 0)
++      break;
++
+     ret = CreateDisplayPipe(conn.get());
+     if (ret) {
+       ALOGE("Failed CreateDisplayPipe %d with %d", conn->id(), ret);
+diff --git a/drm/DrmDevice.h b/drm/DrmDevice.h
+index dfca263..cc35e6f 100644
+--- a/drm/DrmDevice.h
++++ b/drm/DrmDevice.h
+@@ -123,6 +123,9 @@ class DrmDevice {
+   std::shared_ptr<DrmDevice> self;
+ 
+   std::unique_ptr<DrmFbImporter> mDrmFbImporter;
++public:
++  bool preferred_mode_limit_;
++  bool planes_enabling_;
+ };
+ }  // namespace android
+ 
+-- 
+2.32.0
+
