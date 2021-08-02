@@ -1,0 +1,246 @@
+From 83d8501c69a2ddbea00210c9d91dbaf16fd935d3 Mon Sep 17 00:00:00 2001
+From: "Li, HaihongX" <haihongx.li@intel.com>
+Date: Thu, 9 Sep 2021 15:04:23 +0800
+Subject: [PATCH 3/3] Fix hotplug issue and add vsync2.4 callback
+
+1. Once unplug event comes, display.ClearDisplay() will be invoked.
+   Then DrmDisplayCompositor::active_composition_ will be set to
+   nullptr, so in function DrmDisplayCompositor::IsFlatteningNeeded(),
+   should check active_composition_ is not nullptr.
+2. For android can't delete primary display, so when unplug event comes
+   and belongs to primary display, don't invoke hotplug callback to
+   notify upper.
+3. Add vsync2.4 callback.
+4. Set connector dpms property with DRM_MODE_DPMS_OFF if unpluging,
+   DRM_MODE_DPMS_ON if pluging,to enable irq,fix type-c hotplug issue.
+5. Set DrmDevice::mode_id_ with 0 at beginning of
+   DrmConnector::UpdateModes().
+
+Tracked-On: OAM-97985
+Signed-off-by: Li, HaihongX <haihongx.li@intel.com>
+---
+ DrmHwcTwo.cpp                       | 23 +++++++++++++++++++++--
+ DrmHwcTwo.h                         |  3 +++
+ compositor/DrmDisplayCompositor.cpp |  5 ++++-
+ drm/DrmConnector.cpp                |  1 +
+ drm/DrmDevice.cpp                   |  4 ++++
+ drm/DrmDevice.h                     |  1 +
+ drm/DrmEventListener.cpp            |  4 ++--
+ drm/VSyncWorker.cpp                 | 12 ++++++++++++
+ drm/VSyncWorker.h                   |  5 +++++
+ 9 files changed, 53 insertions(+), 5 deletions(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index 2273303..0eadcd7 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -203,6 +203,15 @@ HWC2::Error DrmHwcTwo::RegisterCallback(int32_t descriptor,
+         d.second.RegisterVsyncCallback(data, function);
+       break;
+     }
++    case HWC2::Callback::Vsync_2_4: {
++      for (std::pair<const hwc2_display_t, DrmHwcTwo::HwcDisplay> &d :
++           displays_)
++        d.second.RegisterVsync_2_4Callback(data, function);
++      break;
++    } 
++    case HWC2::Callback::VsyncPeriodTimingChanged: {
++      break;
++    } 
+     default:
+       break;
+   }
+@@ -308,6 +317,12 @@ void DrmHwcTwo::HwcDisplay::RegisterRefreshCallback(
+   compositor_.SetRefreshCallback(data, func);
+ }
+ 
++void DrmHwcTwo::HwcDisplay::RegisterVsync_2_4Callback(
++    hwc2_callback_data_t data, hwc2_function_pointer_t func) {
++  supported(__func__);
++  vsync_worker_.RegisterClient_2_4Callback(data, func);
++}
++
+ HWC2::Error DrmHwcTwo::HwcDisplay::AcceptDisplayChanges() {
+   supported(__func__);
+   for (std::pair<const hwc2_layer_t, DrmHwcTwo::HwcLayer> &l : layers_)
+@@ -1193,7 +1208,8 @@ void DrmHwcTwo::DrmHotplugHandler::HandleEvent(uint64_t timestamp_us) {
+     drmModeConnection cur_state = conn->UpdateModes()
+                                       ? DRM_MODE_UNKNOWNCONNECTION
+                                       : conn->state();
+-
++    if (conn->display() == -1)
++      continue;
+     if (cur_state == old_state)
+       continue;
+ 
+@@ -1205,12 +1221,15 @@ void DrmHwcTwo::DrmHotplugHandler::HandleEvent(uint64_t timestamp_us) {
+     if (cur_state == DRM_MODE_CONNECTED) {
+       auto &display = hwc2_->displays_.at(display_id);
+       display.ChosePreferredConfig();
++      display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::On));
+     } else {
+       auto &display = hwc2_->displays_.at(display_id);
+       display.ClearDisplay();
++      display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::Off));
+     }
+ 
+-    hwc2_->HandleDisplayHotplug(display_id, cur_state);
++    if (display_id != 0 || (display_id == 0 && cur_state == DRM_MODE_CONNECTED))
++      hwc2_->HandleDisplayHotplug(display_id, cur_state);
+   }
+ }
+ 
+diff --git a/DrmHwcTwo.h b/DrmHwcTwo.h
+index 111c664..0c2edef 100644
+--- a/DrmHwcTwo.h
++++ b/DrmHwcTwo.h
+@@ -157,6 +157,9 @@ class DrmHwcTwo : public hwc2_device_t {
+                                hwc2_function_pointer_t func);
+     void RegisterRefreshCallback(hwc2_callback_data_t data,
+                                  hwc2_function_pointer_t func);
++    void RegisterVsync_2_4Callback(hwc2_callback_data_t data,
++                                 hwc2_function_pointer_t func);
++    
+     HWC2::Error CreateComposition(bool test);
+     std::vector<DrmHwcTwo::HwcLayer *> GetOrderLayersByZPos();
+ 
+diff --git a/compositor/DrmDisplayCompositor.cpp b/compositor/DrmDisplayCompositor.cpp
+index a1fe50f..e332641 100644
+--- a/compositor/DrmDisplayCompositor.cpp
++++ b/compositor/DrmDisplayCompositor.cpp
+@@ -685,7 +685,10 @@ void DrmDisplayCompositor::SetFlattening(FlatteningState new_state) {
+ }
+ 
+ bool DrmDisplayCompositor::IsFlatteningNeeded() const {
+-  return CountdownExpired() && active_composition_->layers().size() >= 2;
++  if (active_composition_)
++    return CountdownExpired() && active_composition_->layers().size() >= 2;
++  else
++    return false;
+ }
+ 
+ int DrmDisplayCompositor::FlattenOnClient() {
+diff --git a/drm/DrmConnector.cpp b/drm/DrmConnector.cpp
+index 972660c..3b0f8cb 100644
+--- a/drm/DrmConnector.cpp
++++ b/drm/DrmConnector.cpp
+@@ -162,6 +162,7 @@ std::string DrmConnector::name() const {
+ int DrmConnector::UpdateModes() {
+   int fd = drm_->fd();
+ 
++  drm_->reset_mode_id();
+   drmModeConnectorPtr c = drmModeGetConnector(fd, id_);
+   if (!c) {
+     ALOGE("Failed to get connector %d", id_);
+diff --git a/drm/DrmDevice.cpp b/drm/DrmDevice.cpp
+index 5abe2f4..f47aa72 100644
+--- a/drm/DrmDevice.cpp
++++ b/drm/DrmDevice.cpp
+@@ -475,6 +475,10 @@ uint32_t DrmDevice::next_mode_id() {
+   return ++mode_id_;
+ }
+ 
++void DrmDevice::reset_mode_id() {
++  mode_id_ = 0;
++}
++
+ int DrmDevice::TryEncoderForDisplay(int display, DrmEncoder *enc) {
+   /* First try to use the currently-bound crtc */
+   DrmCrtc *crtc = enc->crtc();
+diff --git a/drm/DrmDevice.h b/drm/DrmDevice.h
+index cc35e6f..a84d1f9 100644
+--- a/drm/DrmDevice.h
++++ b/drm/DrmDevice.h
+@@ -81,6 +81,7 @@ class DrmDevice {
+   const std::vector<std::unique_ptr<DrmCrtc>> &crtcs() const;
+   uint32_t next_mode_id();
+ 
++  void reset_mode_id();
+   int CreatePropertyBlob(void *data, size_t length, uint32_t *blob_id) const;
+   int DestroyPropertyBlob(uint32_t blob_id) const;
+   bool HandlesDisplay(int display) const;
+diff --git a/drm/DrmEventListener.cpp b/drm/DrmEventListener.cpp
+index b303653..d59bd07 100644
+--- a/drm/DrmEventListener.cpp
++++ b/drm/DrmEventListener.cpp
+@@ -83,7 +83,7 @@ void DrmEventListener::FlipHandler(int /* fd */, unsigned int /* sequence */,
+ }
+ 
+ void DrmEventListener::UEventHandler() {
+-  char buffer[1024];
++  char buffer[1024]= {0};
+   int ret = 0;
+ 
+   struct timespec ts {};
+@@ -96,7 +96,7 @@ void DrmEventListener::UEventHandler() {
+     ALOGE("Failed to get monotonic clock on hotplug %d", ret);
+ 
+   while (true) {
+-    ret = read(uevent_fd_.Get(), &buffer, sizeof(buffer));
++    ret = read(uevent_fd_.Get(), &buffer, sizeof(buffer) - 1);
+     if (ret == 0)
+       return;
+ 
+diff --git a/drm/VSyncWorker.cpp b/drm/VSyncWorker.cpp
+index 25eeeab..b7ceb4c 100644
+--- a/drm/VSyncWorker.cpp
++++ b/drm/VSyncWorker.cpp
+@@ -24,6 +24,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <ctime>
++#include <inttypes.h>
+ 
+ #include "utils/log.h"
+ 
+@@ -58,6 +59,14 @@ void VSyncWorker::RegisterClientCallback(hwc2_callback_data_t data,
+   Unlock();
+ }
+ 
++void VSyncWorker::RegisterClient_2_4Callback(hwc2_callback_data_t data,
++                                         hwc2_function_pointer_t hook) {
++  Lock();
++  vsync_2_4_callback_data_ = data;
++  vsync_2_4_callback_hook_ = (HWC2_PFN_VSYNC_2_4)hook;
++  Unlock();
++}
++
+ void VSyncWorker::VSyncControl(bool enabled) {
+   Lock();
+   enabled_ = enabled;
+@@ -171,6 +180,9 @@ void VSyncWorker::Routine() {
+   Lock();
+   if (enabled_ && vsync_callback_hook_ && vsync_callback_data_)
+     vsync_callback_hook_(vsync_callback_data_, display, timestamp);
++  
++  if (enabled_ && vsync_2_4_callback_hook_ && vsync_2_4_callback_data_)
++    vsync_2_4_callback_hook_(vsync_2_4_callback_data_, display, timestamp, 0);
+   Unlock();
+ 
+   last_timestamp_ = timestamp;
+diff --git a/drm/VSyncWorker.h b/drm/VSyncWorker.h
+index b43918c..09ebfda 100644
+--- a/drm/VSyncWorker.h
++++ b/drm/VSyncWorker.h
+@@ -45,6 +45,8 @@ class VSyncWorker : public Worker {
+   void RegisterCallback(std::shared_ptr<VsyncCallback> callback);
+   void RegisterClientCallback(hwc2_callback_data_t data,
+                               hwc2_function_pointer_t hook);
++  void RegisterClient_2_4Callback(hwc2_callback_data_t data,
++                              hwc2_function_pointer_t hook);
+ 
+   void VSyncControl(bool enabled);
+ 
+@@ -68,6 +70,9 @@ class VSyncWorker : public Worker {
+ 
+   hwc2_callback_data_t vsync_callback_data_ = NULL;
+   HWC2_PFN_VSYNC vsync_callback_hook_ = NULL;
++
++  hwc2_callback_data_t vsync_2_4_callback_data_ = NULL;
++  HWC2_PFN_VSYNC_2_4 vsync_2_4_callback_hook_ = NULL;
+ };
+ }  // namespace android
+ 
+-- 
+2.32.0
+
