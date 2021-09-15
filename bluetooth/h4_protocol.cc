@@ -15,7 +15,6 @@
 //
 
 #include "h4_protocol.h"
-#include "hcidefs.h"
 
 #define LOG_TAG "android.hardware.bluetooth-hci-h4"
 
@@ -24,6 +23,15 @@
 #include <asm/byteorder.h>
 #include <linux/usb/ch9.h>
 #include <libusb/libusb.h>
+
+#define HCI_COMMAND_COMPLETE_EVT 0x0E
+#define HCI_COMMAND_STATUS_EVT 0x0F
+#define HCI_ESCO_CONNECTION_COMP_EVT 0x2C
+#define HCI_RESET_SUPPORTED(x) ((x)[5] & 0x80)
+#define HCI_GRP_INFORMATIONAL_PARAMS (0x04 << 10)    /* 0x1000 */
+#define HCI_READ_LOCAL_SUPPORTED_CMDS (0x0002 | HCI_GRP_INFORMATIONAL_PARAMS)
+#define HCI_GRP_HOST_CONT_BASEBAND_CMDS (0x03 << 10) /* 0x0C00 */
+#define HCI_RESET (0x0003 | HCI_GRP_HOST_CONT_BASEBAND_CMDS)
 
 #define INTEL_VID 0x8087
 #define INTEL_PID_8265 0x0a2b // Windstorm peak

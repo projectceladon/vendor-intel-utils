@@ -23,9 +23,6 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 
-#include "esco_parameters.h"
-#include "hcidefs.h"
-
 #include "bluetooth_address.h"
 #include "h4_protocol.h"
 #include "mct_protocol.h"
