@@ -1,0 +1,230 @@
+From 926b8f016a9513eea8aba5b7bcce8a574b3e54b8 Mon Sep 17 00:00:00 2001
+From: Shalini Salomi Bodapati <shalini.salomi.bodapati@intel.com>
+Date: Tue, 18 May 2021 16:20:39 +0530
+Subject: [PATCH 1/3] Linker changes to allow perf variants of an .so
+
+This patch enables the linker to find perf variants of
+an .so if they exist.
+Enables us to have One-image catering to multiple
+IA CPUs which may or may not support all ISA features.
+Example: Pentium SKUs dont support AVX.
+
+Change-Id: I74f98ee61af7ada71d1bca5a5a482734bae90f37
+Tracked-On: OAM-94488
+Signed-off-by: Shalini Salomi Bodapati <shalini.salomi.bodapati@intel.com>
+---
+ linker/linker.cpp                | 69 ++++++++++++++++++++++++++------
+ linker/linker_translate_path.cpp | 31 ++++++++++++++
+ linker/linker_translate_path.h   |  1 +
+ linker/linker_utils.cpp          | 13 ++++++
+ linker/linker_utils.h            |  1 +
+ 5 files changed, 102 insertions(+), 13 deletions(-)
+
+diff --git a/linker/linker.cpp b/linker/linker.cpp
+index 3488f5cc716e..712e2bb04064 100644
+--- a/linker/linker.cpp
++++ b/linker/linker.cpp
+@@ -98,23 +98,35 @@ static const char* const kLdConfigVndkLiteFilePath = "/system/etc/ld.config.vndk
+ static const char* const kLdGeneratedConfigFilePath = "/linkerconfig/ld.config.txt";
+ 
+ #if defined(__LP64__)
+-static const char* const kSystemLibDir        = "/system/lib64";
+-static const char* const kOdmLibDir           = "/odm/lib64";
+-static const char* const kVendorLibDir        = "/vendor/lib64";
+-static const char* const kAsanSystemLibDir    = "/data/asan/system/lib64";
+-static const char* const kAsanOdmLibDir       = "/data/asan/odm/lib64";
+-static const char* const kAsanVendorLibDir    = "/data/asan/vendor/lib64";
++static const char* const kSystemLibPerfAvx2Dir     = "/system/lib64/IA-Perf/avx2";
++static const char* const kSystemLibDir             = "/system/lib64";
++static const char* const kOdmLibDir                = "/odm/lib64";
++static const char* const kVendorLibDir             = "/vendor/lib64";
++static const char* const kAsanSystemLibPerfAvx2Dir = "/data/asan/system/lib64/IA-Perf/avx2";
++static const char* const kAsanSystemLibDir         = "/data/asan/system/lib64";
++static const char* const kAsanOdmLibDir            = "/data/asan/odm/lib64";
++static const char* const kAsanVendorLibDir         = "/data/asan/vendor/lib64";
+ #else
+-static const char* const kSystemLibDir        = "/system/lib";
+-static const char* const kOdmLibDir           = "/odm/lib";
+-static const char* const kVendorLibDir        = "/vendor/lib";
+-static const char* const kAsanSystemLibDir    = "/data/asan/system/lib";
+-static const char* const kAsanOdmLibDir       = "/data/asan/odm/lib";
+-static const char* const kAsanVendorLibDir    = "/data/asan/vendor/lib";
++static const char* const kSystemLibPerfAvx2Dir     = "/system/lib/IA-Perf/avx2";
++static const char* const kSystemLibDir             = "/system/lib";
++static const char* const kOdmLibDir                = "/odm/lib";
++static const char* const kVendorLibDir             = "/vendor/lib";
++static const char* const kAsanSystemLibPerfAvx2Dir = "/data/asan/system/lib/IA-Perf/avx2";
++static const char* const kAsanSystemLibDir         = "/data/asan/system/lib";
++static const char* const kAsanOdmLibDir            = "/data/asan/odm/lib";
++static const char* const kAsanVendorLibDir         = "/data/asan/vendor/lib";
+ #endif
+ 
+ static const char* const kAsanLibDirPrefix = "/data/asan";
+ 
++static const char* const kDefaultPerfAvx2LdPaths[] = {
++  kSystemLibPerfAvx2Dir,
++  kSystemLibDir,
++  kOdmLibDir,
++  kVendorLibDir,
++  nullptr
++};
++
+ static const char* const kDefaultLdPaths[] = {
+   kSystemLibDir,
+   kOdmLibDir,
+@@ -122,6 +134,18 @@ static const char* const kDefaultLdPaths[] = {
+   nullptr
+ };
+ 
++static const char* const kAsanDefaultPerfAvx2LdPaths[] = {
++  kAsanSystemLibPerfAvx2Dir,
++  kSystemLibPerfAvx2Dir,
++  kAsanSystemLibDir,
++  kSystemLibDir,
++  kAsanOdmLibDir,
++  kOdmLibDir,
++  kAsanVendorLibDir,
++  kVendorLibDir,
++  nullptr
++};
++
+ static const char* const kAsanDefaultLdPaths[] = {
+   kAsanSystemLibDir,
+   kSystemLibDir,
+@@ -2137,6 +2161,24 @@ void* do_dlopen(const char* name, int flags,
+   }
+   // End Workaround for dlopen(/system/lib/<soname>) when .so is in /apex.
+ 
++  // Workaround for dlopen(FullPath/<soname>) when platform supports corresponding feature and
++  // .so may have an avx2 version.
++  std::string name_to_avx2;
++  if (translateSystemPathToPerfFeaturePath("avx2", name, &name_to_avx2)) {
++    const char* new_name = name_to_avx2.c_str();
++    LD_LOG(kLogDlopen, "dlopen considering translation from %s to Avx2 path %s",
++           name,
++           new_name);
++    if (!file_exists(new_name)) {
++      LD_LOG(kLogDlopen, "dlopen %s does not exist, not translating",
++             new_name);
++    } else {
++      LD_LOG(kLogDlopen, "dlopen translation accepted: using %s", new_name);
++      name = new_name;
++    }
++  }
++  // End Workaround for dlopen(FullPath/<soname>) when .so may have avx2 version.
++
+   std::string asan_name_holder;
+ 
+   const char* translated_name = name;
+@@ -3331,7 +3373,8 @@ bool soinfo::protect_relro() {
+ 
+ static std::vector<android_namespace_t*> init_default_namespace_no_config(bool is_asan) {
+   g_default_namespace.set_isolated(false);
+-  auto default_ld_paths = is_asan ? kAsanDefaultLdPaths : kDefaultLdPaths;
++  auto default_ld_paths = is_asan ? (PlatformSupportsISAFeature("avx2") ? kAsanDefaultPerfAvx2LdPaths  : kAsanDefaultLdPaths) :
++                                    (PlatformSupportsISAFeature("avx2") ? kDefaultPerfAvx2LdPaths      : kDefaultLdPaths);
+ 
+   char real_path[PATH_MAX];
+   std::vector<std::string> ld_default_paths;
+diff --git a/linker/linker_translate_path.cpp b/linker/linker_translate_path.cpp
+index 4f3fdfbc3b5d..a6b58cf92339 100644
+--- a/linker/linker_translate_path.cpp
++++ b/linker/linker_translate_path.cpp
+@@ -29,6 +29,7 @@
+ #include "linker.h"
+ #include "linker_translate_path.h"
+ #include "linker_utils.h"
++#include "android-base/strings.h"
+ 
+ #if defined(__LP64__)
+ #define APEX_LIB(apex, name) \
+@@ -39,6 +40,10 @@
+ #endif
+ 
+ 
++static const char* const kSystemApexDir       = "/system/apex";
++static const char* const kApexDir             = "/apex";
++static const char* const kPerfDir             = "/IA-Perf/";
++
+ // Workaround for dlopen(/system/lib(64)/<soname>) when .so is in /apex. http://b/121248172
+ /**
+  * Translate /system path to /apex path if needed
+@@ -71,3 +76,29 @@ bool translateSystemPathToApexPath(const char* name, std::string* out_name_to_ap
+   return false;
+ }
+ // End Workaround for dlopen(/system/lib/<soname>) when .so is in /apex.
++
++/**
++ * Translate so path to Perf feature so path if needed
++ *
++ * param out_name_to_perf_feature pointing to corresponding perf feature path
++ * return true if translation is needed
++ */
++bool translateSystemPathToPerfFeaturePath(const char* isa_feature, const char* name, std::string* out_name_to_perf_feature) {
++  const char* kSystemLibDir = "/system/lib64";
++  // If the platform doesn't support avx, there's nothing to do.
++  if (!PlatformSupportsISAFeature(isa_feature) || name == nullptr) {
++    return false;
++  }
++
++  std::string dir_name = dirname(name);
++
++  if (dir_name != kSystemLibDir &&
++      !android::base::StartsWith(dir_name,kApexDir) &&
++      !android::base::StartsWith(dir_name,kSystemApexDir)) {
++    return false;
++  }
++
++  *out_name_to_perf_feature = dir_name + kPerfDir + isa_feature + "/" + basename(name);
++  return true;
++}
++// End Workaround for dlopen(FullPath/<soname>) when .so could have avx version .
+diff --git a/linker/linker_translate_path.h b/linker/linker_translate_path.h
+index 86a3ec1e9ca7..cf6ec5f653e2 100644
+--- a/linker/linker_translate_path.h
++++ b/linker/linker_translate_path.h
+@@ -31,3 +31,4 @@
+ #include <string>
+ 
+ bool translateSystemPathToApexPath(const char* name, std::string* out_name_to_apex);
++bool translateSystemPathToPerfFeaturePath(const char* isa_feature, const char* name, std::string* out_name_to_perf_feature);
+diff --git a/linker/linker_utils.cpp b/linker/linker_utils.cpp
+index 29110ed56845..5e43d1526aa4 100644
+--- a/linker/linker_utils.cpp
++++ b/linker/linker_utils.cpp
+@@ -36,6 +36,8 @@
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
++static int kPlatformSupportsAvx2 = -1;
++
+ void format_string(std::string* str, const std::vector<std::pair<std::string, std::string>>& params) {
+   size_t pos = 0;
+   while (pos < str->size()) {
+@@ -258,3 +260,14 @@ bool is_first_stage_init() {
+   static bool ret = (getpid() == 1 && access("/proc/self/exe", F_OK) == -1);
+   return ret;
+ }
++
++bool PlatformSupportsISAFeature(const char* isa_feature) {
++  if (strcmp(isa_feature, "avx2") == 0) {
++    if (kPlatformSupportsAvx2 == -1) {
++      __builtin_cpu_init();
++      kPlatformSupportsAvx2 = __builtin_cpu_supports("avx2") ? 1 : 0;
++    }
++    return kPlatformSupportsAvx2;
++  }
++  return false;
++}
+diff --git a/linker/linker_utils.h b/linker/linker_utils.h
+index 5073b1068d4f..c745b6609c57 100644
+--- a/linker/linker_utils.h
++++ b/linker/linker_utils.h
+@@ -59,3 +59,4 @@ off64_t page_start(off64_t offset);
+ size_t page_offset(off64_t offset);
+ bool safe_add(off64_t* out, off64_t a, size_t b);
+ bool is_first_stage_init();
++bool PlatformSupportsISAFeature(const char* isa_feature);
+-- 
+2.17.1
+
