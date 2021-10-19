@@ -1,0 +1,253 @@
+From 7b66e1d18d9acac790f0f23597e97ec54e1995f8 Mon Sep 17 00:00:00 2001
+From: ahs <amrita.h.s@intel.com>
+Date: Tue, 19 Oct 2021 20:29:50 +0530
+Subject: [PATCH] A test patch to facilitate Vsock comm from Activity Manager
+
+Tracked-On:
+Signed-off-by: ahs <amrita.h.s@intel.com>
+---
+ Android.bp                                    |   3 +-
+ core/java/android/app/ActivityManager.java    | 101 ++++++++++++++++++
+ .../java/com/android/server/SystemServer.java |  74 +++++++++++++
+ 3 files changed, 177 insertions(+), 1 deletion(-)
+
+diff --git a/Android.bp b/Android.bp
+index bf6c99d0cf29..efe536747fba 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -486,7 +486,8 @@ java_library {
+         "services-platform-compat-config",
+         "documents-ui-compat-config",
+     ],
+-    libs: ["framework-updatable-stubs-module_libs_api"],
++    libs: ["framework-updatable-stubs-module_libs_api",
++        "VsockWrapper"],
+     static_libs: [
+         // If MimeMap ever becomes its own APEX, then this dependency would need to be removed
+         // in favor of an API stubs dependency in java_library "framework" below.
+diff --git a/core/java/android/app/ActivityManager.java b/core/java/android/app/ActivityManager.java
+index 1059a6f2e868..00abf19ac4c5 100644
+--- a/core/java/android/app/ActivityManager.java
++++ b/core/java/android/app/ActivityManager.java
+@@ -101,6 +101,17 @@ import java.util.Collections;
+ import java.util.List;
+ import java.util.Locale;
+ 
++import android.util.Log;
++import com.intel.clipboardagent.VsockClientImpl;
++import com.intel.clipboardagent.VsockAddress;
++import com.intel.clipboardagent.Vsock;
++
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++
+ /**
+  * <p>
+  * This class gives information about, and interacts
+@@ -788,6 +799,10 @@ public class ActivityManager {
+     @UnsupportedAppUsage
+     /*package*/ ActivityManager(Context context, Handler handler) {
+         mContext = context;
++        VsockAddress mVsockAddress = new VsockAddress(VsockAddress.VMADDR_CID_HOST, 1234);
++        Vsock mVsock = new Vsock(mVsockAddress);
++	ExecutorService mThreadPool = Executors.newSingleThreadExecutor();
++	mThreadPool.execute(new HandleHostVsockContent(mVsock, mVsockAddress));
+     }
+ 
+     /**
+@@ -4931,4 +4946,90 @@ public class ActivityManager {
+             throw e.rethrowFromSystemServer();
+         }
+     }
++
++    private class HandleHostVsockContent implements Runnable {
++        private static final String TAG = "VSockComm";
++        private static final int DEFAULT_DATA_LENGTH = 4096;
++        private static final int MAX_DATA_LENGTH = 512*1024;
++	private Vsock mVsock;
++	private VsockAddress mVsockAddress;
++
++        private HandleHostVsockContent(Vsock vsock, VsockAddress vsockaddress) {
++		mVsock = vsock;
++		mVsockAddress = vsockaddress;
++        }
++
++	public void SayHello() {
++            String msg = new String("Hello");
++            byte[] mBytes = msg.getBytes(StandardCharsets.UTF_8);
++
++            try{
++                mVsock.getOutputStream().writeInt(mBytes.length);
++                int writeLength = (mBytes.length < MAX_DATA_LENGTH) ? mBytes.length : MAX_DATA_LENGTH;
++                // If Clipboard is cleared, nothing to send
++                if (writeLength > 0) {
++                   mVsock.getOutputStream().write(mBytes, 0, writeLength);
++                }
++            } catch (IOException exception) {
++                Log.e(TAG, "Error on handling clipboard data: " + exception.getMessage());
++            }
++	}
++
++        @Override
++        public void run() {
++            // TODO: Data length is hard code here for 4096.
++            byte[] buffer = new byte[DEFAULT_DATA_LENGTH];
++	    try {
++	       mVsock.connect();
++            } catch (IOException exception) {
++	       Log.e(TAG, "Failed to connect: " + exception.getMessage());
++	    }
++	    // Say Hello to the server, before listening
++	    SayHello();
++            while (true) {
++                boolean bReconnect = false;
++                byte[] bytes = buffer;
++                String content = "";
++                try {
++                    int length = mVsock.getInputStream().readInt();
++                    if (length < 0 || length > MAX_DATA_LENGTH) {
++                        Log.wtf(TAG, "Unexpected data size :"+length, new Exception("Unexpected data size"));
++                        continue;
++                    }
++
++                    if (length > DEFAULT_DATA_LENGTH) {
++                       bytes = new byte[length];
++                    }
++
++                    if (length > 0) {
++                        mVsock.getInputStream().read(bytes, 0, length);
++                        content = new String(bytes, 0, length, StandardCharsets.UTF_8);
++                    }
++		    Log.w(TAG, "Got New Msg:" + content);
++                } catch (IOException exception) {
++                    if (exception.toString().contains("Connection reset") ||
++                        exception.toString().contains("Connection is closed by peer")) {
++                        Log.e(TAG, "Connection reset, attempting to reconnect");
++			bReconnect = true;
++                    } else {
++                        Log.e(TAG, "Error on handling host Vsock: " + exception.getMessage());
++                    }
++                }
++                if (bReconnect) {
++                    try {
++                        mVsock.close();
++                    } catch (IOException e) {
++                        Log.e(TAG, "Failed to close vsock: " + e.getMessage());
++                    }
++                    try {
++                        mVsock = new Vsock(mVsockAddress);
++                        mVsock.connect();
++                        Thread.sleep(1000);
++                    } catch (IOException e) {
++                        Log.e(TAG, "Error reconnecting... " + e.getMessage());
++                    } catch (InterruptedException x) {}
++                }
++            }
++        }
++    }
+ }
+diff --git a/services/java/com/android/server/SystemServer.java b/services/java/com/android/server/SystemServer.java
+index 88e698121617..aec18674f43d 100644
+--- a/services/java/com/android/server/SystemServer.java
++++ b/services/java/com/android/server/SystemServer.java
+@@ -191,6 +191,8 @@ import java.util.Locale;
+ import java.util.Timer;
+ import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.Future;
++//import com.intel.clipboardagent.VsockClientImpl;
++//import com.intel.clipboardagent.VsockAddress;
+ 
+ public final class SystemServer {
+ 
+@@ -701,6 +703,73 @@ public final class SystemServer {
+         systemUiContext.setTheme(DEFAULT_SYSTEM_THEME);
+     }
+ 
++
++    /*private class HandleHostVsockContent implements Runnable {
++        private static final String TAG = "VSockComm";
++	private Vsock mVsock;
++	private VsockAddress mVsockAddress;
++
++        private HandleHostVsockContent(Vsock vsock, VsockAddress vsockaddress) {
++		mVsock = vsock;
++		mVsockAddress = vsockaddress;
++        }
++
++        @Override
++        public void run() {
++            // TODO: Data length is hard code here for 4096.
++            byte[] buffer = new byte[DEFAULT_DATA_LENGTH];
++	    try {
++	       mVsock.connect();
++            } catch (IOException exception) {
++	       Log.e(TAG, "Failed to connect: " + exception.getMessage());
++	    }
++            while (true) {
++                boolean bReconnect = false;
++                byte[] bytes = buffer;
++                String content = "";
++                try {
++                    int length = mVsock.getInputStream().readInt();
++                    if (length < 0 || length > MAX_DATA_LENGTH) {
++                        Log.wtf(TAG, "Unexpected data size :"+length, new Exception("Unexpected data size"));
++                        continue;
++                    }
++
++                    if (length > DEFAULT_DATA_LENGTH) {
++                       bytes = new byte[length];
++                    }
++
++                    if (length > 0) {
++                        mVsock.getInputStream().read(bytes, 0, length);
++                        content = new String(bytes, 0, length, StandardCharsets.UTF_8);
++                    }
++		    Log.d(TAG, "Got New Msg:" + content);
++                } catch (IOException exception) {
++                    if (exception.toString().contains("Connection reset") ||
++                        exception.toString().contains("Connection is closed by peer")) {
++                        Log.e(TAG, "Connection reset, attempting to reconnect");
++			bReconnect = true;
++                    } else {
++                        Log.e(TAG, "Error on handling host Vsock: " + exception.getMessage());
++                    }
++                }
++                if (bReconnect) {
++                    try {
++                        mVsock.close();
++                    } catch (IOException e) {
++                        Log.e(TAG, "Failed to close vsock: " + e.getMessage());
++                    }
++                    try {
++                        mVsock = new Vsock(mVsockAddress);
++                        mVsock.connect();
++                        Thread.sleep(1000);
++                    } catch (IOException e) {
++                        Log.e(TAG, "Error reconnecting... " + e.getMessage());
++                    } catch (InterruptedException x) {}
++                }
++            }
++        }
++    }*/
++
+     /**
+      * Starts the small tangle of critical services that are needed to get the system off the
+      * ground.  These services have complex mutual dependencies which is why we initialize them all
+@@ -770,6 +839,11 @@ public final class SystemServer {
+         mWindowManagerGlobalLock = atm.getGlobalLock();
+         t.traceEnd();
+ 
++        //VsockAddress mVsockAddress = new VsockAddress(VsockAddress.VMADDR_CID_HOST, 77777);
++        //Vsock mVsock = new Vsock(mVsockAddress);
++	//ExecutorService mThreadPool = Executors.newSingleThreadExecutor();
++	//mThreadPool.execute(new HandleHostVsockContent());
++
+         // Data loader manager service needs to be started before package manager
+         t.traceBegin("StartDataLoaderManagerService");
+         mDataLoaderManagerService = mSystemServiceManager.startService(
+-- 
+2.17.1
+
