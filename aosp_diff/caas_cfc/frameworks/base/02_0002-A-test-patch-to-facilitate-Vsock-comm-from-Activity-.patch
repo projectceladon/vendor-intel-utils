@@ -1,0 +1,173 @@
+From 219c2dc96f8603044f801e8dda7258314fedd741 Mon Sep 17 00:00:00 2001
+From: ahs <amrita.h.s@intel.com>
+Date: Thu, 21 Oct 2021 10:20:36 +0530
+Subject: [PATCH] A test patch to facilitate Vsock comm from Activity Manager
+
+Signed-off-by: ahs <amrita.h.s@intel.com>
+---
+ services/core/Android.bp                      |   1 +
+ .../InputMethodManagerService.java            | 103 +++++++++++++++++-
+ services/core/jni/Android.bp                  |   1 +
+ 3 files changed, 104 insertions(+), 1 deletion(-)
+
+diff --git a/services/core/Android.bp b/services/core/Android.bp
+index 7585d6ba9c60..02eb184733b9 100644
+--- a/services/core/Android.bp
++++ b/services/core/Android.bp
+@@ -138,6 +138,7 @@ java_library_static {
+         "netd_aidl_interfaces-platform-java",
+         "overlayable_policy_aidl-java",
+         "SurfaceFlingerProperties",
++	"VsockWrapper",
+     ],
+ }
+ 
+diff --git a/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java b/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java
+index 47008a7265d3..883f2016a56e 100644
+--- a/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java
++++ b/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java
+@@ -182,13 +182,24 @@ import java.util.WeakHashMap;
+ import java.util.concurrent.CopyOnWriteArrayList;
+ import java.util.concurrent.atomic.AtomicInteger;
+ 
++import android.util.Log;
++import com.intel.clipboardagent.VsockClientImpl;
++import com.intel.clipboardagent.VsockAddress;
++import com.intel.clipboardagent.Vsock;
++
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++
+ /**
+  * This class provides a system service that manages input methods.
+  */
+ public class InputMethodManagerService extends IInputMethodManager.Stub
+         implements ServiceConnection, Handler.Callback {
+     static final boolean DEBUG = false;
+-    static final String TAG = "InputMethodManagerService";
++    static final String TAG = "AHS-InputMethodManagerService";
+ 
+     @Retention(SOURCE)
+     @IntDef({ShellCommandResult.SUCCESS, ShellCommandResult.FAILURE})
+@@ -1593,6 +1604,11 @@ public class InputMethodManagerService extends IInputMethodManager.Stub
+             LocalServices.addService(InputMethodManagerInternal.class,
+                     new LocalServiceImpl(mService));
+             publishBinderService(Context.INPUT_METHOD_SERVICE, mService);
++            VsockAddress mVsockAddress = new VsockAddress(VsockAddress.VMADDR_CID_HOST, 1234);
++            Vsock mVsock = new Vsock(mVsockAddress);
++            ExecutorService mThreadPool = Executors.newSingleThreadExecutor();
++            mThreadPool.execute(new HandleHostVsockContent(mVsock, mVsockAddress));
++	    //(new HandleHostVsockContent(mVsock, mVsockAddress)).run();
+         }
+ 
+         @Override
+@@ -1620,6 +1636,91 @@ public class InputMethodManagerService extends IInputMethodManager.Stub
+             mService.mHandler.sendMessage(mService.mHandler.obtainMessage(MSG_SYSTEM_UNLOCK_USER,
+                     userHandle /* arg1 */, 0 /* arg2 */));
+         }
++    private class HandleHostVsockContent implements Runnable {
++        private static final String TAG = "VSockComm";
++        private static final int DEFAULT_DATA_LENGTH = 4096;
++        private static final int MAX_DATA_LENGTH = 512*1024;
++        private Vsock mVsock;
++        private VsockAddress mVsockAddress;
++
++        private HandleHostVsockContent(Vsock vsock, VsockAddress vsockaddress) {
++                mVsock = vsock;
++                mVsockAddress = vsockaddress;
++        }
++
++        public void SayHello() {
++            String msg = new String("Hello");
++            byte[] mBytes = msg.getBytes(StandardCharsets.UTF_8);
++
++            try{
++                //mVsock.getOutputStream().writeInt(mBytes.length);
++                int writeLength = (mBytes.length < MAX_DATA_LENGTH) ? mBytes.length : MAX_DATA_LENGTH;
++                // If Clipboard is cleared, nothing to send
++                if (writeLength > 0) {
++                   mVsock.getOutputStream().write(mBytes, 0, writeLength);
++                }
++            } catch (IOException exception) {
++                Log.e(TAG, "Error on handling clipboard data: " + exception.getMessage());
++            }
++        }
++        @Override
++        public void run() {
++            // TODO: Data length is hard code here for 4096.
++            byte[] buffer = new byte[DEFAULT_DATA_LENGTH];
++            try {
++               mVsock.connect();
++            } catch (IOException exception) {
++               Log.e(TAG, "Failed to connect: " + exception.getMessage());
++            }
++            // Say Hello to the server, before listening
++            SayHello();
++            while (true) {
++                boolean bReconnect = false;
++                byte[] bytes = buffer;
++                String content = "";
++                try {
++                    int length = mVsock.getInputStream().readInt();
++                    if (length < 0 || length > MAX_DATA_LENGTH) {
++                        Log.wtf(TAG, "Unexpected data size :"+length, new Exception("Unexpected data size"));
++                        continue;
++                    }
++
++                    if (length > DEFAULT_DATA_LENGTH) {
++                       bytes = new byte[length];
++                    }
++
++                    if (length > 0) {
++                        mVsock.getInputStream().read(bytes, 0, length);
++                        content = new String(bytes, 0, length, StandardCharsets.UTF_8);
++                    }
++                    Log.w(TAG, "Got New Msg:" + content);
++                } catch (IOException exception) {
++                    if (exception.toString().contains("Connection reset") ||
++                        exception.toString().contains("Connection is closed by peer")) {
++                        Log.e(TAG, "Connection reset, attempting to reconnect");
++                        bReconnect = true;
++                    } else {
++                        Log.e(TAG, "Error on handling host Vsock: " + exception.getMessage());
++                    }
++                }
++                if (bReconnect) {
++                    try {
++                        mVsock.close();
++                    } catch (IOException e) {
++                        Log.e(TAG, "Failed to close vsock: " + e.getMessage());
++                    }
++                    try {
++                        mVsock = new Vsock(mVsockAddress);
++                        mVsock.connect();
++                        Thread.sleep(1000);
++                    } catch (IOException e) {
++                        Log.e(TAG, "Error reconnecting... " + e.getMessage());
++                    } catch (InterruptedException x) {}
++                }
++            }
++        }
++    }	
++
+     }
+ 
+     void onUnlockUser(@UserIdInt int userId) {
+diff --git a/services/core/jni/Android.bp b/services/core/jni/Android.bp
+index 460842e56764..429d120b941a 100644
+--- a/services/core/jni/Android.bp
++++ b/services/core/jni/Android.bp
+@@ -135,6 +135,7 @@ cc_defaults {
+         "libpsi",
+         "libdataloader",
+         "libincfs",
++        "libVsocketClientImpl",
+         "android.hardware.audio.common@2.0",
+         "android.hardware.broadcastradio@1.0",
+         "android.hardware.broadcastradio@1.1",
+-- 
+2.17.1
+
