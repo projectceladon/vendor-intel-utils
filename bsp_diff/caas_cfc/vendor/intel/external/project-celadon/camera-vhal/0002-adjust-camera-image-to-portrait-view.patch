@@ -1,0 +1,127 @@
+From 46f6a6fbc7c45e71ae2fca9c4f239acf4a675fc5 Mon Sep 17 00:00:00 2001
+From: "Yang, Dong" <dong.yang@intel.com>
+Date: Tue, 2 Nov 2021 08:20:43 +0800
+Subject: [PATCH] adjust camera image to portrait view
+
+the input camera image from host is landscape view, but
+android is portrait view by default, adjust direction to
+portrait view.
+
+Tracked-On:
+Signed-off-by: Yang, Dong <dong.yang@intel.com>
+---
+ src/CameraSocketServerThread.cpp | 73 ++++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/src/CameraSocketServerThread.cpp b/src/CameraSocketServerThread.cpp
+index 62d4f25..8b3d3b2 100644
+--- a/src/CameraSocketServerThread.cpp
++++ b/src/CameraSocketServerThread.cpp
+@@ -45,6 +45,8 @@
+ #include <linux/vm_sockets.h>
+ #include <mutex>
+ 
++#include <libyuv.h>
++
+ android::ClientVideoBuffer *android::ClientVideoBuffer::ic_instance = 0;
+ 
+ namespace android {
+@@ -125,7 +127,70 @@ void CameraSocketServerThread::clearBuffer(char *buffer, int width, int height)
+     memset(uv_offset, 0x80, (width * height) / 2);
+     ALOGVV(LOG_TAG " %s: Exit", __FUNCTION__);
+ }
++#define CROP_ROTATE
++#ifdef CROP_ROTATE
++static void bufferCropAndRotate(unsigned char * buff, unsigned char * buff_out){
++//
++//   Original frame                  Cropped frame              Rotated frame                 Upscale frame    
++// --------------------               --------                                              --------------------
++// |     |      |     |               |      |                 ---------------              |     |      |     |
++// |     |      |     |               |      |                 |             |              |     |      |     |
++// |     |      |     |   =======>>   |      |     =======>>   |             |  =======>>   |     |      |     |
++// |     |      |     |               |      |                 ---------------              |     |      |     |
++// |     |      |     |               |      |                                              |     |      |     |
++// --------------------               --------                                              --------------------
++//  640x480                            360x480                   480x360                        640x480
++    ALOGE("dyang23: bufferCropAndRotate\n");
++    std::unique_ptr<uint8_t[]> cropped_buffer;
++
++    int cropped_width = 360;
++    int cropped_height = 480;
++    int margin = (640-360)/2; //140
++
++    int rotated_height = cropped_width;
++    int rotated_width = cropped_height;
++
++    int rotated_y_stride = rotated_width;
++    int rotated_uv_stride = rotated_width / 2;
++
++    size_t rotated_size =
++        rotated_y_stride * rotated_height + rotated_uv_stride * rotated_height;
++    cropped_buffer.reset(new uint8_t[rotated_size]);
++    uint8_t* rotated_y_plane = cropped_buffer.get();
++    uint8_t* rotated_u_plane =
++      rotated_y_plane + rotated_y_stride * rotated_height;
++    uint8_t* rotated_v_plane =
++      rotated_u_plane + rotated_uv_stride * rotated_height / 2;
++    libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate90;
++    //libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate270;
++
++    int res = libyuv::ConvertToI420(
++      buff, 640*480*3/2, rotated_y_plane,
++      rotated_y_stride, rotated_u_plane, rotated_uv_stride, rotated_v_plane,
++      rotated_uv_stride, margin, 0, 640,
++      480, cropped_width, cropped_height, rotation_mode,
++      libyuv::FourCC::FOURCC_I420);
++
++    if(res){
++        ALOGE("dyang23, critical ConvertToI420 res:%d ", res);
++        return;
++    }
+ 
++    res = libyuv::I420Scale(
++      rotated_y_plane, rotated_y_stride, rotated_u_plane, rotated_uv_stride,
++      rotated_v_plane, rotated_uv_stride, rotated_width, rotated_height,
++      buff_out, 640,
++      buff_out + 640*480,
++      640 / 2,
++      buff_out + 640*480*5/4,
++      640/2, 640,
++      480, libyuv::FilterMode::kFilterNone);
++
++      if(res){
++        ALOGE("dyang23, critical I420Scale res:%d ", res);
++    }
++}
++#endif
+ bool CameraSocketServerThread::threadLoop() {
+     struct sockaddr_un addr_un;
+     memset(&addr_un, 0, sizeof(addr_un));
+@@ -294,6 +359,7 @@ bool CameraSocketServerThread::threadLoop() {
+ 
+         ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+         char *fbuffer = (char *)handle->clientBuf[handle->clientRevCount % 1].buffer;
++        char buffer_recv[640*480*3/2];
+ 
+         clearBuffer(fbuffer, 640, 480);
+ 
+@@ -327,9 +393,16 @@ bool CameraSocketServerThread::threadLoop() {
+                     if(trans_mode == VSOCK)
+                     {
+                         while(size_update != 460800){
++                            #ifdef CROP_ROTATE
++                            size = recv(mClientFd, (char *)buffer_recv+size_update, 460800, 0);
++                            #else
+                             size = recv(mClientFd, (char *)fbuffer+size_update, 460800, 0);
++                            #endif
+                             size_update += size;
+                             if (size_update == 460800){
++                                #ifdef CROP_ROTATE
++                                bufferCropAndRotate((uint8_t*)buffer_recv, (uint8_t*)fbuffer);
++                                #endif
+                                 handle->clientRevCount++;
+                                 size_update = 0;
+                                 ALOGVV(LOG_TAG
+-- 
+2.27.0
+
