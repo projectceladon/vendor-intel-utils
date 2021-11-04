@@ -1,0 +1,235 @@
+From fd83072edb03fafd9c418c56e2207669376d9cb5 Mon Sep 17 00:00:00 2001
+From: Xiao HaowenX <haowenx.xiao@intel.com>
+Date: Thu, 4 Nov 2021 15:11:01 +0800
+Subject: [PATCH] fix crtc connector static bound to dynamaically bound
+
+---
+ DrmHwcTwo.cpp         | 73 ++++++++++++++++++++++++++++++++++++++++---
+ DrmHwcTwo.h           |  2 ++
+ drm/DrmDevice.cpp     | 41 +++---------------------
+ drm/DrmDevice.h       |  5 ++-
+ drm/ResourceManager.h |  3 ++
+ 5 files changed, 82 insertions(+), 42 deletions(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index 194b11e..4683c31 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -1202,23 +1202,83 @@ void DrmHwcTwo::HandleInitialHotplugState(DrmDevice *drmDevice) {
+   }
+ }
+ 
++int DrmHwcTwo::AttachWriteback_(DrmConnector *display_conn,DrmDevice *drm) {
++  DrmCrtc *display_crtc = display_conn->encoder()->crtc();
++  if (drm->GetWritebackConnectorForDisplay(display_crtc->display()) != nullptr) {
++    ALOGE("Display already has writeback attach to it");
++    return -EINVAL;
++  }
++  for (auto &writeback_conn : drm->writeback_connectors()) {
++    if (writeback_conn->display() >= 0)
++      continue;
++    for (DrmEncoder *writeback_enc : writeback_conn->possible_encoders()) {
++      for (DrmCrtc *possible_crtc : writeback_enc->possible_crtcs()) {
++        if (possible_crtc != display_crtc)
++          continue;
++        // Use just encoders which had not been bound already
++        if (writeback_enc->can_bind(display_crtc->display())) {
++          writeback_enc->set_crtc(display_crtc);
++          writeback_conn->set_encoder(writeback_enc);
++          writeback_conn->set_display(display_crtc->display());
++          writeback_conn->UpdateModes();
++          return 0;
++        }
++      }
++    }
++  }
++  return -EINVAL;
++}
++int DrmHwcTwo::DynamaicallyBound(DrmConnector *mconn,DrmDevice *mdrm,DrmHwcTwo *mhwc2){
++	int display_id;
++	int curr_num_display = mhwc2->resource_manager_.getDisplayCount();
++	mconn->set_display(curr_num_display);
++	display_id = mconn->display();
++	for (DrmEncoder *enc : mconn->possible_encoders()) {
++		//try to find a possible crtc which will work 
++		for (DrmCrtc *crtc : enc->possible_crtcs()) {
++		//We've already tried this earlier 
++		if (crtc == enc->crtc())
++				continue;
++		if (crtc->can_bind(display_id)) {
++			crtc->set_display(display_id);
++			enc->set_crtc(crtc);
++			break;
++			}
++		}
++		mconn->set_encoder(enc);
++		mdrm->setDisplay_(curr_num_display);
++		mhwc2->resource_manager_.setDisplayCount();;
++		break;
++		}		
++		if (!mhwc2->AttachWriteback_(mconn,mdrm)) {
++      		ALOGI("Display %d has writeback attach to it", mconn->display());
++		}
++		HWC2::Error ret = HWC2::Error::None;
++		ret = mhwc2->CreateDisplay(curr_num_display, HWC2::DisplayType::Physical);
++		if (ret != HWC2::Error::None) {
++			ALOGE("Failed to create display %d with error %d", curr_num_display, ret);
++			return -1;
++		}
++		
++		return curr_num_display;
++}
++
+ void DrmHwcTwo::DrmHotplugHandler::HandleEvent(uint64_t timestamp_us) {
+   for (const auto &conn : drm_->connectors()) {
+     drmModeConnection old_state = conn->state();
+     drmModeConnection cur_state = conn->UpdateModes()
+                                       ? DRM_MODE_UNKNOWNCONNECTION
+                                       : conn->state();
+-    if (conn->display() == -1)
+-      continue;
+     if (cur_state == old_state)
+       continue;
+ 
+-    ALOGI("%s event @%" PRIu64 " for connector %u on display %d",
+-          cur_state == DRM_MODE_CONNECTED ? "Plug" : "Unplug", timestamp_us,
+-          conn->id(), conn->display());
++   
+ 
+     int display_id = conn->display();
+     if (cur_state == DRM_MODE_CONNECTED) {
++	  if(display_id == -1){
++	  	display_id = hwc2_->DynamaicallyBound(conn.get(),drm_,hwc2_);
++	  }
+       auto &display = hwc2_->displays_.at(display_id);
+       display.ChosePreferredConfig();
+       display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::On));
+@@ -1227,6 +1287,9 @@ void DrmHwcTwo::DrmHotplugHandler::HandleEvent(uint64_t timestamp_us) {
+       display.ClearDisplay();
+       display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::Off));
+     }
++	ALOGI("%s event @%" PRIu64 " for connector %u on display %d",
++			 cur_state == DRM_MODE_CONNECTED ? "Plug" : "Unplug", timestamp_us,
++			 conn->id(), conn->display());
+ 
+     if (display_id != 0 || (display_id == 0 && cur_state == DRM_MODE_CONNECTED))
+       hwc2_->HandleDisplayHotplug(display_id, cur_state);
+diff --git a/DrmHwcTwo.h b/DrmHwcTwo.h
+index 0c2edef..7e3fff3 100644
+--- a/DrmHwcTwo.h
++++ b/DrmHwcTwo.h
+@@ -418,6 +418,8 @@ class DrmHwcTwo : public hwc2_device_t {
+   void HandleDisplayHotplug(hwc2_display_t displayid, int state);
+   void HandleInitialHotplugState(DrmDevice *drmDevice);
+ 
++  int  AttachWriteback_(DrmConnector *display_conn,DrmDevice *drm);
++  int DynamaicallyBound(DrmConnector *conn,DrmDevice *drm,DrmHwcTwo *hwc2);
+   ResourceManager resource_manager_;
+   std::map<hwc2_display_t, HwcDisplay> displays_;
+ 
+diff --git a/drm/DrmDevice.cpp b/drm/DrmDevice.cpp
+index f47aa72..e60e3e4 100644
+--- a/drm/DrmDevice.cpp
++++ b/drm/DrmDevice.cpp
+@@ -304,21 +304,7 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+ 
+   int max_pipe_count = std::min(res->count_crtcs, res->count_connectors);
+   // If no priority display were found then pick first available as primary and
+-  // for the others assign consecutive display_numbers.
+-  for (auto &conn : connectors_) {
+-    if (conn->external() || conn->internal()) {
+-      if (!found_primary) {
+-        conn->set_display(num_displays);
+-        displays_[num_displays] = num_displays;
+-        found_primary = true;
+-        ++num_displays;
+-      } else if (conn->display() < 0 && num_displays < max_pipe_count) {
+-        conn->set_display(num_displays);
+-        displays_[num_displays] = num_displays;
+-        ++num_displays;
+-      }
+-    }
+-  }
++  // for the others assign consecutive display_numbers
+ 
+   if (res)
+     drmModeFreeResources(res);
+@@ -382,27 +368,6 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+     }
+   }
+ 
+-  for (auto &conn : connectors_) {
+-    auto it = std::find_if(std::begin(primary_candidates),
+-                           std::end(primary_candidates),
+-                           [&conn](const DrmConnector *conn_pri) {
+-                             return conn->id() == conn_pri->id();
+-                           });
+-    if (it != std::end(primary_candidates))
+-      continue;
+-
+-    if (max_pipe_count-- <= 0)
+-      break;
+-
+-    ret = CreateDisplayPipe(conn.get());
+-    if (ret) {
+-      ALOGE("Failed CreateDisplayPipe %d with %d", conn->id(), ret);
+-      return std::make_tuple(ret, 0);
+-    }
+-    if (!AttachWriteback(conn.get())) {
+-      ALOGI("Display %d has writeback attach to it", conn->display());
+-    }
+-  }
+   return std::make_tuple(ret, displays_.size());
+ }
+ 
+@@ -410,6 +375,10 @@ bool DrmDevice::HandlesDisplay(int display) const {
+   return displays_.find(display) != displays_.end();
+ }
+ 
++void DrmDevice::setDisplay_(int display) {
++	displays_[display] = display;
++}
++
+ DrmConnector *DrmDevice::GetConnectorForDisplay(int display) const {
+   for (const auto &conn : connectors_) {
+     if (conn->display() == display)
+diff --git a/drm/DrmDevice.h b/drm/DrmDevice.h
+index a84d1f9..6d2aaab 100644
+--- a/drm/DrmDevice.h
++++ b/drm/DrmDevice.h
+@@ -49,7 +49,9 @@ class DrmDevice {
+   const std::vector<std::unique_ptr<DrmConnector>> &connectors() const {
+     return connectors_;
+   }
+-
++  const std::vector<std::unique_ptr<DrmConnector>> &writeback_connectors() const {
++    return writeback_connectors_;
++  }
+   const std::vector<std::unique_ptr<DrmPlane>> &planes() const {
+     return planes_;
+   }
+@@ -85,6 +87,7 @@ class DrmDevice {
+   int CreatePropertyBlob(void *data, size_t length, uint32_t *blob_id) const;
+   int DestroyPropertyBlob(uint32_t blob_id) const;
+   bool HandlesDisplay(int display) const;
++  void setDisplay_(int display);
+   void RegisterHotplugHandler(DrmEventHandler *handler) {
+     event_listener_.RegisterHotplugHandler(handler);
+   }
+diff --git a/drm/ResourceManager.h b/drm/ResourceManager.h
+index 9b4155b..dcf53c3 100644
+--- a/drm/ResourceManager.h
++++ b/drm/ResourceManager.h
+@@ -39,6 +39,9 @@ class ResourceManager {
+   int getDisplayCount() const {
+     return num_displays_;
+   }
++  void setDisplayCount()  {
++	num_displays_++;
++  }
+   bool ForcedScalingWithGpu() {
+     return scale_with_gpu_;
+   }
+-- 
+2.33.0
+
