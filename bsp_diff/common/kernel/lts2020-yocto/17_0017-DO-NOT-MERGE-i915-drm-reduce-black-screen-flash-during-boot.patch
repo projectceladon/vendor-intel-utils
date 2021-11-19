@@ -1,0 +1,89 @@
+From 8b3ca2aa0b439d72438e5a76fcee7594f39b4788 Mon Sep 17 00:00:00 2001
+From: kanlihu <kanli.hu@intel.com>
+Date: Wed, 24 Nov 2021 17:43:51 +0800
+Subject: [PATCH] i915/drm: reduce black screen flash during boot
+
+There is several times of black screen flash during boot
+the root cause is the crtc mode setting
+
+From yacto kernel 5.10.52, I find the i915_pci_probe will call 1 time
+
+i915_pci_probe
+i915_driver_probe
+intel_modeset_init_nogem
+intel_modeset_readout_hw_state
+intel_crtc_copy_hw_to_uapi_state
+drm_atomic_set_mode_for_crtc
+
+intel_fbdev_output_poll_changed will call 8 times
+
+intel_fbdev_output_poll_changed
+drm_fb_helper_hotplug_event
+drm_fb_helper_set_par
+__drm_fb_helper_restore_fbdev_mode_unlocked
+drm_client_modeset_commit
+drm_client_modeset_commit_locked
+drm_client_modeset_commit_atomic
+__drm_atomic_helper_set_config
+drm_atomic_set_mode_for_crtc
+
+drm_ioctl_kernel will call 2 times
+
+drm_ioctl_kernel
+drm_mode_atomic_ioctl
+drm_atomic_set_property
+drm_atomic_set_mode_prop_for_crtc
+
+If crtc_state->inherited was not set, the crtc mode setting wont be trigged in intel_atomic_check
+
+code from intel_atomic_check:
+
+	for_each_oldnew_intel_crtc_in_state(state, crtc, old_crtc_state,
+					    new_crtc_state, i) {
+		if (new_crtc_state->inherited != old_crtc_state->inherited)
+			new_crtc_state->uapi.mode_changed = true;
+	}
+
+intel_crtc_needs_modeset will check uapi.mode_changed
+
+intel_atomic_commit_tail will not call intel_color_load_luts
+
+code from intel_atomic_commit_tail:
+
+	for_each_new_intel_crtc_in_state(state, crtc, new_crtc_state, i) {
+		if (new_crtc_state->uapi.async_flip)
+			intel_crtc_disable_flip_done(state, crtc);
+
+		if (new_crtc_state->hw.active &&
+		    !intel_crtc_needs_modeset(new_crtc_state) &&
+		    !new_crtc_state->preload_luts &&
+		    (new_crtc_state->uapi.color_mgmt_changed ||
+		     new_crtc_state->update_pipe))
+			intel_color_load_luts(new_crtc_state);
+	}
+
+we wait kernel command line and hardware composer to set the crtc mode in android
+
+Tracked-On: OAM-100073
+Signed-off-by: Kanli Hu <kanli.hu@intel.com>
+---
+ drivers/gpu/drm/i915/display/intel_display.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpu/drm/i915/display/intel_display.c b/drivers/gpu/drm/i915/display/intel_display.c
+index 362bff9beb5c..f83f9c849211 100644
+--- a/drivers/gpu/drm/i915/display/intel_display.c
++++ b/drivers/gpu/drm/i915/display/intel_display.c
+@@ -13006,7 +13006,9 @@ static void intel_modeset_readout_hw_state(struct drm_device *dev)
+ 			 * set a flag to indicate that a full recalculation is
+ 			 * needed on the next commit.
+ 			 */
++#if 0
+ 			crtc_state->inherited = true;
++#endif
+ 
+ 			intel_crtc_update_active_timings(crtc_state);
+ 
+-- 
+2.31.0
+
