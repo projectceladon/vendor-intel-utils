@@ -21,6 +21,7 @@
 #include <hardware/boot_control.h>
 #include <hardware/hardware.h>
 #include "BootControl.h"
+#include "boot_control_avb.h"
 
 namespace android {
 namespace hardware {
@@ -98,11 +99,13 @@ Return<void> BootControl::getSuffix(uint32_t slot, getSuffix_cb _hidl_cb) {
 // Methods from ::android::hardware::boot::V1_1::IBootControl.
 // Snapshot merge status is only used by virtual a/b update.
 Return<bool> BootControl::setSnapshotMergeStatus(MergeStatus status) {
-    return true;
+    private_boot_control_t *pModule = (private_boot_control_t *)(mModule);
+    return pModule->SetSnapshotMergeStatus((uint8_t)status);
 }
 
 Return<MergeStatus> BootControl::getSnapshotMergeStatus() {
-    return MergeStatus::NONE;
+    private_boot_control_t *pModule = (private_boot_control_t *)(mModule);
+    return (MergeStatus)(pModule->GetSnapshotMergeStatus());
 }
 
 
