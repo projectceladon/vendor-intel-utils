@@ -1,0 +1,140 @@
+From 55ca61bb2cbe5f971ebeaed0ee058f1d70be5aea Mon Sep 17 00:00:00 2001
+From: Swee Yee Fonn <swee.yee.fonn@intel.com>
+Date: Wed, 29 Dec 2021 19:52:51 +0800
+Subject: [PATCH] Add DP training failure handling
+
+Handle DP training failure at userland.
+Check for link status when recv KMS uevent and current and prev
+status is connected. If link is bad, retrigger modeset to trigger
+DP retraining.
+
+Tracked-On: OAM-100493
+Signed-off-by: Swee Yee Fonn <swee.yee.fonn@intel.com>
+---
+ DrmHwcTwo.cpp        | 36 +++++++++++++++++++++++++++++-------
+ drm/DrmConnector.cpp | 12 ++++++++++++
+ drm/DrmConnector.h   |  3 +++
+ 3 files changed, 44 insertions(+), 7 deletions(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index bb474eb..db4c528 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -1227,17 +1227,15 @@ int DrmHwcTwo::DynamicallyBound(DrmConnector *mconn,DrmDevice *mdrm){
+ 	return curr_num_display;
+ }
+ 
++#define DRM_MODE_LINK_STATUS_GOOD       0
++#define DRM_MODE_LINK_STATUS_BAD        1
++
+ void DrmHwcTwo::DrmHotplugHandler::HandleEvent(uint64_t timestamp_us) {
+   for (const auto &conn : drm_->connectors()) {
+     drmModeConnection old_state = conn->state();
+     drmModeConnection cur_state = conn->UpdateModes()
+                                       ? DRM_MODE_UNKNOWNCONNECTION
+                                       : conn->state();
+-    if (cur_state == old_state)
+-      continue;
+-
+-   
+-
+     int display_id = conn->display();
+     if (cur_state == DRM_MODE_CONNECTED) {
+ 	  if(display_id == -1){
+@@ -1246,9 +1244,33 @@ void DrmHwcTwo::DrmHotplugHandler::HandleEvent(uint64_t timestamp_us) {
+ 	  	}
+ 	  }
+       auto &display = hwc2_->displays_.at(display_id);
+-      display.ChosePreferredConfig();
+-      display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::On));
++      if (cur_state == old_state) {
++          uint64_t link_status = 0;
++          int ret = 0;
++          conn->UpdateLinkStatusProperty();
++          std::tie(ret, link_status) = conn->link_status_property().value();
++          if (ret) {
++	        ALOGE("Conn %u get link status value error %d", conn->id(), ret);
++            continue;
++          }
++          if (link_status != DRM_MODE_LINK_STATUS_GOOD) {
++	        ALOGD("Conn %u link status bad", conn->id());
++            display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::Off));
++            display.ChosePreferredConfig();
++            display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::On));
++	        ALOGD("Conn %u link status bad handling done", conn->id());
++          } else
++	        ALOGD("Conn %u link status good. Do nothing", conn->id());
++
++          continue;
++      } else {
++        display.ChosePreferredConfig();
++        display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::On));
++      }
+     } else {
++      if (cur_state == old_state) {
++        continue;
++      }
+       auto &display = hwc2_->displays_.at(display_id);
+       display.ClearDisplay();
+       display.SetPowerMode(static_cast<int32_t>(HWC2::PowerMode::Off));
+diff --git a/drm/DrmConnector.cpp b/drm/DrmConnector.cpp
+index 3b0f8cb..014e098 100644
+--- a/drm/DrmConnector.cpp
++++ b/drm/DrmConnector.cpp
+@@ -82,6 +82,14 @@ int DrmConnector::Init() {
+   return 0;
+ }
+ 
++int DrmConnector::UpdateLinkStatusProperty() {
++  int ret = drm_->GetConnectorProperty(*this, "link-status", &link_status_property_);
++  if (ret) {
++    ALOGW("Conn %u Could not get link-status property\n", id());
++  }
++  return ret;
++}
++
+ int DrmConnector::UpdateEdidProperty() {
+   int ret = drm_->GetConnectorProperty(*this, "EDID", &edid_property_);
+   if (ret) {
+@@ -310,6 +318,10 @@ const DrmProperty &DrmConnector::writeback_out_fence() const {
+   return writeback_out_fence_;
+ }
+ 
++const DrmProperty &DrmConnector::link_status_property() const {
++  return link_status_property_;
++}
++
+ DrmEncoder *DrmConnector::encoder() const {
+   return encoder_;
+ }
+diff --git a/drm/DrmConnector.h b/drm/DrmConnector.h
+index 3bc18c8..622b051 100644
+--- a/drm/DrmConnector.h
++++ b/drm/DrmConnector.h
+@@ -42,6 +42,7 @@ class DrmConnector {
+   int Init();
+   int UpdateEdidProperty();
+   int GetEdidBlob(drmModePropertyBlobPtr &blob);
++  int UpdateLinkStatusProperty();
+ 
+   uint32_t id() const;
+ 
+@@ -69,6 +70,7 @@ class DrmConnector {
+   const DrmProperty &writeback_pixel_formats() const;
+   const DrmProperty &writeback_fb_id() const;
+   const DrmProperty &writeback_out_fence() const;
++  const DrmProperty &link_status_property() const;
+ 
+   const std::vector<DrmEncoder *> &possible_encoders() const {
+     return possible_encoders_;
+@@ -108,6 +110,7 @@ class DrmConnector {
+   DrmProperty writeback_pixel_formats_;
+   DrmProperty writeback_fb_id_;
+   DrmProperty writeback_out_fence_;
++  DrmProperty link_status_property_;
+ 
+   std::vector<DrmEncoder *> possible_encoders_;
+ 
+-- 
+2.17.1
+
