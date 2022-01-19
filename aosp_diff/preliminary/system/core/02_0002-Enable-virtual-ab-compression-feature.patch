@@ -1,0 +1,120 @@
+From d549b58fa8253765a78414c09ba0fb79168e7ab7 Mon Sep 17 00:00:00 2001
+From: "ji, zhenlong z" <zhenlong.z.ji@intel.com>
+Date: Tue, 18 Jan 2022 16:16:26 +0800
+Subject: [PATCH] Let snapuserd started before init second stage
+
+1. snapuserd need to be put to recovery/root/first_stage_ramdisk/system/bin
+when BOARD_USES_RECOVERY_AS_BOOT := true is set, or it will appear the
+following errors:
+[   11.602223] init: Relaunched snapuserd with pid: 152
+[   11.602700] init: Creating logical partitions with snapshots as needed
+[   11.603555] init: Cannot launch snapuserd; execv failed: No such file or directory
+
+2. snapuserd need to be started before the init second stage, or it will
+appear the following errors. It because if init second stage is started before snapuserd,
+/dev/__properties__ will be created by init. Then in the function of
+__system_properties_init during the libc init stage of snapuserd process, it will
+go to ContextsSplit.Initialize finally, and in this function, it will try to read
+/system/etc/selinux/plat_property_contexts. However, system partition should be
+prepared by snapuserd which is not started yes, this will halt both init and snapuserd
+processes:
+[   12.367545] init: Relaunched snapuserd with pid: 211
+[   12.382032] init: init second stage started!
+[   16.434536] I/O error: sector 550576: no user-space daemon for dm-user/system_b-user-cow target pid:128 tgid:128
+[   16.436606] I/O error: sector 550568: no user-space daemon for dm-user/system_b-user-cow target pid:128 tgid:128
+[   16.439396] I/O error: sector 550560: no user-space daemon for dm-user/system_b-user-cow target pid:128 tgid:128
+[   16.441467] I/O error: sector 550552: no user-space daemon for dm-user/system_b-user-cow target pid:128 tgid:128
+[   20.466540] I/O error: sector 5792: no user-space daemon for dm-user/system_b-user-cow target pid:128 tgid:128
+[   20.468463] device-mapper: verity-fec: 252:4: FEC 2949120: read failed (720): -5 pid:125 tgid:125
+
+It because if init second stage is started before snapuserd, /dev/__properties__
+will be created by init. Then in the function of __system_properties_init during
+the libc init stage of snapuserd process, it will go to ContextsSplit.Initialize
+finally, and in this function, it will try to read /system/etc/selinux/plat_property_contexts.
+However, system partition should be prepared by snapuserd which is not started yes,
+this will halt both init and snapuserd processes
+
+Already reported a bug to Google, and this patch also will be removed
+once this issue is resovled.
+
+Signed-off-by: ji, zhenlong z <zhenlong.z.ji@intel.com>
+---
+ fs_mgr/libsnapshot/Android.bp           |  9 +++++++++
+ fs_mgr/libsnapshot/snapuserd_daemon.cpp |  2 ++
+ init/snapuserd_transition.cpp           | 13 +++++++++++++
+ 3 files changed, 24 insertions(+)
+
+diff --git a/fs_mgr/libsnapshot/Android.bp b/fs_mgr/libsnapshot/Android.bp
+index 6a764e4fa..22dbc60b3 100644
+--- a/fs_mgr/libsnapshot/Android.bp
++++ b/fs_mgr/libsnapshot/Android.bp
+@@ -455,6 +455,15 @@ cc_binary {
+     recovery_available: true,
+ }
+ 
++cc_binary {
++    name: "snapuserd_ramdisk",
++    stem: "snapuserd",
++    defaults: ["snapuserd_defaults"],
++    static_executable: true,
++    system_shared_libs: [],
++    ramdisk: true,
++}
++
+ cc_test {
+     name: "cow_api_test",
+     defaults: [
+diff --git a/fs_mgr/libsnapshot/snapuserd_daemon.cpp b/fs_mgr/libsnapshot/snapuserd_daemon.cpp
+index 7fa01b78f..ddfd1ed1c 100644
+--- a/fs_mgr/libsnapshot/snapuserd_daemon.cpp
++++ b/fs_mgr/libsnapshot/snapuserd_daemon.cpp
+@@ -122,6 +122,8 @@ int main(int argc, char** argv) {
+ 
+     android::snapshot::Daemon& daemon = android::snapshot::Daemon::Instance();
+ 
++    LOG(INFO) << "Snapuserd daemon start.";
++    close(open("/dev/.snapuserd", O_WRONLY | O_CREAT | O_CLOEXEC, 0000));
+     if (!daemon.StartServer(argc, argv)) {
+         LOG(ERROR) << "Snapuserd daemon failed to start.";
+         exit(EXIT_FAILURE);
+diff --git a/init/snapuserd_transition.cpp b/init/snapuserd_transition.cpp
+index 40467b7d3..7207682a9 100644
+--- a/init/snapuserd_transition.cpp
++++ b/init/snapuserd_transition.cpp
+@@ -25,6 +25,7 @@
+ #include <filesystem>
+ #include <string>
+ #include <string_view>
++#include <thread>
+ 
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
+@@ -247,6 +248,14 @@ void SnapuserdSelinuxHelper::RelaunchFirstStageSnapuserd() {
+ 
+         setenv(kSnapuserdFirstStagePidVar, std::to_string(pid).c_str(), 1);
+ 
++        while(access("/dev/.snapuserd", F_OK) != 0) {
++            std::this_thread::sleep_for(100ms);
++        }
++
++        if (unlink("/dev/.snapuserd") < 0) {
++            PLOG(ERROR) << "unlink /dev/.snapuserd failed";
++        }
++
+         LOG(INFO) << "Relaunched snapuserd with pid: " << pid;
+         return;
+     }
+@@ -292,6 +301,10 @@ void KillFirstStageSnapuserd(pid_t pid) {
+     } else {
+         LOG(INFO) << "Sent SIGTERM to snapuserd process " << pid;
+     }
++
++    if (unlink("/dev/.snapuserd") < 0) {
++        PLOG(ERROR) << "unlink /dev/.snapuserd failed";
++    }
+ }
+ 
+ void CleanupSnapuserdSocket() {
+-- 
+2.25.1
+
