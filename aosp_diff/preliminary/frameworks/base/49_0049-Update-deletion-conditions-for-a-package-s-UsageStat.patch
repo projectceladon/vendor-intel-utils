@@ -1,0 +1,177 @@
+From 7bae5100b2342de899b17a1dbb1e0f63e237bac3 Mon Sep 17 00:00:00 2001
+From: Varun Shah <varunshah@google.com>
+Date: Mon, 8 Nov 2021 17:27:32 -0800
+Subject: [PATCH] Update deletion conditions for a package's UsageStats.
+
+If a profile owner is defined for a specific user, do not delete usage
+stats for a package on package deletion.
+
+Bug: 197399948
+Test: atest  UsageStatsTest [all]
+Change-Id: I94a8e3dfca8ef4c7616f77944d61726e06043b85
+Merged-In: I94a8e3dfca8ef4c7616f77944d61726e06043b85
+(cherry picked from commit d95ce6779da8410c5835385cb5785fb5b3a51d83)
+Merged-In:I94a8e3dfca8ef4c7616f77944d61726e06043b85
+---
+ .../admin/DevicePolicyManagerInternal.java    |  8 ++++++
+ .../DevicePolicyManagerService.java           |  7 +++++
+ .../server/usage/UsageStatsService.java       | 26 +++++++++++++++----
+ .../server/usage/UserUsageStatsService.java   | 10 ++++---
+ 4 files changed, 42 insertions(+), 9 deletions(-)
+
+diff --git a/core/java/android/app/admin/DevicePolicyManagerInternal.java b/core/java/android/app/admin/DevicePolicyManagerInternal.java
+index d24694faff93..60cb563cca3d 100644
+--- a/core/java/android/app/admin/DevicePolicyManagerInternal.java
++++ b/core/java/android/app/admin/DevicePolicyManagerInternal.java
+@@ -16,6 +16,7 @@
+ 
+ package android.app.admin;
+ 
++import android.annotation.NonNull;
+ import android.annotation.Nullable;
+ import android.annotation.UserIdInt;
+ import android.content.ComponentName;
+@@ -76,6 +77,13 @@ public abstract class DevicePolicyManagerInternal {
+     public abstract void addOnCrossProfileWidgetProvidersChangeListener(
+             OnCrossProfileWidgetProvidersChangeListener listener);
+ 
++    /**
++     * @param userHandle the handle of the user whose profile owner is being fetched.
++     * @return the configured supervision app if it exists and is the device owner or policy owner.
++     */
++    public abstract @Nullable ComponentName getProfileOwnerOrDeviceOwnerSupervisionComponent(
++            @NonNull UserHandle userHandle);
++
+     /**
+      * Checks if an app with given uid is an active device admin of its user and has the policy
+      * specified.
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+index ae354a953eec..2550f0282c4f 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+@@ -12481,6 +12481,13 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
+             }
+         }
+ 
++        @Override
++        public @Nullable ComponentName getProfileOwnerOrDeviceOwnerSupervisionComponent(
++                @NonNull UserHandle userHandle) {
++            return DevicePolicyManagerService.this.getProfileOwnerOrDeviceOwnerSupervisionComponent(
++                    userHandle);
++        }
++
+         @Override
+         public boolean isActiveAdminWithPolicy(int uid, int reqPolicy) {
+             synchronized (getLockObject()) {
+diff --git a/services/usage/java/com/android/server/usage/UsageStatsService.java b/services/usage/java/com/android/server/usage/UsageStatsService.java
+index a5b676012ea9..a54f263c32ae 100644
+--- a/services/usage/java/com/android/server/usage/UsageStatsService.java
++++ b/services/usage/java/com/android/server/usage/UsageStatsService.java
+@@ -339,6 +339,7 @@ public class UsageStatsService extends SystemService implements
+         if (userId == UserHandle.USER_SYSTEM) {
+             UsageStatsIdleService.scheduleUpdateMappingsJob(getContext());
+         }
++        final boolean deleteObsoleteData = shouldDeleteObsoleteData(UserHandle.of(userId));
+         synchronized (mLock) {
+             // Create a user unlocked event to report
+             final Event unlockEvent = new Event(USER_UNLOCKED, SystemClock.elapsedRealtime());
+@@ -356,7 +357,7 @@ public class UsageStatsService extends SystemService implements
+             boolean needToFlush = !pendingEvents.isEmpty();
+ 
+             initializeUserUsageStatsServiceLocked(userId, System.currentTimeMillis(),
+-                    installedPackages);
++                    installedPackages, deleteObsoleteData);
+             mUserUnlockedStates.put(userId, true);
+             final UserUsageStatsService userService = getUserUsageStatsServiceLocked(userId);
+             if (userService == null) {
+@@ -551,13 +552,13 @@ public class UsageStatsService extends SystemService implements
+      * when the user is initially unlocked.
+      */
+     private void initializeUserUsageStatsServiceLocked(int userId, long currentTimeMillis,
+-            HashMap<String, Long> installedPackages) {
++            HashMap<String, Long> installedPackages, boolean deleteObsoleteData) {
+         final File usageStatsDir = new File(Environment.getDataSystemCeDirectory(userId),
+                 "usagestats");
+         final UserUsageStatsService service = new UserUsageStatsService(getContext(), userId,
+                 usageStatsDir, this);
+         try {
+-            service.init(currentTimeMillis, installedPackages);
++            service.init(currentTimeMillis, installedPackages, deleteObsoleteData);
+             mUserState.put(userId, service);
+         } catch (Exception e) {
+             if (mUserManager.isUserUnlocked(userId)) {
+@@ -1029,6 +1030,10 @@ public class UsageStatsService extends SystemService implements
+      * Called by the Binder stub.
+      */
+     private boolean updatePackageMappingsData() {
++        // don't update the mappings if a profile user is defined
++        if (!shouldDeleteObsoleteData(UserHandle.SYSTEM)) {
++            return true; // return true so job scheduler doesn't reschedule the job
++        }
+         // fetch the installed packages outside the lock so it doesn't block package manager.
+         final HashMap<String, Long> installedPkgs = getInstalledPackages(UserHandle.USER_SYSTEM);
+         synchronized (mLock) {
+@@ -1154,6 +1159,13 @@ public class UsageStatsService extends SystemService implements
+         }
+     }
+ 
++    private boolean shouldDeleteObsoleteData(UserHandle userHandle) {
++        final DevicePolicyManagerInternal dpmInternal = getDpmInternal();
++        // If a profile owner is not defined for the given user, obsolete data should be deleted
++        return dpmInternal == null
++                || dpmInternal.getProfileOwnerOrDeviceOwnerSupervisionComponent(userHandle) == null;
++    }
++
+     private String buildFullToken(String packageName, String token) {
+         final StringBuilder sb = new StringBuilder(packageName.length() + token.length() + 1);
+         sb.append(packageName);
+@@ -2324,8 +2336,12 @@ public class UsageStatsService extends SystemService implements
+     private class MyPackageMonitor extends PackageMonitor {
+         @Override
+         public void onPackageRemoved(String packageName, int uid) {
+-            mHandler.obtainMessage(MSG_PACKAGE_REMOVED, getChangingUserId(), 0, packageName)
+-                    .sendToTarget();
++            final int changingUserId = getChangingUserId();
++            // Only remove the package's data if a profile owner is not defined for the user
++            if (shouldDeleteObsoleteData(UserHandle.of(changingUserId))) {
++                mHandler.obtainMessage(MSG_PACKAGE_REMOVED, changingUserId, 0, packageName)
++                        .sendToTarget();
++            }
+             super.onPackageRemoved(packageName, uid);
+         }
+     }
+diff --git a/services/usage/java/com/android/server/usage/UserUsageStatsService.java b/services/usage/java/com/android/server/usage/UserUsageStatsService.java
+index 26de11af6f4e..0a5adc8e61d4 100644
+--- a/services/usage/java/com/android/server/usage/UserUsageStatsService.java
++++ b/services/usage/java/com/android/server/usage/UserUsageStatsService.java
+@@ -115,8 +115,9 @@ class UserUsageStatsService {
+         mSystemTimeSnapshot = System.currentTimeMillis();
+     }
+ 
+-    void init(final long currentTimeMillis, HashMap<String, Long> installedPackages) {
+-        readPackageMappingsLocked(installedPackages);
++    void init(final long currentTimeMillis, HashMap<String, Long> installedPackages,
++            boolean deleteObsoleteData) {
++        readPackageMappingsLocked(installedPackages, deleteObsoleteData);
+         mDatabase.init(currentTimeMillis);
+         if (mDatabase.wasUpgradePerformed()) {
+             mDatabase.prunePackagesDataOnUpgrade(installedPackages);
+@@ -180,12 +181,13 @@ class UserUsageStatsService {
+         return mDatabase.onPackageRemoved(packageName, timeRemoved);
+     }
+ 
+-    private void readPackageMappingsLocked(HashMap<String, Long> installedPackages) {
++    private void readPackageMappingsLocked(HashMap<String, Long> installedPackages,
++            boolean deleteObsoleteData) {
+         mDatabase.readMappingsLocked();
+         // Package mappings for the system user are updated after 24 hours via a job scheduled by
+         // UsageStatsIdleService to ensure restored data is not lost on first boot. Additionally,
+         // this makes user service initialization a little quicker on subsequent boots.
+-        if (mUserId != UserHandle.USER_SYSTEM) {
++        if (mUserId != UserHandle.USER_SYSTEM && deleteObsoleteData) {
+             updatePackageMappingsLocked(installedPackages);
+         }
+     }
+-- 
+2.17.1
+
