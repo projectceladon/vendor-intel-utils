@@ -1,0 +1,484 @@
+From ee34ff940e2ecbb5d9a8f825d0f3555011b45b7e Mon Sep 17 00:00:00 2001
+From: yaravapa <yasoda.aravapalli@intel.com>
+Date: Tue, 1 Feb 2022 23:32:32 +0530
+Subject: [PATCH] Intrinsify System.ArrayCopy for Primitive data types
+
+This patch implements System.ArrayCopy intrinsic for
+byte and int data types
+
+14% improvement in microbench below:
+
+public static void time_System_arrayCopy_byte(int reps) {
+        byte[] src = new byte[8192];
+        for (int rep = 0; rep < reps; ++rep) {
+            byte[] dst = new byte[8192];
+            System.arraycopy(src, 0, dst, 0, 8192);
+        }
+    }
+public static void time_System_arrayCopy_byte(int reps) {
+        int[] src = new int[8192];
+        for (int rep = 0; rep < reps; ++rep) {
+            int[] dst = new int[8192];
+            System.arraycopy(src, 0, dst, 0, 8192);
+        }
+    }
+
+Time for base version:      4057 ms
+Time for intrinsic version: 3487 ms
+
+Test: ./art/test/testrunner/testrunner.py --host --optimizing
+
+Signed-off-by: yaravapa <yasoda.aravapalli@intel.com>
+---
+ compiler/optimizing/intrinsics_arm64.cc       |   2 +
+ compiler/optimizing/intrinsics_arm_vixl.cc    |   2 +
+ compiler/optimizing/intrinsics_x86.cc         | 101 ++++++++++++------
+ compiler/optimizing/intrinsics_x86_64.cc      |  75 +++++++++----
+ compiler/utils/x86/assembler_x86.cc           |   5 +
+ compiler/utils/x86/assembler_x86.h            |   1 +
+ compiler/utils/x86_64/assembler_x86_64.cc     |  11 ++
+ compiler/utils/x86_64/assembler_x86_64.h      |   2 +
+ runtime/hidden_api.h                          |   2 +
+ runtime/interpreter/interpreter_intrinsics.cc |   2 +
+ runtime/intrinsics_list.h                     |   2 +
+ 11 files changed, 155 insertions(+), 50 deletions(-)
+
+diff --git a/compiler/optimizing/intrinsics_arm64.cc b/compiler/optimizing/intrinsics_arm64.cc
+index d0c64c2230..2c8d2f9f49 100644
+--- a/compiler/optimizing/intrinsics_arm64.cc
++++ b/compiler/optimizing/intrinsics_arm64.cc
+@@ -5375,6 +5375,8 @@ UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendFloat);
+ UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendDouble);
+ UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderLength);
+ UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderToString);
++UNIMPLEMENTED_INTRINSIC(ARM64, SystemArrayCopyByte);
++UNIMPLEMENTED_INTRINSIC(ARM64, SystemArrayCopyInt);
+ 
+ // 1.8.
+ UNIMPLEMENTED_INTRINSIC(ARM64, UnsafeGetAndAddInt)
+diff --git a/compiler/optimizing/intrinsics_arm_vixl.cc b/compiler/optimizing/intrinsics_arm_vixl.cc
+index 2a2f245025..b1753e9cdf 100644
+--- a/compiler/optimizing/intrinsics_arm_vixl.cc
++++ b/compiler/optimizing/intrinsics_arm_vixl.cc
+@@ -5391,6 +5391,8 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, StringBuilderAppendDouble);
+ UNIMPLEMENTED_INTRINSIC(ARMVIXL, StringBuilderLength);
+ UNIMPLEMENTED_INTRINSIC(ARMVIXL, StringBuilderToString);
+ 
++UNIMPLEMENTED_INTRINSIC(ARMVIXL, SystemArrayCopyByte);
++UNIMPLEMENTED_INTRINSIC(ARMVIXL, SystemArrayCopyInt);
+ // 1.8.
+ UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddInt)
+ UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddLong)
+diff --git a/compiler/optimizing/intrinsics_x86.cc b/compiler/optimizing/intrinsics_x86.cc
+index b0c4b5736f..4d8f067e43 100644
+--- a/compiler/optimizing/intrinsics_x86.cc
++++ b/compiler/optimizing/intrinsics_x86.cc
+@@ -760,7 +760,7 @@ void IntrinsicCodeGeneratorX86::VisitMathNextAfter(HInvoke* invoke) {
+   GenFPToFPCall(invoke, codegen_, kQuickNextAfter);
+ }
+ 
+-void IntrinsicLocationsBuilderX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
++static void CreateSystemArrayCopyLocations(HInvoke* invoke) {
+   // We need at least two of the positions or length to be an integer constant,
+   // or else we won't have enough free registers.
+   HIntConstant* src_pos = invoke->InputAt(1)->AsIntConstant();
+@@ -796,7 +796,8 @@ void IntrinsicLocationsBuilderX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
+ 
+   // Okay, it is safe to generate inline code.
+   LocationSummary* locations =
+-      new (allocator_) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
++      new (invoke->GetBlock()->GetGraph()->GetAllocator())
++      LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+   // arraycopy(Object src, int srcPos, Object dest, int destPos, int length).
+   locations->SetInAt(0, Location::RequiresRegister());
+   locations->SetInAt(1, Location::RegisterOrConstant(invoke->InputAt(1)));
+@@ -874,17 +875,18 @@ static void CheckPosition(X86Assembler* assembler,
+   }
+ }
+ 
+-void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
+-  X86Assembler* assembler = GetAssembler();
++static void SystemArrayCopyPrimitive(HInvoke* invoke,
++                                     X86Assembler* assembler,
++                                     CodeGeneratorX86* codegen,
++                                     DataType::Type type) {
+   LocationSummary* locations = invoke->GetLocations();
+-
+   Register src = locations->InAt(0).AsRegister<Register>();
+-  Location srcPos = locations->InAt(1);
++  Location src_pos = locations->InAt(1);
+   Register dest = locations->InAt(2).AsRegister<Register>();
+-  Location destPos = locations->InAt(3);
++  Location dest_pos = locations->InAt(3);
+   Location length = locations->InAt(4);
+ 
+-  // Temporaries that we need for MOVSW.
++  // Temporaries that we need for MOVSB/D/W.
+   Register src_base = locations->GetTemp(0).AsRegister<Register>();
+   DCHECK_EQ(src_base, ESI);
+   Register dest_base = locations->GetTemp(1).AsRegister<Register>();
+@@ -892,10 +894,10 @@ void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
+   Register count = locations->GetTemp(2).AsRegister<Register>();
+   DCHECK_EQ(count, ECX);
+ 
+-  SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) IntrinsicSlowPathX86(invoke);
+-  codegen_->AddSlowPath(slow_path);
++  SlowPathCode* slow_path = new (codegen->GetScopedAllocator()) IntrinsicSlowPathX86(invoke);
++  codegen->AddSlowPath(slow_path);
+ 
+-  // Bail out if the source and destination are the same (to handle overlap).
++  // Bail out if the source and destination are the same.
+   __ cmpl(src, dest);
+   __ j(kEqual, slow_path->GetEntryLabel());
+ 
+@@ -914,7 +916,7 @@ void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
+     __ j(kLess, slow_path->GetEntryLabel());
+   }
+ 
+-  // We need the count in ECX.
++  // We need the count in RCX.
+   if (length.IsConstant()) {
+     __ movl(count, Immediate(length.GetConstant()->AsIntConstant()->GetValue()));
+   } else {
+@@ -922,40 +924,77 @@ void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
+   }
+ 
+   // Validity checks: source. Use src_base as a temporary register.
+-  CheckPosition(assembler, srcPos, src, Location::RegisterLocation(count), slow_path, src_base);
++  CheckPosition(assembler, src_pos, src, length, slow_path, src_base);
+ 
+   // Validity checks: dest. Use src_base as a temporary register.
+-  CheckPosition(assembler, destPos, dest, Location::RegisterLocation(count), slow_path, src_base);
++  CheckPosition(assembler, dest_pos, dest, length, slow_path, src_base);
+ 
+   // Okay, everything checks out.  Finally time to do the copy.
+   // Check assumption that sizeof(Char) is 2 (used in scaling below).
+-  const size_t char_size = DataType::Size(DataType::Type::kUint16);
+-  DCHECK_EQ(char_size, 2u);
+-
+-  const uint32_t data_offset = mirror::Array::DataOffset(char_size).Uint32Value();
++  const size_t data_size = DataType::Size(type);
++  //const ScaleFactor scale_factor = CodeGenerator::ScaleFactorForType(type);
++  const ScaleFactor scale_factor = static_cast<ScaleFactor>(DataType::SizeShift(type));
++  const uint32_t data_offset = mirror::Array::DataOffset(data_size).Uint32Value();
+ 
+-  if (srcPos.IsConstant()) {
+-    int32_t srcPos_const = srcPos.GetConstant()->AsIntConstant()->GetValue();
+-    __ leal(src_base, Address(src, char_size * srcPos_const + data_offset));
++  if (src_pos.IsConstant()) {
++    int32_t src_pos_const = src_pos.GetConstant()->AsIntConstant()->GetValue();
++    __ leal(src_base, Address(src, data_size * src_pos_const + data_offset));
+   } else {
+-    __ leal(src_base, Address(src, srcPos.AsRegister<Register>(),
+-                              ScaleFactor::TIMES_2, data_offset));
++    __ leal(src_base, Address(src, src_pos.AsRegister<Register>(),
++                              scale_factor, data_offset));
+   }
+-  if (destPos.IsConstant()) {
+-    int32_t destPos_const = destPos.GetConstant()->AsIntConstant()->GetValue();
+-
+-    __ leal(dest_base, Address(dest, char_size * destPos_const + data_offset));
++  if (dest_pos.IsConstant()) {
++    int32_t dest_pos_const = dest_pos.GetConstant()->AsIntConstant()->GetValue();
++    __ leal(dest_base, Address(dest, data_size * dest_pos_const + data_offset));
+   } else {
+-    __ leal(dest_base, Address(dest, destPos.AsRegister<Register>(),
+-                               ScaleFactor::TIMES_2, data_offset));
++    __ leal(dest_base, Address(dest, dest_pos.AsRegister<Register>(),
++                               scale_factor, data_offset));
+   }
+ 
+   // Do the move.
+-  __ rep_movsw();
+-
++  switch (type) {
++    case DataType::Type::kInt8:
++       __ rep_movsb();
++       break;
++   case DataType::Type::kUint16:
++     __ rep_movsw();
++     break;
++   case DataType::Type::kInt32:
++     __ rep_movsl();
++     break;
++   default:
++     LOG(FATAL) << "Unexpected data type for intrinsic";
++  }
+   __ Bind(slow_path->GetExitLabel());
+ }
+ 
++void IntrinsicLocationsBuilderX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
++ CreateSystemArrayCopyLocations(invoke);
++}
++
++void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyChar(HInvoke* invoke) {
++  X86Assembler* assembler = GetAssembler();
++  SystemArrayCopyPrimitive(invoke, assembler, codegen_, DataType::Type::kUint16);
++}
++
++void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyByte(HInvoke* invoke) {
++  X86Assembler* assembler = GetAssembler();
++  SystemArrayCopyPrimitive(invoke, assembler, codegen_, DataType::Type::kInt8);
++}
++
++void IntrinsicLocationsBuilderX86::VisitSystemArrayCopyByte(HInvoke* invoke) {
++  CreateSystemArrayCopyLocations(invoke);
++}
++
++void IntrinsicCodeGeneratorX86::VisitSystemArrayCopyInt(HInvoke* invoke) {
++  X86Assembler* assembler = GetAssembler();
++  SystemArrayCopyPrimitive(invoke, assembler, codegen_, DataType::Type::kInt32);
++}
++
++void IntrinsicLocationsBuilderX86::VisitSystemArrayCopyInt(HInvoke* invoke) {
++  CreateSystemArrayCopyLocations(invoke);
++}
++
+ void IntrinsicLocationsBuilderX86::VisitStringCompareTo(HInvoke* invoke) {
+   // The inputs plus one temp.
+   LocationSummary* locations = new (allocator_) LocationSummary(
+diff --git a/compiler/optimizing/intrinsics_x86_64.cc b/compiler/optimizing/intrinsics_x86_64.cc
+index 63511817c0..584133bb05 100644
+--- a/compiler/optimizing/intrinsics_x86_64.cc
++++ b/compiler/optimizing/intrinsics_x86_64.cc
+@@ -565,7 +565,7 @@ void IntrinsicCodeGeneratorX86_64::VisitMathNextAfter(HInvoke* invoke) {
+   GenFPToFPCall(invoke, codegen_, kQuickNextAfter);
+ }
+ 
+-void IntrinsicLocationsBuilderX86_64::VisitSystemArrayCopyChar(HInvoke* invoke) {
++static void CreateSystemArrayCopyLocations(HInvoke* invoke) {
+   // Check to see if we have known failures that will cause us to have to bail out
+   // to the runtime, and just generate the runtime call directly.
+   HIntConstant* src_pos = invoke->InputAt(1)->AsIntConstant();
+@@ -587,9 +587,9 @@ void IntrinsicLocationsBuilderX86_64::VisitSystemArrayCopyChar(HInvoke* invoke)
+       return;
+     }
+   }
+-
+   LocationSummary* locations =
+-      new (allocator_) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
++      new (invoke->GetBlock()->GetGraph()->GetAllocator()) LocationSummary
++      (invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+   // arraycopy(Object src, int src_pos, Object dest, int dest_pos, int length).
+   locations->SetInAt(0, Location::RequiresRegister());
+   locations->SetInAt(1, Location::RegisterOrConstant(invoke->InputAt(1)));
+@@ -667,17 +667,18 @@ static void CheckPosition(X86_64Assembler* assembler,
+   }
+ }
+ 
+-void IntrinsicCodeGeneratorX86_64::VisitSystemArrayCopyChar(HInvoke* invoke) {
+-  X86_64Assembler* assembler = GetAssembler();
++static void SystemArrayCopyPrimitive(HInvoke* invoke,
++                                     X86_64Assembler* assembler,
++                                     CodeGeneratorX86_64* codegen,
++                                     DataType::Type type) {
+   LocationSummary* locations = invoke->GetLocations();
+-
+   CpuRegister src = locations->InAt(0).AsRegister<CpuRegister>();
+   Location src_pos = locations->InAt(1);
+   CpuRegister dest = locations->InAt(2).AsRegister<CpuRegister>();
+   Location dest_pos = locations->InAt(3);
+   Location length = locations->InAt(4);
+ 
+-  // Temporaries that we need for MOVSW.
++  // Temporaries that we need for MOVSB/D/W.
+   CpuRegister src_base = locations->GetTemp(0).AsRegister<CpuRegister>();
+   DCHECK_EQ(src_base.AsRegister(), RSI);
+   CpuRegister dest_base = locations->GetTemp(1).AsRegister<CpuRegister>();
+@@ -685,8 +686,8 @@ void IntrinsicCodeGeneratorX86_64::VisitSystemArrayCopyChar(HInvoke* invoke) {
+   CpuRegister count = locations->GetTemp(2).AsRegister<CpuRegister>();
+   DCHECK_EQ(count.AsRegister(), RCX);
+ 
+-  SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) IntrinsicSlowPathX86_64(invoke);
+-  codegen_->AddSlowPath(slow_path);
++  SlowPathCode* slow_path = new (codegen->GetScopedAllocator()) IntrinsicSlowPathX86_64(invoke);
++  codegen->AddSlowPath(slow_path);
+ 
+   // Bail out if the source and destination are the same.
+   __ cmpl(src, dest);
+@@ -722,32 +723,68 @@ void IntrinsicCodeGeneratorX86_64::VisitSystemArrayCopyChar(HInvoke* invoke) {
+ 
+   // Okay, everything checks out.  Finally time to do the copy.
+   // Check assumption that sizeof(Char) is 2 (used in scaling below).
+-  const size_t char_size = DataType::Size(DataType::Type::kUint16);
+-  DCHECK_EQ(char_size, 2u);
+-
+-  const uint32_t data_offset = mirror::Array::DataOffset(char_size).Uint32Value();
++  const size_t data_size = DataType::Size(type);
++  //const ScaleFactor scale_factor = CodeGenerator::ScaleFactorForType(type);
++  const ScaleFactor scale_factor = static_cast<ScaleFactor>(DataType::SizeShift(type));
++  const uint32_t data_offset = mirror::Array::DataOffset(data_size).Uint32Value();
+ 
+   if (src_pos.IsConstant()) {
+     int32_t src_pos_const = src_pos.GetConstant()->AsIntConstant()->GetValue();
+-    __ leal(src_base, Address(src, char_size * src_pos_const + data_offset));
++    __ leal(src_base, Address(src, data_size * src_pos_const + data_offset));
+   } else {
+     __ leal(src_base, Address(src, src_pos.AsRegister<CpuRegister>(),
+-                              ScaleFactor::TIMES_2, data_offset));
++                              scale_factor, data_offset));
+   }
+   if (dest_pos.IsConstant()) {
+     int32_t dest_pos_const = dest_pos.GetConstant()->AsIntConstant()->GetValue();
+-    __ leal(dest_base, Address(dest, char_size * dest_pos_const + data_offset));
++    __ leal(dest_base, Address(dest, data_size * dest_pos_const + data_offset));
+   } else {
+     __ leal(dest_base, Address(dest, dest_pos.AsRegister<CpuRegister>(),
+-                               ScaleFactor::TIMES_2, data_offset));
++                               scale_factor, data_offset));
+   }
+ 
+   // Do the move.
+-  __ rep_movsw();
+-
++  switch (type) {
++    case DataType::Type::kInt8:
++       __ rep_movsb();
++       break;
++   case DataType::Type::kUint16:
++     __ rep_movsw();
++     break;
++   case DataType::Type::kInt32:
++     __ rep_movsl();
++     break;
++   default:
++     LOG(FATAL) << "Unexpected data type for intrinsic";
++  }
+   __ Bind(slow_path->GetExitLabel());
+ }
+ 
++void IntrinsicLocationsBuilderX86_64::VisitSystemArrayCopyChar(HInvoke* invoke) {
++ CreateSystemArrayCopyLocations(invoke);
++}
++void IntrinsicCodeGeneratorX86_64::VisitSystemArrayCopyChar(HInvoke* invoke) {
++  X86_64Assembler* assembler = GetAssembler();
++  SystemArrayCopyPrimitive(invoke, assembler, codegen_, DataType::Type::kUint16);
++}
++
++void IntrinsicCodeGeneratorX86_64::VisitSystemArrayCopyByte(HInvoke* invoke) {
++  X86_64Assembler* assembler = GetAssembler();
++  SystemArrayCopyPrimitive(invoke, assembler, codegen_, DataType::Type::kInt8);
++}
++
++void IntrinsicLocationsBuilderX86_64::VisitSystemArrayCopyByte(HInvoke* invoke) {
++  CreateSystemArrayCopyLocations(invoke);
++}
++
++void IntrinsicCodeGeneratorX86_64::VisitSystemArrayCopyInt(HInvoke* invoke) {
++  X86_64Assembler* assembler = GetAssembler();
++  SystemArrayCopyPrimitive(invoke, assembler, codegen_, DataType::Type::kInt32);
++}
++
++void IntrinsicLocationsBuilderX86_64::VisitSystemArrayCopyInt(HInvoke* invoke) {
++  CreateSystemArrayCopyLocations(invoke);
++}
+ 
+ void IntrinsicLocationsBuilderX86_64::VisitSystemArrayCopy(HInvoke* invoke) {
+   // The only read barrier implementation supporting the
+diff --git a/compiler/utils/x86/assembler_x86.cc b/compiler/utils/x86/assembler_x86.cc
+index adc7bcc0f4..f1a5fa8f6d 100644
+--- a/compiler/utils/x86/assembler_x86.cc
++++ b/compiler/utils/x86/assembler_x86.cc
+@@ -3657,6 +3657,11 @@ void X86Assembler::rep_movsw() {
+   EmitUint8(0xA5);
+ }
+ 
++void X86Assembler::rep_movsl() {
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  EmitUint8(0xF3);
++  EmitUint8(0xA5);
++}
+ 
+ X86Assembler* X86Assembler::lock() {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+diff --git a/compiler/utils/x86/assembler_x86.h b/compiler/utils/x86/assembler_x86.h
+index a9050e6df1..be91555df6 100644
+--- a/compiler/utils/x86/assembler_x86.h
++++ b/compiler/utils/x86/assembler_x86.h
+@@ -821,6 +821,7 @@ class X86Assembler final : public Assembler {
+   void repe_cmpsw();
+   void repe_cmpsl();
+   void rep_movsb();
++  void rep_movsl();
+   void rep_movsw();
+ 
+   X86Assembler* lock();
+diff --git a/compiler/utils/x86_64/assembler_x86_64.cc b/compiler/utils/x86_64/assembler_x86_64.cc
+index 7116bf2131..801ebedaf3 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.cc
++++ b/compiler/utils/x86_64/assembler_x86_64.cc
+@@ -4821,6 +4821,17 @@ void X86_64Assembler::rep_movsw() {
+   EmitUint8(0xA5);
+ }
+ 
++void X86_64Assembler::rep_movsb() {
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  EmitUint8(0xF3);
++  EmitUint8(0xA4);
++}
++
++void X86_64Assembler::rep_movsl() {
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  EmitUint8(0xF3);
++  EmitUint8(0xA5);
++}
+ 
+ X86_64Assembler* X86_64Assembler::lock() {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+diff --git a/compiler/utils/x86_64/assembler_x86_64.h b/compiler/utils/x86_64/assembler_x86_64.h
+index e5a9ce4834..382eac13b4 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.h
++++ b/compiler/utils/x86_64/assembler_x86_64.h
+@@ -890,6 +890,8 @@ class X86_64Assembler final : public Assembler {
+   void repe_cmpsl();
+   void repe_cmpsq();
+   void rep_movsw();
++  void rep_movsb();
++  void rep_movsl();
+ 
+   //
+   // Macros for High-level operations.
+diff --git a/runtime/hidden_api.h b/runtime/hidden_api.h
+index 16c2fe8cf6..3ded76aa81 100644
+--- a/runtime/hidden_api.h
++++ b/runtime/hidden_api.h
+@@ -282,6 +282,8 @@ ALWAYS_INLINE inline uint32_t GetRuntimeFlags(ArtMethod* method)
+   if (UNLIKELY(method->IsIntrinsic())) {
+     switch (static_cast<Intrinsics>(method->GetIntrinsic())) {
+       case Intrinsics::kSystemArrayCopyChar:
++      case Intrinsics::kSystemArrayCopyByte:
++      case Intrinsics::kSystemArrayCopyInt:
+       case Intrinsics::kStringGetCharsNoCheck:
+       case Intrinsics::kReferenceGetReferent:
+       case Intrinsics::kReferenceRefersTo:
+diff --git a/runtime/interpreter/interpreter_intrinsics.cc b/runtime/interpreter/interpreter_intrinsics.cc
+index 7236bad5de..d5e00eeaf0 100644
+--- a/runtime/interpreter/interpreter_intrinsics.cc
++++ b/runtime/interpreter/interpreter_intrinsics.cc
+@@ -501,7 +501,9 @@ bool MterpHandleIntrinsic(ShadowFrame* shadow_frame,
+     UNIMPLEMENTED_CASE(MathRoundDouble /* (D)J */)
+     UNIMPLEMENTED_CASE(MathRoundFloat /* (F)I */)
+     UNIMPLEMENTED_CASE(MathMultiplyHigh /* (JJ)J */)
++    UNIMPLEMENTED_CASE(SystemArrayCopyByte /* ([BI[BII)V */)
+     UNIMPLEMENTED_CASE(SystemArrayCopyChar /* ([CI[CII)V */)
++    UNIMPLEMENTED_CASE(SystemArrayCopyInt /* ([II[III)V */)
+     UNIMPLEMENTED_CASE(SystemArrayCopy /* (Ljava/lang/Object;ILjava/lang/Object;II)V */)
+     UNIMPLEMENTED_CASE(ThreadCurrentThread /* ()Ljava/lang/Thread; */)
+     UNIMPLEMENTED_CASE(MemoryPeekByte /* (J)B */)
+diff --git a/runtime/intrinsics_list.h b/runtime/intrinsics_list.h
+index c0ef1c9a68..df79cb62b3 100644
+--- a/runtime/intrinsics_list.h
++++ b/runtime/intrinsics_list.h
+@@ -157,7 +157,9 @@
+   V(MathRoundDouble, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "round", "(D)J") \
+   V(MathRoundFloat, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "round", "(F)I") \
+   V(MathMultiplyHigh, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "multiplyHigh", "(JJ)J") \
++  V(SystemArrayCopyByte, kStatic, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/System;", "arraycopy", "([BI[BII)V") \
+   V(SystemArrayCopyChar, kStatic, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/System;", "arraycopy", "([CI[CII)V") \
++  V(SystemArrayCopyInt, kStatic, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/System;", "arraycopy", "([II[III)V") \
+   V(SystemArrayCopy, kStatic, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/System;", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V") \
+   V(ThreadCurrentThread, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Thread;", "currentThread", "()Ljava/lang/Thread;") \
+   V(MemoryPeekByte, kStatic, kNeedsEnvironment, kReadSideEffects, kCanThrow, "Llibcore/io/Memory;", "peekByte", "(J)B") \
+-- 
+2.17.1
+
