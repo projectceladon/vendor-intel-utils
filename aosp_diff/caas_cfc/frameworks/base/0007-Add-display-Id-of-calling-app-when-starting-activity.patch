@@ -1,0 +1,145 @@
+From 61a496855cac8c644332e9e6e1fdd6aeece0e755 Mon Sep 17 00:00:00 2001
+From: bxu10x <bingx.xu@intel.com>
+Date: Thu, 24 Dec 2020 14:20:23 +0800
+Subject: [PATCH 1/4] Add display Id of calling app when starting activity from
+ other users.
+
+2022/02/11 Shuang: fixed issue of OAM-100807:
+Added the feature to set the display ID for activity started from
+backend service.
+
+Change-Id: Icfffde54575d9bb0a5828566ea3c14ae1f785171
+Tracked-On: ACP-1420
+Signed-off-by: bxu10x <bingx.xu@intel.com>
+---
+ .../android/server/wm/ActivityStarter.java    | 74 +++++++++++++++++++
+ .../server/wm/WindowProcessController.java    |  4 +
+ 2 files changed, 78 insertions(+)
+
+diff --git a/services/core/java/com/android/server/wm/ActivityStarter.java b/services/core/java/com/android/server/wm/ActivityStarter.java
+index 54ad4acaca4c..dc493ee0ed40 100644
+--- a/services/core/java/com/android/server/wm/ActivityStarter.java
++++ b/services/core/java/com/android/server/wm/ActivityStarter.java
+@@ -55,6 +55,7 @@ import static android.content.pm.ActivityInfo.LAUNCH_SINGLE_TOP;
+ import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+ import static android.os.Process.INVALID_UID;
+ import static android.view.Display.DEFAULT_DISPLAY;
++import static android.view.Display.INVALID_DISPLAY;
+ 
+ import static com.android.server.wm.ActivityStack.ActivityState.RESUMED;
+ import static com.android.server.wm.ActivityStackSupervisor.DEFER_RESUME;
+@@ -123,9 +124,15 @@ import com.android.server.wm.ActivityMetricsLogger.LaunchingState;
+ import com.android.server.wm.ActivityStackSupervisor.PendingActivityLaunch;
+ import com.android.server.wm.LaunchParamsController.LaunchParams;
+ 
++import android.app.ActivityManagerInternal;
++import android.app.ActivityTaskManager;
++import android.app.IActivityTaskManager;
++import com.android.server.LocalServices;
++
+ import java.io.PrintWriter;
+ import java.text.DateFormat;
+ import java.util.Date;
++import java.util.List;
+ 
+ /**
+  * Controller for interpreting how and then launching an activity.
+@@ -827,6 +834,46 @@ class ActivityStarter {
+         return res;
+     }
+ 
++    private int getBestPlacementDisplayId(String pkg, int orig_display_id) {
++        Slog.d(TAG, "Find the best matched display id for package: " + pkg + " origin display id: " + orig_display_id);
++
++        int new_display_id = orig_display_id;
++
++        try {
++            final ActivityTaskManagerInternal atmi_ptr = LocalServices.getService(ActivityTaskManagerInternal.class);
++            final IActivityTaskManager atm_ptr = ActivityTaskManager.getService();
++            List<IBinder> actlist = atmi_ptr.getTopVisibleActivities();
++            if (atm_ptr == null) {
++                Slog.d(TAG, "ActivityTaskManager Service is null");
++                return orig_display_id;
++            }
++            Slog.d(TAG, "getTopVisibleActivities, returns: " + actlist.size());
++
++            for (int i=0; i<actlist.size(); i++) {
++                String pkgname = atm_ptr.getPackageForToken(actlist.get(i));
++                Slog.d(TAG, "pkgname: " + pkgname);
++                int atm_display_id = atm_ptr.getDisplayId(actlist.get(i));
++                Slog.d(TAG, "atm_display_id: " + atm_display_id);
++                if (pkgname.equals(pkg)) {
++                    Slog.d(TAG, "Found the Actiity for package: " + pkg);
++                    if (atm_display_id >= 0) {
++                        new_display_id = atm_display_id;
++                        Slog.d(TAG, "Got the new_display_id: " + new_display_id);
++                    }
++                    break;
++                }
++                else {
++                    Slog.d(TAG, "Got the packagename: " + pkgname + " but it's not the one we want, skip it.");
++                }
++            }
++        }
++        catch (Exception e) {
++            e.printStackTrace();
++        }
++
++        return new_display_id;
++    }
++
+     /**
+      * Executing activity start request and starts the journey of starting an activity. Here
+      * begins with performing several preliminary checks. The normally activity launch flow will
+@@ -1183,6 +1230,33 @@ class ActivityStarter {
+         mService.onStartActivitySetDidAppSwitch();
+         mController.doPendingActivityLaunches(false);
+ 
++        int calling_displayID = INVALID_DISPLAY;
++        ActivityRecord callerRecord = null;
++        if(callerApp != null) {
++            callerRecord = callerApp.getConfigActivityRecord();
++            if(callerRecord != null) {
++                calling_displayID = callerRecord.getDisplayId();
++            }
++        }
++
++        if (calling_displayID == INVALID_DISPLAY) {
++            calling_displayID = getBestPlacementDisplayId(intent.getComponent().getPackageName(), calling_displayID);
++        }
++
++        if (checkedOptions == null && calling_displayID != INVALID_DISPLAY) {
++            checkedOptions = ActivityOptions.makeBasic();
++        }
++
++        if (calling_displayID != INVALID_DISPLAY && checkedOptions != null){
++	    //call from APP property
++            if (calling_displayID != checkedOptions.getCallerDisplayId()) {
++                checkedOptions.setCallerDisplayId(calling_displayID);
++            }
++        } else if (sourceRecord == null) {
++	    //call from APP internal
++            sourceRecord = callerRecord;
++        }
++
+         mLastStartActivityResult = startActivityUnchecked(r, sourceRecord, voiceSession,
+                 request.voiceInteractor, startFlags, true /* doResume */, checkedOptions, inTask,
+                 restrictedBgActivity, intentGrants);
+diff --git a/services/core/java/com/android/server/wm/WindowProcessController.java b/services/core/java/com/android/server/wm/WindowProcessController.java
+index e6a35f1267b5..27b15313d1e6 100644
+--- a/services/core/java/com/android/server/wm/WindowProcessController.java
++++ b/services/core/java/com/android/server/wm/WindowProcessController.java
+@@ -416,6 +416,10 @@ public class WindowProcessController extends ConfigurationContainer<Configuratio
+         return mDisplayId;
+     }
+ 
++    ActivityRecord getConfigActivityRecord() {
++        return mConfigActivityRecord;
++    }
++
+     public void setDebugging(boolean debugging) {
+         mDebugging = debugging;
+     }
+-- 
+2.17.1
+
