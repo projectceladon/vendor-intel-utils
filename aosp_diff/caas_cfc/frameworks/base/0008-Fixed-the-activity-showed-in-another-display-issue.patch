@@ -1,0 +1,157 @@
+From aed5470d59b426f17a0b47aa20a330a8b461b623 Mon Sep 17 00:00:00 2001
+From: Wan Shuang <shuang.wan@intel.com>
+Date: Mon, 7 Feb 2022 21:08:08 +0800
+Subject: [PATCH 2/3] Fixed the activity showed in another display issue.
+
+The activity launched by app might be showed in display not bundled
+to the display given at app launch time. The root cause of it
+might be the display ID is not saved in app context and most of
+time display 0 will be used. The fix is to set the display ID for
+new activity launched by APP to display ID extracted from existing
+activity record.
+
+Signed-off-by: Wan Shuang <shuang.wan@intel.com>
+Tracked-On: OAM-100862
+---
+ .../server/wm/WindowManagerService.java       | 74 +++++++++++++++++--
+ 1 file changed, 69 insertions(+), 5 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
+index 744afb9bb8ab..dbe3b5c8368a 100644
+--- a/services/core/java/com/android/server/wm/WindowManagerService.java
++++ b/services/core/java/com/android/server/wm/WindowManagerService.java
+@@ -285,6 +285,8 @@ import com.android.server.protolog.common.ProtoLog;
+ import com.android.server.utils.DeviceConfigInterface;
+ import com.android.server.utils.PriorityDump;
+ 
++import android.app.ActivityManager.RunningAppProcessInfo;
++
+ import java.io.BufferedWriter;
+ import java.io.DataInputStream;
+ import java.io.File;
+@@ -1371,6 +1373,41 @@ public class WindowManagerService extends IWindowManager.Stub
+         return false;
+     }
+ 
++    private int getBestPlacementDisplayId(String pkg, int orig_display_id) {
++        int new_display_id = orig_display_id;
++        try {
++            List<IBinder> actlist = mAtmInternal.getTopVisibleActivities();
++            if (mActivityTaskManager == null) {
++                Slog.d(TAG, "Failed to get ActivityTaskManager Service");
++                return orig_display_id;
++            }
++            Slog.d(TAG, "getTopVisibleActivities, returns: " + actlist.size());
++
++            for (int i=0; i<actlist.size(); i++) {
++                String pkgname = mActivityTaskManager.getPackageForToken(actlist.get(i));
++                Slog.d(TAG, "pkgname: " + pkgname);
++                int atms_display_id = mActivityTaskManager.getDisplayId(actlist.get(i));
++                Slog.d(TAG, "atms_display_id: " + atms_display_id);
++                if (pkgname.equals(pkg)) {
++                    Slog.d(TAG, "Found the Actiity for package: " + pkg);
++                    if (atms_display_id >= 0) {
++                        new_display_id = atms_display_id;
++                        Slog.d(TAG, "Got the new_display_id: " + new_display_id);
++                    }
++                    break;
++                }
++                else {
++                    Slog.d(TAG, "Got the packagename: " + pkgname + " but it's not the one we want, skip it.");
++                }
++            }
++        }
++        catch (Exception e) {
++            e.printStackTrace();
++        }
++
++        return new_display_id;
++    }
++
+     public int addWindow(Session session, IWindow client, int seq,
+             LayoutParams attrs, int viewVisibility, int displayId, Rect outFrame,
+             Rect outContentInsets, Rect outStableInsets,
+@@ -1392,23 +1429,24 @@ public class WindowManagerService extends IWindowManager.Stub
+         final int callingPid = Binder.getCallingPid();
+         final long origId = Binder.clearCallingIdentity();
+         final int type = attrs.type;
++        int new_display_id = getBestPlacementDisplayId(attrs.packageName, displayId);
+ 
+         synchronized (mGlobalLock) {
+             if (!mDisplayReady) {
+                 throw new IllegalStateException("Display has not been initialialized");
+             }
+ 
+-            final DisplayContent displayContent = getDisplayContentOrCreate(displayId, attrs.token);
++            final DisplayContent displayContent = getDisplayContentOrCreate(new_display_id, attrs.token);
+ 
+             if (displayContent == null) {
+                 ProtoLog.w(WM_ERROR, "Attempted to add window to a display that does "
+-                        + "not exist: %d. Aborting.", displayId);
++                        + "not exist: %d. Aborting.", new_display_id);
+                 return WindowManagerGlobal.ADD_INVALID_DISPLAY;
+             }
+             if (!displayContent.hasAccess(session.mUid)) {
+                 ProtoLog.w(WM_ERROR,
+                         "Attempted to add window to a display for which the application "
+-                                + "does not have access: %d.  Aborting.", displayId);
++                                + "does not have access: %d.  Aborting.", new_display_id);
+                 return WindowManagerGlobal.ADD_INVALID_DISPLAY;
+             }
+ 
+@@ -2603,6 +2641,21 @@ public class WindowManagerService extends IWindowManager.Stub
+         return false;
+     }
+ 
++    private String getPackageNameFromPid(int pid) {
++	try {
++            for (RunningAppProcessInfo processinfo: mActivityManager.getRunningAppProcesses()){
++	        if (processinfo.pid == pid) {
++		    return processinfo.processName;
++	        }
++	    }
++	}
++	catch (Exception e) {
++	    e.printStackTrace();
++	}
++
++	return "";
++    }
++
+     @Override
+     public void addWindowToken(IBinder binder, int type, int displayId) {
+         addWindowTokenWithOptions(binder, type, displayId, null /* options */,
+@@ -2652,6 +2705,17 @@ public class WindowManagerService extends IWindowManager.Stub
+ 
+         final int callingUid = Binder.getCallingUid();
+         final long origId = Binder.clearCallingIdentity();
++
++	String pname;
++	if (packageName == null) {
++	    pname = getPackageNameFromPid(Binder.getCallingPid());
++	}
++	else {
++	    pname = packageName;
++	}
++
++	int new_display_id = getBestPlacementDisplayId(pname, displayId);
++
+         try {
+             synchronized (mGlobalLock) {
+                 if (!callerCanManageAppTokens) {
+@@ -2662,10 +2726,10 @@ public class WindowManagerService extends IWindowManager.Stub
+                     }
+                 }
+ 
+-                final DisplayContent dc = getDisplayContentOrCreate(displayId, null /* token */);
++                final DisplayContent dc = getDisplayContentOrCreate(new_display_id, null /* token */);
+                 if (dc == null) {
+                     ProtoLog.w(WM_ERROR, "addWindowToken: Attempted to add token: %s"
+-                            + " for non-exiting displayId=%d", binder, displayId);
++                            + " for non-exiting displayId=%d", binder, new_display_id);
+                     return WindowManagerGlobal.ADD_INVALID_DISPLAY;
+                 }
+ 
+-- 
+2.17.1
+
