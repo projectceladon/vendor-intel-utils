@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dongwon Kim <dongwon.kim@intel.com>
+Date: Fri, 25 Jun 2021 09:57:31 -0700
+Subject: [PATCH] ui/gtk: skip any extra draw of same guest scanout blob res
+
+Any extra gd_egl_draw of same blob resource representing guest
+scanout before the previous drawing is not finished can break
+synchronous draw sequence so it needs to be skipped or blocked.
+
+v2: mutex to protect critical section where draw_submitted flag is
+    checked and modified.
+
+Signed-off-by: Dongwon Kim <dongwon.kim@intel.com>
+---
+ hw/display/virtio-gpu-udmabuf.c |  3 +++
+ include/ui/console.h            |  3 +++
+ ui/gtk-egl.c                    | 15 +++++++++++++++
+ ui/gtk-gl-area.c                |  9 +++++++++
+ 4 files changed, 30 insertions(+)
+
+diff --git a/hw/display/virtio-gpu-udmabuf.c b/hw/display/virtio-gpu-udmabuf.c
+index 632ba06cbc..29793f5317 100644
+--- a/hw/display/virtio-gpu-udmabuf.c
++++ b/hw/display/virtio-gpu-udmabuf.c
+@@ -186,6 +186,9 @@ static VGPUDMABuf
+     dmabuf->buf.fourcc = qemu_pixman_to_drm_format(fb->format);
+     dmabuf->buf.fd = res->dmabuf_fd;
+     dmabuf->buf.blob = true;
++    dmabuf->buf.draw_submitted = false;
++
++    qemu_mutex_init(&dmabuf->buf.mutex);
+ 
+     dmabuf->scanout_id = scanout_id;
+     QTAILQ_INSERT_HEAD(&g->dmabuf.bufs, dmabuf, next);
+diff --git a/include/ui/console.h b/include/ui/console.h
+index 570d827644..f7cf3f1acd 100644
+--- a/include/ui/console.h
++++ b/include/ui/console.h
+@@ -5,6 +5,7 @@
+ #include "qom/object.h"
+ #include "qemu/notify.h"
+ #include "qemu/error-report.h"
++#include "qemu/lockable.h"
+ #include "qapi/qapi-types-ui.h"
+ 
+ #ifdef CONFIG_OPENGL
+@@ -171,6 +172,8 @@ typedef struct QemuDmaBuf {
+     void      *sync;
+     int       fence_fd;
+     bool      blob;
++    bool      draw_submitted;
++    QemuMutex mutex;
+ } QemuDmaBuf;
+ 
+ typedef struct DisplayState DisplayState;
+diff --git a/ui/gtk-egl.c b/ui/gtk-egl.c
+index 3c7eb244b4..207b28fbe1 100644
+--- a/ui/gtk-egl.c
++++ b/ui/gtk-egl.c
+@@ -74,6 +74,15 @@ void gd_egl_draw(VirtualConsole *vc)
+     ww = gdk_window_get_width(window);
+     wh = gdk_window_get_height(window);
+ 
++    if (dmabuf) {
++       qemu_mutex_lock(&dmabuf->mutex);
++       if (!dmabuf->draw_submitted) {
++           qemu_mutex_unlock(&dmabuf->mutex);
++           return;
++       } else {
++          dmabuf->draw_submitted = false;
++       }
++    }
+     if (vc->gfx.scanout_mode) {
+         gd_egl_scanout_flush(&vc->gfx.dcl, 0, 0, vc->gfx.w, vc->gfx.h);
+ 
+@@ -81,6 +90,9 @@ void gd_egl_draw(VirtualConsole *vc)
+         vc->gfx.scale_y = (double)wh / vc->gfx.h;
+     } else {
+         if (!vc->gfx.ds) {
++            if (dmabuf) {
++                qemu_mutex_unlock(&dmabuf->mutex);
++            }
+             return;
+         }
+         eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
+@@ -100,9 +112,11 @@ void gd_egl_draw(VirtualConsole *vc)
+         egl_dmabuf_create_fence(dmabuf);
+         if (dmabuf->fence_fd > 0) {
+             qemu_set_fd_handler(dmabuf->fence_fd, gd_hw_gl_flushed, NULL, vc);
++	    qemu_mutex_unlock(&dmabuf->mutex);
+             return;
+         }
+         graphic_hw_gl_block(vc->gfx.dcl.con, false);
++	qemu_mutex_unlock(&dmabuf->mutex);
+     }
+     graphic_hw_gl_flushed(vc->gfx.dcl.con);
+ }
+@@ -312,6 +326,7 @@ void gd_egl_flush(DisplayChangeListener *dcl,
+ 
+     if (vc->gfx.guest_fb.dmabuf) {
+         graphic_hw_gl_block(vc->gfx.dcl.con, true);
++        vc->gfx.guest_fb.dmabuf->draw_submitted = true;
+         gtk_widget_queue_draw_area(area, x, y, w, h);
+         return;
+     }
+diff --git a/ui/gtk-gl-area.c b/ui/gtk-gl-area.c
+index 091194789e..4ea64736c5 100644
+--- a/ui/gtk-gl-area.c
++++ b/ui/gtk-gl-area.c
+@@ -54,6 +54,14 @@ void gd_gl_area_draw(VirtualConsole *vc)
+             return;
+         }
+ 
++        if (dmabuf) {
++            if (!dmabuf->draw_submitted) {
++                return;
++            } else {
++                dmabuf->draw_submitted = false;
++            }
++        }
++
+         glBindFramebuffer(GL_READ_FRAMEBUFFER, vc->gfx.guest_fb.framebuffer);
+         /* GtkGLArea sets GL_DRAW_FRAMEBUFFER for us */
+ 
+@@ -228,6 +236,7 @@ void gd_gl_area_scanout_flush(DisplayChangeListener *dcl,
+ 
+     if (vc->gfx.guest_fb.dmabuf) {
+         graphic_hw_gl_block(vc->gfx.dcl.con, true);
++        vc->gfx.guest_fb.dmabuf->draw_submitted = true;
+     }
+     gtk_gl_area_queue_render(GTK_GL_AREA(vc->gfx.drawing_area));
+ }
+-- 
+2.17.1
+
