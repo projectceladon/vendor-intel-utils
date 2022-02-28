@@ -1,0 +1,634 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gerd Hoffmann <kraxel@redhat.com>
+Date: Wed, 19 May 2021 07:39:33 +0200
+Subject: [PATCH] ui: Add in clipboard infra
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Mazlan, Hazwan Arif <hazwan.arif.mazlan@intel.com>
+
+ui: add clipboard infrastructure
+
+Add some infrastructure to manage the clipboard in qemu.
+
+Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Message-id: 20210519053940.1888907-1-kraxel@redhat.com
+Message-Id: <20210519053940.1888907-3-kraxel@redhat.com>
+
+ui/cocoa: Add clipboard support
+
+Signed-off-by: Akihiko Odaki <akihiko.odaki@gmail.com>
+Message-Id: <20210616141954.54291-1-akihiko.odaki@gmail.com>
+Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+
+ui/gtk: add clipboard support
+
+This patch adds clipboard support to the qemu gtk ui.
+
+Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Message-id: 20210519053940.1888907-1-kraxel@redhat.com
+Message-Id: <20210519053940.1888907-10-kraxel@redhat.com>
+---
+ include/ui/clipboard.h |  62 +++++++++++++
+ include/ui/gtk.h       |  10 +++
+ ui/clipboard.c         |  92 ++++++++++++++++++++
+ ui/cocoa.m             | 109 +++++++++++++++++++++++
+ ui/gtk-clipboard.c     | 192 +++++++++++++++++++++++++++++++++++++++++
+ ui/gtk.c               |   1 +
+ ui/meson.build         |   3 +-
+ 7 files changed, 468 insertions(+), 1 deletion(-)
+ create mode 100644 include/ui/clipboard.h
+ create mode 100644 ui/clipboard.c
+ create mode 100644 ui/gtk-clipboard.c
+
+diff --git a/include/ui/clipboard.h b/include/ui/clipboard.h
+new file mode 100644
+index 0000000000..a1aacb1f7d
+--- /dev/null
++++ b/include/ui/clipboard.h
+@@ -0,0 +1,62 @@
++#ifndef QEMU_CLIPBOARD_H
++#define QEMU_CLIPBOARD_H
++
++#include "qemu/notify.h"
++
++typedef enum QemuClipboardType QemuClipboardType;
++typedef enum QemuClipboardSelection QemuClipboardSelection;
++typedef struct QemuClipboardPeer QemuClipboardPeer;
++typedef struct QemuClipboardInfo QemuClipboardInfo;
++
++enum QemuClipboardType {
++    QEMU_CLIPBOARD_TYPE_TEXT,  /* text/plain; charset=utf-8 */
++    QEMU_CLIPBOARD_TYPE__COUNT,
++};
++
++/* same as VD_AGENT_CLIPBOARD_SELECTION_* */
++enum QemuClipboardSelection {
++    QEMU_CLIPBOARD_SELECTION_CLIPBOARD,
++    QEMU_CLIPBOARD_SELECTION_PRIMARY,
++    QEMU_CLIPBOARD_SELECTION_SECONDARY,
++    QEMU_CLIPBOARD_SELECTION__COUNT,
++};
++
++struct QemuClipboardPeer {
++    const char *name;
++    Notifier update;
++    void (*request)(QemuClipboardInfo *info,
++                    QemuClipboardType type);
++};
++
++struct QemuClipboardInfo {
++    uint32_t refcount;
++    QemuClipboardPeer *owner;
++    QemuClipboardSelection selection;
++    struct {
++        bool available;
++        bool requested;
++        size_t size;
++        void *data;
++    } types[QEMU_CLIPBOARD_TYPE__COUNT];
++};
++
++void qemu_clipboard_peer_register(QemuClipboardPeer *peer);
++void qemu_clipboard_peer_unregister(QemuClipboardPeer *peer);
++
++QemuClipboardInfo *qemu_clipboard_info_new(QemuClipboardPeer *owner,
++                                           QemuClipboardSelection selection);
++QemuClipboardInfo *qemu_clipboard_info_ref(QemuClipboardInfo *info);
++void qemu_clipboard_info_unref(QemuClipboardInfo *info);
++
++void qemu_clipboard_update(QemuClipboardInfo *info);
++void qemu_clipboard_request(QemuClipboardInfo *info,
++                            QemuClipboardType type);
++
++void qemu_clipboard_set_data(QemuClipboardPeer *peer,
++                             QemuClipboardInfo *info,
++                             QemuClipboardType type,
++                             uint32_t size,
++                             const void *data,
++                             bool update);
++
++#endif /* QEMU_CLIPBOARD_H */
+diff --git a/include/ui/gtk.h b/include/ui/gtk.h
+index 074ad4466f..a25f5bfecc 100644
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -18,6 +18,7 @@
+ #include <gdk/gdkwayland.h>
+ #endif
+ 
++#include "ui/clipboard.h"
+ #include "ui/console.h"
+ #include "ui/kbd-state.h"
+ #if defined(CONFIG_OPENGL)
+@@ -137,6 +138,12 @@ struct GtkDisplayState {
+ 
+     bool external_pause_update;
+ 
++    QemuClipboardPeer cbpeer;
++    QemuClipboardInfo *cbinfo[QEMU_CLIPBOARD_SELECTION__COUNT];
++    uint32_t cbpending[QEMU_CLIPBOARD_SELECTION__COUNT];
++    GtkClipboard *gtkcb[QEMU_CLIPBOARD_SELECTION__COUNT];
++    bool cbowner[QEMU_CLIPBOARD_SELECTION__COUNT];
++
+     DisplayOptions *opts;
+ };
+ 
+@@ -208,4 +215,7 @@ void gtk_gl_area_init(void);
+ int gd_gl_area_make_current(DisplayChangeListener *dcl,
+                             QEMUGLContext ctx);
+ 
++/* gtk-clipboard.c */
++void gd_clipboard_init(GtkDisplayState *gd);
++
+ #endif /* UI_GTK_H */
+diff --git a/ui/clipboard.c b/ui/clipboard.c
+new file mode 100644
+index 0000000000..3525b30178
+--- /dev/null
++++ b/ui/clipboard.c
+@@ -0,0 +1,92 @@
++#include "qemu/osdep.h"
++#include "ui/clipboard.h"
++
++static NotifierList clipboard_notifiers =
++    NOTIFIER_LIST_INITIALIZER(clipboard_notifiers);
++
++void qemu_clipboard_peer_register(QemuClipboardPeer *peer)
++{
++    notifier_list_add(&clipboard_notifiers, &peer->update);
++}
++
++void qemu_clipboard_peer_unregister(QemuClipboardPeer *peer)
++{
++    notifier_remove(&peer->update);
++}
++
++void qemu_clipboard_update(QemuClipboardInfo *info)
++{
++    notifier_list_notify(&clipboard_notifiers, info);
++}
++
++QemuClipboardInfo *qemu_clipboard_info_new(QemuClipboardPeer *owner,
++                                           QemuClipboardSelection selection)
++{
++    QemuClipboardInfo *info = g_new0(QemuClipboardInfo, 1);
++
++    info->owner = owner;
++    info->selection = selection;
++    info->refcount = 1;
++
++    return info;
++}
++
++QemuClipboardInfo *qemu_clipboard_info_ref(QemuClipboardInfo *info)
++{
++    info->refcount++;
++    return info;
++}
++
++void qemu_clipboard_info_unref(QemuClipboardInfo *info)
++{
++    uint32_t type;
++
++    if (!info) {
++        return;
++    }
++
++    info->refcount--;
++    if (info->refcount > 0) {
++        return;
++    }
++
++    for (type = 0; type < QEMU_CLIPBOARD_TYPE__COUNT; type++) {
++        g_free(info->types[type].data);
++    }
++    g_free(info);
++}
++
++void qemu_clipboard_request(QemuClipboardInfo *info,
++                            QemuClipboardType type)
++{
++    if (info->types[type].data ||
++        info->types[type].requested ||
++        !info->types[type].available ||
++        !info->owner)
++        return;
++
++    info->types[type].requested = true;
++    info->owner->request(info, type);
++}
++
++void qemu_clipboard_set_data(QemuClipboardPeer *peer,
++                             QemuClipboardInfo *info,
++                             QemuClipboardType type,
++                             uint32_t size,
++                             const void *data,
++                             bool update)
++{
++    if (!info ||
++        info->owner != peer) {
++        return;
++    }
++
++    g_free(info->types[type].data);
++    info->types[type].data = g_memdup(data, size);
++    info->types[type].size = size;
++    info->types[type].available = true;
++
++    if (update) {
++        qemu_clipboard_update(info);
++    }
++}
+diff --git a/ui/cocoa.m b/ui/cocoa.m
+index 37e1fb52eb..bd549e3276 100644
+--- a/ui/cocoa.m
++++ b/ui/cocoa.m
+@@ -28,6 +28,7 @@
+ #include <crt_externs.h>
+ 
+ #include "qemu-common.h"
++#include "ui/clipboard.h"
+ #include "ui/console.h"
+ #include "ui/input.h"
+ #include "ui/kbd-state.h"
+@@ -105,6 +106,10 @@ static QemuSemaphore display_init_sem;
+ static QemuSemaphore app_started_sem;
+ static bool allow_events;
+ 
++static NSInteger cbchangecount = -1;
++static QemuClipboardInfo *cbinfo;
++static QemuEvent cbevent;
++
+ // Utility functions to run specified code block with iothread lock held
+ typedef void (^CodeBlock)(void);
+ typedef bool (^BoolCodeBlock)(void);
+@@ -1711,6 +1716,93 @@ static void addRemovableDevicesMenuItems(void)
+     qapi_free_BlockInfoList(pointerToFree);
+ }
+ 
++@interface QemuCocoaPasteboardTypeOwner : NSObject<NSPasteboardTypeOwner>
++@end
++
++@implementation QemuCocoaPasteboardTypeOwner
++
++- (void)pasteboard:(NSPasteboard *)sender provideDataForType:(NSPasteboardType)type
++{
++    if (type != NSPasteboardTypeString) {
++        return;
++    }
++
++    with_iothread_lock(^{
++        QemuClipboardInfo *info = qemu_clipboard_info_ref(cbinfo);
++        qemu_event_reset(&cbevent);
++        qemu_clipboard_request(info, QEMU_CLIPBOARD_TYPE_TEXT);
++
++        while (info == cbinfo &&
++               info->types[QEMU_CLIPBOARD_TYPE_TEXT].available &&
++               info->types[QEMU_CLIPBOARD_TYPE_TEXT].data == NULL) {
++            qemu_mutex_unlock_iothread();
++            qemu_event_wait(&cbevent);
++            qemu_mutex_lock_iothread();
++        }
++
++        if (info == cbinfo) {
++            NSData *data = [[NSData alloc] initWithBytes:info->types[QEMU_CLIPBOARD_TYPE_TEXT].data
++                                           length:info->types[QEMU_CLIPBOARD_TYPE_TEXT].size];
++            [sender setData:data forType:NSPasteboardTypeString];
++            [data release];
++        }
++
++        qemu_clipboard_info_unref(info);
++    });
++}
++
++@end
++
++static QemuCocoaPasteboardTypeOwner *cbowner;
++
++static void cocoa_clipboard_notify(Notifier *notifier, void *data);
++static void cocoa_clipboard_request(QemuClipboardInfo *info,
++                                    QemuClipboardType type);
++
++static QemuClipboardPeer cbpeer = {
++    .name = "cocoa",
++    .update = { .notify = cocoa_clipboard_notify },
++    .request = cocoa_clipboard_request
++};
++
++static void cocoa_clipboard_notify(Notifier *notifier, void *data)
++{
++    QemuClipboardInfo *info = data;
++
++    if (info->owner == &cbpeer || info->selection != QEMU_CLIPBOARD_SELECTION_CLIPBOARD) {
++        return;
++    }
++
++    if (info != cbinfo) {
++        NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
++        qemu_clipboard_info_unref(cbinfo);
++        cbinfo = qemu_clipboard_info_ref(info);
++        cbchangecount = [[NSPasteboard generalPasteboard] declareTypes:@[NSPasteboardTypeString] owner:cbowner];
++        [pool release];
++    }
++
++    qemu_event_set(&cbevent);
++}
++
++static void cocoa_clipboard_request(QemuClipboardInfo *info,
++                                    QemuClipboardType type)
++{
++    NSData *text;
++
++    switch (type) {
++    case QEMU_CLIPBOARD_TYPE_TEXT:
++        text = [[NSPasteboard generalPasteboard] dataForType:NSPasteboardTypeString];
++        if (text) {
++            qemu_clipboard_set_data(&cbpeer, info, type,
++                                    [text length], [text bytes], true);
++            [text release];
++        }
++        break;
++    default:
++        break;
++    }
++}
++
+ /*
+  * The startup process for the OSX/Cocoa UI is complicated, because
+  * OSX insists that the UI runs on the initial main thread, and so we
+@@ -1745,6 +1837,7 @@ static void *call_qemu_main(void *opaque)
+     COCOA_DEBUG("Second thread: calling qemu_main()\n");
+     status = qemu_main(gArgc, gArgv, *_NSGetEnviron());
+     COCOA_DEBUG("Second thread: qemu_main() returned, exiting\n");
++    [cbowner release];
+     exit(status);
+ }
+ 
+@@ -1865,6 +1958,18 @@ static void cocoa_refresh(DisplayChangeListener *dcl)
+             [cocoaView setAbsoluteEnabled:YES];
+         });
+     }
++
++    if (cbchangecount != [[NSPasteboard generalPasteboard] changeCount]) {
++        qemu_clipboard_info_unref(cbinfo);
++        cbinfo = qemu_clipboard_info_new(&cbpeer, QEMU_CLIPBOARD_SELECTION_CLIPBOARD);
++        if ([[NSPasteboard generalPasteboard] availableTypeFromArray:@[NSPasteboardTypeString]]) {
++            cbinfo->types[QEMU_CLIPBOARD_TYPE_TEXT].available = true;
++        }
++        qemu_clipboard_update(cbinfo);
++        cbchangecount = [[NSPasteboard generalPasteboard] changeCount];
++        qemu_event_set(&cbevent);
++    }
++
+     [pool release];
+ }
+ 
+@@ -1890,6 +1995,10 @@ static void cocoa_display_init(DisplayState *ds, DisplayOptions *opts)
+ 
+     // register vga output callbacks
+     register_displaychangelistener(&dcl);
++
++    qemu_event_init(&cbevent, false);
++    cbowner = [[QemuCocoaPasteboardTypeOwner alloc] init];
++    qemu_clipboard_peer_register(&cbpeer);
+ }
+ 
+ static QemuDisplay qemu_display_cocoa = {
+diff --git a/ui/gtk-clipboard.c b/ui/gtk-clipboard.c
+new file mode 100644
+index 0000000000..bff28d2030
+--- /dev/null
++++ b/ui/gtk-clipboard.c
+@@ -0,0 +1,192 @@
++/*
++ * GTK UI -- clipboard support
++ *
++ * Copyright (C) 2021 Gerd Hoffmann <kraxel@redhat.com>
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#include "qemu/osdep.h"
++#include "qemu-common.h"
++#include "qemu/main-loop.h"
++
++#include "ui/gtk.h"
++
++static QemuClipboardSelection gd_find_selection(GtkDisplayState *gd,
++                                                GtkClipboard *clipboard)
++{
++    QemuClipboardSelection s;
++
++    for (s = 0; s < QEMU_CLIPBOARD_SELECTION__COUNT; s++) {
++        if (gd->gtkcb[s] == clipboard) {
++            return s;
++        }
++    }
++    return QEMU_CLIPBOARD_SELECTION_CLIPBOARD;
++}
++
++static void gd_clipboard_get_data(GtkClipboard     *clipboard,
++                                  GtkSelectionData *selection_data,
++                                  guint             selection_info,
++                                  gpointer          data)
++{
++    GtkDisplayState *gd = data;
++    QemuClipboardSelection s = gd_find_selection(gd, clipboard);
++    QemuClipboardType type = QEMU_CLIPBOARD_TYPE_TEXT;
++    QemuClipboardInfo *info = qemu_clipboard_info_ref(gd->cbinfo[s]);
++
++    qemu_clipboard_request(info, type);
++    while (info == gd->cbinfo[s] &&
++           info->types[type].available &&
++           info->types[type].data == NULL) {
++        main_loop_wait(false);
++    }
++
++    if (info == gd->cbinfo[s] && gd->cbowner[s]) {
++        gtk_selection_data_set_text(selection_data,
++                                    info->types[type].data,
++                                    info->types[type].size);
++    } else {
++        /* clipboard owner changed while waiting for the data */
++    }
++
++    qemu_clipboard_info_unref(info);
++}
++
++static void gd_clipboard_clear(GtkClipboard *clipboard,
++                               gpointer data)
++{
++    GtkDisplayState *gd = data;
++    QemuClipboardSelection s = gd_find_selection(gd, clipboard);
++
++    gd->cbowner[s] = false;
++}
++
++static void gd_clipboard_notify(Notifier *notifier, void *data)
++{
++    GtkDisplayState *gd = container_of(notifier, GtkDisplayState, cbpeer.update);
++    QemuClipboardInfo *info = data;
++    QemuClipboardSelection s = info->selection;
++    bool self_update = info->owner == &gd->cbpeer;
++
++    if (info != gd->cbinfo[s]) {
++        qemu_clipboard_info_unref(gd->cbinfo[s]);
++        gd->cbinfo[s] = qemu_clipboard_info_ref(info);
++        gd->cbpending[s] = 0;
++        if (!self_update) {
++            GtkTargetList *list;
++            GtkTargetEntry *targets;
++            gint n_targets;
++
++            list = gtk_target_list_new(NULL, 0);
++            if (info->types[QEMU_CLIPBOARD_TYPE_TEXT].available) {
++                gtk_target_list_add_text_targets(list, 0);
++            }
++            targets = gtk_target_table_new_from_list(list, &n_targets);
++
++            gtk_clipboard_clear(gd->gtkcb[s]);
++            gd->cbowner[s] = true;
++            gtk_clipboard_set_with_data(gd->gtkcb[s],
++                                        targets, n_targets,
++                                        gd_clipboard_get_data,
++                                        gd_clipboard_clear,
++                                        gd);
++
++            gtk_target_table_free(targets, n_targets);
++            gtk_target_list_unref(list);
++        }
++        return;
++    }
++
++    if (self_update) {
++        return;
++    }
++
++    /*
++     * Clipboard got updated, with data probably.  No action here, we
++     * are waiting for updates in gd_clipboard_get_data().
++     */
++}
++
++static void gd_clipboard_request(QemuClipboardInfo *info,
++                                 QemuClipboardType type)
++{
++    GtkDisplayState *gd = container_of(info->owner, GtkDisplayState, cbpeer);
++    char *text;
++
++    switch (type) {
++    case QEMU_CLIPBOARD_TYPE_TEXT:
++        text = gtk_clipboard_wait_for_text(gd->gtkcb[info->selection]);
++        if (text) {
++            qemu_clipboard_set_data(&gd->cbpeer, info, type,
++                                    strlen(text), text, true);
++            g_free(text);
++        }
++        break;
++    default:
++        break;
++    }
++}
++
++static void gd_owner_change(GtkClipboard *clipboard,
++                            GdkEvent *event,
++                            gpointer data)
++{
++    GtkDisplayState *gd = data;
++    QemuClipboardSelection s = gd_find_selection(gd, clipboard);
++    QemuClipboardInfo *info;
++
++    if (gd->cbowner[s]) {
++        /* ignore notifications about our own grabs */
++        return;
++    }
++
++
++    switch (event->owner_change.reason) {
++    case GDK_SETTING_ACTION_NEW:
++        info = qemu_clipboard_info_new(&gd->cbpeer, s);
++        if (gtk_clipboard_wait_is_text_available(clipboard)) {
++            info->types[QEMU_CLIPBOARD_TYPE_TEXT].available = true;
++        }
++
++        qemu_clipboard_update(info);
++        qemu_clipboard_info_unref(info);
++        break;
++    default:
++        break;
++    }
++}
++
++void gd_clipboard_init(GtkDisplayState *gd)
++{
++    gd->cbpeer.name = "gtk";
++    gd->cbpeer.update.notify = gd_clipboard_notify;
++    gd->cbpeer.request = gd_clipboard_request;
++    qemu_clipboard_peer_register(&gd->cbpeer);
++
++    gd->gtkcb[QEMU_CLIPBOARD_SELECTION_CLIPBOARD] =
++        gtk_clipboard_get(gdk_atom_intern("CLIPBOARD", FALSE));
++    gd->gtkcb[QEMU_CLIPBOARD_SELECTION_PRIMARY] =
++        gtk_clipboard_get(gdk_atom_intern("PRIMARY", FALSE));
++    gd->gtkcb[QEMU_CLIPBOARD_SELECTION_SECONDARY] =
++        gtk_clipboard_get(gdk_atom_intern("SECONDARY", FALSE));
++
++    g_signal_connect(gd->gtkcb[QEMU_CLIPBOARD_SELECTION_CLIPBOARD],
++                     "owner-change", G_CALLBACK(gd_owner_change), gd);
++    g_signal_connect(gd->gtkcb[QEMU_CLIPBOARD_SELECTION_PRIMARY],
++                     "owner-change", G_CALLBACK(gd_owner_change), gd);
++    g_signal_connect(gd->gtkcb[QEMU_CLIPBOARD_SELECTION_SECONDARY],
++                     "owner-change", G_CALLBACK(gd_owner_change), gd);
++}
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 8bcf965440..bb3861c135 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -2342,6 +2342,7 @@ static void gtk_display_init(DisplayState *ds, DisplayOptions *opts)
+     }
+ 
+ 
++    gd_clipboard_init(s);
+ }
+ 
+ static void early_gtk_display_init(DisplayOptions *opts)
+diff --git a/ui/meson.build b/ui/meson.build
+index 7a709ff548..e72e1c39ed 100644
+--- a/ui/meson.build
++++ b/ui/meson.build
+@@ -2,6 +2,7 @@ softmmu_ss.add(pixman)
+ specific_ss.add(when: ['CONFIG_SOFTMMU'], if_true: pixman)   # for the include path
+ 
+ softmmu_ss.add(files(
++  'clipboard.c',
+   'console.c',
+   'cursor.c',
+   'input-keymap.c',
+@@ -63,7 +64,7 @@ if gtk.found()
+   softmmu_ss.add(when: 'CONFIG_WIN32', if_true: files('win32-kbd-hook.c'))
+ 
+   gtk_ss = ss.source_set()
+-  gtk_ss.add(gtk, vte, pixman, files('gtk.c'))
++  gtk_ss.add(gtk, vte, pixman, files('gtk.c', 'gtk-clipboard.c'))
+   gtk_ss.add(when: x11, if_true: files('x_keymap.c'))
+   gtk_ss.add(when: [opengl, 'CONFIG_OPENGL'], if_true: files('gtk-gl-area.c'))
+   gtk_ss.add(when: [x11, opengl, 'CONFIG_OPENGL'], if_true: files('gtk-egl.c'))
+-- 
+2.17.1
+
