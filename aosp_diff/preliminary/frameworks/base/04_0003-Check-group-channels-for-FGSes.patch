@@ -1,0 +1,126 @@
+From 3f2c12ab6523a1c7a11172a771dc7eb4d6f05ce1 Mon Sep 17 00:00:00 2001
+From: Julia Reynolds <juliacr@google.com>
+Date: Fri, 7 Jan 2022 16:28:52 -0500
+Subject: [PATCH] Check group channels for FGSes
+
+Before allowing the group to be deleted, by updating
+the current check to the method that populates the channel
+list
+
+Test: NotificationManagerServiceTest
+Bug: 209965481
+Change-Id: I9db781c300e96e9c80bd5d21585b8be9b4db08c8
+Merged-In: I9db781c300e96e9c80bd5d21585b8be9b4db08c8
+(cherry picked from commit 37a28db7f586de3bad3e9dff3afc4356bfb8bb76)
+Merged-In:I9db781c300e96e9c80bd5d21585b8be9b4db08c8
+---
+ .../NotificationManagerService.java           |  5 +-
+ .../NotificationManagerServiceTest.java       | 55 ++++++++++++++++++-
+ 2 files changed, 57 insertions(+), 3 deletions(-)
+
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index 7ba0f04a435f..73e7c9c15d54 100755
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -2803,7 +2803,7 @@ public class NotificationManagerService extends SystemService {
+         }
+     }
+ 
+-    private void createNotificationChannelGroup(String pkg, int uid, NotificationChannelGroup group,
++    void createNotificationChannelGroup(String pkg, int uid, NotificationChannelGroup group,
+             boolean fromApp, boolean fromListener) {
+         Objects.requireNonNull(group);
+         Objects.requireNonNull(pkg);
+@@ -3851,7 +3851,8 @@ public class NotificationManagerService extends SystemService {
+ 
+             final int callingUid = Binder.getCallingUid();
+             NotificationChannelGroup groupToDelete =
+-                    mPreferencesHelper.getNotificationChannelGroup(groupId, pkg, callingUid);
++                    mPreferencesHelper.getNotificationChannelGroupWithChannels(
++                            pkg, callingUid, groupId, false);
+             if (groupToDelete != null) {
+                 // Preflight for allowability
+                 final int userId = UserHandle.getUserId(callingUid);
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+index 1ae219db7726..3555865dc6a3 100755
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -225,6 +225,8 @@ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.CountDownLatch;
+ import java.util.function.Consumer;
+ 
+ 
+@@ -2460,7 +2462,8 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+                 .thenReturn(associations);
+         NotificationChannelGroup ncg = new NotificationChannelGroup("a", "b/c");
+         mService.setPreferencesHelper(mPreferencesHelper);
+-        when(mPreferencesHelper.getNotificationChannelGroup(eq(ncg.getId()), eq(PKG), anyInt()))
++        when(mPreferencesHelper.getNotificationChannelGroupWithChannels(
++                eq(PKG), anyInt(), eq(ncg.getId()), anyBoolean()))
+                 .thenReturn(ncg);
+         reset(mListeners);
+         mBinderService.deleteNotificationChannelGroup(PKG, ncg.getId());
+@@ -2469,6 +2472,56 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+                 eq(NotificationListenerService.NOTIFICATION_CHANNEL_OR_GROUP_DELETED));
+     }
+ 
++    @Test
++    public void testDeleteChannelGroupChecksForFgses() throws Exception {
++        List<String> associations = new ArrayList<>();
++        associations.add("a");
++        when(mCompanionMgr.getAssociations(PKG, UserHandle.getUserId(mUid)))
++                .thenReturn(associations);
++        CountDownLatch latch = new CountDownLatch(2);
++        mService.createNotificationChannelGroup(
++                PKG, mUid, new NotificationChannelGroup("group", "group"), true, false);
++        new Thread(() -> {
++            NotificationChannel notificationChannel = new NotificationChannel("id", "id",
++                    NotificationManager.IMPORTANCE_HIGH);
++            notificationChannel.setGroup("group");
++            ParceledListSlice<NotificationChannel> pls =
++                    new ParceledListSlice(ImmutableList.of(notificationChannel));
++            try {
++                mBinderService.createNotificationChannelsForPackage(PKG, mUid, pls);
++            } catch (RemoteException e) {
++                throw new RuntimeException(e);
++            }
++            latch.countDown();
++        }).start();
++        new Thread(() -> {
++            try {
++                synchronized (this) {
++                    wait(5000);
++                }
++                mService.createNotificationChannelGroup(PKG, mUid,
++                        new NotificationChannelGroup("new", "new group"), true, false);
++                NotificationChannel notificationChannel =
++                        new NotificationChannel("id", "id", NotificationManager.IMPORTANCE_HIGH);
++                notificationChannel.setGroup("new");
++                ParceledListSlice<NotificationChannel> pls =
++                        new ParceledListSlice(ImmutableList.of(notificationChannel));
++                try {
++                mBinderService.createNotificationChannelsForPackage(PKG, mUid, pls);
++                mBinderService.deleteNotificationChannelGroup(PKG, "group");
++                } catch (RemoteException e) {
++                    throw new RuntimeException(e);
++                }
++            } catch (Exception e) {
++                e.printStackTrace();
++            }
++            latch.countDown();
++        }).start();
++
++        latch.await();
++        verify(mAmi).hasForegroundServiceNotification(anyString(), anyInt(), anyString());
++    }
++
+     @Test
+     public void testUpdateNotificationChannelFromPrivilegedListener_success() throws Exception {
+         mService.setPreferencesHelper(mPreferencesHelper);
+-- 
+2.33.1
+
