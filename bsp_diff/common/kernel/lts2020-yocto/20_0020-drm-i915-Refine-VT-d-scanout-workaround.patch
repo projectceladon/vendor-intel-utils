@@ -1,0 +1,173 @@
+From 578bceaab6c9e33439a05711082515bbe8711765 Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris@chris-wilson.co.uk>
+Date: Wed, 10 Feb 2021 23:25:52 +0000
+Subject: [PATCH] drm/i915: Refine VT-d scanout workaround
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+VT-d may cause overfetch of the scanout PTE, both before and after the
+vma (depending on the scanout orientation). bspec recommends that we
+provide a tile-row in either directions, and suggests using 168 PTE,
+warning that the accesses will wrap around the ends of the GGTT.
+Currently, we fill the entire GGTT with scratch pages when using VT-d to
+always ensure there are valid entries around every vma, including
+scanout. However, writing every PTE is slow as on recent devices we
+perform 8MiB of uncached writes, incurring an extra 100ms during resume.
+
+If instead we focus on only putting guard pages around scanout, we can
+avoid touching the whole GGTT. To avoid having to introduce extra nodes
+around each scanout vma, we adjust the scanout drm_mm_node to be smaller
+than the allocated space, and fixup the extra PTE during dma binding.
+
+v2: Move the guard from modifying drm_mm_node.start which is still used
+by the drm_mm itself, into an adjustment of node.start at the point of
+use.
+
+v3: Pass the requested guard padding from the caller, so we can drop the
+VT-d w/a knowledge from the i915_vma allocator.
+
+v4: Bump minimum padding to 168 PTE and cautiously ensure that a full
+tile row around the vma is included with the guard.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+Cc: Ville Syrjälä <ville.syrjala@linux.intel.com>
+Cc: Matthew Auld <matthew.auld@intel.com>
+Cc: Imre Deak <imre.deak@intel.com>
+Reviewed-by: Matthew Auld <matthew.auld@intel.com>
+---
+ drivers/gpu/drm/i915/gem/i915_gem_domain.c | 13 +++++++++++
+ drivers/gpu/drm/i915/gt/intel_ggtt.c       | 25 +---------------------
+ drivers/gpu/drm/i915/i915_gem_gtt.h        |  1 +
+ drivers/gpu/drm/i915/i915_vma.c            |  8 +++++++
+ 4 files changed, 23 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_domain.c b/drivers/gpu/drm/i915/gem/i915_gem_domain.c
+index b684a62bf3b0..fcc77f120675 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_domain.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_domain.c
+@@ -16,6 +16,8 @@
+ #include "i915_gem_lmem.h"
+ #include "i915_gem_mman.h"
+ 
++#define VTD_GUARD (168u * I915_GTT_PAGE_SIZE) /* 168 or tile-row PTE padding */
++
+ static bool gpu_write_needs_clflush(struct drm_i915_gem_object *obj)
+ {
+ 	return !(obj->cache_level == I915_CACHE_NONE ||
+@@ -401,6 +403,17 @@ i915_gem_object_pin_to_display_plane(struct drm_i915_gem_object *obj,
+ 	if (ret)
+ 		return ERR_PTR(ret);
+ 
++	/* VT-d may overfetch before/after the vma, so pad with scratch */
++	if (intel_scanout_needs_vtd_wa(i915)) {
++		unsigned int guard = VTD_GUARD;
++
++		if (i915_gem_object_is_tiled(obj))
++			guard = max(guard,
++				    i915_gem_object_get_tile_row_size(obj));
++
++		flags |= PIN_OFFSET_GUARD | guard;
++	}
++
+ 	/*
+ 	 * As the user may map the buffer once pinned in the display plane
+ 	 * (e.g. libkms for the bootup splash), we have to ensure that we
+diff --git a/drivers/gpu/drm/i915/gt/intel_ggtt.c b/drivers/gpu/drm/i915/gt/intel_ggtt.c
+index f0c04d9d7745..317a2a819522 100644
+--- a/drivers/gpu/drm/i915/gt/intel_ggtt.c
++++ b/drivers/gpu/drm/i915/gt/intel_ggtt.c
+@@ -348,27 +348,6 @@ static void nop_clear_range(struct i915_address_space *vm,
+ {
+ }
+ 
+-static void gen8_ggtt_clear_range(struct i915_address_space *vm,
+-				  u64 start, u64 length)
+-{
+-	struct i915_ggtt *ggtt = i915_vm_to_ggtt(vm);
+-	unsigned int first_entry = start / I915_GTT_PAGE_SIZE;
+-	unsigned int num_entries = length / I915_GTT_PAGE_SIZE;
+-	const gen8_pte_t scratch_pte = vm->scratch[0]->encode;
+-	gen8_pte_t __iomem *gtt_base =
+-		(gen8_pte_t __iomem *)ggtt->gsm + first_entry;
+-	const int max_entries = ggtt_total_entries(ggtt) - first_entry;
+-	int i;
+-
+-	if (WARN(num_entries > max_entries,
+-		 "First entry = %d; Num entries = %d (max=%d)\n",
+-		 first_entry, num_entries, max_entries))
+-		num_entries = max_entries;
+-
+-	for (i = 0; i < num_entries; i++)
+-		gen8_set_pte(&gtt_base[i], scratch_pte);
+-}
+-
+ static void bxt_vtd_ggtt_wa(struct i915_address_space *vm)
+ {
+ 	/*
+@@ -959,8 +938,6 @@ static int gen8_gmch_probe(struct i915_ggtt *ggtt)
+ 	ggtt->vm.cleanup = gen6_gmch_remove;
+ 	ggtt->vm.insert_page = gen8_ggtt_insert_page;
+ 	ggtt->vm.clear_range = nop_clear_range;
+-	if (intel_scanout_needs_vtd_wa(i915))
+-		ggtt->vm.clear_range = gen8_ggtt_clear_range;
+ 
+ 	ggtt->vm.insert_entries = gen8_ggtt_insert_entries;
+ 
+@@ -1108,7 +1085,7 @@ static int gen6_gmch_probe(struct i915_ggtt *ggtt)
+ 	ggtt->vm.alloc_pt_dma = alloc_pt_dma;
+ 
+ 	ggtt->vm.clear_range = nop_clear_range;
+-	if (!HAS_FULL_PPGTT(i915) || intel_scanout_needs_vtd_wa(i915))
++	if (!HAS_FULL_PPGTT(i915))
+ 		ggtt->vm.clear_range = gen6_ggtt_clear_range;
+ 	ggtt->vm.insert_page = gen6_ggtt_insert_page;
+ 	ggtt->vm.insert_entries = gen6_ggtt_insert_entries;
+diff --git a/drivers/gpu/drm/i915/i915_gem_gtt.h b/drivers/gpu/drm/i915/i915_gem_gtt.h
+index c9b0ee5e1d23..f3ae9afdee15 100644
+--- a/drivers/gpu/drm/i915/i915_gem_gtt.h
++++ b/drivers/gpu/drm/i915/i915_gem_gtt.h
+@@ -41,6 +41,7 @@ int i915_gem_gtt_insert(struct i915_address_space *vm,
+ #define PIN_HIGH		BIT_ULL(5)
+ #define PIN_OFFSET_BIAS		BIT_ULL(6)
+ #define PIN_OFFSET_FIXED	BIT_ULL(7)
++#define PIN_OFFSET_GUARD	BIT_ULL(8)
+ 
+ #define PIN_GLOBAL		BIT_ULL(10) /* I915_VMA_GLOBAL_BIND */
+ #define PIN_USER		BIT_ULL(11) /* I915_VMA_LOCAL_BIND */
+diff --git a/drivers/gpu/drm/i915/i915_vma.c b/drivers/gpu/drm/i915/i915_vma.c
+index f46390c32db0..d930004709ea 100644
+--- a/drivers/gpu/drm/i915/i915_vma.c
++++ b/drivers/gpu/drm/i915/i915_vma.c
+@@ -559,6 +559,9 @@ bool i915_vma_misplaced(const struct i915_vma *vma,
+ 	    i915_vma_offset(vma) != (flags & PIN_OFFSET_MASK))
+ 		return true;
+ 
++	if (flags & PIN_OFFSET_GUARD && vma->guard < (flags & PIN_OFFSET_MASK))
++		return true;
++
+ 	return false;
+ }
+ 
+@@ -636,6 +639,7 @@ i915_vma_insert(struct i915_vma *vma, u64 size, u64 alignment, u64 flags)
+ 
+ 	GEM_BUG_ON(i915_vma_is_bound(vma, I915_VMA_GLOBAL_BIND | I915_VMA_LOCAL_BIND));
+ 	GEM_BUG_ON(drm_mm_node_allocated(&vma->node));
++	GEM_BUG_ON(hweight64(flags & (PIN_OFFSET_GUARD | PIN_OFFSET_FIXED | PIN_OFFSET_BIAS)) > 1);
+ 
+ 	size = max(size, vma->size);
+ 	alignment = max_t(typeof(alignment), alignment, vma->display_alignment);
+@@ -650,6 +654,10 @@ i915_vma_insert(struct i915_vma *vma, u64 size, u64 alignment, u64 flags)
+ 	GEM_BUG_ON(!is_power_of_2(alignment));
+ 
+ 	guard = vma->guard; /* retain guard across rebinds */
++	if (flags & PIN_OFFSET_GUARD) {
++		GEM_BUG_ON(overflows_type(flags & PIN_OFFSET_MASK, u32));
++		guard = max_t(u32, guard, flags & PIN_OFFSET_MASK);
++	}
+ 	guard = ALIGN(guard, alignment);
+ 
+ 	start = flags & PIN_OFFSET_BIAS ? flags & PIN_OFFSET_MASK : 0;
+-- 
+2.35.1
+
