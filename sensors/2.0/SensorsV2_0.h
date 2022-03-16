@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_HARDWARE_SENSORS_V2_0_H
-#define ANDROID_HARDWARE_SENSORS_V2_0_H
+#ifndef SENSORS_2_0_SENSORSV2_0_H_
+#define SENSORS_2_0_SENSORSV2_0_H_
 
 #include "Sensors.h"
 
@@ -36,4 +36,4 @@ struct SensorsV2_0 : public ::android::hardware::sensors::V2_X::implementation::
 }  // namespace hardware
 }  // namespace android
 
-#endif  // ANDROID_HARDWARE_SENSORS_V2_0_H
+#endif  // SENSORS_2_0_SENSORSV2_0_H_
