@@ -1,0 +1,194 @@
+From e5d68ad4753576a15ca9ad52180094dfb727ead4 Mon Sep 17 00:00:00 2001
+From: kholoud mohamed <kholoudm@google.com>
+Date: Fri, 7 May 2021 10:50:28 +0100
+Subject: [PATCH] Fix INTERACT_ACROSS_PROFILES appop issue for shared UIDs
+
+CrossProfileApps#setInteractAcrossProfilesAppOp was previously setting
+the appop per-package instead of per-UID, causing issues for apps with
+shared UIDs. This is now fixed, however we need to apply the fix in the
+new OTA update to existing apps that already have the appop set incorrectly.
+
+Test: atest UpdateInteractAcrossProfilesAppOpTaskTest
+Test: manual testing by triggering an OTA update manually
+Bug: 183188804
+Bug: 183730243
+Bug: 195630721
+Change-Id: I0c826bdc8f0a868cfc7fce3e23c0e124e06b8c95
+Merged-In: I0c826bdc8f0a868cfc7fce3e23c0e124e06b8c95
+(cherry picked from commit 854dad1bc01e40764cec0e278c04c9b33197a80a)
+(cherry picked from commit a356e46bcee7be220e6f0d946dee61986c0ed178)
+---
+ ...UpdateInteractAcrossProfilesAppOpTask.java | 121 ++++++++++++++++--
+ 1 file changed, 113 insertions(+), 8 deletions(-)
+
+diff --git a/src/com/android/managedprovisioning/task/UpdateInteractAcrossProfilesAppOpTask.java b/src/com/android/managedprovisioning/task/UpdateInteractAcrossProfilesAppOpTask.java
+index a39fc07b..25ad0b59 100644
+--- a/src/com/android/managedprovisioning/task/UpdateInteractAcrossProfilesAppOpTask.java
++++ b/src/com/android/managedprovisioning/task/UpdateInteractAcrossProfilesAppOpTask.java
+@@ -16,19 +16,26 @@
+ 
+ package com.android.managedprovisioning.task;
+ 
++import static android.app.AppOpsManager.OP_INTERACT_ACROSS_PROFILES;
++
+ import android.Manifest;
+ import android.app.AppOpsManager;
+ import android.app.admin.DevicePolicyManager;
+ import android.content.Context;
++import android.content.pm.ApplicationInfo;
+ import android.content.pm.CrossProfileApps;
+ import android.content.pm.PackageManager;
++import android.os.UserHandle;
++import android.os.UserManager;
+ import android.util.ArraySet;
+ 
+ import com.android.managedprovisioning.analytics.ProvisioningAnalyticsTracker;
++import com.android.managedprovisioning.common.ProvisionLogger;
+ import com.android.managedprovisioning.model.ProvisioningParams;
+ import com.android.managedprovisioning.task.interactacrossprofiles.CrossProfileAppsSnapshot;
+ 
+ import java.util.HashSet;
++import java.util.List;
+ import java.util.Set;
+ 
+ /**
+@@ -74,6 +81,7 @@ public class UpdateInteractAcrossProfilesAppOpTask extends AbstractProvisioningT
+         newCrossProfilePackages.removeAll(previousCrossProfilePackages);
+ 
+         grantNewConfigurableDefaultCrossProfilePackages(newCrossProfilePackages);
++        reapplyCrossProfileAppsPermission();
+     }
+ 
+     private void grantNewConfigurableDefaultCrossProfilePackages(
+@@ -84,23 +92,120 @@ public class UpdateInteractAcrossProfilesAppOpTask extends AbstractProvisioningT
+             if (!mCrossProfileApps.canConfigureInteractAcrossProfiles(crossProfilePackageName)) {
+                 continue;
+             }
+-            if (appOpIsChangedFromDefault(op, crossProfilePackageName)) {
++            try {
++                final int uid = mPackageManager.getPackageUid(
++                        crossProfilePackageName, /* flags= */ 0);
++                if (appOpIsChangedFromDefault(op, uid, crossProfilePackageName)) {
++                    continue;
++                }
++            } catch (PackageManager.NameNotFoundException e) {
++                ProvisionLogger.loge("Missing package, this should not happen.", e);
+                 continue;
+             }
+-
+             mCrossProfileApps.setInteractAcrossProfilesAppOp(crossProfilePackageName,
+                     AppOpsManager.MODE_ALLOWED);
+         }
+     }
+ 
+-    private boolean appOpIsChangedFromDefault(String op, String packageName) {
+-        try {
+-            final int uid = mPackageManager.getPackageUid(packageName, /* flags= */ 0);
+-            return mAppOpsManager.unsafeCheckOpNoThrow(op, uid, packageName)
+-                    != AppOpsManager.MODE_DEFAULT;
+-        } catch (PackageManager.NameNotFoundException e) {
++    /**
++     * Iterate over all apps and reapply the app-op permission.
++     *
++     * <p>This is to fix an issue that existed in Android 11 where the appop was set per-package
++     * instead of per-UID causing issues for applications with shared UIDs.
++     */
++    private void reapplyCrossProfileAppsPermission() {
++        final Set<Integer> uids = getUidsWithNonDefaultMode();
++        reapplyCrossProfileAppsPermissionForUids(uids);
++    }
++
++    private Set<Integer> getUidsWithNonDefaultMode() {
++        final String op = AppOpsManager.permissionToOp(
++                Manifest.permission.INTERACT_ACROSS_PROFILES);
++        final Set<Integer> uids = new HashSet<>();
++        for (ApplicationInfo appInfo : getAllInstalledApps()) {
++            if (appOpIsChangedFromDefault(
++                    op, appInfo.uid, appInfo.packageName)) {
++                uids.add(appInfo.uid);
++            }
++        }
++        return uids;
++    }
++
++    private Set<ApplicationInfo> getAllInstalledApps() {
++        final Set<ApplicationInfo> apps = new HashSet<>();
++        List<UserHandle> profiles = mContext.getSystemService(UserManager.class).getAllProfiles();
++        for (UserHandle profile : profiles) {
++            apps.addAll(mContext.createContextAsUser(profile, /* flags= */ 0).getPackageManager()
++                    .getInstalledApplications(/* flags= */ 0));
++        }
++        return apps;
++    }
++
++    private void reapplyCrossProfileAppsPermissionForUids(Set<Integer> uids) {
++        for (int uid : uids) {
++            reapplyCrossProfileAppsPermissionForUid(uid);
++        }
++    }
++
++    private void reapplyCrossProfileAppsPermissionForUid(int uid) {
++        final String op = AppOpsManager.permissionToOp(
++                Manifest.permission.INTERACT_ACROSS_PROFILES);
++        final String[] packages = mPackageManager.getPackagesForUid(uid);
++        final int consolidatedUidMode = getConsolidatedModeForPackagesInUid(uid, packages, op);
++        setAppOpForPackagesInUid(uid, packages, consolidatedUidMode);
++    }
++
++    private int getConsolidatedModeForPackagesInUid(int uid, String[] packages, String op) {
++        int uidMode = AppOpsManager.MODE_DEFAULT;
++        for (String packageName : packages) {
++            if (mCrossProfileApps.canConfigureInteractAcrossProfiles(packageName)) {
++                final int packageMode = mAppOpsManager.unsafeCheckOpNoThrow(op, uid, packageName);
++                if (shouldUpdateUidMode(packageMode, uidMode)) {
++                    uidMode = packageMode;
++                }
++            }
++        }
++        return uidMode;
++    }
++
++    private boolean shouldUpdateUidMode(int packageMode, @AppOpsManager.Mode int uidMode) {
++        if (!appOpIsChangedFromDefault(packageMode)) {
+             return false;
+         }
++        if (!appOpIsChangedFromDefault(uidMode)) {
++            return true;
++        }
++        if (packageMode == AppOpsManager.MODE_ALLOWED) {
++            return true;
++        }
++        return false;
++    }
++
++    private void setAppOpForPackagesInUid(
++            int uid, String[] packages, @AppOpsManager.Mode int mode) {
++        for (String packageName : packages) {
++            setInteractAcrossProfilesAppOpForPackage(uid, packageName, mode);
++        }
++    }
++
++    /**
++     * Sets the package appop to default mode and the uid appop to {@code mode}.
++     */
++    private void setInteractAcrossProfilesAppOpForPackage(
++            int uid, String packageName, @AppOpsManager.Mode int mode) {
++        mAppOpsManager.setMode(
++                OP_INTERACT_ACROSS_PROFILES, uid, packageName,
++                AppOpsManager.opToDefaultMode(OP_INTERACT_ACROSS_PROFILES));
++        mAppOpsManager.setUidMode(OP_INTERACT_ACROSS_PROFILES, uid, mode);
++    }
++
++    private boolean appOpIsChangedFromDefault(String op, int uid, String packageName) {
++        return mAppOpsManager.unsafeCheckOpNoThrow(op, uid, packageName)
++                != AppOpsManager.MODE_DEFAULT;
++    }
++
++    private boolean appOpIsChangedFromDefault(int mode) {
++        return mode != AppOpsManager.MODE_DEFAULT;
+     }
+ 
+     @Override
+-- 
+2.34.0.rc2.393.gf8c9666880-goog
+
