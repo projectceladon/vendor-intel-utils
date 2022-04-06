@@ -1,0 +1,146 @@
+From a34a293c9169594e3067de81b581be14967b0e6f Mon Sep 17 00:00:00 2001
+From: Songchun Fan <schfan@google.com>
+Date: Wed, 6 Apr 2022 15:15:37 +0530
+Subject: [PATCH] Revert "Revert "[pm] remove old stage dirs on low storage""
+
+This reverts commit b45ebca772a77bf3fd269d0dcfc1a7af7c73861d.
+
+Reason for revert: adding the fix for system to abandon sessions
+
+BUG: 67862680
+Test: manual
+Change-Id: I5b762a29d12f62b516a59a85530386236259308b
+Merged-In: I91170ba399b3a596320b3bd9c8188912e5c4f1be
+(cherry picked from commit c98f06c286eb0d41f57e0a00b9f59044b9f12706)
+(cherry picked from commit 8408d434030650c7ab26197030375765b24eeedd)
+Merged-In:I5b762a29d12f62b516a59a85530386236259308b
+---
+ .../server/pm/PackageInstallerService.java    | 50 +++++++++++++++++--
+ .../server/pm/PackageInstallerSession.java    |  8 +--
+ .../server/pm/PackageManagerService.java      |  4 ++
+ 3 files changed, 50 insertions(+), 12 deletions(-)
+
+diff --git a/services/core/java/com/android/server/pm/PackageInstallerService.java b/services/core/java/com/android/server/pm/PackageInstallerService.java
+index f8115d39b375..d4b98438d603 100644
+--- a/services/core/java/com/android/server/pm/PackageInstallerService.java
++++ b/services/core/java/com/android/server/pm/PackageInstallerService.java
+@@ -134,6 +134,9 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
+     /** Upper bound on number of historical sessions for a UID */
+     private static final long MAX_HISTORICAL_SESSIONS = 1048576;
+ 
++    /** Destroy sessions older than this on storage free request */
++    private static final long MAX_SESSION_AGE_ON_LOW_STORAGE_MILLIS = 8 * DateUtils.HOUR_IN_MILLIS;
++
+     /**
+      * Allow verification-skipping if it's a development app installed through ADB with
+      * disable verification flag specified.
+@@ -295,22 +298,32 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
+ 
+     @GuardedBy("mSessions")
+     private void reconcileStagesLocked(String volumeUuid) {
+-        final File stagingDir = getTmpSessionDir(volumeUuid);
+-        final ArraySet<File> unclaimedStages = newArraySet(
+-                stagingDir.listFiles(sStageFilter));
+-
+         // We also need to clean up orphaned staging directory for staged sessions
+         final File stagedSessionStagingDir = Environment.getDataStagingDirectory(volumeUuid);
+         unclaimedStages.addAll(newArraySet(stagedSessionStagingDir.listFiles()));
++        final ArraySet<File> unclaimedStages = getStagingDirsOnVolume(volumeUuid);
+ 
+         // Ignore stages claimed by active sessions
+         for (int i = 0; i < mSessions.size(); i++) {
+             final PackageInstallerSession session = mSessions.valueAt(i);
+             unclaimedStages.remove(session.stageDir);
+         }
++        removeStagingDirs(unclaimedStages);
++    }
++
++    private ArraySet<File> getStagingDirsOnVolume(String volumeUuid) {
++        final File stagingDir = getTmpSessionDir(volumeUuid);
++        final ArraySet<File> stagingDirs = newArraySet(stagingDir.listFiles(sStageFilter));
+ 
++        // We also need to clean up orphaned staging directory for staged sessions
++        final File stagedSessionStagingDir = Environment.getDataStagingDirectory(volumeUuid);
++        stagingDirs.addAll(newArraySet(stagedSessionStagingDir.listFiles()));
++        return stagingDirs;
++    }
++
++    private void removeStagingDirs(ArraySet<File> stagingDirsToRemove) {
+         // Clean up orphaned staging directories
+-        for (File stage : unclaimedStages) {
++        for (File stage : stagingDirsToRemove) {
+             Slog.w(TAG, "Deleting orphan stage " + stage);
+             synchronized (mPm.mInstallLock) {
+                 mPm.removeCodePathLI(stage);
+@@ -318,6 +331,33 @@ public class PackageInstallerService extends IPackageInstaller.Stub implements
+         }
+     }
+ 
++    /**
++     * Called to free up some storage space from obsolete installation files
++     */
++    public void freeStageDirs(String volumeUuid) {
++        final ArraySet<File> unclaimedStagingDirsOnVolume = getStagingDirsOnVolume(volumeUuid);
++        final long currentTimeMillis = System.currentTimeMillis();
++        synchronized (mSessions) {
++            for (int i = 0; i < mSessions.size(); i++) {
++                final PackageInstallerSession session = mSessions.valueAt(i);
++                if (!unclaimedStagingDirsOnVolume.contains(session.stageDir)) {
++                    // Only handles sessions stored on the target volume
++                    continue;
++                }
++                final long age = currentTimeMillis - session.createdMillis;
++                if (age >= MAX_SESSION_AGE_ON_LOW_STORAGE_MILLIS) {
++                    // Aggressively close old sessions because we are running low on storage
++                    // Their staging dirs will be removed too
++                    session.abandon();
++                } else {
++                    // Session is new enough, so it deserves to be kept even on low storage
++                    unclaimedStagingDirsOnVolume.remove(session.stageDir);
++                }
++            }
++        }
++        removeStagingDirs(unclaimedStagingDirsOnVolume);
++    }
++
+     public void onPrivateVolumeMounted(String volumeUuid) {
+         synchronized (mSessions) {
+             reconcileStagesLocked(volumeUuid);
+diff --git a/services/core/java/com/android/server/pm/PackageInstallerSession.java b/services/core/java/com/android/server/pm/PackageInstallerSession.java
+index d690ae9e70f1..a253b509abb9 100644
+--- a/services/core/java/com/android/server/pm/PackageInstallerSession.java
++++ b/services/core/java/com/android/server/pm/PackageInstallerSession.java
+@@ -2638,14 +2638,8 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
+ 
+         List<PackageInstallerSession> childSessions = getChildSessionsNotLocked();
+         synchronized (mLock) {
+-            if (params.isStaged && mDestroyed) {
+-                // If a user abandons staged session in an unsafe state, then system will try to
+-                // abandon the destroyed staged session when it is safe on behalf of the user.
+-                assertCallerIsOwnerOrRootOrSystemLocked();
+-            } else {
+-                assertCallerIsOwnerOrRootLocked();
+-            }
+ 
++            assertCallerIsOwnerOrRootOrSystemLocked();
+             if (isStagedAndInTerminalState()) {
+                 // We keep the session in the database if it's in a finalized state. It will be
+                 // removed by PackageInstallerService when the last update time is old enough.
+diff --git a/services/core/java/com/android/server/pm/PackageManagerService.java b/services/core/java/com/android/server/pm/PackageManagerService.java
+index f772e8f0d357..56412a128dd2 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerService.java
++++ b/services/core/java/com/android/server/pm/PackageManagerService.java
+@@ -5150,6 +5150,10 @@ public class PackageManagerService extends IPackageManager.Stub
+                             InstantAppRegistry.DEFAULT_UNINSTALLED_INSTANT_APP_MIN_CACHE_PERIOD))) {
+                 return;
+             }
++
++            // 12. Clear temp install session files
++            mInstallerService.freeStageDirs(volumeUuid);
++
+         } else {
+             try {
+                 mInstaller.freeCache(volumeUuid, bytes, 0, 0);
+-- 
+2.17.1
+
