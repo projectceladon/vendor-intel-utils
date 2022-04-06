@@ -1,0 +1,136 @@
+From 0c9c8615a84f851ca6b777415b440b0cf70447b6 Mon Sep 17 00:00:00 2001
+From: Jeff DeCew <jeffdq@google.com>
+Date: Thu, 21 Oct 2021 19:48:19 +0000
+Subject: [PATCH] Allow forcing status bar state changes and do so when the
+ screen turns off.
+
+This adds a force flag, which we will use when turning the screen off to make sure that all UI components are reset to the SHADE state regardless.
+
+Bug: 189575031
+Test: make a call; lock screen; pull down shade
+Merged-In: I79baeb71ac5d1ed45602ac55cdca996b3bed0ac3
+Change-Id: I79baeb71ac5d1ed45602ac55cdca996b3bed0ac3
+(cherry picked from commit 9be6207510c2e39e2899a9ce7a93fb09f83134c6)
+Merged-In:I79baeb71ac5d1ed45602ac55cdca996b3bed0ac3
+---
+ .../statusbar/StatusBarStateControllerImpl.java    |  4 ++--
+ .../statusbar/SysuiStatusBarStateController.java   | 14 +++++++++++++-
+ .../systemui/statusbar/phone/StatusBar.java        | 13 +++++++++----
+ .../systemui/statusbar/phone/StatusBarTest.java    |  6 ++++--
+ 4 files changed, 28 insertions(+), 9 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/StatusBarStateControllerImpl.java b/packages/SystemUI/src/com/android/systemui/statusbar/StatusBarStateControllerImpl.java
+index 2bef355d59f..e0e603f7514 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/StatusBarStateControllerImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/StatusBarStateControllerImpl.java
+@@ -134,11 +134,11 @@ public class StatusBarStateControllerImpl implements SysuiStatusBarStateControll
+     }
+ 
+     @Override
+-    public boolean setState(int state) {
++    public boolean setState(int state, boolean force) {
+         if (state > MAX_STATE || state < MIN_STATE) {
+             throw new IllegalArgumentException("Invalid state " + state);
+         }
+-        if (state == mState) {
++        if (!force && state == mState) {
+             return false;
+         }
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/SysuiStatusBarStateController.java b/packages/SystemUI/src/com/android/systemui/statusbar/SysuiStatusBarStateController.java
+index 07b35502478..fc40077810f 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/SysuiStatusBarStateController.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/SysuiStatusBarStateController.java
+@@ -58,7 +58,19 @@ public interface SysuiStatusBarStateController extends StatusBarStateController
+      * @param state see {@link StatusBarState} for valid options
+      * @return {@code true} if the state changed, else {@code false}
+      */
+-    boolean setState(int state);
++    default boolean setState(int state) {
++        return setState(state, false /* force */);
++    }
++
++    /**
++     * Update the status bar state
++     * @param state see {@link StatusBarState} for valid options
++     * @param force whether to set the state even if it's the same as the current state. This will
++     *              dispatch the state to all StatusBarStateListeners, ensuring that all listening
++     *              components are reset to this state.
++     * @return {@code true} if the state was changed or set forcefully
++     */
++    boolean setState(int state, boolean force);
+ 
+     /**
+      * Update the dozing state from {@link StatusBar}'s perspective
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBar.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBar.java
+index a5cc1a83fc8..ab14c52be8b 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBar.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBar.java
+@@ -3152,6 +3152,10 @@ public class StatusBar extends SystemUI implements DemoMode,
+     }
+ 
+     boolean updateIsKeyguard() {
++        return updateIsKeyguard(false /* force */);
++    }
++
++    boolean updateIsKeyguard(boolean force) {
+         boolean wakeAndUnlocking = mBiometricUnlockController.getMode()
+                 == BiometricUnlockController.MODE_WAKE_AND_UNLOCK;
+ 
+@@ -3174,7 +3178,7 @@ public class StatusBar extends SystemUI implements DemoMode,
+                 showKeyguardImpl();
+             }
+         } else {
+-            return hideKeyguardImpl();
++            return hideKeyguardImpl(force);
+         }
+         return false;
+     }
+@@ -3305,11 +3309,11 @@ public class StatusBar extends SystemUI implements DemoMode,
+     /**
+      * @return true if we would like to stay in the shade, false if it should go away entirely
+      */
+-    public boolean hideKeyguardImpl() {
++    public boolean hideKeyguardImpl(boolean force) {
+         mIsKeyguard = false;
+         Trace.beginSection("StatusBar#hideKeyguard");
+         boolean staying = mStatusBarStateController.leaveOpenOnKeyguardHide();
+-        if (!(mStatusBarStateController.setState(StatusBarState.SHADE))) {
++        if (!(mStatusBarStateController.setState(StatusBarState.SHADE, force))) {
+             //TODO: StatusBarStateController should probably know about hiding the keyguard and
+             // notify listeners.
+ 
+@@ -3736,7 +3740,8 @@ public class StatusBar extends SystemUI implements DemoMode,
+                 // is correct.
+                 mHandler.post(() -> onCameraLaunchGestureDetected(mLastCameraLaunchSource));
+             }
+-            updateIsKeyguard();
++            // When finished going to sleep, force the status bar state to avoid stale state.
++            updateIsKeyguard(true /* force */);
+         }
+ 
+         @Override
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/phone/StatusBarTest.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/phone/StatusBarTest.java
+index 5a08c9ca017..d528f209cd1 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/phone/StatusBarTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/phone/StatusBarTest.java
+@@ -809,12 +809,14 @@ public class StatusBarTest extends SysuiTestCase {
+ 
+         // By default, showKeyguardImpl sets state to KEYGUARD.
+         mStatusBar.showKeyguardImpl();
+-        verify(mStatusBarStateController).setState(eq(StatusBarState.KEYGUARD));
++        verify(mStatusBarStateController).setState(
++                eq(StatusBarState.KEYGUARD), eq(false) /* force */);
+ 
+         // If useFullscreenUserSwitcher is true, state is set to FULLSCREEN_USER_SWITCHER.
+         when(mUserSwitcherController.useFullscreenUserSwitcher()).thenReturn(true);
+         mStatusBar.showKeyguardImpl();
+-        verify(mStatusBarStateController).setState(eq(StatusBarState.FULLSCREEN_USER_SWITCHER));
++        verify(mStatusBarStateController).setState(
++                eq(StatusBarState.FULLSCREEN_USER_SWITCHER), eq(false) /* force */);
+     }
+ 
+     @Test
+-- 
+2.34.1.173.g76aa8bc2d0-goog
+
