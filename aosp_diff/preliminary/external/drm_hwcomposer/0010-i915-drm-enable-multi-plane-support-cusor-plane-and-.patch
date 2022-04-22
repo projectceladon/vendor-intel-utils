@@ -1,0 +1,168 @@
+From f0d5432a5e67dbcdfd1145d33696fc538451d430 Mon Sep 17 00:00:00 2001
+From: kanlihu <kanli.hu@intel.com>
+Date: Fri, 22 Apr 2022 12:30:41 +0800
+Subject: [PATCH] i915/drm: enable multi-plane, support cusor plane and small
+ rect
+
+add prop to /vendor/default.prop
+vendor.hwcomposer.planes.enabling=1
+to enable mult-plane
+
+vendor.hwcomposer.planes.support_cursor=1
+make cursor layer rendor on device layer
+
+vendor.hwcomposer.planes.support_small_rect=1
+make small layer (7680*96) rendor on device layer
+
+Tracked-On: OAM-99951
+Signed-off-by: Kanli Hu <kanli.hu@intel.com>
+---
+ DrmHwcTwo.h         |  6 +++++
+ backend/Backend.cpp | 61 +++++++++++++++++++++++++++++++++++++++++++--
+ backend/Backend.h   |  2 ++
+ drm/DrmDevice.cpp   |  3 ++-
+ 4 files changed, 69 insertions(+), 3 deletions(-)
+
+diff --git a/DrmHwcTwo.h b/DrmHwcTwo.h
+index 911c38b..a340e06 100644
+--- a/DrmHwcTwo.h
++++ b/DrmHwcTwo.h
+@@ -101,6 +101,12 @@ class DrmHwcTwo : public hwc2_device_t {
+       return scaling || phasing;
+     }
+ 
++    int64_t displaySize() {
++      float dest_width = display_frame_.right - display_frame_.left;
++      float dest_height = display_frame_.bottom - display_frame_.top;
++	  return (int64_t)(dest_width * dest_height);
++    }
++
+     // Layer hooks
+     HWC2::Error SetCursorPosition(int32_t x, int32_t y);
+     HWC2::Error SetLayerBlendMode(int32_t mode);
+diff --git a/backend/Backend.cpp b/backend/Backend.cpp
+index 44afd14..44004c4 100644
+--- a/backend/Backend.cpp
++++ b/backend/Backend.cpp
+@@ -20,9 +20,35 @@
+ 
+ #include "BackendManager.h"
+ #include "bufferinfo/BufferInfoGetter.h"
++#include "utils/properties.h"
++#include "utils/log.h"
+ 
+ namespace android {
+ 
++static bool planes_enabling_ = false;
++static int overlay_planes_size_ = 0;
++static bool support_cursor_ = false;
++static bool support_small_rect_ = false;
++
++static bool support_cursor() {
++  bool is_support_cursor;
++  char property[PROPERTY_VALUE_MAX];
++  memset(property, 0 , PROPERTY_VALUE_MAX);
++  property_get("vendor.hwcomposer.planes.support_cursor", property, "1");
++  is_support_cursor = atoi(property) != 0 ? true : false;
++  return is_support_cursor;
++}
++
++static bool support_small_rect() {
++  bool is_support_small_rect;
++  char property[PROPERTY_VALUE_MAX];
++  memset(property, 0 , PROPERTY_VALUE_MAX);
++  property_get("vendor.hwcomposer.planes.support_small_rect", property, "1");
++  is_support_small_rect = atoi(property) != 0 ? true : false;
++  return is_support_small_rect;
++}
++
++
+ HWC2::Error Backend::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
+                                      uint32_t *num_types,
+                                      uint32_t *num_requests) {
+@@ -33,15 +59,21 @@ HWC2::Error Backend::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
+ 
+   int client_start = -1;
+   size_t client_size = 0;
++  if (display&&display->drm()) {
++    planes_enabling_ = display->drm()->planes_enabling_;
++    overlay_planes_size_ = display->overlay_planes().size();
++  }
++  support_cursor_ = support_cursor();
++  support_small_rect_ = support_small_rect();
+ 
+   if (display->compositor().ShouldFlattenOnClient()) {
+     client_start = 0;
+     client_size = layers.size();
+-    MarkValidated(layers, client_start, client_size);
++    MarkValidatedNew(layers, client_start, client_size);
+   } else {
+     std::tie(client_start, client_size) = GetClientLayers(display, layers);
+ 
+-    MarkValidated(layers, client_start, client_size);
++    MarkValidatedNew(layers, client_start, client_size);
+ 
+     bool testing_needed = !(client_start == 0 && client_size == layers.size());
+ 
+@@ -109,6 +141,31 @@ uint32_t Backend::CalcPixOps(const std::vector<DrmHwcTwo::HwcLayer *> &layers,
+   return pixops;
+ }
+ 
++void Backend::MarkValidatedNew(std::vector<DrmHwcTwo::HwcLayer *> &layers,
++                            size_t client_first_z, size_t client_size) {
++  int plane_size = overlay_planes_size_;
++  for (int z_order = layers.size() - 1; z_order >= 0 ; --z_order) {
++    if (z_order >= client_first_z && z_order < client_first_z + client_size)
++      layers[z_order]->set_validated_type(HWC2::Composition::Client);
++    else
++      layers[z_order]->set_validated_type(HWC2::Composition::Device);
++
++	if (planes_enabling_ && plane_size > 0) {
++		bool isCursor = (layers[z_order]->sf_type() == HWC2::Composition::Cursor);
++		bool isSmallRect = (layers[z_order]->displaySize() <= 7680*96);
++		if (support_cursor_ && isCursor) {
++			layers[z_order]->set_validated_type(HWC2::Composition::Device);
++			plane_size--;
++		} else if (support_small_rect_ && isSmallRect) {
++			layers[z_order]->set_validated_type(HWC2::Composition::Device);
++			plane_size--;
++		} else {
++			plane_size = 0;
++		}
++	}
++  }
++}
++
+ void Backend::MarkValidated(std::vector<DrmHwcTwo::HwcLayer *> &layers,
+                             size_t client_first_z, size_t client_size) {
+   for (int z_order = 0; z_order < layers.size(); ++z_order) {
+diff --git a/backend/Backend.h b/backend/Backend.h
+index fc9a733..b19d741 100644
+--- a/backend/Backend.h
++++ b/backend/Backend.h
+@@ -39,6 +39,8 @@ class Backend {
+                       size_t first_z, size_t size);
+   void MarkValidated(std::vector<DrmHwcTwo::HwcLayer *> &layers,
+                      size_t client_first_z, size_t client_size);
++  void MarkValidatedNew(std::vector<DrmHwcTwo::HwcLayer *> &layers,
++                     size_t client_first_z, size_t client_size);
+   std::tuple<int, int> GetExtraClientRange(
+       DrmHwcTwo::HwcDisplay *display,
+       const std::vector<DrmHwcTwo::HwcLayer *> &layers, int client_start,
+diff --git a/drm/DrmDevice.cpp b/drm/DrmDevice.cpp
+index d7bc13a..b8e00c9 100644
+--- a/drm/DrmDevice.cpp
++++ b/drm/DrmDevice.cpp
+@@ -339,7 +339,8 @@ std::tuple<int, int> DrmDevice::Init(const char *path, int num_displays) {
+       if (plane->type() == DRM_PLANE_TYPE_PRIMARY)
+         planes_.emplace_back(std::move(plane));
+     } else {
+-      planes_.emplace_back(std::move(plane));
++      if (plane->type() != DRM_PLANE_TYPE_CURSOR)
++        planes_.emplace_back(std::move(plane));
+     }
+   }
+   drmModeFreePlaneResources(plane_res);
+-- 
+2.31.0
+
