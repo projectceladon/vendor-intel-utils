@@ -1,0 +1,353 @@
+From 18b8e36b7c35e54191be302001496c8e2a951a6e Mon Sep 17 00:00:00 2001
+From: "Yang, JunchaoX" <junchaox.yang@intel.com>
+Date: Sun, 24 Apr 2022 19:42:17 +0800
+Subject: [PATCH] add an virtual display for bootup
+
+---
+ DrmHwcTwo.cpp           | 131 +++++++++++++++++++++++++++++++++++-----
+ DrmHwcTwo.h             |   6 ++
+ drm/ResourceManager.cpp |   5 +-
+ 3 files changed, 122 insertions(+), 20 deletions(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index db4c528..41a817f 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -86,7 +86,14 @@ HWC2::Error DrmHwcTwo::Init() {
+       return ret;
+     }
+   }
+-
++  
++  if (resource_manager_.getDisplayCount() == 0) {
++    hwc2_display_t num = 0;
++    int32_t format = 0; 
++    uint32_t width = 0;
++    uint32_t height = 0;
++    CreateVirtualDisplay(width,height,&format,&num);
++  }
+   const auto &drm_devices = resource_manager_.getDrmDevices();
+   for (const auto &device : drm_devices) {
+     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+@@ -109,6 +116,9 @@ HWC2::Error DrmHwcTwo::CreateVirtualDisplay(uint32_t width, uint32_t height,
+                                             int32_t *format,
+                                             hwc2_display_t *display) {
+   // TODO(nobody): Implement virtual display
++  displays_.emplace(std::piecewise_construct, std::forward_as_tuple(*display),
++                    std::forward_as_tuple(&resource_manager_,nullptr,*display,
++                                         HWC2::DisplayType::Virtual));
+   return unsupported(__func__, width, height, format, display);
+ }
+ 
+@@ -124,6 +134,9 @@ std::string DrmHwcTwo::HwcDisplay::DumpDelta(
+   double ratio = 1.0 - double(delta.gpu_pixops_) / double(delta.total_pixops_);
+ 
+   std::stringstream ss;
++  if (type_ == HWC2::DisplayType::Virtual) {
++    ss << "- Display on: Virtual Display " << handle_ << "\n";
++  } else {
+   ss << " Total frames count: " << delta.total_frames_ << "\n"
+      << " Failed to test commit frames: " << delta.failed_kms_validate_ << "\n"
+      << " Failed to commit frames: " << delta.failed_kms_present_ << "\n"
+@@ -135,7 +148,7 @@ std::string DrmHwcTwo::HwcDisplay::DumpDelta(
+      << " : [TOTAL: " << delta.total_pixops_ << " / GPU: " << delta.gpu_pixops_
+      << "]\n"
+      << " Composition efficiency: " << ratio;
+-
++  }
+   return ss.str();
+ }
+ 
+@@ -175,7 +188,7 @@ void DrmHwcTwo::Dump(uint32_t *outSize, char *outBuffer) {
+ uint32_t DrmHwcTwo::GetMaxVirtualDisplayCount() {
+   // TODO(nobody): Implement virtual display
+   unsupported(__func__);
+-  return 0;
++  return MaxVirtualDisplayCount;
+ }
+ 
+ HWC2::Error DrmHwcTwo::RegisterCallback(int32_t descriptor,
+@@ -302,7 +315,12 @@ HWC2::Error DrmHwcTwo::HwcDisplay::ChosePreferredConfig() {
+   if (err != HWC2::Error::None || !num_configs)
+     return err;
+ 
+-  return SetActiveConfig(connector_->get_preferred_mode_id());
++  //return SetActiveConfig(connector_->get_preferred_mode_id());
++  if (type_ == HWC2::DisplayType::Virtual)
++    return SetActiveConfig(config_);
++  else
++    return SetActiveConfig(connector_->get_preferred_mode_id());
++
+ }
+ 
+ void DrmHwcTwo::HwcDisplay::RegisterVsyncCallback(
+@@ -349,6 +367,11 @@ HWC2::Error DrmHwcTwo::HwcDisplay::DestroyLayer(hwc2_layer_t layer) {
+ 
+ HWC2::Error DrmHwcTwo::HwcDisplay::GetActiveConfig(hwc2_config_t *config) {
+   supported(__func__);
++  if (type_ == HWC2::DisplayType::Virtual) {
++    *config = config_;
++    return HWC2::Error::None;
++  }
++
+   DrmMode const &mode = connector_->active_mode();
+   if (mode.id() == 0)
+     return HWC2::Error::BadConfig;
+@@ -412,6 +435,39 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayAttribute(hwc2_config_t config,
+                                                        int32_t attribute_in,
+                                                        int32_t *value) {
+   supported(__func__);
++  if (type_ == HWC2::DisplayType::Virtual) {
++    auto attribute = static_cast<HWC2::Attribute>(attribute_in);
++    switch (attribute) {
++      case HWC2::Attribute::Width:
++        *value = 1920;
++        break;
++      case HWC2::Attribute::Height:
++        *value = 1080;
++        break;
++      case HWC2::Attribute::VsyncPeriod:
++        // in nanoseconds
++        *value = 1000.0 * 1000.0 * 1000.0 / 60.0;
++        break;
++      case HWC2::Attribute::DpiX:
++        // Dots per 1000 inches
++        *value = 101600;
++        break;
++      case HWC2::Attribute::DpiY:
++        // Dots per 1000 inches
++        *value = 101600;
++        break;
++  #if PLATFORM_SDK_VERSION > 29
++      case HWC2::Attribute::ConfigGroup:
++        *value = 0; /* TODO: Add support for config groups */
++        break;
++  #endif
++      default:
++        *value = -1;
++        return HWC2::Error::BadConfig;
++    }
++    return HWC2::Error::None;
++  }
++
+   auto mode = std::find_if(connector_->modes().begin(),
+                            connector_->modes().end(),
+                            [config](DrmMode const &m) {
+@@ -465,6 +521,14 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayConfigs(uint32_t *num_configs,
+   // redundantly. Instead, only update the modes on the first invocation. While
+   // it's possible this will result in stale modes, it'll all come out in the
+   // wash when we try to set the active config later.
++  if (type_ == HWC2::DisplayType::Virtual) {
++    *num_configs = 1;
++    if (configs) {
++      configs[0] = config_;
++    }
++    return HWC2::Error::None;
++  }
++
+   if (!configs) {
+     int ret = connector_->UpdateModes();
+     if (ret) {
+@@ -552,7 +616,12 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayConfigs(uint32_t *num_configs,
+ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayName(uint32_t *size, char *name) {
+   supported(__func__);
+   std::ostringstream stream;
+-  stream << "display-" << connector_->id();
++  //stream << "display-" << connector_->id();
++  if (type_ == HWC2::DisplayType::Virtual)
++    stream << "virtual-display-" << handle_;
++  else
++    stream << "display-" << connector_->id();
++
+   std::string string = stream.str();
+   size_t length = string.length();
+   if (!name) {
+@@ -724,6 +793,9 @@ HWC2::Error DrmHwcTwo::HwcDisplay::CreateComposition(bool test) {
+ HWC2::Error DrmHwcTwo::HwcDisplay::PresentDisplay(int32_t *present_fence) {
+   supported(__func__);
+   HWC2::Error ret;
++  if (type_ == HWC2::DisplayType::Virtual) {
++    return HWC2::Error::None;    
++  }
+ 
+   ++total_stats_.total_frames_;
+ 
+@@ -747,6 +819,11 @@ HWC2::Error DrmHwcTwo::HwcDisplay::PresentDisplay(int32_t *present_fence) {
+ 
+ HWC2::Error DrmHwcTwo::HwcDisplay::SetActiveConfig(hwc2_config_t config) {
+   supported(__func__);
++  if (type_ == HWC2::DisplayType::Virtual) {
++    config_ = config;
++    return HWC2::Error::None;
++  }
++
+   auto mode = std::find_if(connector_->modes().begin(),
+                            connector_->modes().end(),
+                            [config](DrmMode const &m) {
+@@ -847,6 +924,9 @@ HWC2::Error DrmHwcTwo::HwcDisplay::SetOutputBuffer(buffer_handle_t buffer,
+ 
+ HWC2::Error DrmHwcTwo::HwcDisplay::SetPowerMode(int32_t mode_in) {
+   supported(__func__);
++  if (type_ == HWC2::DisplayType::Virtual) {
++    return HWC2::Error::None;
++  }
+   uint64_t dpms_value = 0;
+   auto mode = static_cast<HWC2::PowerMode>(mode_in);
+   switch (mode) {
+@@ -884,6 +964,14 @@ HWC2::Error DrmHwcTwo::HwcDisplay::SetVsyncEnabled(int32_t enabled) {
+ HWC2::Error DrmHwcTwo::HwcDisplay::ValidateDisplay(uint32_t *num_types,
+                                                    uint32_t *num_requests) {
+   supported(__func__);
++  if (type_ == HWC2::DisplayType::Virtual) {
++    for (auto &[handle, layer] : layers_) {
++    layer.set_validated_type(HWC2::Composition::Client);
++  }
++
++  *num_types = layers_.size();
++  return HWC2::Error::HasChanges;
++  }
+ 
+   return backend_->ValidateDisplay(this, num_types, num_requests);
+ }
+@@ -907,6 +995,11 @@ DrmHwcTwo::HwcDisplay::GetOrderLayersByZPos() {
+ 
+ #if PLATFORM_SDK_VERSION > 29
+ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayConnectionType(uint32_t *outType) {
++  if (type_ == HWC2::DisplayType::Virtual) {
++    *outType = static_cast<uint32_t>(HWC2::DisplayConnectionType::External);
++    return HWC2::Error::None;
++  }
++
+   if (connector_->internal() || connector_->display() == 0)
+     *outType = static_cast<uint32_t>(HWC2::DisplayConnectionType::Internal);
+   else if (connector_->external())
+@@ -920,11 +1013,14 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayConnectionType(uint32_t *outType) {
+ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayVsyncPeriod(
+     hwc2_vsync_period_t *outVsyncPeriod /* ns */) {
+   supported(__func__);
+-  DrmMode const &mode = connector_->active_mode();
+-  if (mode.id() == 0)
+-    return HWC2::Error::BadConfig;
+-
+-  *outVsyncPeriod = 1E9 / mode.v_refresh();
++  if (type_ == HWC2::DisplayType::Virtual) {
++    *outVsyncPeriod = 1E9 / virtual_display_refresh_;
++  } else {
++    DrmMode const &mode = connector_->active_mode();
++    if (mode.id() == 0)
++      return HWC2::Error::BadConfig;
++    *outVsyncPeriod = 1E9 / mode.v_refresh();
++  }
+   return HWC2::Error::None;
+ }
+ 
+@@ -978,9 +1074,11 @@ HWC2::Error DrmHwcTwo::HwcDisplay::SetContentType(int32_t contentType) {
+ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayIdentificationData(
+     uint8_t *outPort, uint32_t *outDataSize, uint8_t *outData) {
+   supported(__func__);
+-
++  if (type_ == HWC2::DisplayType::Virtual) {
++    *outPort = handle_;
++    *outDataSize = 0;
++  } else {
+   drmModePropertyBlobPtr blob = nullptr;
+-
+   if (connector_->GetEdidBlob(blob)) {
+     ALOGE("Failed to get edid property value.");
+     return HWC2::Error::Unsupported;
+@@ -993,7 +1091,7 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayIdentificationData(
+     *outDataSize = blob->length;
+   }
+   *outPort = connector_->id();
+-
++  }
+   return HWC2::Error::None;
+ }
+ 
+@@ -1004,9 +1102,7 @@ HWC2::Error DrmHwcTwo::HwcDisplay::GetDisplayCapabilities(
+   if (outNumCapabilities == nullptr) {
+     return HWC2::Error::BadParameter;
+   }
+-
+   *outNumCapabilities = 0;
+-
+   return HWC2::Error::None;
+ }
+ 
+@@ -1081,7 +1177,6 @@ HWC2::Error DrmHwcTwo::HwcLayer::SetLayerBlendMode(int32_t mode) {
+ HWC2::Error DrmHwcTwo::HwcLayer::SetLayerBuffer(buffer_handle_t buffer,
+                                                 int32_t acquire_fence) {
+   supported(__func__);
+-
+   set_buffer(buffer);
+   acquire_fence_ = UniqueFd(acquire_fence);
+   return HWC2::Error::None;
+@@ -1200,6 +1295,10 @@ void DrmHwcTwo::HandleInitialHotplugState(DrmDevice *drmDevice) {
+       continue;
+     HandleDisplayHotplug(conn->display(), conn->state());
+   }
++  if (resource_manager_.getDisplayCount() == 0) {
++    HandleDisplayHotplug(0, DRM_MODE_CONNECTED);
++    resource_manager_.addDisplayCount();
++  }
+ }
+ 
+ int DrmHwcTwo::DynamicallyBound(DrmConnector *mconn,DrmDevice *mdrm){
+diff --git a/DrmHwcTwo.h b/DrmHwcTwo.h
+index 911c38b..7a869cf 100644
+--- a/DrmHwcTwo.h
++++ b/DrmHwcTwo.h
+@@ -144,6 +144,8 @@ class DrmHwcTwo : public hwc2_device_t {
+     HWC2::Transform transform_ = HWC2::Transform::None;
+     uint32_t z_order_ = 0;
+     android_dataspace_t dataspace_ = HAL_DATASPACE_UNKNOWN;
++	
++
+   };
+ 
+   class HwcDisplay {
+@@ -336,6 +338,9 @@ class DrmHwcTwo : public hwc2_device_t {
+     Stats total_stats_;
+     Stats prev_stats_;
+     std::string DumpDelta(DrmHwcTwo::HwcDisplay::Stats delta);
++
++    hwc2_config_t config_;
++    float virtual_display_refresh_ = 60.0f;
+   };
+ 
+   class DrmHotplugHandler : public DrmEventHandler {
+@@ -423,6 +428,7 @@ class DrmHwcTwo : public hwc2_device_t {
+   std::map<hwc2_display_t, HwcDisplay> displays_;
+ 
+   std::string mDumpString;
++  const int MaxVirtualDisplayCount = 1;
+ };
+ }  // namespace android
+ 
+diff --git a/drm/ResourceManager.cpp b/drm/ResourceManager.cpp
+index ef44180..84f0596 100644
+--- a/drm/ResourceManager.cpp
++++ b/drm/ResourceManager.cpp
+@@ -20,9 +20,7 @@
+ 
+ #include <fcntl.h>
+ #include <sys/stat.h>
+-
+ #include <sstream>
+-
+ #include "bufferinfo/BufferInfoGetter.h"
+ #include "utils/log.h"
+ #include "utils/properties.h"
+@@ -57,8 +55,7 @@ int ResourceManager::Init() {
+   }
+ 
+   if (!num_displays_) {
+-    ALOGE("Failed to initialize any displays");
+-    return ret ? -EINVAL : ret;
++    ALOGE("Failed to initialize any physics displays");
+   }
+ 
+   char scale_with_gpu[PROPERTY_VALUE_MAX];
+-- 
+2.33.0
+
