@@ -1,27 +1,31 @@
-From f0d5432a5e67dbcdfd1145d33696fc538451d430 Mon Sep 17 00:00:00 2001
+From 61697a785b0a24e1eb651c408e7fafcc5a18e2e4 Mon Sep 17 00:00:00 2001
 From: kanlihu <kanli.hu@intel.com>
 Date: Fri, 22 Apr 2022 12:30:41 +0800
-Subject: [PATCH] i915/drm: enable multi-plane, support cusor plane and small
+Subject: [PATCH] i915/drm: enable multi-plane, support cursor plane and small
  rect
 
 add prop to /vendor/default.prop
+to enable multi-plane
+
 vendor.hwcomposer.planes.enabling=1
-to enable mult-plane
 
 vendor.hwcomposer.planes.support_cursor=1
 make cursor layer rendor on device layer
 
 vendor.hwcomposer.planes.support_small_rect=1
-make small layer (7680*96) rendor on device layer
+make small layer (1920*56) rendor on device layer
+
+vendor.hwcomposer.planes.rect_size=107520
 
 Tracked-On: OAM-99951
 Signed-off-by: Kanli Hu <kanli.hu@intel.com>
 ---
- DrmHwcTwo.h         |  6 +++++
- backend/Backend.cpp | 61 +++++++++++++++++++++++++++++++++++++++++++--
- backend/Backend.h   |  2 ++
- drm/DrmDevice.cpp   |  3 ++-
- 4 files changed, 69 insertions(+), 3 deletions(-)
+ DrmHwcTwo.h                       |  6 +++
+ backend/Backend.cpp               | 83 +++++++++++++++++++++++++++++--
+ backend/Backend.h                 |  2 +
+ compositor/DrmDisplayCompositor.h |  3 +-
+ drm/DrmDevice.cpp                 |  3 +-
+ 5 files changed, 92 insertions(+), 5 deletions(-)
 
 diff --git a/DrmHwcTwo.h b/DrmHwcTwo.h
 index 911c38b..a340e06 100644
@@ -41,10 +45,10 @@ index 911c38b..a340e06 100644
      HWC2::Error SetCursorPosition(int32_t x, int32_t y);
      HWC2::Error SetLayerBlendMode(int32_t mode);
 diff --git a/backend/Backend.cpp b/backend/Backend.cpp
-index 44afd14..44004c4 100644
+index 312faed..94f0faa 100644
 --- a/backend/Backend.cpp
 +++ b/backend/Backend.cpp
-@@ -20,9 +20,35 @@
+@@ -20,9 +20,49 @@
  
  #include "BackendManager.h"
  #include "bufferinfo/BufferInfoGetter.h"
@@ -57,6 +61,7 @@ index 44afd14..44004c4 100644
 +static int overlay_planes_size_ = 0;
 +static bool support_cursor_ = false;
 +static bool support_small_rect_ = false;
++static int rect_size_ = 0;
 +
 +static bool support_cursor() {
 +  bool is_support_cursor;
@@ -71,16 +76,29 @@ index 44afd14..44004c4 100644
 +  bool is_support_small_rect;
 +  char property[PROPERTY_VALUE_MAX];
 +  memset(property, 0 , PROPERTY_VALUE_MAX);
-+  property_get("vendor.hwcomposer.planes.support_small_rect", property, "1");
++  property_get("vendor.hwcomposer.planes.support_small_rect", property, "0");
 +  is_support_small_rect = atoi(property) != 0 ? true : false;
 +  return is_support_small_rect;
 +}
++
++static int rect_size() {
++  int rect_size;
++  char property[PROPERTY_VALUE_MAX];
++  memset(property, 0 , PROPERTY_VALUE_MAX);
++  property_get("vendor.hwcomposer.planes.rect_size", property, "0");
++  rect_size = atoi(property);
++  if (rect_size < 1920*56) {
++    rect_size = 1920*56;
++  }
++  return rect_size;
++}
++
 +
 +
  HWC2::Error Backend::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
                                       uint32_t *num_types,
                                       uint32_t *num_requests) {
-@@ -33,15 +59,21 @@ HWC2::Error Backend::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
+@@ -33,15 +73,22 @@ HWC2::Error Backend::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
  
    int client_start = -1;
    size_t client_size = 0;
@@ -90,6 +108,7 @@ index 44afd14..44004c4 100644
 +  }
 +  support_cursor_ = support_cursor();
 +  support_small_rect_ = support_small_rect();
++  rect_size_ = rect_size();
  
    if (display->compositor().ShouldFlattenOnClient()) {
      client_start = 0;
@@ -104,7 +123,16 @@ index 44afd14..44004c4 100644
  
      bool testing_needed = !(client_start == 0 && client_size == layers.size());
  
-@@ -109,6 +141,31 @@ uint32_t Backend::CalcPixOps(const std::vector<DrmHwcTwo::HwcLayer *> &layers,
+@@ -50,7 +97,7 @@ HWC2::Error Backend::ValidateDisplay(DrmHwcTwo::HwcDisplay *display,
+       ++display->total_stats().failed_kms_validate_;
+       client_start = 0;
+       client_size = layers.size();
+-      MarkValidated(layers, 0, client_size);
++      MarkValidatedNew(layers, 0, client_size);
+     }
+   }
+ 
+@@ -108,6 +155,36 @@ uint32_t Backend::CalcPixOps(const std::vector<DrmHwcTwo::HwcLayer *> &layers,
    return pixops;
  }
  
@@ -112,26 +140,31 @@ index 44afd14..44004c4 100644
 +                            size_t client_first_z, size_t client_size) {
 +  int plane_size = overlay_planes_size_;
 +  for (int z_order = layers.size() - 1; z_order >= 0 ; --z_order) {
-+    if (z_order >= client_first_z && z_order < client_first_z + client_size)
++    if (z_order >= client_first_z && z_order < client_first_z + client_size) {
 +      layers[z_order]->set_validated_type(HWC2::Composition::Client);
-+    else
-+      layers[z_order]->set_validated_type(HWC2::Composition::Device);
-+
-+	if (planes_enabling_ && plane_size > 0) {
-+		bool isCursor = (layers[z_order]->sf_type() == HWC2::Composition::Cursor);
-+		bool isSmallRect = (layers[z_order]->displaySize() <= 7680*96);
-+		if (support_cursor_ && isCursor) {
-+			layers[z_order]->set_validated_type(HWC2::Composition::Device);
-+			plane_size--;
-+		} else if (support_small_rect_ && isSmallRect) {
-+			layers[z_order]->set_validated_type(HWC2::Composition::Device);
-+			plane_size--;
++	  plane_size = 0;
++	} else {
++		if (planes_enabling_) {
++			bool isCursor = (layers[z_order]->sf_type() == HWC2::Composition::Cursor);
++			bool isSmallRect = (layers[z_order]->displaySize() <= rect_size_);
++			if (support_cursor_ && isCursor && plane_size > 0) {
++				layers[z_order]->set_validated_type(HWC2::Composition::Device);
++				plane_size--;
++			} else if (support_small_rect_ && isSmallRect && plane_size > 0) {
++				layers[z_order]->set_validated_type(HWC2::Composition::Device);
++				plane_size--;
++			} else {
++			    layers[z_order]->set_validated_type(HWC2::Composition::Client);
++				plane_size = 0;
++			}
 +		} else {
++			layers[z_order]->set_validated_type(HWC2::Composition::Client);
 +			plane_size = 0;
 +		}
 +	}
 +  }
 +}
++
 +
  void Backend::MarkValidated(std::vector<DrmHwcTwo::HwcLayer *> &layers,
                              size_t client_first_z, size_t client_size) {
@@ -149,6 +182,20 @@ index fc9a733..b19d741 100644
    std::tuple<int, int> GetExtraClientRange(
        DrmHwcTwo::HwcDisplay *display,
        const std::vector<DrmHwcTwo::HwcLayer *> &layers, int client_start,
+diff --git a/compositor/DrmDisplayCompositor.h b/compositor/DrmDisplayCompositor.h
+index c0eed0c..cfffc56 100644
+--- a/compositor/DrmDisplayCompositor.h
++++ b/compositor/DrmDisplayCompositor.h
+@@ -34,7 +34,8 @@
+ 
+ // If a scene is still for this number of vblanks flatten it to reduce power
+ // consumption.
+-#define FLATTEN_COUNTDOWN_INIT 60
++// FIXME we don't need reduce power, we need to display device status
++#define FLATTEN_COUNTDOWN_INIT 60 * 60 * 60
+ 
+ namespace android {
+ 
 diff --git a/drm/DrmDevice.cpp b/drm/DrmDevice.cpp
 index d7bc13a..b8e00c9 100644
 --- a/drm/DrmDevice.cpp
