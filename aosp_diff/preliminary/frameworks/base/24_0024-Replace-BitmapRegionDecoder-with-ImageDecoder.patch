@@ -1,0 +1,156 @@
+From 3bf617a15329dea72cfbc6f4ddb4f42f4246c6af Mon Sep 17 00:00:00 2001
+From: Vincent Wang <firewall@google.com>
+Date: Fri, 7 Jan 2022 12:40:00 +0800
+Subject: [PATCH] Replace BitmapRegionDecoder with ImageDecoder
+
+1. generateCrop() couldn't handle super huge size because BitmapRegionDecoder
+will occupy too much native heap during process, We replace old decoder
+with ImageDecoder
+2. Fix overflow problem in debug message
+3. Add a record file to note if ImageDecoder work well
+
+Bug: 204087139
+Test: Manually set wallpaper, no PDoS observed.
+Change-Id: I59cf3c21edce836ffbe9f24a08b3a8e077c5fcf3
+Merged-In: I59cf3c21edce836ffbe9f24a08b3a8e077c5fcf3
+(cherry picked from commit 06991931150374c98b7e81abef076172c8a46b6e)
+Merged-In: I59cf3c21edce836ffbe9f24a08b3a8e077c5fcf3
+---
+ .../wallpaper/WallpaperManagerService.java    | 71 ++++++++++++++++---
+ 1 file changed, 63 insertions(+), 8 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java b/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java
+index 77133207175..b84851e4db5 100644
+--- a/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java
++++ b/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java
+@@ -57,8 +57,8 @@ import android.content.pm.UserInfo;
+ import android.content.res.Resources;
+ import android.graphics.Bitmap;
+ import android.graphics.BitmapFactory;
+-import android.graphics.BitmapRegionDecoder;
+ import android.graphics.Color;
++import android.graphics.ImageDecoder;
+ import android.graphics.Rect;
+ import android.graphics.RectF;
+ import android.hardware.display.DisplayManager;
+@@ -193,6 +193,8 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+     static final String WALLPAPER_LOCK_ORIG = "wallpaper_lock_orig";
+     static final String WALLPAPER_LOCK_CROP = "wallpaper_lock";
+     static final String WALLPAPER_INFO = "wallpaper_info.xml";
++    private static final String RECORD_FILE = "decode_record";
++    private static final String RECORD_LOCK_FILE = "decode_lock_record";
+ 
+     // All the various per-user state files we need to be aware of
+     private static final String[] sPerUserFiles = new String[] {
+@@ -659,8 +661,7 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+                 }
+ 
+                 if (DEBUG) {
+-                    // This is just a quick estimation, may be smaller than it is.
+-                    long estimateSize = options.outWidth * options.outHeight * 4;
++                    long estimateSize = (long) options.outWidth * options.outHeight * 4;
+                     Slog.v(TAG, "Null crop of new wallpaper, estimate size="
+                             + estimateSize + ", success=" + success);
+                 }
+@@ -669,9 +670,6 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+                 FileOutputStream f = null;
+                 BufferedOutputStream bos = null;
+                 try {
+-                    BitmapRegionDecoder decoder = BitmapRegionDecoder.newInstance(
+-                            wallpaper.wallpaperFile.getAbsolutePath(), false);
+-
+                     // This actually downsamples only by powers of two, but that's okay; we do
+                     // a proper scaling blit later.  This is to minimize transient RAM use.
+                     // We calculate the largest power-of-two under the actual ratio rather than
+@@ -725,8 +723,24 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+                         Slog.v(TAG, "  maxTextureSize=" + GLHelper.getMaxTextureSize());
+                     }
+ 
+-                    Bitmap cropped = decoder.decodeRegion(cropHint, options);
+-                    decoder.recycle();
++                    //Create a record file and will delete if ImageDecoder work well.
++                    final String recordName =
++                            (wallpaper.wallpaperFile.getName().equals(WALLPAPER)
++                                    ? RECORD_FILE : RECORD_LOCK_FILE);
++                    final File record = new File(getWallpaperDir(wallpaper.userId), recordName);
++                    record.createNewFile();
++                    Slog.v(TAG, "record path =" + record.getPath()
++                            + ", record name =" + record.getName());
++
++                    final ImageDecoder.Source srcData =
++                            ImageDecoder.createSource(wallpaper.wallpaperFile);
++                    final int sampleSize = scale;
++                    Bitmap cropped = ImageDecoder.decodeBitmap(srcData, (decoder, info, src) -> {
++                        decoder.setTargetSampleSize(sampleSize);
++                        decoder.setCrop(estimateCrop);
++                    });
++
++                    record.delete();
+ 
+                     if (cropped == null) {
+                         Slog.e(TAG, "Could not decode new wallpaper");
+@@ -1770,6 +1784,7 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+                     new UserSwitchObserver() {
+                         @Override
+                         public void onUserSwitching(int newUserId, IRemoteCallback reply) {
++                            errorCheck(newUserId);
+                             switchUser(newUserId, reply);
+                         }
+                     }, TAG);
+@@ -1807,6 +1822,14 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+ 
+     @Override
+     public void onBootPhase(int phase) {
++        // If someone set too large jpg file as wallpaper, system_server may be killed by lmk in
++        // generateCrop(), so we create a file in generateCrop() before ImageDecoder starts working
++        // and delete this file after ImageDecoder finishing. If the specific file exists, that
++        // means ImageDecoder can't handle the original wallpaper file, in order to avoid
++        // system_server restart again and again and rescue party will trigger factory reset,
++        // so we reset default wallpaper in case system_server is trapped into a restart loop.
++        errorCheck(UserHandle.USER_SYSTEM);
++
+         if (phase == SystemService.PHASE_ACTIVITY_MANAGER_READY) {
+             systemReady();
+         } else if (phase == SystemService.PHASE_THIRD_PARTY_APPS_CAN_START) {
+@@ -1814,6 +1837,38 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+         }
+     }
+ 
++    private static final HashMap<Integer, String> sWallpaperType = new HashMap<Integer, String>() {
++        {
++            put(FLAG_SYSTEM, RECORD_FILE);
++            put(FLAG_LOCK, RECORD_LOCK_FILE);
++        }
++    };
++
++    private void errorCheck(int userID) {
++        sWallpaperType.forEach((type, filename) -> {
++            final File record = new File(getWallpaperDir(userID), filename);
++            if (record.exists()) {
++                Slog.w(TAG, "User:" + userID + ", wallpaper tyep = " + type
++                        + ", wallpaper fail detect!! reset to default wallpaper");
++                clearWallpaperData(userID, type);
++                record.delete();
++            }
++        });
++    }
++
++    private void clearWallpaperData(int userID, int wallpaperType) {
++        final WallpaperData wallpaper = new WallpaperData(userID, getWallpaperDir(userID),
++                (wallpaperType == FLAG_LOCK) ? WALLPAPER_LOCK_ORIG : WALLPAPER,
++                (wallpaperType == FLAG_LOCK) ? WALLPAPER_LOCK_CROP : WALLPAPER_CROP);
++        if (wallpaper.sourceExists()) {
++            wallpaper.wallpaperFile.delete();
++        }
++        if (wallpaper.cropExists()) {
++            wallpaper.cropFile.delete();
++        }
++
++    }
++
+     @Override
+     public void onUnlockUser(final int userId) {
+         TimingsTraceAndSlog t = new TimingsTraceAndSlog(TAG);
+-- 
+2.35.1.894.gb6a874cedc-goog
+
