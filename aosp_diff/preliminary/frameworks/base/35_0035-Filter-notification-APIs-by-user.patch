@@ -1,0 +1,285 @@
+From 8613ca36464c885ec9db1a1c5391fbcbdeb2ae06 Mon Sep 17 00:00:00 2001
+From: Julia Reynolds <juliacr@google.com>
+Date: Fri, 11 Feb 2022 17:08:58 -0500
+Subject: [PATCH] Filter notification APIs by user
+
+Specifically getActiveNotifications and
+getHistoricalNotifications
+
+Test: atest NotificationManagerServiceTest
+Bug: 214999128
+Change-Id: I2eba0a592fa33ed25e1ac3919f1b2631e5db4258
+Merged-In: I2eba0a592fa33ed25e1ac3919f1b2631e5db4258
+(cherry picked from commit 3456555b7cfa84752b4dfa75191b7e87dc95b156)
+Merged-In: I2eba0a592fa33ed25e1ac3919f1b2631e5db4258
+---
+ .../NotificationManagerService.java           | 37 ++++++++++++-----
+ .../server/notification/ArchiveTest.java      | 40 ++++++++++++++++---
+ .../NotificationManagerServiceTest.java       | 35 +++++++++++++++-
+ 3 files changed, 96 insertions(+), 16 deletions(-)
+ mode change 100644 => 100755 services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index 0833d263d07..6e87babb69b 100755
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -583,7 +583,14 @@ public class NotificationManagerService extends SystemService {
+             return mBuffer.descendingIterator();
+         }
+ 
+-        public StatusBarNotification[] getArray(int count, boolean includeSnoozed) {
++        public StatusBarNotification[] getArray(UserManager um, int count, boolean includeSnoozed) {
++            ArrayList<Integer> currentUsers = new ArrayList<>();
++            currentUsers.add(UserHandle.USER_ALL);
++            Binder.withCleanCallingIdentity(() -> {
++                for (int user : um.getProfileIds(ActivityManager.getCurrentUser(), false)) {
++                    currentUsers.add(user);
++                }
++            });
+             if (count == 0) count = mBufferSize;
+             List<StatusBarNotification> a = new ArrayList();
+             Iterator<Pair<StatusBarNotification, Integer>> iter = descendingIterator();
+@@ -591,8 +598,10 @@ public class NotificationManagerService extends SystemService {
+             while (iter.hasNext() && i < count) {
+                 Pair<StatusBarNotification, Integer> pair = iter.next();
+                 if (pair.second != REASON_SNOOZED || includeSnoozed) {
+-                    i++;
+-                    a.add(pair.first);
++                    if (currentUsers.contains(pair.first.getUserId())) {
++                        i++;
++                        a.add(pair.first);
++                    }
+                 }
+             }
+             return  a.toArray(new StatusBarNotification[a.size()]);
+@@ -3781,22 +3790,32 @@ public class NotificationManagerService extends SystemService {
+                     android.Manifest.permission.ACCESS_NOTIFICATIONS,
+                     "NotificationManagerService.getActiveNotifications");
+ 
+-            StatusBarNotification[] tmp = null;
++            ArrayList<StatusBarNotification> tmp = new ArrayList<>();
+             int uid = Binder.getCallingUid();
+ 
++            ArrayList<Integer> currentUsers = new ArrayList<>();
++            currentUsers.add(UserHandle.USER_ALL);
++            Binder.withCleanCallingIdentity(() -> {
++                for (int user : mUm.getProfileIds(ActivityManager.getCurrentUser(), false)) {
++                    currentUsers.add(user);
++                }
++            });
++
+             // noteOp will check to make sure the callingPkg matches the uid
+             if (mAppOps.noteOpNoThrow(AppOpsManager.OP_ACCESS_NOTIFICATIONS, uid, callingPkg,
+                     callingAttributionTag, null)
+                     == AppOpsManager.MODE_ALLOWED) {
+                 synchronized (mNotificationLock) {
+-                    tmp = new StatusBarNotification[mNotificationList.size()];
+                     final int N = mNotificationList.size();
+-                    for (int i=0; i<N; i++) {
+-                        tmp[i] = mNotificationList.get(i).getSbn();
++                    for (int i = 0; i < N; i++) {
++                        final StatusBarNotification sbn = mNotificationList.get(i).getSbn();
++                        if (currentUsers.contains(sbn.getUserId())) {
++                            tmp.add(sbn);
++                        }
+                     }
+                 }
+             }
+-            return tmp;
++            return tmp.toArray(new StatusBarNotification[tmp.size()]);
+         }
+ 
+         /**
+@@ -3905,7 +3924,7 @@ public class NotificationManagerService extends SystemService {
+                     callingAttributionTag, null)
+                     == AppOpsManager.MODE_ALLOWED) {
+                 synchronized (mArchive) {
+-                    tmp = mArchive.getArray(count, includeSnoozed);
++                    tmp = mArchive.getArray(mUm, count, includeSnoozed);
+                 }
+             }
+             return tmp;
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ArchiveTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ArchiveTest.java
+index c69ef8d9328..c4e0fa0cc1e 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/ArchiveTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ArchiveTest.java
+@@ -15,14 +15,22 @@
+  */
+ package com.android.server.notification;
+ 
++import static android.os.UserHandle.USER_ALL;
+ import static android.os.UserHandle.USER_CURRENT;
++import static android.os.UserHandle.USER_NULL;
+ import static android.os.UserHandle.USER_SYSTEM;
+ import static android.service.notification.NotificationListenerService.REASON_CANCEL;
+ 
+ import static com.google.common.truth.Truth.assertThat;
+ 
++import static org.junit.Assert.fail;
++import static org.mockito.ArgumentMatchers.anyBoolean;
++import static org.mockito.ArgumentMatchers.anyInt;
++import static org.mockito.Mockito.when;
++
+ import android.app.Notification;
+ import android.os.UserHandle;
++import android.os.UserManager;
+ import android.service.notification.StatusBarNotification;
+ import android.test.suitebuilder.annotation.SmallTest;
+ 
+@@ -33,6 +41,7 @@ import com.android.server.UiServiceTestCase;
+ import org.junit.Before;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
++import org.mockito.Mock;
+ import org.mockito.MockitoAnnotations;
+ 
+ import java.util.ArrayList;
+@@ -45,6 +54,8 @@ public class ArchiveTest extends UiServiceTestCase {
+     private static final int SIZE = 5;
+ 
+     private NotificationManagerService.Archive mArchive;
++    @Mock
++    private UserManager mUm;
+ 
+     @Before
+     public void setUp() {
+@@ -53,6 +64,9 @@ public class ArchiveTest extends UiServiceTestCase {
+         mArchive = new NotificationManagerService.Archive(SIZE);
+         mArchive.updateHistoryEnabled(USER_SYSTEM, true);
+         mArchive.updateHistoryEnabled(USER_CURRENT, true);
++
++        when(mUm.getProfileIds(anyInt(), anyBoolean())).thenReturn(
++                new int[] {USER_CURRENT, USER_SYSTEM});
+     }
+ 
+     private StatusBarNotification getNotification(String pkg, int id, UserHandle user) {
+@@ -64,7 +78,6 @@ public class ArchiveTest extends UiServiceTestCase {
+                 pkg, pkg, id, null, 0, 0, n, user, null, System.currentTimeMillis());
+     }
+ 
+-
+     @Test
+     public void testRecordAndRead() {
+         List<String> expected = new ArrayList<>();
+@@ -75,13 +88,29 @@ public class ArchiveTest extends UiServiceTestCase {
+             mArchive.record(sbn, REASON_CANCEL);
+         }
+ 
+-        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray(SIZE, true));
++        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray(mUm, SIZE, true));
+         assertThat(actual).hasSize(expected.size());
+         for (StatusBarNotification sbn : actual) {
+             assertThat(expected).contains(sbn.getKey());
+         }
+     }
+ 
++    @Test
++    public void testCrossUser() {
++        mArchive.record(getNotification("pkg", 1, UserHandle.of(USER_SYSTEM)), REASON_CANCEL);
++        mArchive.record(getNotification("pkg", 2, UserHandle.of(USER_CURRENT)), REASON_CANCEL);
++        mArchive.record(getNotification("pkg", 3, UserHandle.of(USER_ALL)), REASON_CANCEL);
++        mArchive.record(getNotification("pkg", 4, UserHandle.of(USER_NULL)), REASON_CANCEL);
++
++        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray(mUm, SIZE, true));
++        assertThat(actual).hasSize(3);
++        for (StatusBarNotification sbn : actual) {
++            if (sbn.getUserId() == USER_NULL) {
++                fail("leaked notification from wrong user");
++            }
++        }
++    }
++
+     @Test
+     public void testRecordAndRead_overLimit() {
+         List<String> expected = new ArrayList<>();
+@@ -93,7 +122,8 @@ public class ArchiveTest extends UiServiceTestCase {
+             }
+         }
+ 
+-        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray((SIZE * 2), true));
++        List<StatusBarNotification> actual = Arrays.asList(
++                mArchive.getArray(mUm, (SIZE * 2), true));
+         assertThat(actual).hasSize(expected.size());
+         for (StatusBarNotification sbn : actual) {
+             assertThat(expected).contains(sbn.getKey());
+@@ -113,7 +143,7 @@ public class ArchiveTest extends UiServiceTestCase {
+             }
+         }
+ 
+-        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray(SIZE, true));
++        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray(mUm, SIZE, true));
+         assertThat(actual).hasSize(expected.size());
+         for (StatusBarNotification sbn : actual) {
+             assertThat(expected).contains(sbn.getKey());
+@@ -134,7 +164,7 @@ public class ArchiveTest extends UiServiceTestCase {
+         }
+         mArchive.updateHistoryEnabled(USER_CURRENT, false);
+ 
+-        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray(SIZE, true));
++        List<StatusBarNotification> actual = Arrays.asList(mArchive.getArray(mUm, SIZE, true));
+         assertThat(actual).hasSize(expected.size());
+         for (StatusBarNotification sbn : actual) {
+             assertThat(expected).contains(sbn.getKey());
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+old mode 100644
+new mode 100755
+index 9394eb84007..62a423e3277
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -463,6 +463,7 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         when(mPackageManager.getPackagesForUid(mUid)).thenReturn(new String[]{PKG});
+         when(mPackageManagerClient.getPackagesForUid(anyInt())).thenReturn(new String[]{PKG});
+         mContext.addMockSystemService(AppOpsManager.class, mock(AppOpsManager.class));
++        when(mUm.getProfileIds(0, false)).thenReturn(new int[]{0});
+ 
+         // write to a test file; the system file isn't readable from tests
+         mFile = new File(mContext.getCacheDir(), "test.xml");
+@@ -6156,8 +6157,9 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         waitForIdle();
+ 
+         // A notification exists for the given record
+-        StatusBarNotification[] notifsBefore = mBinderService.getActiveNotifications(PKG);
+-        assertEquals(1, notifsBefore.length);
++        List<StatusBarNotification> notifsBefore =
++                mBinderService.getAppActiveNotifications(PKG, nr.getSbn().getUserId()).getList();
++        assertEquals(1, notifsBefore.size());
+ 
+         reset(mPackageManager);
+ 
+@@ -7075,4 +7077,33 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         assertEquals(NotificationManagerService.MAX_PACKAGE_NOTIFICATIONS + 1,
+                 mService.getNotificationRecordCount());
+     }
++
++    @Test
++    public void testGetActiveNotification_filtersUsers() throws Exception {
++        when(mUm.getProfileIds(0, false)).thenReturn(new int[]{0, 10});
++
++        NotificationRecord nr0 =
++                generateNotificationRecord(mTestNotificationChannel, 0);
++        mBinderService.enqueueNotificationWithTag(PKG, PKG, "tag0",
++                nr0.getSbn().getId(), nr0.getSbn().getNotification(), nr0.getSbn().getUserId());
++
++        NotificationRecord nr10 =
++                generateNotificationRecord(mTestNotificationChannel, 10);
++        mBinderService.enqueueNotificationWithTag(PKG, PKG, "tag10",
++                nr10.getSbn().getId(), nr10.getSbn().getNotification(), nr10.getSbn().getUserId());
++
++        NotificationRecord nr11 =
++                generateNotificationRecord(mTestNotificationChannel, 11);
++        mBinderService.enqueueNotificationWithTag(PKG, PKG, "tag11",
++                nr11.getSbn().getId(), nr11.getSbn().getNotification(), nr11.getSbn().getUserId());
++        waitForIdle();
++
++        StatusBarNotification[] notifs = mBinderService.getActiveNotifications(PKG);
++        assertEquals(2, notifs.length);
++        for (StatusBarNotification sbn : notifs) {
++            if (sbn.getUserId() == 11) {
++                fail("leaked data across users");
++            }
++        }
++    }
+ }
+-- 
+2.35.1.894.gb6a874cedc-goog
+
