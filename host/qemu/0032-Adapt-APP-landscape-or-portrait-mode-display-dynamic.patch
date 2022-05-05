@@ -1,0 +1,236 @@
+From a78e248316e91cb2827878f2173caedd1076373e Mon Sep 17 00:00:00 2001
+From: renchenglei <chenglei.ren@intel.com>
+Date: Tue, 19 Apr 2022 17:49:22 +0800
+Subject: [PATCH] Adapt APP landscape or portrait mode display dynamically
+
+Add one gtk button to set window to landscape/portrait
+mode.
+
+Tracked-On: OAM-101263
+Signed-off-by: Chenglei Ren <chenglei.ren@intel.com>
+---
+ include/ui/gtk.h                 |  1 +
+ include/ui/shader.h              |  1 +
+ ui/egl-helpers.c                 |  4 ++++
+ ui/gtk-egl.c                     |  2 ++
+ ui/gtk.c                         | 28 ++++++++++++++++++++++++++--
+ ui/shader.c                      | 19 ++++++++++++++++++-
+ ui/shader/texture-blit-flip.vert |  6 ++++++
+ ui/shader/texture-blit.vert      |  6 ++++++
+ 8 files changed, 64 insertions(+), 3 deletions(-)
+
+diff --git a/include/ui/gtk.h b/include/ui/gtk.h
+index 86344ee42d22..e363a8aa865e 100644
+--- a/include/ui/gtk.h
++++ b/include/ui/gtk.h
+@@ -111,6 +111,7 @@ struct GtkDisplayState {
+     GtkWidget *zoom_fit_item;
+     GtkWidget *grab_item;
+     GtkWidget *grab_on_hover_item;
++    GtkWidget *window_rotation;
+ 
+     int nb_vcs;
+     VirtualConsole vc[MAX_VCS];
+diff --git a/include/ui/shader.h b/include/ui/shader.h
+index 4c5acb2ce8b2..84b7ead88615 100644
+--- a/include/ui/shader.h
++++ b/include/ui/shader.h
+@@ -6,6 +6,7 @@
+ typedef struct QemuGLShader QemuGLShader;
+ 
+ void qemu_gl_run_texture_blit(QemuGLShader *gls, bool flip);
++void qemu_gl_load_rotation(QemuGLShader *gls, bool flip, int rotation);
+ 
+ QemuGLShader *qemu_gl_init_shader(void);
+ void qemu_gl_fini_shader(QemuGLShader *gls);
+diff --git a/ui/egl-helpers.c b/ui/egl-helpers.c
+index e7d84febc578..3a1c6765bd1f 100644
+--- a/ui/egl-helpers.c
++++ b/ui/egl-helpers.c
+@@ -155,10 +155,14 @@ void egl_fb_read(DisplaySurface *dst, egl_fb *src)
+ 
+ void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip)
+ {
++    int rotation = 0;
+     glBindFramebuffer(GL_FRAMEBUFFER_EXT, dst->framebuffer);
+     glViewport(0, 0, dst->width, dst->height);
+     glEnable(GL_TEXTURE_2D);
+     glBindTexture(GL_TEXTURE_2D, src->texture);
++    if (dst->width < dst->height)
++        rotation = 3;
++    qemu_gl_load_rotation(gls, flip, rotation);
+     qemu_gl_run_texture_blit(gls, flip);
+ }
+ 
+diff --git a/ui/gtk-egl.c b/ui/gtk-egl.c
+index 298b7c8f4ef8..ca0bcf8818f4 100644
+--- a/ui/gtk-egl.c
++++ b/ui/gtk-egl.c
+@@ -317,6 +317,8 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
+                           vc->gfx.scale_x, vc->gfx.scale_y);
+     } else {
+         egl_fb_blit(&vc->gfx.win_fb, &vc->gfx.guest_fb, !vc->gfx.y0_top);
++        egl_texture_blit(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.guest_fb,
++                         vc->gfx.y0_top);
+     }
+ 
+     if (vc->gfx.guest_fb.dmabuf) {
+diff --git a/ui/gtk.c b/ui/gtk.c
+index 6ab7c2ed77e3..0a52b601b36e 100644
+--- a/ui/gtk.c
++++ b/ui/gtk.c
+@@ -116,6 +116,8 @@
+ 
+ #define HOTKEY_MODIFIERS        (GDK_CONTROL_MASK | GDK_MOD1_MASK)
+ 
++static bool rotation = false;
++
+ static const guint16 *keycode_map;
+ static size_t keycode_maplen;
+ 
+@@ -274,8 +276,14 @@ static void gd_update_geometry_hints(VirtualConsole *vc)
+             geo.min_height = surface_height(vc->gfx.ds) * VC_SCALE_MIN;
+             mask |= GDK_HINT_MIN_SIZE;
+         } else {
+-            geo.min_width  = surface_width(vc->gfx.ds) * vc->gfx.scale_x;
+-            geo.min_height = surface_height(vc->gfx.ds) * vc->gfx.scale_y;
++            if (rotation) {
++                geo.min_height  = surface_width(vc->gfx.ds) * vc->gfx.scale_x;
++                geo.min_width = surface_height(vc->gfx.ds) * vc->gfx.scale_y;
++                rotation = false;
++            } else {
++                geo.min_width  = surface_width(vc->gfx.ds) * vc->gfx.scale_x;
++                geo.min_height = surface_height(vc->gfx.ds) * vc->gfx.scale_y;
++            }
+             mask |= GDK_HINT_MIN_SIZE;
+         }
+         geo_widget = vc->gfx.drawing_area;
+@@ -1436,6 +1444,17 @@ static void gd_menu_full_screen(GtkMenuItem *item, void *opaque)
+     gd_update_cursor(vc);
+ }
+ 
++static void gd_menu_window_rotation(GtkMenuItem *item, void *opaque)
++{
++    GtkDisplayState *s = opaque;
++    VirtualConsole *vc = gd_vc_find_current(s);
++
++    s->free_scale = FALSE;
++    rotation = true;
++    gd_update_windowsize(vc);
++    gd_update_full_redraw(vc);
++}
++
+ static void gd_accel_full_screen(void *opaque)
+ {
+     GtkDisplayState *s = opaque;
+@@ -2012,6 +2031,8 @@ static void gd_connect_signals(GtkDisplayState *s)
+                      G_CALLBACK(gd_menu_grab_input), s);
+     g_signal_connect(s->notebook, "switch-page",
+                      G_CALLBACK(gd_change_page), s);
++    g_signal_connect(s->window_rotation, "activate",
++                     G_CALLBACK(gd_menu_window_rotation), s);
+ }
+ 
+ static GtkWidget *gd_create_menu_machine(GtkDisplayState *s)
+@@ -2162,6 +2183,9 @@ static GtkWidget *gd_create_menu_view(GtkDisplayState *s)
+     gtk_menu_shell_append(GTK_MENU_SHELL(view_menu), s->copy_item);
+ #endif
+ 
++    s->window_rotation = gtk_check_menu_item_new_with_mnemonic(_("_Rotation"));
++    gtk_menu_shell_append(GTK_MENU_SHELL(view_menu), s->window_rotation);
++
+     gtk_accel_group_connect(s->accel_group, GDK_KEY_f, HOTKEY_MODIFIERS, 0,
+             g_cclosure_new_swap(G_CALLBACK(gd_accel_full_screen), s, NULL));
+     gtk_accel_label_set_accel(
+diff --git a/ui/shader.c b/ui/shader.c
+index e8b8d321b7c7..d2de7cd07ef7 100644
+--- a/ui/shader.c
++++ b/ui/shader.c
+@@ -31,6 +31,8 @@
+ #include "ui/shader/texture-blit-flip-vert.h"
+ #include "ui/shader/texture-blit-frag.h"
+ 
++#include <math.h>
++
+ struct QemuGLShader {
+     GLint texture_blit_prog;
+     GLint texture_blit_flip_prog;
+@@ -47,7 +49,8 @@ static GLuint qemu_gl_init_texture_blit(GLint texture_blit_prog)
+         -1,  1,
+         1,   1,
+     };
+-    GLint l_position;
++    static float rotation = 0.0;
++    GLint l_position, l_rotation;
+     GLuint vao, buffer;
+ 
+     glGenVertexArrays(1, &vao);
+@@ -63,6 +66,9 @@ static GLuint qemu_gl_init_texture_blit(GLint texture_blit_prog)
+     glVertexAttribPointer(l_position, 2, GL_FLOAT, GL_FALSE, 0, 0);
+     glEnableVertexAttribArray(l_position);
+ 
++    l_rotation = glGetUniformLocation(texture_blit_prog, "in_rotation");
++    glUniform1f(l_rotation, M_PI / 2.0 * rotation);
++
+     glBindBuffer(GL_ARRAY_BUFFER, 0);
+     glBindVertexArray(0);
+ 
+@@ -78,6 +84,17 @@ void qemu_gl_run_texture_blit(QemuGLShader *gls, bool flip)
+     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+ }
+ 
++void qemu_gl_load_rotation(QemuGLShader *gls, bool flip, int rotation)
++{
++   GLint l_rotation;
++   glUseProgram(flip
++                 ? gls->texture_blit_flip_prog
++                 : gls->texture_blit_prog);
++   l_rotation = glGetUniformLocation((flip ? gls->texture_blit_flip_prog: gls->texture_blit_prog),
++                                     "in_rotation");
++   glUniform1f(l_rotation, M_PI / 2.0 * rotation);
++}
++
+ /* ---------------------------------------------------------------------- */
+ 
+ static GLuint qemu_gl_create_compile_shader(GLenum type, const GLchar *src)
+diff --git a/ui/shader/texture-blit-flip.vert b/ui/shader/texture-blit-flip.vert
+index ba081fa5a6c3..6071804f7f61 100644
+--- a/ui/shader/texture-blit-flip.vert
++++ b/ui/shader/texture-blit-flip.vert
+@@ -3,8 +3,14 @@
+ 
+ in vec2  in_position;
+ out vec2 ex_tex_coord;
++uniform float in_rotation;
+ 
+ void main(void) {
+     gl_Position = vec4(in_position, 0.0, 1.0);
++    mat4 rotationMatrix = mat4(cos(in_rotation), sin(in_rotation), 0.0, 0.0,
++                               -sin(in_rotation), cos(in_rotation), 0.0, 0.0,
++                               0.0, 0.0, 1.0, 0.0,
++                               0.0, 0.0, 0.0, 1.0);
++    gl_Position = rotationMatrix * gl_Position;
+     ex_tex_coord = vec2(1.0 + in_position.x, 1.0 + in_position.y) * 0.5;
+ }
+diff --git a/ui/shader/texture-blit.vert b/ui/shader/texture-blit.vert
+index 6fe2744d6849..26fca7902457 100644
+--- a/ui/shader/texture-blit.vert
++++ b/ui/shader/texture-blit.vert
+@@ -3,8 +3,14 @@
+ 
+ in vec2  in_position;
+ out vec2 ex_tex_coord;
++uniform float in_rotation;
+ 
+ void main(void) {
+     gl_Position = vec4(in_position, 0.0, 1.0);
++    mat4 rotationMatrix = mat4(cos(in_rotation), sin(in_rotation), 0.0, 0.0,
++                               -sin(in_rotation), cos(in_rotation), 0.0, 0.0,
++                               0.0, 0.0, 1.0, 0.0,
++                               0.0, 0.0, 0.0, 1.0);
++    gl_Position = rotationMatrix * gl_Position;
+     ex_tex_coord = vec2(1.0 + in_position.x, 1.0 - in_position.y) * 0.5;
+ }
+-- 
+2.17.1
+
