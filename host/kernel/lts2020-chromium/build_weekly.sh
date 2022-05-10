@@ -5,7 +5,7 @@ mkdir -p host_kernel
 cd host_kernel
 git clone https://github.com/projectceladon/linux-intel-lts2020-chromium.git
 cd linux-intel-lts2020-chromium
-git checkout b04c9469b7904ffc19e67ee95ece70db22a8a134
+git checkout 32f6e0a8092694a4f801dcc013a2a34af4563b3a
 cp ../../x86_64_defconfig .config
 patch_list=`find ../../ -iname "*.patch" | sort -u`
 for i in $patch_list
