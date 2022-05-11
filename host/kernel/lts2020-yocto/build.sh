@@ -3,6 +3,7 @@
 rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
+git clone https://github.com/projectceladon/vendor-intel-utils
 git clone https://github.com/intel/linux-intel-lts.git -b 5.10/yocto
 git clone https://github.com/intel-innersource/os.linux.kernel.kernel-config.git -b 5.10/civ_host
 cd linux-intel-lts
@@ -22,13 +23,12 @@ do
     else
       git am --abort
       echo "Not able to apply\t"`basename $i`
-      exit
+      break
     fi
   else
     echo -e "\tAlready applied\t\t"`basename $i`
   fi
 done
-
 make ARCH=x86_64 clean
 make ARCH=x86_64 olddefconfig
 make ARCH=x86_64 -j64 LOCALVERSION=-yvhb bindeb-pkg
