@@ -1,0 +1,208 @@
+From a08df5462fbc65675b5bbc92ec14ceb1c0b30164 Mon Sep 17 00:00:00 2001
+From: HeYue <yue.he@intel.com>
+Date: Wed, 18 May 2022 12:34:36 +0800
+Subject: [PATCH] Add the memtrack AIDL HAL implement
+
+Tracked-On: OAM-98918
+Signed-off-by: HeYue <yue.he@intel.com>
+---
+ memtrack/aidl/default/Android.bp          |  5 +-
+ memtrack/aidl/default/Memtrack.cpp        | 67 ++++++++++++++++++++++-
+ memtrack/aidl/default/Memtrack.h          | 13 +++++
+ memtrack/aidl/default/main.cpp            |  5 +-
+ memtrack/aidl/default/memtrack-default.rc |  4 +-
+ 5 files changed, 88 insertions(+), 6 deletions(-)
+
+diff --git a/memtrack/aidl/default/Android.bp b/memtrack/aidl/default/Android.bp
+index 7a7feea5bfa3..3386462411dc 100644
+--- a/memtrack/aidl/default/Android.bp
++++ b/memtrack/aidl/default/Android.bp
+@@ -22,7 +22,7 @@ package {
+ }
+ 
+ cc_binary {
+-    name: "android.hardware.memtrack-service.example",
++    name: "android.hardware.memtrack-service.celadon",
+     relative_install_path: "hw",
+     init_rc: ["memtrack-default.rc"],
+     vintf_fragments: ["memtrack-default.xml"],
+@@ -30,6 +30,9 @@ cc_binary {
+     shared_libs: [
+         "libbase",
+         "libbinder_ndk",
++        "liblog",
++        "libhardware",
++        "libutils",
+         "android.hardware.memtrack-V1-ndk_platform",
+     ],
+     srcs: [
+diff --git a/memtrack/aidl/default/Memtrack.cpp b/memtrack/aidl/default/Memtrack.cpp
+index 49a6582989ca..dbf9a5cc92b9 100644
+--- a/memtrack/aidl/default/Memtrack.cpp
++++ b/memtrack/aidl/default/Memtrack.cpp
+@@ -14,12 +14,27 @@
+  * limitations under the License.
+  */
+ 
++#define LOG_TAG "memtrack"
++
+ #include "Memtrack.h"
+ 
++#include <log/log.h>
++
++#include <hardware/hardware.h>
++#include <hardware/memtrack.h>
++
+ namespace aidl {
+ namespace android {
+ namespace hardware {
+ namespace memtrack {
++namespace impl {
++
++Memtrack::Memtrack(const memtrack_module_t *module) : mModule(module) {
++    if (mModule)
++        mModule->init(mModule);
++}
++
++Memtrack::~Memtrack() {}
+ 
+ ndk::ScopedAStatus Memtrack::getMemory(int pid, MemtrackType type,
+                                        std::vector<MemtrackRecord>* _aidl_return) {
+@@ -31,16 +46,66 @@ ndk::ScopedAStatus Memtrack::getMemory(int pid, MemtrackType type,
+         return ndk::ScopedAStatus(AStatus_fromExceptionCode(EX_UNSUPPORTED_OPERATION));
+     }
+     _aidl_return->clear();
++
++    size_t temp = 0;
++    size_t *size = &temp;
++    int ret = 0;
++
++    if (mModule->getMemory == nullptr) {
++	return ndk::ScopedAStatus::ok();
++    }
++    ret = mModule->getMemory(mModule, pid, static_cast<memtrack_type>(type),
++            NULL, size);
++    if (ret == 0) {
++        memtrack_record *legacy_records = new memtrack_record[*size];
++        ret = mModule->getMemory(mModule, pid,
++                static_cast<memtrack_type>(type), legacy_records, size);
++        if (ret == 0) {
++            for(size_t i = 0; i < *size; i++) {
++		MemtrackRecord record = {
++			.flags = static_cast<int32_t>(legacy_records[i].flags),
++			.sizeInBytes = static_cast<int64_t>(legacy_records[i].size_in_bytes),
++		};
++		_aidl_return->emplace_back(record);
++            }
++        }
++        delete[] legacy_records;
++    }
++
+     return ndk::ScopedAStatus::ok();
+ }
+ 
+ ndk::ScopedAStatus Memtrack::getGpuDeviceInfo(std::vector<DeviceInfo>* _aidl_return) {
+     _aidl_return->clear();
+-    DeviceInfo dev_info = {.id = 0, .name = "virtio_gpu"};
++    DeviceInfo dev_info = {.id = 0, .name = "i915"};
+     _aidl_return->emplace_back(dev_info);
+     return ndk::ScopedAStatus::ok();
+ }
+ 
++memtrack_module_t* AIDL_FETCH_IMemtrack(const char* /* name */) {
++    const hw_module_t* hw_module = nullptr;
++    memtrack_module_t* memtrack_module = nullptr;
++
++    int err = hw_get_module(MEMTRACK_HARDWARE_MODULE_ID, &hw_module);
++    if (err) {
++        ALOGE ("hw_get_module %s failed: %d", MEMTRACK_HARDWARE_MODULE_ID, err);
++        return nullptr;
++    }
++
++    if (!hw_module->methods || !hw_module->methods->open) {
++        memtrack_module = const_cast<memtrack_module_t*>(reinterpret_cast<const memtrack_module_t*>(hw_module));
++    } else {
++        err = hw_module->methods->open(hw_module, MEMTRACK_HARDWARE_MODULE_ID,
++                reinterpret_cast<hw_device_t**>(reinterpret_cast<memtrack_module_t**>(&memtrack_module)));
++        if (err) {
++            ALOGE("Passthrough failed to load legacy HAL.");
++            return nullptr;
++        }
++    }
++    return memtrack_module;
++}
++
++}  // namespace impl
+ }  // namespace memtrack
+ }  // namespace hardware
+ }  // namespace android
+diff --git a/memtrack/aidl/default/Memtrack.h b/memtrack/aidl/default/Memtrack.h
+index f2ef60e005e5..25c07ea709d8 100644
+--- a/memtrack/aidl/default/Memtrack.h
++++ b/memtrack/aidl/default/Memtrack.h
+@@ -20,19 +20,32 @@
+ #include <aidl/android/hardware/memtrack/DeviceInfo.h>
+ #include <aidl/android/hardware/memtrack/MemtrackRecord.h>
+ #include <aidl/android/hardware/memtrack/MemtrackType.h>
++#include <hardware/memtrack.h>
++
+ 
+ namespace aidl {
+ namespace android {
+ namespace hardware {
+ namespace memtrack {
++namespace impl {
+ 
+ class Memtrack : public BnMemtrack {
++  public:
++    Memtrack(const memtrack_module_t* module);
++    ~Memtrack();
++
+     ndk::ScopedAStatus getMemory(int pid, MemtrackType type,
+                                  std::vector<MemtrackRecord>* _aidl_return) override;
+ 
+     ndk::ScopedAStatus getGpuDeviceInfo(std::vector<DeviceInfo>* _aidl_return) override;
++
++  private:
++    const memtrack_module_t* mModule;
+ };
+ 
++extern memtrack_module_t* AIDL_FETCH_IMemtrack(const char* name);
++
++}  // namespace impl
+ }  // namespace memtrack
+ }  // namespace hardware
+ }  // namespace android
+diff --git a/memtrack/aidl/default/main.cpp b/memtrack/aidl/default/main.cpp
+index d063d2aeda85..ae1dfc0dac5d 100644
+--- a/memtrack/aidl/default/main.cpp
++++ b/memtrack/aidl/default/main.cpp
+@@ -20,11 +20,12 @@
+ #include <android/binder_manager.h>
+ #include <android/binder_process.h>
+ 
+-using aidl::android::hardware::memtrack::Memtrack;
++using aidl::android::hardware::memtrack::impl::Memtrack;
+ 
+ int main() {
+     ABinderProcess_setThreadPoolMaxThreadCount(0);
+-    std::shared_ptr<Memtrack> memtrack = ndk::SharedRefBase::make<Memtrack>();
++    std::shared_ptr<Memtrack> memtrack = ndk::SharedRefBase::make<Memtrack>(
++		aidl::android::hardware::memtrack::impl::AIDL_FETCH_IMemtrack(nullptr));
+ 
+     const std::string instance = std::string() + Memtrack::descriptor + "/default";
+     binder_status_t status =
+diff --git a/memtrack/aidl/default/memtrack-default.rc b/memtrack/aidl/default/memtrack-default.rc
+index 1725cd00f79a..5174a7cf951f 100644
+--- a/memtrack/aidl/default/memtrack-default.rc
++++ b/memtrack/aidl/default/memtrack-default.rc
+@@ -1,4 +1,4 @@
+-service vendor.memtrack-default /vendor/bin/hw/android.hardware.memtrack-service.example
++service vendor.memtrack-default /vendor/bin/hw/android.hardware.memtrack-service.celadon
+     class hal
+-    user nobody
++    user system
+     group system
+-- 
+2.17.1
+
