@@ -1,0 +1,261 @@
+From 85abf97a0fe2edc36a92b89135e7e8447b67b7f5 Mon Sep 17 00:00:00 2001
+From: shivasku82 <shiva.kumara.rudrappa@intel.com>
+Date: Fri, 3 Jun 2022 11:26:57 +0530
+Subject: [PATCH] mjpeg support added for camera mediation
+
+Camera mediation is enabled only with yuv format.
+with higher resolutions, more bandwidth is used to
+transfer data between host and guest.
+
+Added mjpeg to support high resolution with reduced
+data transfer between host and guest.
+
+Tracked-On: OAM-102360
+Signed-off-by: shivasku82 <shiva.kumara.rudrappa@intel.com>
+---
+ Android.mk                       |  1 +
+ include/CameraSocketCommand.h    |  2 +-
+ include/VirtualBuffer.h          |  1 +
+ src/CameraSocketServerThread.cpp | 65 ++++++++++++++++++++++++++++++--
+ src/VirtualCameraFactory.cpp     |  5 ++-
+ src/fake-pipeline2/Sensor.cpp    | 12 +++---
+ 6 files changed, 74 insertions(+), 12 deletions(-)
+
+diff --git a/Android.mk b/Android.mk
+index 27be12f..f0dafd0 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -142,6 +142,7 @@ camera_vhal_shared_libraries := \
+     libcutils \
+     libui \
+     libdl \
++    libjpeg \
+     libcamera_metadata \
+     libhardware \
+     libsync 
+diff --git a/include/CameraSocketCommand.h b/include/CameraSocketCommand.h
+index 50f9026..a9a1522 100644
+--- a/include/CameraSocketCommand.h
++++ b/include/CameraSocketCommand.h
+@@ -32,7 +32,7 @@ namespace android {
+ 
+ namespace socket {
+ 
+-enum class VideoCodecType { kH264 = 1, kH265 = 2,kI420 = 4, kAll = 3 };
++enum class VideoCodecType { kH264 = 1, kH265 = 2,kI420 = 4, kMJPEG = 8, kAll = 15 };
+ enum class FrameResolution { k480p = 1, k720p = 2, k1080p = 4, kAll = 7 };
+ 
+ enum class SensorOrientation {
+diff --git a/include/VirtualBuffer.h b/include/VirtualBuffer.h
+index 23776d1..22ffb08 100644
+--- a/include/VirtualBuffer.h
++++ b/include/VirtualBuffer.h
+@@ -9,6 +9,7 @@ namespace android {
+ 
+ extern bool gIsInFrameI420;
+ extern bool gIsInFrameH264;
++extern bool gIsInFrameMJPG;
+ extern bool gUseVaapi;
+ 
+ // Max no of cameras supported based on client device request.
+diff --git a/src/CameraSocketServerThread.cpp b/src/CameraSocketServerThread.cpp
+index c719372..396bec0 100644
+--- a/src/CameraSocketServerThread.cpp
++++ b/src/CameraSocketServerThread.cpp
+@@ -17,6 +17,8 @@
+ //#define LOG_NNDEBUG 0
+ #define LOG_TAG "CameraSocketServerThread: "
+ #include <log/log.h>
++#define HAVE_JPEG // required for libyuv.h to export MJPEG decode APIs
++#include <libyuv.h>
+ 
+ #ifdef LOG_NNDEBUG
+ #define ALOGVV(...) ALOGV(__VA_ARGS__)
+@@ -266,10 +268,18 @@ bool CameraSocketServerThread::configureCapabilities() {
+                   "expected Id %d",
+                   __FUNCTION__, camera_info[i].cameraId, expctd_cam_id);
+ 
++        ALOGI("received codec type %d", camera_info[i].codec_type);
+         switch (camera_info[i].codec_type) {
+             case uint32_t(VideoCodecType::kH264):
++                gIsInFrameH264 = true;
++                val_client_cap[i].validCodecType = true;
++                break;
+             case uint32_t(VideoCodecType::kI420):
+-            case uint32_t(VideoCodecType::kH265):
++                gIsInFrameI420 = true;
++                val_client_cap[i].validCodecType = true;
++                break;
++            case uint32_t(VideoCodecType::kMJPEG):
++                gIsInFrameMJPG = true;
+                 val_client_cap[i].validCodecType = true;
+                 break;
+             default:
+@@ -607,7 +617,7 @@ bool CameraSocketServerThread::threadLoop() {
+         }
+ 
+         ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+-        char *fbuffer = (char *)handle->clientBuf[handle->clientRevCount % 1].buffer;
++        uint8_t *fbuffer = (uint8_t *)handle->clientBuf[handle->clientRevCount % 1].buffer;
+         // Reset and clear the input buffer before receiving the frames.
+         handle->reset();
+ 
+@@ -636,7 +646,6 @@ bool CameraSocketServerThread::threadLoop() {
+                 // data is available in socket => read data
+                 if (gIsInFrameI420) {
+                      if(trans_mode == VSOCK){
+-
+                         int size_header =0; 
+                         ssize_t size_pending =0; 
+                         //Check if the header type is data
+@@ -686,6 +695,54 @@ bool CameraSocketServerThread::threadLoop() {
+                                __FUNCTION__, handle->clientRevCount, size);
+                         } 
+                     }
++                } else if (gIsInFrameMJPG) { 
++
++                    int size_header =0; 
++                    ssize_t size_pending =0;
++                    ALOGI("it is MJPG irecv the header");
++                    camera_header_t buffer_header = {};
++                    size_header = recv(mClientFd, (char *)&buffer_header, sizeof(camera_header_t), 0);
++                    if (buffer_header.type == CAMERA_DATA) {
++                         uint8_t *mjpeg_buffer = (uint8_t *)malloc(buffer_header.size);
++                         if (mjpeg_buffer == NULL) {
++                             ALOGE(LOG_TAG "%s: buffer allocation failed: %d ", __FUNCTION__, __LINE__);
++                             continue;
++                         }
++                         size_pending = buffer_header.size;
++                         ALOGE("it is MJPG recv buffer size %zd", size_pending);
++                         while (size_pending != 0) {
++                             ssize_t size_data = 0;
++                             ALOGI("it is MJPG recv buffer %zd", size_pending);
++                             size_data = recv(mClientFd, (char *)mjpeg_buffer+size_update, size_pending, 0);
++                             if (size_data < 0) {
++                                 //error handling while in preview
++                                 ALOGE(LOG_TAG "entered into recv error, break to recover");
++                                 continue;
++                              }
++                              size_update += size_data;
++                              size_pending -= size_data;
++                              if (size_pending == 0) {
++                                  handle->clientRevCount++;
++                                  size_update = 0;
++                                 
++                                  ALOGV(LOG_TAG
++                                      "[MJPEG] %s: Packet rev %d and "
++                                      "size %zd",
++                                      __FUNCTION__, handle->clientRevCount, size_data);
++                                  break;
++                              }
++                          }
++                          int res = libyuv::MJPGToI420(
++                          mjpeg_buffer, buffer_header.size, static_cast<uint8_t*>(fbuffer), gCameraMaxWidth,
++                          static_cast<uint8_t*>(fbuffer + (gCameraMaxWidth * gCameraMaxHeight)), (gCameraMaxWidth / 2),
++                          static_cast<uint8_t*>(fbuffer + (gCameraMaxWidth * gCameraMaxHeight) + ((gCameraMaxWidth * gCameraMaxHeight) / 4)), (gCameraMaxWidth / 2),
++                          gCameraMaxWidth, gCameraMaxHeight, gCameraMaxWidth, gCameraMaxHeight);
++                          if (res != 0) {
++                              ALOGE("updated fail to convert MJPG to I420 ret %d  and sz %d", res, buffer_header.size);
++                          }
++                          free(mjpeg_buffer);
++                    } else
++                        ALOGE("MJPEG received NOT OK");
+                 } else if (gIsInFrameH264) {  // default H264
+ #ifdef ENABLE_FFMPEG
+                     ssize_t size = 0;
+@@ -768,7 +825,7 @@ bool CameraSocketServerThread::threadLoop() {
+ #endif
+                 } else {
+                     ALOGE(
+-                        "%s: Only H264, H265, I420 Input frames are supported. Check Input format",
++                        "%s: Only H264, I420 Input frames are supported. Check Input format",
+                         __FUNCTION__);
+                 }
+             } else {
+diff --git a/src/VirtualCameraFactory.cpp b/src/VirtualCameraFactory.cpp
+index e463174..7c76c58 100644
+--- a/src/VirtualCameraFactory.cpp
++++ b/src/VirtualCameraFactory.cpp
+@@ -43,6 +43,7 @@ namespace android {
+ 
+ bool gIsInFrameI420;
+ bool gIsInFrameH264;
++bool gIsInFrameMJPG;
+ bool gUseVaapi;
+ 
+ void VirtualCameraFactory::readSystemProperties() {
+@@ -54,10 +55,12 @@ void VirtualCameraFactory::readSystemProperties() {
+     property_get("ro.vendor.camera.in_frame_format.i420", prop_val, "false");
+     gIsInFrameI420 = !strcmp(prop_val, "true");
+     //D TODO
+-     gIsInFrameI420 = true;
+     property_get("ro.vendor.camera.decode.vaapi", prop_val, "false");
+     gUseVaapi = !strcmp(prop_val, "true");
+ 
++    gIsInFrameH264 = false;
++    gIsInFrameI420 = false;
++    gIsInFrameMJPG = false;
+     ALOGI("%s - gIsInFrameH264: %d, gIsInFrameI420: %d, gUseVaapi: %d", __func__, gIsInFrameH264,
+           gIsInFrameI420, gUseVaapi);
+ }
+diff --git a/src/fake-pipeline2/Sensor.cpp b/src/fake-pipeline2/Sensor.cpp
+index 2877074..15c4757 100644
+--- a/src/fake-pipeline2/Sensor.cpp
++++ b/src/fake-pipeline2/Sensor.cpp
+@@ -609,7 +609,7 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     #endif
+     int cameraInputDataSize;
+ 
+-    if (!gIsInFrameI420 && !gIsInFrameH264) {
++    if (!gIsInFrameI420 && !gIsInFrameH264 && !gIsInFrameMJPG) {
+         ALOGE("%s Exit - only H264, H265, I420 input frames supported", __FUNCTION__);
+         return;
+     }
+@@ -639,7 +639,7 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+ 
+     // For Max supported Resolution.
+     if (width == (uint32_t)mSrcWidth && height == (uint32_t)mSrcHeight) {
+-        if (gIsInFrameI420) {
++        if (gIsInFrameI420 || gIsInFrameMJPG) {
+             ALOGVV(LOG_TAG " %s: I420, scaling not required: Size = %dx%d", __FUNCTION__, width,
+                    height);
+             const uint8_t *src_y = bufData;
+@@ -671,7 +671,7 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+         }
+         // For upscaling and downscaling all other resolutions below max supported resolution.
+     } else {
+-        if (gIsInFrameI420) {
++        if (gIsInFrameI420 || gIsInFrameMJPG) {
+             ALOGVV(LOG_TAG " %s: I420, need to scale: Size = %dx%d", __FUNCTION__, width, height);
+             int destFrameSize = width * height;
+ 
+@@ -854,7 +854,7 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     ALOGVV(LOG_TAG " %s: bufData[%p] img[%p] resolution[%d:%d]", __func__, bufData, img, width,
+            height);
+ 
+-    if (!gIsInFrameI420 && !gIsInFrameH264) {
++    if (!gIsInFrameI420 && !gIsInFrameH264 && !gIsInFrameMJPG) {
+         ALOGE("%s Exit - only H264, I420 input frames supported", __FUNCTION__);
+         return;
+     }
+@@ -884,7 +884,7 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+ 
+     // For Max supported Resolution.
+     if (width == (uint32_t)mSrcWidth && height == (uint32_t)mSrcHeight) {
+-        if (gIsInFrameI420) {
++        if (gIsInFrameI420 || gIsInFrameMJPG) {
+             // For I420 input support
+             ALOGVV(LOG_TAG " %s: I420 no scaling required Size = %dx%d", __FUNCTION__, width,
+                    height);
+@@ -919,7 +919,7 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+         }
+         // For upscaling and downscaling all other resolutions below max supported resolution.
+     } else {
+-        if (gIsInFrameI420) {
++        if (gIsInFrameI420 || gIsInFrameMJPG) {
+             // For I420 input support
+             ALOGVV(LOG_TAG " %s: I420 with scaling: Size = %dx%d", __FUNCTION__, width, height);
+ 
+-- 
+2.17.1
+
