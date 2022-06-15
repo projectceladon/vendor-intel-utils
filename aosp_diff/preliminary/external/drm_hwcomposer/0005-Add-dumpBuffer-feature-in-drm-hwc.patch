@@ -1,0 +1,379 @@
+From a3744cc2bd424be1417fdc070247207988096261 Mon Sep 17 00:00:00 2001
+From: "wei, wushuangx" <wushuangx.wei@intel.com>
+Date: Wed, 15 Jun 2022 16:38:19 +0800
+Subject: [PATCH] Add dumpBuffer feature in drm-hwc
+
+Enable dumpBuffer for debug purpose. when necessary, DumpBuffer() function is called to execute.
+After "setenforce 0" is executed in the shell, dumpfiles will be generated in the /data/local/tarce directory
+
+Tracked-On: OAM-102488
+Signed-off-by: wei, wushuangx <wushuangx.wei@intel.com>
+---
+ bufferinfo/BufferInfoGetter.cpp         |   4 +-
+ bufferinfo/legacy/BufferInfoMinigbm.cpp | 205 +++++++++++++++++++++++-
+ bufferinfo/legacy/BufferInfoMinigbm.h   |   8 +
+ include/drmhwcomposer.h                 |  57 +++++++
+ 4 files changed, 272 insertions(+), 2 deletions(-)
+
+diff --git a/bufferinfo/BufferInfoGetter.cpp b/bufferinfo/BufferInfoGetter.cpp
+index 7f7f8ae..e83fca2 100644
+--- a/bufferinfo/BufferInfoGetter.cpp
++++ b/bufferinfo/BufferInfoGetter.cpp
+@@ -28,6 +28,8 @@
+ #include "utils/log.h"
+ #include "utils/properties.h"
+ 
++#include "bufferinfo/legacy/BufferInfoMinigbm.h"
++
+ namespace android {
+ 
+ BufferInfoGetter *BufferInfoGetter::GetInstance() {
+@@ -58,6 +60,7 @@ bool BufferInfoGetter::IsHandleUsable(buffer_handle_t handle) {
+   if (bo.prime_fds[0] == 0) {
+     return false;
+   }
++  
+   return true;
+ }
+ 
+@@ -116,5 +119,4 @@ LegacyBufferInfoGetter::CreateInstance() {
+   ALOGE("No legacy buffer info getters available");
+   return nullptr;
+ }
+-
+ }  // namespace android
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.cpp b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+index d030dff..da8d8d3 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.cpp
++++ b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+@@ -21,13 +21,64 @@
+ #include <xf86drm.h>
+ #include <xf86drmMode.h>
+ 
+-#include "cros_gralloc_handle.h"
++#include <ui/GraphicBufferMapper.h>
++
++#include <drm_fourcc.h>
++
++#include "drmhwcomposer.h"
+ #include "utils/log.h"
+ 
+ #define DRM_FORMAT_YVU420_ANDROID fourcc_code('9', '9', '9', '7')
+ 
+ namespace android {
+ 
++enum { HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL = 0x100,
++       HAL_PIXEL_FORMAT_NV12_LINEAR_INTEL = 0x101,
++       HAL_PIXEL_FORMAT_YCrCb_422_H_INTEL = 0x102,
++       HAL_PIXEL_FORMAT_NV12_LINEAR_PACKED_INTEL = 0x103,
++       HAL_PIXEL_FORMAT_YCbCr_422_H_INTEL = 0x104,
++       HAL_PIXEL_FORMAT_NV12_X_TILED_INTEL = 0x105,
++       HAL_PIXEL_FORMAT_RGBA_5551_INTEL = 0x106,
++       HAL_PIXEL_FORMAT_RGBA_4444_INTEL = 0x107,
++       HAL_PIXEL_FORMAT_GENERIC_8BIT_INTEL = 0x108,
++       HAL_PIXEL_FORMAT_YCbCr_411_INTEL = 0x109,
++       HAL_PIXEL_FORMAT_YCbCr_420_H_INTEL = 0x10A,
++       HAL_PIXEL_FORMAT_YCbCr_422_V_INTEL = 0x10B,
++       HAL_PIXEL_FORMAT_YCbCr_444_INTEL = 0x10C,
++       HAL_PIXEL_FORMAT_RGBP_INTEL = 0x10D,
++       HAL_PIXEL_FORMAT_BGRP_INTEL = 0x10E,
++       HAL_PIXEL_FORMAT_NV12_LINEAR_CAMERA_INTEL = 0x10F,
++       HAL_PIXEL_FORMAT_P010_INTEL = 0x110,
++       HAL_PIXEL_FORMAT_Z16_INTEL = 0x111,
++       HAL_PIXEL_FORMAT_UVMAP64_INTEL = 0x112,
++       HAL_PIXEL_FORMAT_A2R10G10B10_INTEL = 0x113,
++       HAL_PIXEL_FORMAT_A2B10G10R10_INTEL = 0x114,
++       HAL_PIXEL_FORMAT_YCrCb_NORMAL_INTEL = 0x115,
++       HAL_PIXEL_FORMAT_YCrCb_SWAPUVY_INTEL = 0x116,
++       HAL_PIXEL_FORMAT_YCrCb_SWAPUV_INTEL = 0x117,
++       HAL_PIXEL_FORMAT_YCrCb_SWAPY_INTEL = 0x118,
++       HAL_PIXEL_FORMAT_X2R10G10B10_INTEL = 0x119,
++       HAL_PIXEL_FORMAT_X2B10G10R10_INTEL = 0x11A,
++       HAL_PIXEL_FORMAT_P016_INTEL = 0x11C,
++       HAL_PIXEL_FORMAT_Y210_INTEL = 0x11D,
++       HAL_PIXEL_FORMAT_Y216_INTEL = 0x11E,
++       HAL_PIXEL_FORMAT_Y410_INTEL = 0x11F,
++       HAL_PIXEL_FORMAT_Y416_INTEL = 0x120,
++       HAL_PIXEL_FORMAT_Y8I_INTEL = 0x121,
++       HAL_PIXEL_FORMAT_Y12I_INTEL = 0x122,
++       HAL_PIXEL_FORMAT_YUYV_INTEL = HAL_PIXEL_FORMAT_YCrCb_NORMAL_INTEL,
++       HAL_PIXEL_FORMAT_YUY2_INTEL = HAL_PIXEL_FORMAT_YCrCb_NORMAL_INTEL,
++       HAL_PIXEL_FORMAT_VYUY_INTEL = HAL_PIXEL_FORMAT_YCrCb_SWAPUVY_INTEL,
++       HAL_PIXEL_FORMAT_YVYU_INTEL = HAL_PIXEL_FORMAT_YCrCb_SWAPUV_INTEL,
++       HAL_PIXEL_FORMAT_UYVY_INTEL = HAL_PIXEL_FORMAT_YCrCb_SWAPY_INTEL,
++       HAL_PIXEL_FORMAT_NV12_TILED_INTEL = HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL,
++       HAL_PIXEL_FORMAT_NV12_INTEL = HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL,
++       HAL_PIXEL_FORMAT_INTEL_NV12 = HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL,
++       HAL_PIXEL_FORMAT_NV12 = 0x10F,
++       HAL_PIXEL_FORMAT_YUV420PackedSemiPlanar_INTEL = 0x7FA00E00,
++       HAL_PIXEL_FORMAT_YUV420PackedSemiPlanar_Tiled_INTEL = 0x7FA00F00,
++};
++
+ LEGACY_BUFFER_INFO_GETTER(BufferInfoMinigbm);
+ 
+ int BufferInfoMinigbm::ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) {
+@@ -55,4 +106,156 @@ int BufferInfoMinigbm::ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) {
+   return 0;
+ }
+ 
++
++void BufferInfoMinigbm::DumpBuffer(buffer_handle_t handle) {
++  if (NULL == handle)
++    return;
++  char dump_file[256] = {0};
++  cros_gralloc_handle *gr_handle = (cros_gralloc_handle *)handle;
++  native_handle_t *handle_copy;
++  uint8_t* pixels = nullptr;
++  GraphicBufferMapper &gm(GraphicBufferMapper::get());
++  int ret = gm.importBuffer(handle, gr_handle->width, gr_handle->height, 1,
++                          DrmFormatToHALFormat(gr_handle->format), gr_handle->usage,
++                          gr_handle->pixel_stride, const_cast<buffer_handle_t *>(&handle_copy));
++
++  if (ret != 0) {
++    ALOGE("Failed to import buffer while dumping");
++  } else {
++    ret = gm.lock(handle_copy, GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_NEVER,
++                     Rect(gr_handle->width, gr_handle->height), reinterpret_cast<void**>(&pixels));
++    if (ret != 0) {
++      ALOGE("Failed to lock buffer while dumping");
++    } else {
++      char ctime[32];
++      time_t t = time(0);
++      static int i = 0;
++      if (i >= 1000)
++        i = 0;
++      strftime(ctime, sizeof(ctime), "%Y-%m-%d", localtime(&t));
++      sprintf(dump_file, "/data/local/traces/dump_%dx%d_0x%x_%s_%d", gr_handle->width, gr_handle->height, gr_handle->format, ctime,i++);
++      int file_fd = 0;
++      file_fd = open(dump_file, O_RDWR|O_CREAT, 0666);
++      if (file_fd == -1) {
++        ALOGE("Failed to open %s while dumping", dump_file);
++      } else {
++        write(file_fd, pixels, gr_handle->sizes[0]);
++        close(file_fd);
++      }
++      gm.unlock(handle_copy);
++      gm.freeBuffer(handle_copy);
++    }
++  }
++}  
++
++int DrmFormatToHALFormat(int format) {
++  switch (format) {
++    case DRM_FORMAT_BGRA8888:
++      return HAL_PIXEL_FORMAT_RGBA_8888;
++    case DRM_FORMAT_BGRX8888:
++      return HAL_PIXEL_FORMAT_RGBX_8888;
++    case DRM_FORMAT_BGR888:
++      return HAL_PIXEL_FORMAT_RGB_888;
++    case DRM_FORMAT_BGR565:
++      return HAL_PIXEL_FORMAT_RGB_565;
++    case DRM_FORMAT_ARGB8888:
++      return HAL_PIXEL_FORMAT_BGRA_8888;
++    case DRM_FORMAT_YVU420:
++      return HAL_PIXEL_FORMAT_YV12;
++    case DRM_FORMAT_R8:
++      return HAL_PIXEL_FORMAT_BLOB;
++    case DRM_FORMAT_GR88:
++    case DRM_FORMAT_R16:
++      return HAL_PIXEL_FORMAT_Y16;
++    case DRM_FORMAT_ABGR8888:
++      return HAL_PIXEL_FORMAT_RGBA_8888;
++    case DRM_FORMAT_RGB332:  //('R', 'G', 'B', '8') /* [7:0] R:G:B 3:3:2 */
++      return 0;
++    case DRM_FORMAT_BGR233:  //('B', 'G', 'R', '8') /* [7:0] B:G:R 2:3:3 */
++      return 0;
++
++    case DRM_FORMAT_XRGB4444:
++    case DRM_FORMAT_XBGR4444:
++    case DRM_FORMAT_RGBX4444:
++    case DRM_FORMAT_BGRX4444:
++    case DRM_FORMAT_ARGB4444:
++    case DRM_FORMAT_ABGR4444:
++    case DRM_FORMAT_RGBA4444:
++    case DRM_FORMAT_BGRA4444:
++      return 0;
++    case DRM_FORMAT_XRGB1555:
++    case DRM_FORMAT_XBGR1555:
++    case DRM_FORMAT_RGBX5551:
++    case DRM_FORMAT_BGRX5551:
++    case DRM_FORMAT_ARGB1555:
++    case DRM_FORMAT_ABGR1555:
++    case DRM_FORMAT_RGBA5551:
++    case DRM_FORMAT_BGRA5551:
++      return 0;
++    case DRM_FORMAT_RGB565:
++      return HAL_PIXEL_FORMAT_RGB_565;
++    case DRM_FORMAT_RGB888:
++      return HAL_PIXEL_FORMAT_RGB_888;
++    case DRM_FORMAT_XRGB8888:
++    case DRM_FORMAT_XBGR8888:
++    case DRM_FORMAT_RGBX8888:
++    case DRM_FORMAT_RGBA8888:
++      return 0;
++    case DRM_FORMAT_ABGR2101010:
++      return HAL_PIXEL_FORMAT_RGBA_1010102;
++    case DRM_FORMAT_XRGB2101010:
++    case DRM_FORMAT_XBGR2101010:
++    case DRM_FORMAT_RGBX1010102:
++    case DRM_FORMAT_BGRX1010102:
++    case DRM_FORMAT_ARGB2101010:
++    case DRM_FORMAT_RGBA1010102:
++    case DRM_FORMAT_BGRA1010102:
++      return 0;
++    case DRM_FORMAT_YUYV:
++      return HAL_PIXEL_FORMAT_YCbCr_422_I;
++    case DRM_FORMAT_YVYU:
++    case DRM_FORMAT_UYVY:
++    case DRM_FORMAT_VYUY:
++    case DRM_FORMAT_AYUV:
++      ALOGE("YUV format using RGB buffer \n");
++      return 0;
++    case DRM_FORMAT_NV12:
++      return HAL_PIXEL_FORMAT_NV12;
++    case DRM_FORMAT_NV21:
++      return HAL_PIXEL_FORMAT_YCrCb_420_SP;
++    case DRM_FORMAT_NV16:
++      return HAL_PIXEL_FORMAT_YCbCr_422_SP;
++    case DRM_FORMAT_NV61:
++    case DRM_FORMAT_YUV410:
++    case DRM_FORMAT_YVU410:
++    case DRM_FORMAT_YUV411:
++    case DRM_FORMAT_YVU411:
++      ALOGE("YUV format using RGB buffer \n");
++      return 0;
++    case DRM_FORMAT_YUV420:
++      return HAL_PIXEL_FORMAT_YCbCr_420_888;
++    case DRM_FORMAT_YVU420_ANDROID:
++      return HAL_PIXEL_FORMAT_YV12;
++    case DRM_FORMAT_YUV422:
++      return HAL_PIXEL_FORMAT_YCbCr_422_888;
++    case DRM_FORMAT_YVU422:
++      ALOGE("YUV format using RGB buffer \n");
++      return 0;
++    case DRM_FORMAT_YUV444:
++      return HAL_PIXEL_FORMAT_YCbCr_444_888;
++    case DRM_FORMAT_YVU444:
++      ALOGE("YUV format using RGB buffer \n");
++      return 0;
++    case DRM_FORMAT_NV12_Y_TILED_INTEL:
++      return HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL;
++    case DRM_FORMAT_P010:
++      return HAL_PIXEL_FORMAT_P010_INTEL;
++    default:
++      return 0;
++      break;
++  }
++
++  return DRM_FORMAT_NONE;
++}
++
+ }  // namespace android
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.h b/bufferinfo/legacy/BufferInfoMinigbm.h
+index bff9d74..e68993d 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.h
++++ b/bufferinfo/legacy/BufferInfoMinigbm.h
+@@ -22,13 +22,21 @@
+ #include "bufferinfo/BufferInfoGetter.h"
+ 
+ namespace android {
++  
++#define DRM_FORMAT_NONE fourcc_code('0', '0', '0', '0')
++#define DRM_FORMAT_YVU420_ANDROID fourcc_code('9', '9', '9', '7')
++#define DRM_FORMAT_NV12_Y_TILED_INTEL fourcc_code('9', '9', '9', '6')
++#define DRM_FORMAT_P010		fourcc_code('P', '0', '1', '0') /* 2x2 subsampled Cr:Cb plane 10 bits per channel */
+ 
+ class BufferInfoMinigbm : public LegacyBufferInfoGetter {
+  public:
+   using LegacyBufferInfoGetter::LegacyBufferInfoGetter;
+   int ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) override;
++  static void DumpBuffer(buffer_handle_t handle);
+ };
+ 
++int DrmFormatToHALFormat(int format) ;
++
+ }  // namespace android
+ 
+ #endif
+diff --git a/include/drmhwcomposer.h b/include/drmhwcomposer.h
+index 22af12b..43c07d7 100644
+--- a/include/drmhwcomposer.h
++++ b/include/drmhwcomposer.h
+@@ -24,10 +24,17 @@
+ 
+ #include <vector>
+ 
++#include <cstdint>
++#include <cutils/native_handle.h>
++
+ #include "drm/DrmFbImporter.h"
+ #include "drmhwcgralloc.h"
+ #include "utils/UniqueFd.h"
+ 
++
++#define DRV_MAX_PLANES 4
++#define DRV_MAX_FDS (DRV_MAX_PLANES + 1)
++
+ namespace android {
+ 
+ class DrmFbIdHandle;
+@@ -72,6 +79,56 @@ struct DrmHwcLayer {
+   }
+ };
+ 
++struct cros_gralloc_handle {
++	native_handle_t base;
++	/*
++	 * File descriptors must immediately follow the native_handle_t base and used file
++	 * descriptors must be packed at the beginning of this array to work with
++	 * native_handle_clone().
++	 *
++	 * This field contains 'num_planes' plane file descriptors followed by an optional metadata
++	 * reserved region file descriptor if 'reserved_region_size' is greater than zero.
++	 */
++	int32_t fds[DRV_MAX_FDS];
++	uint32_t strides[DRV_MAX_PLANES];
++	uint32_t offsets[DRV_MAX_PLANES];
++	uint32_t sizes[DRV_MAX_PLANES];
++	bool from_kms;
++	uint32_t id;
++	uint32_t width;
++	uint32_t height;
++	uint32_t format; /* DRM format */
++	uint64_t format_modifier;
++	uint64_t use_flags; /* Buffer creation flags */
++	uint32_t magic;
++	uint32_t pixel_stride;
++	int32_t droid_format;
++	int32_t usage; /* Android usage. */
++	uint32_t num_planes;
++	uint64_t reserved_region_size;
++	uint64_t total_size; /* Total allocation size */
++	/*
++	 * Name is a null terminated char array located at handle->base.data[handle->name_offset].
++	 */
++	uint32_t name_offset;
++#ifdef USE_GRALLOC1
++	uint32_t consumer_usage;
++	uint32_t producer_usage;
++	uint32_t yuv_color_range;   // YUV Color range.
++	uint32_t is_updated;        // frame updated flag
++	uint32_t is_encoded;        // frame encoded flag
++	uint32_t is_encrypted;
++	uint32_t is_key_frame;
++	uint32_t is_interlaced;
++	uint32_t is_mmc_capable;
++	uint32_t compression_mode;
++	uint32_t compression_hint;
++	uint32_t codec;
++	uint32_t tiling_mode;
++	uint32_t format_modifiers[2 * DRV_MAX_PLANES];
++#endif
++} __attribute__((packed));
++
+ }  // namespace android
+ 
+ #endif
+-- 
+2.36.0
+
