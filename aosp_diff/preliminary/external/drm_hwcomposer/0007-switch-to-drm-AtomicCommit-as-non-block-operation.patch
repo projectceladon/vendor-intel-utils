@@ -1,7 +1,7 @@
-From 9fd375c1edd6e6dbfd358984adc999f3c4f120b3 Mon Sep 17 00:00:00 2001
-From: Fei Jiang <fei.jiang@intel.com>
-Date: Mon, 22 Nov 2021 17:53:31 +0800
-Subject: [PATCH] switch to drm AtomicCommit as non-block operation
+From bc614086fa34e890c6474822e5991f38c3918b63 Mon Sep 17 00:00:00 2001
+From: kanlihu <kanli.hu@intel.com>
+Date: Wed, 15 Jun 2022 20:38:50 +0800
+Subject: [PATCH 1/5] switch to drm AtomicCommit as non-block operation
 
 This is used to resolve framerate downgrade issue when multiple monitors
 connected. If only add DRM_MODE_ATOMIC_NONBLOCK, flashing issue occurred.
@@ -9,14 +9,18 @@ Then we need wait vblank and try commit again.
 For modeset, still can't add DRM_MODE_ATOMIC_NONBLOCK, otherwise,
 hotplug will fail.
 
+v2: by kanli.hu <kanli.hu@intel.com>
+wait last present fence when display new frame
+
 Tracked-On: OAM-99990
 Signed-off-by: Fei Jiang <fei.jiang@intel.com>
 ---
- compositor/DrmDisplayCompositor.cpp | 17 +++++++++++++++++
- 1 file changed, 17 insertions(+)
+ compositor/DrmDisplayCompositor.cpp | 58 ++++++++++++++++++++++++++++-
+ compositor/DrmDisplayCompositor.h   |  2 +
+ 2 files changed, 59 insertions(+), 1 deletion(-)
 
 diff --git a/compositor/DrmDisplayCompositor.cpp b/compositor/DrmDisplayCompositor.cpp
-index e332641..f741b6f 100644
+index e332641..da82c7f 100644
 --- a/compositor/DrmDisplayCompositor.cpp
 +++ b/compositor/DrmDisplayCompositor.cpp
 @@ -30,6 +30,7 @@
@@ -27,17 +31,43 @@ index e332641..f741b6f 100644
  
  #include "drm/DrmCrtc.h"
  #include "drm/DrmDevice.h"
-@@ -504,10 +505,26 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
+@@ -504,16 +505,65 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
  
    if (!ret) {
      uint32_t flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
-+    if (!mode_.needs_modeset)
-+      flags |= DRM_MODE_ATOMIC_NONBLOCK;
-+
-     if (test_only)
+-    if (test_only)
++    bool nonblock = true;
++    if (test_only) {
        flags |= DRM_MODE_ATOMIC_TEST_ONLY;
++      ret = drmModeAtomicCommit(drm->fd(), pset, flags, drm);
++      if (pset)
++        drmModeAtomicFree(pset);
++      return ret;
++    }
++
++    if (last_present_fence_) {
++      ATRACE_NAME("WaitPriorFramePresented");
++      constexpr int kTimeoutMs = 500;
++      int err = sync_wait(last_present_fence_.Get(), kTimeoutMs);
++      if (err != 0) {
++        ALOGE("sync_wait(fd=%i) returned: %i (errno: %i)",
++            last_present_fence_.Get(), err, errno);
++      }
++
++      CleanupPriorFrameResources();
++    }
++
++    if (!mode_.needs_modeset) {
++      nonblock = true;
++    } else {
++      nonblock = false;
++    }
++    if (nonblock) {
++      flags |= DRM_MODE_ATOMIC_NONBLOCK;
++    }
  
      ret = drmModeAtomicCommit(drm->fd(), pset, flags, drm);
++
 +    if (ret == -EBUSY) {
 +      ALOGV("failed to commit with EBUSY, wait for vblank and try again");
 +      drmVBlank vblank;
@@ -48,12 +78,59 @@ index e332641..f741b6f 100644
 +      				 (high_crtc & DRM_VBLANK_HIGH_CRTC_MASK));
 +      vblank.request.type = type_;
 +      drmWaitVBlank(drm->fd(), &vblank);
++      flags &= ~DRM_MODE_ATOMIC_NONBLOCK;
++      nonblock = false;
 +      ret = drmModeAtomicCommit(drm->fd(), pset, flags, drm);
 +    }
 +
      if (ret) {
        if (!test_only)
          ALOGE("Failed to commit pset ret=%d\n", ret);
+       drmModeAtomicFree(pset);
+       return ret;
+     }
++
++    if (nonblock) {
++      last_present_fence_ = UniqueFd(dup((int)out_fences[crtc->pipe()]));
++    } else {
++      last_present_fence_ = {};
++    }
+   }
+   if (pset)
+     drmModeAtomicFree(pset);
+@@ -546,6 +596,12 @@ int DrmDisplayCompositor::CommitFrame(DrmDisplayComposition *display_comp,
+   return ret;
+ }
+ 
++void DrmDisplayCompositor::CleanupPriorFrameResources() {
++  ATRACE_NAME("CleanupPriorFrameResources");
++  last_present_fence_ = {};
++}
++
++
+ int DrmDisplayCompositor::ApplyDpms(DrmDisplayComposition *display_comp) {
+   DrmDevice *drm = resource_manager_->GetDrmDevice(display_);
+   DrmConnector *conn = drm->GetConnectorForDisplay(display_);
+diff --git a/compositor/DrmDisplayCompositor.h b/compositor/DrmDisplayCompositor.h
+index c0eed0c..0e9b464 100644
+--- a/compositor/DrmDisplayCompositor.h
++++ b/compositor/DrmDisplayCompositor.h
+@@ -102,6 +102,7 @@ class DrmDisplayCompositor {
+ 
+   int CommitFrame(DrmDisplayComposition *display_comp, bool test_only);
+   int ApplyDpms(DrmDisplayComposition *display_comp);
++  void CleanupPriorFrameResources();
+   int DisablePlanes(DrmDisplayComposition *display_comp);
+ 
+   void ApplyFrame(std::unique_ptr<DrmDisplayComposition> composition,
+@@ -142,6 +143,7 @@ class DrmDisplayCompositor {
+   uint32_t frames_flattened_;
+ 
+   std::function<void(int)> refresh_display_cb_;
++  UniqueFd last_present_fence_;
+ };
+ }  // namespace android
+ 
 -- 
-2.32.0
+2.31.0
 
