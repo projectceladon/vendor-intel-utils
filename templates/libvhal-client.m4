@@ -31,9 +31,15 @@ dnl
 include(begin.m4)
 
 DECLARE(`LIBVHAL_SRC_REPO',https://github.com/projectceladon/libvhal-client.git)
-DECLARE(`LIBVHAL_CLIENT_VER',ccc3a2c)
+DECLARE(`LIBVHAL_CLIENT_VER',99d3fe9)
+DECLARE(`LIBVHAL_BUILD_EMU',OFF)
 
-define(`LIBVHAL_CLIENT_BUILD_DEPS',ca-certificates cmake gcc g++ git make pkg-config xz-utils)
+define(`LIBVHAL_CLIENT_BUILD_DEPS',`ca-certificates cmake gcc g++ git dnl
+  ifelse(LIBVHAL_BUILD_EMU,ON,libyaml-cpp-dev) dnl
+  make pkg-config xz-utils')
+
+define(`LIBVHAL_CLIENT_INSTALL_DEPS',`dnl
+  ifelse(LIBVHAL_BUILD_EMU,ON,libyaml-cpp0.7)')
 
 define(`BUILD_LIBVHAL_CLIENT',`dnl
 ARG LIBVHAL_CLIENT_REPO=LIBVHAL_SRC_REPO
@@ -44,6 +50,7 @@ RUN git clone $LIBVHAL_CLIENT_REPO BUILD_HOME/libvhal-client && \
   cmake -DCMAKE_INSTALL_PREFIX=BUILD_PREFIX \
         -DCMAKE_INSTALL_LIBDIR=BUILD_LIBDIR \
         -DBUILD_EXAMPLES=OFF \
+        -DBUILD_EMULATOR_APP=LIBVHAL_BUILD_EMU \
         .. && \
   make -j$(nproc) && \
   make install DESTDIR=BUILD_DESTDIR && \
