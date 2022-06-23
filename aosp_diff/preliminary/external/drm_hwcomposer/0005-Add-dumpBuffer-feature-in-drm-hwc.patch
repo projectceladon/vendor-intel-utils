@@ -1,0 +1,271 @@
+From bad65a2fa96cc237f8169f6ac08c28a87d274587 Mon Sep 17 00:00:00 2001
+From: "wei, wushuangx" <wushuangx.wei@intel.com>
+Date: Thu, 23 Jun 2022 16:14:52 +0800
+Subject: [PATCH] Add dumpBuffer feature in drm-hwc
+
+Enable dumpBuffer for debug purpose. when necessary, DumpBuffer() function is called to execute.
+After "setenforce 0" is executed in the shell, dumpfiles will be generated in the /data/local/tarce directory
+
+Tracked-On: OAM-102488
+Signed-off-by: wei, wushuangx <wushuangx.wei@intel.com>
+---
+ DrmHwcTwo.cpp                           |   2 +
+ bufferinfo/legacy/BufferInfoMinigbm.cpp | 101 +++++++++++++++++++++++-
+ bufferinfo/legacy/BufferInfoMinigbm.h   |  65 +++++++++++++++
+ drm/DrmDevice.h                         |   2 +
+ utils/hwcutils.cpp                      |   4 +
+ 5 files changed, 173 insertions(+), 1 deletion(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index 194b11e..d50675d 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -35,6 +35,7 @@
+ #include "compositor/DrmDisplayComposition.h"
+ #include "utils/log.h"
+ #include "utils/properties.h"
++#include "bufferinfo/legacy/BufferInfoMinigbm.h"
+ 
+ namespace android {
+ 
+@@ -292,6 +293,7 @@ HWC2::Error DrmHwcTwo::HwcDisplay::Init(std::vector<DrmPlane *> *planes) {
+     return HWC2::Error::BadDisplay;
+   }
+ 
++  BufferInfoMinigbm::InitializeDumpBuffer(drm_);
+   return ChosePreferredConfig();
+ }
+ 
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.cpp b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+index d030dff..2692c4b 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.cpp
++++ b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+@@ -55,4 +55,103 @@ int BufferInfoMinigbm::ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) {
+   return 0;
+ }
+ 
+-}  // namespace android
++void BufferInfoMinigbm::DumpBuffer(DrmDevice *drmDevice, buffer_handle_t handle) {
++  if (NULL == handle)
++    return;
++  char dump_file[256] = {0};
++  cros_drm_handle *drm_handle = (cros_drm_handle *)handle;
++  buffer_handle_t handle_copy;
++  uint8_t* pixels = nullptr;
++  gralloc1_rect_t accessRegion;
++
++  struct dri2_drm_display *dri_drm = (dri2_drm_display *)drmDevice->dri_drm;
++
++  if (!dri_drm) {
++    ALOGE("Gralloc DumpBuffer Initialize failed");
++    return;
++  }
++
++  if (!dri_drm->pfn_importBuffer) {
++    ALOGE("Gralloc does not support importBuffer");
++    return;
++  }
++  int ret = dri_drm->pfn_importBuffer(dri_drm->gralloc1_dvc, handle, &handle_copy);
++  if (ret) {
++    ALOGE("Gralloc importBuffer failed");
++    return;
++  }
++
++  if (!dri_drm->pfn_lock) {
++    ALOGE("Gralloc does not support lock");
++    return;
++  }
++  ret = dri_drm->pfn_lock(dri_drm->gralloc1_dvc, handle_copy,
++                                    0, 0, &accessRegion, reinterpret_cast<void**>(&pixels), -1);
++  if (ret) {
++    ALOGE("gralloc->lock failed: %d", ret);
++    return;
++  } else {
++    char ctime[32];
++    time_t t = time(0);
++    static int i = 0;
++    if (i >= 1000)
++      i = 0;
++    strftime(ctime, sizeof(ctime), "%Y-%m-%d", localtime(&t));
++    sprintf(dump_file, "/data/local/traces/dump_%dx%d_0x%x_%s_%d", drm_handle->width, drm_handle->height, drm_handle->format, ctime,i++);
++    int file_fd = 0;
++    file_fd = open(dump_file, O_RDWR|O_CREAT, 0666);
++    if (file_fd == -1) {
++      ALOGE("Failed to open %s while dumping", dump_file);
++    } else {
++      write(file_fd, pixels, drm_handle->sizes[0]);
++      close(file_fd);
++    }
++
++    int outReleaseFence = 0;
++    dri_drm->pfn_unlock(dri_drm->gralloc1_dvc, handle_copy, &outReleaseFence);
++    if (!dri_drm->pfn_release) {
++      ALOGE("Gralloc does not support release");
++      return;
++    }
++    ret = dri_drm->pfn_release(dri_drm->gralloc1_dvc, handle_copy);
++    if (ret) {
++      ALOGE("Gralloc release failed");
++      return;
++    }
++  }
++}
++
++void BufferInfoMinigbm::InitializeDumpBuffer(DrmDevice *drmDevice) {
++  hw_device_t *device;
++
++  struct dri2_drm_display *dri_drm = (dri2_drm_display *)calloc(1, sizeof(*dri_drm));
++  if (!dri_drm)
++    return;
++
++  dri_drm->fd = -1;
++  int ret = hw_get_module(GRALLOC_HARDWARE_MODULE_ID,
++                      (const hw_module_t **)&dri_drm->gralloc);
++  if (ret) {
++    return;
++  }
++
++  dri_drm->gralloc_version = dri_drm->gralloc->common.module_api_version;
++  if (dri_drm->gralloc_version == HARDWARE_MODULE_API_VERSION(1, 0)) {
++    ret = dri_drm->gralloc->common.methods->open(&dri_drm->gralloc->common, GRALLOC_HARDWARE_MODULE_ID, &device);
++    if (ret) {
++      ALOGE("Failed to open device");
++      return;
++    } else {
++      ALOGE("success to open device, Initialize");
++      dri_drm->gralloc1_dvc = (gralloc1_device_t *)device;
++      dri_drm->pfn_lock = (GRALLOC1_PFN_LOCK)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_LOCK);
++      dri_drm->pfn_importBuffer = (GRALLOC1_PFN_IMPORT_BUFFER)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc,GRALLOC1_FUNCTION_IMPORT_BUFFER);
++      dri_drm->pfn_release = (GRALLOC1_PFN_RELEASE)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_RELEASE);
++      dri_drm->pfn_unlock = (GRALLOC1_PFN_UNLOCK)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_UNLOCK);
++      drmDevice->dri_drm = (void *)dri_drm;
++      }
++    }
++  return;
++};
++
++}  // namespace android
+\ No newline at end of file
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.h b/bufferinfo/legacy/BufferInfoMinigbm.h
+index bff9d74..7e2a9d1 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.h
++++ b/bufferinfo/legacy/BufferInfoMinigbm.h
+@@ -18,15 +18,80 @@
+ #define BUFFERINFOMINIGBM_H_
+ 
+ #include <hardware/gralloc.h>
++#include <hardware/gralloc1.h>
+ 
+ #include "bufferinfo/BufferInfoGetter.h"
+ 
++#define DRV_MAX_PLANES 4
++#define DRV_MAX_FDS (DRV_MAX_PLANES + 1)
++
++enum INITIALIZE_ERROR{
++	INITIALIZE_CALLOC_ERROR = 1,
++	INITIALIZE_GET_MODULE_ERROR,
++	INITIALIZE_OPEN_DEVICE_ERROR,
++	INITIALIZE_NONE = 0,
++};
++
++struct cros_drm_handle {
++	native_handle_t base;
++	int32_t fds[DRV_MAX_FDS];
++	uint32_t strides[DRV_MAX_PLANES];
++	uint32_t offsets[DRV_MAX_PLANES];
++	uint32_t sizes[DRV_MAX_PLANES];
++	bool from_kms;
++	uint32_t id;
++	uint32_t width;
++	uint32_t height;
++	uint32_t format; /* DRM format */
++	uint64_t format_modifier;
++	uint64_t use_flags; /* Buffer creation flags */
++	uint32_t magic;
++	uint32_t pixel_stride;
++	int32_t droid_format;
++	int32_t usage; /* Android usage. */
++	uint32_t num_planes;
++	uint64_t reserved_region_size;
++	uint64_t total_size; /* Total allocation size */
++	uint32_t name_offset;
++#ifdef USE_GRALLOC1
++	uint32_t consumer_usage;
++	uint32_t producer_usage;
++	uint32_t yuv_color_range;   // YUV Color range.
++	uint32_t is_updated;        // frame updated flag
++	uint32_t is_encoded;        // frame encoded flag
++	uint32_t is_encrypted;
++	uint32_t is_key_frame;
++	uint32_t is_interlaced;
++	uint32_t is_mmc_capable;
++	uint32_t compression_mode;
++	uint32_t compression_hint;
++	uint32_t codec;
++	uint32_t tiling_mode;
++	uint32_t format_modifiers[2 * DRV_MAX_PLANES];
++#endif
++}__attribute__((packed));
++
++struct dri2_drm_display
++{
++   int fd;
++   const gralloc_module_t *gralloc;
++   uint16_t gralloc_version;
++   gralloc1_device_t *gralloc1_dvc;
++   GRALLOC1_PFN_LOCK pfn_lock;
++   GRALLOC1_PFN_GET_FORMAT pfn_getFormat;
++   GRALLOC1_PFN_UNLOCK pfn_unlock;
++   GRALLOC1_PFN_IMPORT_BUFFER pfn_importBuffer;
++   GRALLOC1_PFN_RELEASE pfn_release;
++};
++
+ namespace android {
+ 
+ class BufferInfoMinigbm : public LegacyBufferInfoGetter {
+  public:
+   using LegacyBufferInfoGetter::LegacyBufferInfoGetter;
+   int ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) override;
++  static void InitializeDumpBuffer(DrmDevice *drmDevice);
++  static void DumpBuffer(DrmDevice *drmDevice, buffer_handle_t handle);
+ };
+ 
+ }  // namespace android
+diff --git a/drm/DrmDevice.h b/drm/DrmDevice.h
+index a84d1f9..dd8638f 100644
+--- a/drm/DrmDevice.h
++++ b/drm/DrmDevice.h
+@@ -97,6 +97,8 @@ class DrmDevice {
+     return *mDrmFbImporter.get();
+   }
+ 
++  void *dri_drm;
++
+  private:
+   int TryEncoderForDisplay(int display, DrmEncoder *enc);
+   int GetProperty(uint32_t obj_id, uint32_t obj_type, const char *prop_name,
+diff --git a/utils/hwcutils.cpp b/utils/hwcutils.cpp
+index 6de6500..b1ebfd5 100644
+--- a/utils/hwcutils.cpp
++++ b/utils/hwcutils.cpp
+@@ -24,6 +24,7 @@
+ #include "bufferinfo/BufferInfoGetter.h"
+ #include "drm/DrmFbImporter.h"
+ #include "drmhwcomposer.h"
++#include "bufferinfo/legacy/BufferInfoMinigbm.h"
+ 
+ #define UNUSED(x) (void)(x)
+ 
+@@ -45,6 +46,9 @@ int DrmHwcLayer::ImportBuffer(DrmDevice *drmDevice) {
+     return -EINVAL;
+   }
+ 
++#ifdef DRM_DUMPBUFFER_ON
++  BufferInfoMinigbm::DumpBuffer(drmDevice, sf_handle);
++#endif
+   return 0;
+ }
+ 
+-- 
+2.36.0
+
