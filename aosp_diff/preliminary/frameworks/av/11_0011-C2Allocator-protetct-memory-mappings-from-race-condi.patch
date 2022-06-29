@@ -1,0 +1,197 @@
+From 4dad4322da9ace6a79af4c4678c3e497d2be5fb6 Mon Sep 17 00:00:00 2001
+From: Sungtak Lee <taklee@google.com>
+Date: Thu, 14 Apr 2022 20:37:33 -0700
+Subject: [PATCH] C2Allocator: protetct memory mappings from race condition
+
+Protect memory mappings of C2DmaBufAllocator from race condition. Clean
+up C2AllocatorIon also.
+
+Bug: 213850092
+Merged-In: Icf6d00491438176e9092b67974a9388e803ac130
+Change-Id: Icf6d00491438176e9092b67974a9388e803ac130
+(cherry picked from commit 530a22aaa005efbc51b5a283601c9c7872f2d757)
+(cherry picked from commit 5cbca291a6d288fa6d471c0dc223537ca12700d3)
+Merged-In: Icf6d00491438176e9092b67974a9388e803ac130
+---
+ media/codec2/vndk/C2AllocatorIon.cpp    | 53 ++++++++++++-------------
+ media/codec2/vndk/C2DmaBufAllocator.cpp | 19 +++++----
+ 2 files changed, 36 insertions(+), 36 deletions(-)
+
+diff --git a/media/codec2/vndk/C2AllocatorIon.cpp b/media/codec2/vndk/C2AllocatorIon.cpp
+index 7b593eeeeb..a6a733ebd2 100644
+--- a/media/codec2/vndk/C2AllocatorIon.cpp
++++ b/media/codec2/vndk/C2AllocatorIon.cpp
+@@ -31,6 +31,7 @@
+ #include <C2HandleIonInternal.h>
+ 
+ #include <android-base/properties.h>
++#include <media/stagefright/foundation/Mutexed.h>
+ 
+ namespace android {
+ 
+@@ -180,7 +181,7 @@ public:
+     c2_status_t map(size_t offset, size_t size, C2MemoryUsage usage, C2Fence *fence, void **addr) {
+         (void)fence; // TODO: wait for fence
+         *addr = nullptr;
+-        if (!mMappings.empty()) {
++        if (!mMappings.lock()->empty()) {
+             ALOGV("multiple map");
+             // TODO: technically we should return DUPLICATE here, but our block views don't
+             // actually unmap, so we end up remapping an ion buffer multiple times.
+@@ -207,47 +208,44 @@ public:
+ 
+         c2_status_t err = mapInternal(mapSize, mapOffset, alignmentBytes, prot, flags, &(map.addr), addr);
+         if (map.addr) {
+-            std::lock_guard<std::mutex> guard(mMutexMappings);
+-            mMappings.push_back(map);
++            mMappings.lock()->push_back(map);
+         }
+         return err;
+     }
+ 
+     c2_status_t unmap(void *addr, size_t size, C2Fence *fence) {
+-        if (mMappings.empty()) {
++        Mutexed<std::list<Mapping>>::Locked mappings(mMappings);
++        if (mappings->empty()) {
+             ALOGD("tried to unmap unmapped buffer");
+             return C2_NOT_FOUND;
+         }
+-        { // Scope for the lock_guard of mMutexMappings.
+-            std::lock_guard<std::mutex> guard(mMutexMappings);
+-            for (auto it = mMappings.begin(); it != mMappings.end(); ++it) {
+-                if (addr != (uint8_t *)it->addr + it->alignmentBytes ||
+-                        size + it->alignmentBytes != it->size) {
+-                    continue;
+-                }
+-                int err = munmap(it->addr, it->size);
+-                if (err != 0) {
+-                    ALOGD("munmap failed");
+-                    return c2_map_errno<EINVAL>(errno);
+-                }
+-                if (fence) {
+-                    *fence = C2Fence(); // not using fences
+-                }
+-                (void)mMappings.erase(it);
+-                ALOGV("successfully unmapped: addr=%p size=%zu fd=%d", addr, size,
+-                          mHandle.bufferFd());
+-                return C2_OK;
++        for (auto it = mappings->begin(); it != mappings->end(); ++it) {
++            if (addr != (uint8_t *)it->addr + it->alignmentBytes ||
++                    size + it->alignmentBytes != it->size) {
++                continue;
+             }
++            int err = munmap(it->addr, it->size);
++            if (err != 0) {
++                ALOGD("munmap failed");
++                return c2_map_errno<EINVAL>(errno);
++            }
++            if (fence) {
++                *fence = C2Fence(); // not using fences
++            }
++            (void)mappings->erase(it);
++            ALOGV("successfully unmapped: addr=%p size=%zu fd=%d", addr, size,
++                      mHandle.bufferFd());
++            return C2_OK;
+         }
+         ALOGD("unmap failed to find specified map");
+         return C2_BAD_VALUE;
+     }
+ 
+     virtual ~Impl() {
+-        if (!mMappings.empty()) {
++        Mutexed<std::list<Mapping>>::Locked mappings(mMappings);
++        if (!mappings->empty()) {
+             ALOGD("Dangling mappings!");
+-            std::lock_guard<std::mutex> guard(mMutexMappings);
+-            for (const Mapping &map : mMappings) {
++            for (const Mapping &map : *mappings) {
+                 (void)munmap(map.addr, map.size);
+             }
+         }
+@@ -325,8 +323,7 @@ protected:
+         size_t alignmentBytes;
+         size_t size;
+     };
+-    std::list<Mapping> mMappings;
+-    std::mutex mMutexMappings;
++    Mutexed<std::list<Mapping>> mMappings;
+ };
+ 
+ class C2AllocationIon::ImplV2 : public C2AllocationIon::Impl {
+diff --git a/media/codec2/vndk/C2DmaBufAllocator.cpp b/media/codec2/vndk/C2DmaBufAllocator.cpp
+index 1aa3d69c0c..c470171935 100644
+--- a/media/codec2/vndk/C2DmaBufAllocator.cpp
++++ b/media/codec2/vndk/C2DmaBufAllocator.cpp
+@@ -31,6 +31,7 @@
+ #include <list>
+ 
+ #include <android-base/properties.h>
++#include <media/stagefright/foundation/Mutexed.h>
+ 
+ namespace android {
+ 
+@@ -161,7 +162,7 @@ class C2DmaBufAllocation : public C2LinearAllocation {
+         size_t alignmentBytes;
+         size_t size;
+     };
+-    std::list<Mapping> mMappings;
++    Mutexed<std::list<Mapping>> mMappings;
+ 
+     // TODO: we could make this encapsulate shared_ptr and copiable
+     C2_DO_NOT_COPY(C2DmaBufAllocation);
+@@ -171,7 +172,7 @@ c2_status_t C2DmaBufAllocation::map(size_t offset, size_t size, C2MemoryUsage us
+                                     void** addr) {
+     (void)fence;  // TODO: wait for fence
+     *addr = nullptr;
+-    if (!mMappings.empty()) {
++    if (!mMappings.lock()->empty()) {
+         ALOGV("multiple map");
+         // TODO: technically we should return DUPLICATE here, but our block views
+         // don't actually unmap, so we end up remapping the buffer multiple times.
+@@ -199,17 +200,18 @@ c2_status_t C2DmaBufAllocation::map(size_t offset, size_t size, C2MemoryUsage us
+     c2_status_t err =
+             mapInternal(mapSize, mapOffset, alignmentBytes, prot, flags, &(map.addr), addr);
+     if (map.addr) {
+-        mMappings.push_back(map);
++        mMappings.lock()->push_back(map);
+     }
+     return err;
+ }
+ 
+ c2_status_t C2DmaBufAllocation::unmap(void* addr, size_t size, C2Fence* fence) {
+-    if (mMappings.empty()) {
++    Mutexed<std::list<Mapping>>::Locked mappings(mMappings);
++    if (mappings->empty()) {
+         ALOGD("tried to unmap unmapped buffer");
+         return C2_NOT_FOUND;
+     }
+-    for (auto it = mMappings.begin(); it != mMappings.end(); ++it) {
++    for (auto it = mappings->begin(); it != mappings->end(); ++it) {
+         if (addr != (uint8_t*)it->addr + it->alignmentBytes ||
+             size + it->alignmentBytes != it->size) {
+             continue;
+@@ -222,7 +224,7 @@ c2_status_t C2DmaBufAllocation::unmap(void* addr, size_t size, C2Fence* fence) {
+         if (fence) {
+             *fence = C2Fence();  // not using fences
+         }
+-        (void)mMappings.erase(it);
++        (void)mappings->erase(it);
+         ALOGV("successfully unmapped: %d", mHandle.bufferFd());
+         return C2_OK;
+     }
+@@ -253,9 +255,10 @@ const C2Handle* C2DmaBufAllocation::handle() const {
+ }
+ 
+ C2DmaBufAllocation::~C2DmaBufAllocation() {
+-    if (!mMappings.empty()) {
++    Mutexed<std::list<Mapping>>::Locked mappings(mMappings);
++    if (!mappings->empty()) {
+         ALOGD("Dangling mappings!");
+-        for (const Mapping& map : mMappings) {
++        for (const Mapping& map : *mappings) {
+             int err = munmap(map.addr, map.size);
+             if (err) ALOGD("munmap failed");
+         }
+-- 
+2.33.1
+

@@ -1,0 +1,760 @@
+From 750bcc99f65b419d7bd252f42730af26acd8239c Mon Sep 17 00:00:00 2001
+From: Evan Severson <evanseverson@google.com>
+Date: Thu, 5 May 2022 23:19:43 -0700
+Subject: [PATCH] Add excludedPackages parameter to broadcast
+
+This parameter is useful for when a broadcast's intent is not targeting
+specific package and it is not wanted to be delievered to a specific
+one.
+
+Test: Install two apps and create shell command argument to exlude
+        packages, verify the correct packages can receive or get
+	skipped. Verified with manifest and registered receivers.
+Bug: 231635380
+Bug: 210118427
+
+Merged-In: I9a331f71c7052b294d4eada0f0f658dba989d881
+Change-Id: I9a331f71c7052b294d4eada0f0f658dba989d881
+(cherry picked from commit c0ce69bc8d5225e38214dfdc2636b2cb5a375546)
+Merged-In: I9a331f71c7052b294d4eada0f0f658dba989d881
+---
+ core/java/android/app/ActivityManager.java    |  4 +-
+ core/java/android/app/ContextImpl.java        | 49 ++++++-------
+ core/java/android/app/IActivityManager.aidl   |  2 +-
+ core/java/android/content/Context.java        | 13 ++++
+ core/java/android/content/ContextWrapper.java |  6 +-
+ .../server/am/ActivityManagerService.java     | 72 ++++++++++---------
+ .../am/ActivityManagerShellCommand.java       |  4 +-
+ .../com/android/server/am/BroadcastQueue.java | 30 ++++++++
+ .../android/server/am/BroadcastRecord.java    | 17 +++--
+ .../android/server/am/PreBootBroadcaster.java |  2 +-
+ .../com/android/server/am/UserController.java |  4 +-
+ .../apphibernation/AppHibernationService.java |  2 +
+ .../server/pm/PackageManagerService.java      | 10 +--
+ .../server/am/BroadcastRecordTest.java        |  1 +
+ .../AppHibernationServiceTest.java            |  2 +-
+ 15 files changed, 141 insertions(+), 77 deletions(-)
+
+diff --git a/core/java/android/app/ActivityManager.java b/core/java/android/app/ActivityManager.java
+index 4376d225e67..644a87d850d 100644
+--- a/core/java/android/app/ActivityManager.java
++++ b/core/java/android/app/ActivityManager.java
+@@ -4282,8 +4282,8 @@ public class ActivityManager {
+         try {
+             getService().broadcastIntentWithFeature(
+                     null, null, intent, null, null, Activity.RESULT_OK, null, null,
+-                    null /*requiredPermissions*/, null /*excludedPermissions*/, appOp, null, false,
+-                    true, userId);
++                    null /*requiredPermissions*/, null /*excludedPermissions*/,
++                    null /*excludedPackages*/, appOp, null, false, true, userId);
+         } catch (RemoteException ex) {
+         }
+     }
+diff --git a/core/java/android/app/ContextImpl.java b/core/java/android/app/ContextImpl.java
+index 4db1f71e825..02adaef3c1e 100644
+--- a/core/java/android/app/ContextImpl.java
++++ b/core/java/android/app/ContextImpl.java
+@@ -1177,7 +1177,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, null, null /*excludedPermissions=*/,
+-                    AppOpsManager.OP_NONE, null, false, false, getUserId());
++                    null, AppOpsManager.OP_NONE, null, false, false, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1194,7 +1194,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, null, false, false,
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, null, false, false,
+                     getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+@@ -1210,7 +1210,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, null, false, false,
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, null, false, false,
+                     getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+@@ -1227,8 +1227,8 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, options, false, false,
+-                    getUserId());
++                    null /*excludedPermissions=*/, null /*excludedPackages*/,
++                    AppOpsManager.OP_NONE, options, false, false, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1243,7 +1243,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, null, false, false,
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, null, false, false,
+                     user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+@@ -1252,7 +1252,7 @@ class ContextImpl extends Context {
+ 
+     @Override
+     public void sendBroadcastMultiplePermissions(Intent intent, String[] receiverPermissions,
+-            String[] excludedPermissions) {
++            String[] excludedPermissions, String[] excludedPackages) {
+         warnIfCallingFromSystemProcess();
+         String resolvedType = intent.resolveTypeIfNeeded(getContentResolver());
+         try {
+@@ -1260,7 +1260,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions, excludedPermissions,
+-                    AppOpsManager.OP_NONE, null, false, false, getUserId());
++                    excludedPackages, AppOpsManager.OP_NONE, null, false, false, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1277,8 +1277,8 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, options, false, false,
+-                    getUserId());
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, options, false,
++                    false, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1295,7 +1295,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, appOp, null, false, false, getUserId());
++                    null /*excludedPermissions=*/, null, appOp, null, false, false, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1312,7 +1312,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, null, true, false,
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, null, true, false,
+                     getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+@@ -1376,7 +1376,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     rd, initialCode, initialData, initialExtras, receiverPermissions,
+-                    null /*excludedPermissions=*/, appOp, options, true, false, getUserId());
++                    null /*excludedPermissions=*/, null, appOp, options, true, false, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1390,7 +1390,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, null, null /*excludedPermissions=*/,
+-                    AppOpsManager.OP_NONE, null, false, false, user.getIdentifier());
++                    null, AppOpsManager.OP_NONE, null, false, false, user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1413,8 +1413,8 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, options, false, false,
+-                    user.getIdentifier());
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, options, false,
++                    false, user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1431,7 +1431,8 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, receiverPermissions,
+-                    null /*excludedPermissions=*/, appOp, null, false, false, user.getIdentifier());
++                    null /*excludedPermissions=*/, null, appOp, null, false, false,
++                    user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1482,7 +1483,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     rd, initialCode, initialData, initialExtras, receiverPermissions,
+-                    null /*excludedPermissions=*/, appOp, options, true, false,
++                    null /*excludedPermissions=*/, null, appOp, options, true, false,
+                     user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+@@ -1524,7 +1525,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, null, null /*excludedPermissions=*/,
+-                    AppOpsManager.OP_NONE, null, false, true, getUserId());
++                    null, AppOpsManager.OP_NONE, null, false, true, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1563,7 +1564,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, null, null /*excludedPermissions=*/,
+-                    AppOpsManager.OP_NONE, options, false, true, getUserId());
++                    null, AppOpsManager.OP_NONE, options, false, true, getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1599,7 +1600,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     rd, initialCode, initialData, initialExtras, null,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, null, true, true,
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, null, true, true,
+                     getUserId());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+@@ -1632,7 +1633,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, null, null /*excludedPermissions=*/,
+-                    AppOpsManager.OP_NONE, null, false, true, user.getIdentifier());
++                    null, AppOpsManager.OP_NONE, null, false, true, user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1647,7 +1648,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     null, Activity.RESULT_OK, null, null, null, null /*excludedPermissions=*/,
+-                    AppOpsManager.OP_NONE, options, false, true, user.getIdentifier());
++                    null, AppOpsManager.OP_NONE, options, false, true, user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+@@ -1682,7 +1683,7 @@ class ContextImpl extends Context {
+             ActivityManager.getService().broadcastIntentWithFeature(
+                     mMainThread.getApplicationThread(), getAttributionTag(), intent, resolvedType,
+                     rd, initialCode, initialData, initialExtras, null,
+-                    null /*excludedPermissions=*/, AppOpsManager.OP_NONE, null, true, true,
++                    null /*excludedPermissions=*/, null, AppOpsManager.OP_NONE, null, true, true,
+                     user.getIdentifier());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+diff --git a/core/java/android/app/IActivityManager.aidl b/core/java/android/app/IActivityManager.aidl
+index b90b9a11611..b74ed3a9df3 100644
+--- a/core/java/android/app/IActivityManager.aidl
++++ b/core/java/android/app/IActivityManager.aidl
+@@ -138,7 +138,7 @@ interface IActivityManager {
+     int broadcastIntentWithFeature(in IApplicationThread caller, in String callingFeatureId,
+             in Intent intent, in String resolvedType, in IIntentReceiver resultTo, int resultCode,
+             in String resultData, in Bundle map, in String[] requiredPermissions, in String[] excludePermissions,
+-            int appOp, in Bundle options, boolean serialized, boolean sticky, int userId);
++            in String[] excludePackages, int appOp, in Bundle options, boolean serialized, boolean sticky, int userId);
+     void unbroadcastIntent(in IApplicationThread caller, in Intent intent, int userId);
+     @UnsupportedAppUsage
+     oneway void finishReceiver(in IBinder who, int resultCode, in String resultData, in Bundle map,
+diff --git a/core/java/android/content/Context.java b/core/java/android/content/Context.java
+index 27027721109..1ecce958b78 100644
+--- a/core/java/android/content/Context.java
++++ b/core/java/android/content/Context.java
+@@ -2212,6 +2212,19 @@ public abstract class Context {
+      */
+     public void sendBroadcastMultiplePermissions(@NonNull Intent intent,
+             @NonNull String[] receiverPermissions, @Nullable String[] excludedPermissions) {
++        sendBroadcastMultiplePermissions(intent, receiverPermissions, excludedPermissions, null);
++    }
++
++
++    /**
++     * Like {@link #sendBroadcastMultiplePermissions(Intent, String[], String[])}, but also allows
++     * specification of a list of excluded packages.
++     *
++     * @hide
++     */
++    public void sendBroadcastMultiplePermissions(@NonNull Intent intent,
++            @NonNull String[] receiverPermissions, @Nullable String[] excludedPermissions,
++            @Nullable String[] excludedPackages) {
+         throw new RuntimeException("Not implemented. Must override in a subclass.");
+     }
+ 
+diff --git a/core/java/android/content/ContextWrapper.java b/core/java/android/content/ContextWrapper.java
+index 6324d0ecb0e..985293ca211 100644
+--- a/core/java/android/content/ContextWrapper.java
++++ b/core/java/android/content/ContextWrapper.java
+@@ -494,8 +494,10 @@ public class ContextWrapper extends Context {
+     /** @hide */
+     @Override
+     public void sendBroadcastMultiplePermissions(@NonNull Intent intent,
+-            @NonNull String[] receiverPermissions, @Nullable String[] excludedPermissions) {
+-        mBase.sendBroadcastMultiplePermissions(intent, receiverPermissions, excludedPermissions);
++            @NonNull String[] receiverPermissions, @Nullable String[] excludedPermissions,
++            @Nullable String[] excludedPackages) {
++        mBase.sendBroadcastMultiplePermissions(intent, receiverPermissions, excludedPermissions,
++                excludedPackages);
+     }
+ 
+     /** @hide */
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index 953e6e24236..66e3246bdc1 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -2544,7 +2544,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+     public void batterySendBroadcast(Intent intent) {
+         synchronized (this) {
+             broadcastIntentLocked(null, null, null, intent, null, null, 0, null, null, null, null,
+-                    OP_NONE, null, false, false, -1, SYSTEM_UID, Binder.getCallingUid(),
++                    null, OP_NONE, null, false, false, -1, SYSTEM_UID, Binder.getCallingUid(),
+                     Binder.getCallingPid(), UserHandle.USER_ALL);
+         }
+     }
+@@ -4009,7 +4009,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+         intent.putExtra(Intent.EXTRA_UID, uid);
+         intent.putExtra(Intent.EXTRA_USER_HANDLE, UserHandle.getUserId(uid));
+         broadcastIntentLocked(null, null, null, intent,
+-                null, null, 0, null, null, null, null, OP_NONE,
++                null, null, 0, null, null, null, null, null, OP_NONE,
+                 null, false, false, MY_PID, SYSTEM_UID, Binder.getCallingUid(),
+                 Binder.getCallingPid(), UserHandle.getUserId(uid));
+     }
+@@ -7686,7 +7686,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+                             | Intent.FLAG_RECEIVER_FOREGROUND);
+                     intent.putExtra(Intent.EXTRA_USER_HANDLE, currentUserId);
+                     broadcastIntentLocked(null, null, null, intent,
+-                            null, null, 0, null, null, null, null, OP_NONE,
++                            null, null, 0, null, null, null, null, null, OP_NONE,
+                             null, false, false, MY_PID, SYSTEM_UID, callingUid, callingPid,
+                             currentUserId);
+                     intent = new Intent(Intent.ACTION_USER_STARTING);
+@@ -7698,8 +7698,8 @@ public class ActivityManagerService extends IActivityManager.Stub
+                                 public void performReceive(Intent intent, int resultCode,
+                                         String data, Bundle extras, boolean ordered, boolean sticky,
+                                         int sendingUser) {}
+-                            }, 0, null, null, new String[] {INTERACT_ACROSS_USERS}, null, OP_NONE,
+-                            null, true, false, MY_PID, SYSTEM_UID, callingUid, callingPid,
++                            }, 0, null, null, new String[] {INTERACT_ACROSS_USERS}, null, null,
++                            OP_NONE, null, true, false, MY_PID, SYSTEM_UID, callingUid, callingPid,
+                             UserHandle.USER_ALL);
+                 } catch (Throwable e) {
+                     Slog.wtf(TAG, "Failed sending first user broadcasts", e);
+@@ -12504,8 +12504,8 @@ public class ActivityManagerService extends IActivityManager.Stub
+                     Intent intent = allSticky.get(i);
+                     BroadcastQueue queue = broadcastQueueForIntent(intent);
+                     BroadcastRecord r = new BroadcastRecord(queue, intent, null,
+-                            null, null, -1, -1, false, null, null, null, OP_NONE, null, receivers,
+-                            null, 0, null, null, false, true, true, -1, false, null,
++                            null, null, -1, -1, false, null, null, null, null, OP_NONE, null,
++                            receivers, null, 0, null, null, false, true, true, -1, false, null,
+                             false /* only PRE_BOOT_COMPLETED should be exempt, no stickies */);
+                     queue.enqueueParallelBroadcastLocked(r);
+                     queue.scheduleBroadcastsLocked();
+@@ -12747,12 +12747,14 @@ public class ActivityManagerService extends IActivityManager.Stub
+             String callerPackage, String callerFeatureId, Intent intent, String resolvedType,
+             IIntentReceiver resultTo, int resultCode, String resultData,
+             Bundle resultExtras, String[] requiredPermissions, String[] excludedPermissions,
+-            int appOp, Bundle bOptions, boolean ordered, boolean sticky, int callingPid,
++            String[] excludedPackages, int appOp, Bundle bOptions, boolean ordered,
++            boolean sticky, int callingPid,
+             int callingUid, int realCallingUid, int realCallingPid, int userId) {
+         return broadcastIntentLocked(callerApp, callerPackage, callerFeatureId, intent,
+                 resolvedType, resultTo, resultCode, resultData, resultExtras, requiredPermissions,
+-                excludedPermissions, appOp, bOptions, ordered, sticky, callingPid, callingUid,
+-                realCallingUid, realCallingPid, userId, false /* allowBackgroundActivityStarts */,
++                excludedPermissions, excludedPackages, appOp, bOptions, ordered, sticky, callingPid,
++                callingUid, realCallingUid, realCallingPid, userId,
++                false /* allowBackgroundActivityStarts */,
+                 null /* tokenNeededForBackgroundActivityStarts */, null /* broadcastAllowList */);
+     }
+ 
+@@ -12761,7 +12763,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+             @Nullable String callerFeatureId, Intent intent, String resolvedType,
+             IIntentReceiver resultTo, int resultCode, String resultData,
+             Bundle resultExtras, String[] requiredPermissions,
+-            String[] excludedPermissions, int appOp, Bundle bOptions,
++            String[] excludedPermissions, String[] excludedPackages, int appOp, Bundle bOptions,
+             boolean ordered, boolean sticky, int callingPid, int callingUid,
+             int realCallingUid, int realCallingPid, int userId,
+             boolean allowBackgroundActivityStarts,
+@@ -13338,10 +13340,10 @@ public class ActivityManagerService extends IActivityManager.Stub
+             final BroadcastQueue queue = broadcastQueueForIntent(intent);
+             BroadcastRecord r = new BroadcastRecord(queue, intent, callerApp, callerPackage,
+                     callerFeatureId, callingPid, callingUid, callerInstantApp, resolvedType,
+-                    requiredPermissions, excludedPermissions, appOp, brOptions, registeredReceivers,
+-                    resultTo, resultCode, resultData, resultExtras, ordered, sticky, false, userId,
+-                    allowBackgroundActivityStarts, backgroundActivityStartsToken,
+-                    timeoutExempt);
++                    requiredPermissions, excludedPermissions, excludedPackages, appOp, brOptions,
++                    registeredReceivers, resultTo, resultCode, resultData, resultExtras, ordered,
++                    sticky, false, userId, allowBackgroundActivityStarts,
++                    backgroundActivityStartsToken, timeoutExempt);
+             if (DEBUG_BROADCAST) Slog.v(TAG_BROADCAST, "Enqueueing parallel broadcast " + r);
+             final boolean replaced = replacePending
+                     && (queue.replaceParallelBroadcastLocked(r) != null);
+@@ -13436,7 +13438,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+             BroadcastQueue queue = broadcastQueueForIntent(intent);
+             BroadcastRecord r = new BroadcastRecord(queue, intent, callerApp, callerPackage,
+                     callerFeatureId, callingPid, callingUid, callerInstantApp, resolvedType,
+-                    requiredPermissions, excludedPermissions, appOp, brOptions,
++                    requiredPermissions, excludedPermissions, excludedPackages, appOp, brOptions,
+                     receivers, resultTo, resultCode, resultData, resultExtras,
+                     ordered, sticky, false, userId, allowBackgroundActivityStarts,
+                     backgroundActivityStartsToken, timeoutExempt);
+@@ -13565,14 +13567,16 @@ public class ActivityManagerService extends IActivityManager.Stub
+             String[] requiredPermissions, int appOp, Bundle bOptions,
+             boolean serialized, boolean sticky, int userId) {
+         return broadcastIntentWithFeature(caller, null, intent, resolvedType, resultTo, resultCode,
+-                resultData, resultExtras, requiredPermissions, null, appOp, bOptions, serialized,
+-                sticky, userId);
++                resultData, resultExtras, requiredPermissions, null, null, appOp, bOptions,
++                serialized, sticky, userId);
+     }
+ 
++    @Override
+     public final int broadcastIntentWithFeature(IApplicationThread caller, String callingFeatureId,
+             Intent intent, String resolvedType, IIntentReceiver resultTo,
+             int resultCode, String resultData, Bundle resultExtras,
+-            String[] requiredPermissions, String[] excludedPermissions, int appOp, Bundle bOptions,
++            String[] requiredPermissions, String[] excludedPermissions,
++            String[] excludedPackages, int appOp, Bundle bOptions,
+             boolean serialized, boolean sticky, int userId) {
+         enforceNotIsolatedCaller("broadcastIntent");
+         synchronized(this) {
+@@ -13587,8 +13591,8 @@ public class ActivityManagerService extends IActivityManager.Stub
+                 return broadcastIntentLocked(callerApp,
+                         callerApp != null ? callerApp.info.packageName : null, callingFeatureId,
+                         intent, resolvedType, resultTo, resultCode, resultData, resultExtras,
+-                        requiredPermissions, excludedPermissions, appOp, bOptions, serialized,
+-                        sticky, callingPid, callingUid, callingUid, callingPid, userId);
++                        requiredPermissions, excludedPermissions, excludedPackages, appOp, bOptions,
++                        serialized, sticky, callingPid, callingUid, callingUid, callingPid, userId);
+             } finally {
+                 Binder.restoreCallingIdentity(origId);
+             }
+@@ -13610,7 +13614,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+             try {
+                 return broadcastIntentLocked(null, packageName, featureId, intent, resolvedType,
+                         resultTo, resultCode, resultData, resultExtras, requiredPermissions, null,
+-                        OP_NONE, bOptions, serialized, sticky, -1, uid, realCallingUid,
++                        null, OP_NONE, bOptions, serialized, sticky, -1, uid, realCallingUid,
+                         realCallingPid, userId, allowBackgroundActivityStarts,
+                         backgroundActivityStartsToken,
+                         null /* broadcastAllowList */);
+@@ -15823,10 +15827,11 @@ public class ActivityManagerService extends IActivityManager.Stub
+                     return ActivityManagerService.this.broadcastIntentLocked(null /*callerApp*/,
+                             null /*callerPackage*/, null /*callingFeatureId*/, intent,
+                             null /*resolvedType*/, resultTo, 0 /*resultCode*/, null /*resultData*/,
+-                            null /*resultExtras*/, requiredPermissions, null, AppOpsManager.OP_NONE,
+-                            bOptions /*options*/, serialized, false /*sticky*/, callingPid,
+-                            callingUid, callingUid, callingPid, userId,
+-                            false /*allowBackgroundStarts*/,
++                            null /*resultExtras*/, requiredPermissions,
++                            null /*excludedPermissions*/, null /*excludedPackages*/,
++                            AppOpsManager.OP_NONE, bOptions /*options*/, serialized,
++                            false /*sticky*/, callingPid, callingUid, callingUid, callingPid,
++                            userId, false /*allowBackgroundStarts*/,
+                             null /*tokenNeededForBackgroundActivityStarts*/, appIdAllowList);
+                 } finally {
+                     Binder.restoreCallingIdentity(origId);
+@@ -15948,7 +15953,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+                         | Intent.FLAG_RECEIVER_FOREGROUND
+                         | Intent.FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS);
+                 broadcastIntentLocked(null, null, null, intent, null, null, 0, null, null, null,
+-                        null, OP_NONE, null, false, false, MY_PID, SYSTEM_UID,
++                        null, null, OP_NONE, null, false, false, MY_PID, SYSTEM_UID,
+                         Binder.getCallingUid(), Binder.getCallingPid(), UserHandle.USER_ALL);
+                 if ((changes & ActivityInfo.CONFIG_LOCALE) != 0) {
+                     intent = new Intent(Intent.ACTION_LOCALE_CHANGED);
+@@ -15963,8 +15968,8 @@ public class ActivityManagerService extends IActivityManager.Stub
+                             TEMPORARY_ALLOW_LIST_TYPE_FOREGROUND_SERVICE_ALLOWED,
+                             PowerExemptionManager.REASON_LOCALE_CHANGED, "");
+                     broadcastIntentLocked(null, null, null, intent, null, null, 0, null, null, null,
+-                            null, OP_NONE, bOptions.toBundle(), false, false, MY_PID, SYSTEM_UID,
+-                            Binder.getCallingUid(), Binder.getCallingPid(),
++                            null, null, OP_NONE, bOptions.toBundle(), false, false, MY_PID,
++                            SYSTEM_UID, Binder.getCallingUid(), Binder.getCallingPid(),
+                             UserHandle.USER_ALL);
+                 }
+ 
+@@ -15979,8 +15984,9 @@ public class ActivityManagerService extends IActivityManager.Stub
+                     String[] permissions =
+                             new String[] { android.Manifest.permission.INSTALL_PACKAGES };
+                     broadcastIntentLocked(null, null, null, intent, null, null, 0, null, null,
+-                            permissions, null, OP_NONE, null, false, false, MY_PID, SYSTEM_UID,
+-                            Binder.getCallingUid(), Binder.getCallingPid(), UserHandle.USER_ALL);
++                            permissions, null, null, OP_NONE, null, false, false, MY_PID,
++                            SYSTEM_UID, Binder.getCallingUid(), Binder.getCallingPid(),
++                            UserHandle.USER_ALL);
+                 }
+             }
+         }
+@@ -16004,8 +16010,8 @@ public class ActivityManagerService extends IActivityManager.Stub
+                 }
+ 
+                 broadcastIntentLocked(null, null, null, intent, null, null, 0, null, null, null,
+-                        null, OP_NONE, null, false, false, -1, SYSTEM_UID, Binder.getCallingUid(),
+-                        Binder.getCallingPid(), UserHandle.USER_ALL);
++                        null, null, OP_NONE, null, false, false, -1, SYSTEM_UID,
++                        Binder.getCallingUid(), Binder.getCallingPid(), UserHandle.USER_ALL);
+             }
+         }
+ 
+diff --git a/services/core/java/com/android/server/am/ActivityManagerShellCommand.java b/services/core/java/com/android/server/am/ActivityManagerShellCommand.java
+index 685d606f8d4..9ab9b24583f 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerShellCommand.java
++++ b/services/core/java/com/android/server/am/ActivityManagerShellCommand.java
+@@ -763,8 +763,8 @@ final class ActivityManagerShellCommand extends ShellCommand {
+         pw.flush();
+         Bundle bundle = mBroadcastOptions == null ? null : mBroadcastOptions.toBundle();
+         mInterface.broadcastIntentWithFeature(null, null, intent, null, receiver, 0, null, null,
+-                requiredPermissions, null, android.app.AppOpsManager.OP_NONE, bundle, true, false,
+-                mUserId);
++                requiredPermissions, null, null, android.app.AppOpsManager.OP_NONE, bundle, true,
++                false, mUserId);
+         if (!mAsync) {
+             receiver.waitForFinish();
+         }
+diff --git a/services/core/java/com/android/server/am/BroadcastQueue.java b/services/core/java/com/android/server/am/BroadcastQueue.java
+index 503b3a93b31..2383b653475 100644
+--- a/services/core/java/com/android/server/am/BroadcastQueue.java
++++ b/services/core/java/com/android/server/am/BroadcastQueue.java
+@@ -60,6 +60,7 @@ import android.util.SparseIntArray;
+ import android.util.TimeUtils;
+ import android.util.proto.ProtoOutputStream;
+ 
++import com.android.internal.util.ArrayUtils;
+ import com.android.internal.util.FrameworkStatsLog;
+ 
+ import java.io.FileDescriptor;
+@@ -758,6 +759,22 @@ public final class BroadcastQueue {
+                 skip = true;
+             }
+         }
++
++        // Check that the receiver does *not* belong to any of the excluded packages
++        if (!skip && r.excludedPackages != null && r.excludedPackages.length > 0) {
++            if (ArrayUtils.contains(r.excludedPackages, filter.packageName)) {
++                Slog.w(TAG, "Skipping delivery of excluded package "
++                        + r.intent.toString()
++                        + " to " + filter.receiverList.app
++                        + " (pid=" + filter.receiverList.pid
++                        + ", uid=" + filter.receiverList.uid + ")"
++                        + " excludes package " + filter.packageName
++                        + " due to sender " + r.callerPackage
++                        + " (uid " + r.callingUid + ")");
++                skip = true;
++            }
++        }
++
+         // If the broadcast also requires an app op check that as well.
+         if (!skip && r.appOp != AppOpsManager.OP_NONE
+                 && mService.getAppOpsManager().noteOpNoThrow(r.appOp,
+@@ -1586,6 +1603,19 @@ public final class BroadcastQueue {
+             }
+         }
+ 
++        // Check that the receiver does *not* belong to any of the excluded packages
++        if (!skip && r.excludedPackages != null && r.excludedPackages.length > 0) {
++            if (ArrayUtils.contains(r.excludedPackages, component.getPackageName())) {
++                Slog.w(TAG, "Skipping delivery of excluded package "
++                        + r.intent + " to "
++                        + component.flattenToShortString()
++                        + " excludes package " + component.getPackageName()
++                        + " due to sender " + r.callerPackage
++                        + " (uid " + r.callingUid + ")");
++                skip = true;
++            }
++        }
++
+         if (!skip && info.activityInfo.applicationInfo.uid != Process.SYSTEM_UID &&
+                 r.requiredPermissions != null && r.requiredPermissions.length > 0) {
+             for (int i = 0; i < r.requiredPermissions.length; i++) {
+diff --git a/services/core/java/com/android/server/am/BroadcastRecord.java b/services/core/java/com/android/server/am/BroadcastRecord.java
+index 80155962045..84a948217c9 100644
+--- a/services/core/java/com/android/server/am/BroadcastRecord.java
++++ b/services/core/java/com/android/server/am/BroadcastRecord.java
+@@ -63,6 +63,7 @@ final class BroadcastRecord extends Binder {
+     final String resolvedType; // the resolved data type
+     final String[] requiredPermissions; // permissions the caller has required
+     final String[] excludedPermissions; // permissions to exclude
++    final String[] excludedPackages; // packages to exclude
+     final int appOp;        // an app op that is associated with this broadcast
+     final BroadcastOptions options; // BroadcastOptions supplied by caller
+     final List receivers;   // contains BroadcastFilter and ResolveInfo
+@@ -147,6 +148,10 @@ final class BroadcastRecord extends Binder {
+             pw.print(prefix); pw.print("excludedPermissions=");
+             pw.print(Arrays.toString(excludedPermissions));
+         }
++        if (excludedPackages != null && excludedPackages.length > 0) {
++            pw.print(prefix); pw.print("excludedPackages=");
++            pw.print(Arrays.toString(excludedPackages));
++        }
+         if (options != null) {
+             pw.print(prefix); pw.print("options="); pw.println(options.toBundle());
+         }
+@@ -245,7 +250,8 @@ final class BroadcastRecord extends Binder {
+             Intent _intent, ProcessRecord _callerApp, String _callerPackage,
+             @Nullable String _callerFeatureId, int _callingPid, int _callingUid,
+             boolean _callerInstantApp, String _resolvedType,
+-            String[] _requiredPermissions, String[] _excludedPermissions, int _appOp,
++            String[] _requiredPermissions, String[] _excludedPermissions,
++            String[] _excludedPackages, int _appOp,
+             BroadcastOptions _options, List _receivers, IIntentReceiver _resultTo, int _resultCode,
+             String _resultData, Bundle _resultExtras, boolean _serialized, boolean _sticky,
+             boolean _initialSticky, int _userId, boolean allowBackgroundActivityStarts,
+@@ -265,6 +271,7 @@ final class BroadcastRecord extends Binder {
+         resolvedType = _resolvedType;
+         requiredPermissions = _requiredPermissions;
+         excludedPermissions = _excludedPermissions;
++        excludedPackages = _excludedPackages;
+         appOp = _appOp;
+         options = _options;
+         receivers = _receivers;
+@@ -306,6 +313,7 @@ final class BroadcastRecord extends Binder {
+         resolvedType = from.resolvedType;
+         requiredPermissions = from.requiredPermissions;
+         excludedPermissions = from.excludedPermissions;
++        excludedPackages = from.excludedPackages;
+         appOp = from.appOp;
+         options = from.options;
+         receivers = from.receivers;
+@@ -363,9 +371,10 @@ final class BroadcastRecord extends Binder {
+         // build a new BroadcastRecord around that single-target list
+         BroadcastRecord split = new BroadcastRecord(queue, intent, callerApp, callerPackage,
+                 callerFeatureId, callingPid, callingUid, callerInstantApp, resolvedType,
+-                requiredPermissions, excludedPermissions, appOp, options, splitReceivers, resultTo,
+-                resultCode, resultData, resultExtras, ordered, sticky, initialSticky, userId,
+-                allowBackgroundActivityStarts, mBackgroundActivityStartsToken, timeoutExempt);
++                requiredPermissions, excludedPermissions, excludedPackages, appOp, options,
++                splitReceivers, resultTo, resultCode, resultData, resultExtras, ordered, sticky,
++                initialSticky, userId, allowBackgroundActivityStarts,
++                mBackgroundActivityStartsToken, timeoutExempt);
+ 
+         split.splitToken = this.splitToken;
+         return split;
+diff --git a/services/core/java/com/android/server/am/PreBootBroadcaster.java b/services/core/java/com/android/server/am/PreBootBroadcaster.java
+index 75620982461..35f91ba1169 100644
+--- a/services/core/java/com/android/server/am/PreBootBroadcaster.java
++++ b/services/core/java/com/android/server/am/PreBootBroadcaster.java
+@@ -124,7 +124,7 @@ public abstract class PreBootBroadcaster extends IIntentReceiver.Stub {
+                 REASON_PRE_BOOT_COMPLETED, "");
+         synchronized (mService) {
+             mService.broadcastIntentLocked(null, null, null, mIntent, null, this, 0, null, null,
+-                    null, null, AppOpsManager.OP_NONE, bOptions.toBundle(), true,
++                    null, null, null, AppOpsManager.OP_NONE, bOptions.toBundle(), true,
+                     false, ActivityManagerService.MY_PID,
+                     Process.SYSTEM_UID, Binder.getCallingUid(), Binder.getCallingPid(), mUserId);
+         }
+diff --git a/services/core/java/com/android/server/am/UserController.java b/services/core/java/com/android/server/am/UserController.java
+index ba3e1fb95e7..e9f668fd552 100644
+--- a/services/core/java/com/android/server/am/UserController.java
++++ b/services/core/java/com/android/server/am/UserController.java
+@@ -2937,8 +2937,8 @@ class UserController implements Handler.Callback {
+             synchronized (mService) {
+                 return mService.broadcastIntentLocked(null, null, null, intent, resolvedType,
+                         resultTo, resultCode, resultData, resultExtras, requiredPermissions, null,
+-                        appOp, bOptions, ordered, sticky, callingPid, callingUid, realCallingUid,
+-                        realCallingPid, userId);
++                        null, appOp, bOptions, ordered, sticky, callingPid, callingUid,
++                        realCallingUid, realCallingPid, userId);
+             }
+         }
+ 
+diff --git a/services/core/java/com/android/server/apphibernation/AppHibernationService.java b/services/core/java/com/android/server/apphibernation/AppHibernationService.java
+index db2ecc54dbf..b2e0b34fdf3 100644
+--- a/services/core/java/com/android/server/apphibernation/AppHibernationService.java
++++ b/services/core/java/com/android/server/apphibernation/AppHibernationService.java
+@@ -418,6 +418,7 @@ public final class AppHibernationService extends SystemService {
+                     null /* resultExtras */,
+                     requiredPermissions,
+                     null /* excludedPermissions */,
++                    null /* excludedPackages */,
+                     OP_NONE,
+                     null /* bOptions */,
+                     false /* serialized */,
+@@ -436,6 +437,7 @@ public final class AppHibernationService extends SystemService {
+                     null /* resultExtras */,
+                     requiredPermissions,
+                     null /* excludedPermissions */,
++                    null /* excludedPackages */,
+                     OP_NONE,
+                     null /* bOptions */,
+                     false /* serialized */,
+diff --git a/services/core/java/com/android/server/pm/PackageManagerService.java b/services/core/java/com/android/server/pm/PackageManagerService.java
+index 41813e3702a..59e74f36c74 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerService.java
++++ b/services/core/java/com/android/server/pm/PackageManagerService.java
+@@ -15854,7 +15854,7 @@ public class PackageManagerService extends IPackageManager.Stub
+             final BroadcastOptions bOptions = getTemporaryAppAllowlistBroadcastOptions(
+                     REASON_LOCKED_BOOT_COMPLETED);
+             am.broadcastIntentWithFeature(null, null, lockedBcIntent, null, null, 0, null, null,
+-                    requiredPermissions, null, android.app.AppOpsManager.OP_NONE,
++                    requiredPermissions, null, null, android.app.AppOpsManager.OP_NONE,
+                     bOptions.toBundle(), false, false, userId);
+ 
+             // Deliver BOOT_COMPLETED only if user is unlocked
+@@ -15865,7 +15865,7 @@ public class PackageManagerService extends IPackageManager.Stub
+                     bcIntent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+                 }
+                 am.broadcastIntentWithFeature(null, null, bcIntent, null, null, 0, null, null,
+-                        requiredPermissions, null, android.app.AppOpsManager.OP_NONE,
++                        requiredPermissions, null, null, android.app.AppOpsManager.OP_NONE,
+                         bOptions.toBundle(), false, false, userId);
+             }
+         } catch (RemoteException e) {
+@@ -22789,7 +22789,7 @@ public class PackageManagerService extends IPackageManager.Stub
+             intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
+             try {
+                 am.broadcastIntentWithFeature(null, null, intent, null, null,
+-                        0, null, null, null, null, android.app.AppOpsManager.OP_NONE,
++                        0, null, null, null, null, null, android.app.AppOpsManager.OP_NONE,
+                         null, false, false, userId);
+             } catch (RemoteException e) {
+             }
+@@ -28660,8 +28660,8 @@ public class PackageManagerService extends IPackageManager.Stub
+             };
+             try {
+                 am.broadcastIntentWithFeature(null, null, intent, null, null, 0, null, null,
+-                        requiredPermissions, null, android.app.AppOpsManager.OP_NONE, null, false,
+-                        false, UserHandle.USER_ALL);
++                        requiredPermissions, null, null, android.app.AppOpsManager.OP_NONE, null,
++                        false, false, UserHandle.USER_ALL);
+             } catch (RemoteException e) {
+                 throw e.rethrowFromSystemServer();
+             }
+diff --git a/services/tests/servicestests/src/com/android/server/am/BroadcastRecordTest.java b/services/tests/servicestests/src/com/android/server/am/BroadcastRecordTest.java
+index e9b5b624308..f44104e1096 100644
+--- a/services/tests/servicestests/src/com/android/server/am/BroadcastRecordTest.java
++++ b/services/tests/servicestests/src/com/android/server/am/BroadcastRecordTest.java
+@@ -185,6 +185,7 @@ public class BroadcastRecordTest {
+                 null /* resolvedType */,
+                 null /* requiredPermissions */,
+                 null /* excludedPermissions */,
++                null /* excludedPackages */,
+                 0 /* appOp */,
+                 null /* options */,
+                 new ArrayList<>(receivers), // Make a copy to not affect the original list.
+diff --git a/services/tests/servicestests/src/com/android/server/apphibernation/AppHibernationServiceTest.java b/services/tests/servicestests/src/com/android/server/apphibernation/AppHibernationServiceTest.java
+index 5c7a580a259..2dcd1c1e478 100644
+--- a/services/tests/servicestests/src/com/android/server/apphibernation/AppHibernationServiceTest.java
++++ b/services/tests/servicestests/src/com/android/server/apphibernation/AppHibernationServiceTest.java
+@@ -294,7 +294,7 @@ public final class AppHibernationServiceTest {
+         ArgumentCaptor<Intent> intentArgumentCaptor = ArgumentCaptor.forClass(Intent.class);
+         verify(mIActivityManager, times(2)).broadcastIntentWithFeature(any(), any(),
+                 intentArgumentCaptor.capture(), any(), any(), anyInt(), any(), any(), any(), any(),
+-                anyInt(), any(), anyBoolean(), anyBoolean(), eq(USER_ID_1));
++                any(), anyInt(), any(), anyBoolean(), anyBoolean(), eq(USER_ID_1));
+         List<Intent> capturedIntents = intentArgumentCaptor.getAllValues();
+         assertEquals(capturedIntents.get(0).getAction(), Intent.ACTION_LOCKED_BOOT_COMPLETED);
+         assertEquals(capturedIntents.get(1).getAction(), Intent.ACTION_BOOT_COMPLETED);
+-- 
+2.36.1.476.g0c4daa206d-goog
+

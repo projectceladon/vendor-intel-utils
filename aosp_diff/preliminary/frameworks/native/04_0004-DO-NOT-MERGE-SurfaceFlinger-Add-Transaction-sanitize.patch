@@ -1,0 +1,184 @@
+From f89bca992476c27a9e78aef36efab0ca98550de3 Mon Sep 17 00:00:00 2001
+From: Robert Carr <racarr@google.com>
+Date: Fri, 7 Jan 2022 18:23:06 -0800
+Subject: [PATCH] DO NOT MERGE: SurfaceFlinger: Add Transaction#sanitize
+
+Various elements of the Transaction interface require
+a permission in order to apply. In particular the setTrustedOverlay
+and setInputWindowInfo fields. These permission checks are
+implemented by checking the PID and the UID of the process which
+sent the transaction. Unfortunately widespread use of transaction
+merging makes this inadequate. At the moment
+IWindowSession#finishDrawing seems to be the only boundary on which
+transactions move from client to system processes, and so we expose
+a sanitize method and use it from there to resolve the situation
+in an easily backportable way.
+
+Moving forward it likely make sense to move security sensitive
+interfaces off of Transaction. Most of the things behind permissions
+currently are not truly security sensitive, more of just a request
+not to use them.
+
+It was also considered to sanitize transactions at all process
+boundaries through writeToParcel, however this could be disruptive
+as previously permissioned processes (WM and SysUI) could freely
+exchange transactions. As the change needs to be backportable the
+lowest risk option was chosen.
+
+Bug: 213644870
+Test: Existing tests pass
+Change-Id: I424f45bc30ea8e56e4c4493203ee0749eabf239c
+(cherry picked from commit de6d7b467e572d384f2bc1bc788259340ebe2f93)
+(cherry picked from commit 1ff38ab351a617c4870eec236b70932ff2c4473b)
+(cherry picked from commit cdd1c045540b4f4530a27a77fbe628a4627d4024)
+Merged-In: I424f45bc30ea8e56e4c4493203ee0749eabf239c
+---
+ libs/gui/LayerState.cpp                      | 59 ++++++++++++++++++++
+ libs/gui/SurfaceComposerClient.cpp           |  8 ++-
+ libs/gui/include/gui/LayerState.h            |  7 +++
+ libs/gui/include/gui/SurfaceComposerClient.h |  8 +++
+ 4 files changed, 81 insertions(+), 1 deletion(-)
+
+diff --git a/libs/gui/LayerState.cpp b/libs/gui/LayerState.cpp
+index 076c90dd2..bd496ba01 100644
+--- a/libs/gui/LayerState.cpp
++++ b/libs/gui/LayerState.cpp
+@@ -377,6 +377,65 @@ void DisplayState::merge(const DisplayState& other) {
+     }
+ }
+ 
++void layer_state_t::sanitize(int32_t permissions) {
++    // TODO: b/109894387
++    //
++    // SurfaceFlinger's renderer is not prepared to handle cropping in the face of arbitrary
++    // rotation. To see the problem observe that if we have a square parent, and a child
++    // of the same size, then we rotate the child 45 degrees around its center, the child
++    // must now be cropped to a non rectangular 8 sided region.
++    //
++    // Of course we can fix this in the future. For now, we are lucky, SurfaceControl is
++    // private API, and arbitrary rotation is used in limited use cases, for instance:
++    // - WindowManager only uses rotation in one case, which is on a top level layer in which
++    //   cropping is not an issue.
++    // - Launcher, as a privileged app, uses this to transition an application to PiP
++    //   (picture-in-picture) mode.
++    //
++    // However given that abuse of rotation matrices could lead to surfaces extending outside
++    // of cropped areas, we need to prevent non-root clients without permission
++    // ACCESS_SURFACE_FLINGER nor ROTATE_SURFACE_FLINGER
++    // (a.k.a. everyone except WindowManager / tests / Launcher) from setting non rectangle
++    // preserving transformations.
++    if (what & eMatrixChanged) {
++        if (!(permissions & Permission::ROTATE_SURFACE_FLINGER)) {
++            ui::Transform t;
++            t.set(matrix.dsdx, matrix.dtdy, matrix.dtdx, matrix.dsdy);
++            if (!t.preserveRects()) {
++                what &= ~eMatrixChanged;
++                ALOGE("Stripped non rect preserving matrix in sanitize");
++            }
++        }
++    }
++
++    if (what & layer_state_t::eInputInfoChanged) {
++        if (!(permissions & Permission::ACCESS_SURFACE_FLINGER)) {
++            what &= ~eInputInfoChanged;
++            ALOGE("Stripped attempt to set eInputInfoChanged in sanitize");
++        }
++    }
++    if (what & layer_state_t::eTrustedOverlayChanged) {
++        if (!(permissions & Permission::ACCESS_SURFACE_FLINGER)) {
++            what &= ~eTrustedOverlayChanged;
++            ALOGE("Stripped attempt to set eTrustedOverlay in sanitize");
++        }
++    }
++    if (what & layer_state_t::eFrameRateSelectionPriority) {
++        if (!(permissions & Permission::ACCESS_SURFACE_FLINGER)) {
++            what &= ~eFrameRateSelectionPriority;
++            ALOGE("Stripped attempt to set eFrameRateSelectionPriority in sanitize");
++        }
++    }
++    if (what & layer_state_t::eFrameRateChanged) {
++        if (!ValidateFrameRate(frameRate, frameRateCompatibility,
++                               changeFrameRateStrategy,
++                               "layer_state_t::sanitize",
++                               permissions & Permission::ACCESS_SURFACE_FLINGER)) {
++            what &= ~eFrameRateChanged; // logged in ValidateFrameRate
++        }
++    }
++}
++
+ void layer_state_t::merge(const layer_state_t& other) {
+     if (other.what & ePositionChanged) {
+         what |= ePositionChanged;
+diff --git a/libs/gui/SurfaceComposerClient.cpp b/libs/gui/SurfaceComposerClient.cpp
+index 96da8efd1..37914c18f 100644
+--- a/libs/gui/SurfaceComposerClient.cpp
++++ b/libs/gui/SurfaceComposerClient.cpp
+@@ -527,6 +527,13 @@ SurfaceComposerClient::Transaction::Transaction(const Transaction& other)
+     mListenerCallbacks = other.mListenerCallbacks;
+ }
+ 
++void SurfaceComposerClient::Transaction::sanitize() {
++    for (auto & [handle, composerState] : mComposerStates) {
++        composerState.state.sanitize(0 /* permissionMask */);
++    }
++    mInputWindowCommands.clear();
++}
++
+ std::unique_ptr<SurfaceComposerClient::Transaction>
+ SurfaceComposerClient::Transaction::createFromParcel(const Parcel* parcel) {
+     auto transaction = std::make_unique<Transaction>();
+@@ -611,7 +618,6 @@ status_t SurfaceComposerClient::Transaction::readFromParcel(const Parcel* parcel
+         if (composerState.read(*parcel) == BAD_VALUE) {
+             return BAD_VALUE;
+         }
+-
+         composerStates[surfaceControlHandle] = composerState;
+     }
+ 
+diff --git a/libs/gui/include/gui/LayerState.h b/libs/gui/include/gui/LayerState.h
+index 3e57ff611..4ffd324cd 100644
+--- a/libs/gui/include/gui/LayerState.h
++++ b/libs/gui/include/gui/LayerState.h
+@@ -62,6 +62,12 @@ struct client_cache_t {
+  * Used to communicate layer information between SurfaceFlinger and its clients.
+  */
+ struct layer_state_t {
++    enum Permission {
++        ACCESS_SURFACE_FLINGER = 0x1,
++        ROTATE_SURFACE_FLINGER = 0x2,
++        INTERNAL_SYSTEM_WINDOW = 0x4,
++    };
++
+     enum {
+         eLayerHidden = 0x01,         // SURFACE_HIDDEN in SurfaceControl.java
+         eLayerOpaque = 0x02,         // SURFACE_OPAQUE
+@@ -128,6 +134,7 @@ struct layer_state_t {
+     status_t read(const Parcel& input);
+     bool hasBufferChanges() const;
+     bool hasValidBuffer() const;
++    void sanitize(int32_t permissions);
+ 
+     struct matrix22_t {
+         float dsdx{0};
+diff --git a/libs/gui/include/gui/SurfaceComposerClient.h b/libs/gui/include/gui/SurfaceComposerClient.h
+index baa056761..271ab86d2 100644
+--- a/libs/gui/include/gui/SurfaceComposerClient.h
++++ b/libs/gui/include/gui/SurfaceComposerClient.h
+@@ -585,6 +585,14 @@ public:
+         void setAnimationTransaction();
+         void setEarlyWakeupStart();
+         void setEarlyWakeupEnd();
++
++        /**
++         * Strip the transaction of all permissioned requests, required when
++         * accepting transactions across process boundaries.
++         *
++         * TODO (b/213644870): Remove all permissioned things from Transaction
++         */
++        void sanitize();
+     };
+ 
+     status_t clearLayerFrameStats(const sp<IBinder>& token) const;
+-- 
+2.36.1.476.g0c4daa206d-goog
+
