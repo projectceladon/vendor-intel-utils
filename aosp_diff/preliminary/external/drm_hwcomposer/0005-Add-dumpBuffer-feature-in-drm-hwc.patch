@@ -1,0 +1,235 @@
+From 9066bedde4a9cb10791dfd5f32a4a058ca695024 Mon Sep 17 00:00:00 2001
+From: "wei, wushuangx" <wushuangx.wei@intel.com>
+Date: Wed, 29 Jun 2022 15:14:07 +0800
+Subject: [PATCH] Add dumpBuffer feature in drm-hwc
+
+Enable dumpBuffer for debug purpose. when necessary, DumpBuffer() function is called to execute.
+After "setenforce 0" and "setprop drm.dumpbuffer.on 1" is executed in the adb shell,
+dumpfiles will be generated in the /data/local/tarce directory
+
+Tracked-On: OAM-102488
+Signed-off-by: wei, wushuangx <wushuangx.wei@intel.com>
+---
+ DrmHwcTwo.cpp                           |  2 +
+ bufferinfo/legacy/BufferInfoMinigbm.cpp | 91 ++++++++++++++++++++++++-
+ bufferinfo/legacy/BufferInfoMinigbm.h   | 27 ++++++++
+ drm/DrmDevice.h                         |  2 +
+ utils/hwcutils.cpp                      | 11 +++
+ 5 files changed, 132 insertions(+), 1 deletion(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index 194b11e..eb7c41f 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -35,6 +35,7 @@
+ #include "compositor/DrmDisplayComposition.h"
+ #include "utils/log.h"
+ #include "utils/properties.h"
++#include "bufferinfo/legacy/BufferInfoMinigbm.h"
+ 
+ namespace android {
+ 
+@@ -292,6 +293,7 @@ HWC2::Error DrmHwcTwo::HwcDisplay::Init(std::vector<DrmPlane *> *planes) {
+     return HWC2::Error::BadDisplay;
+   }
+ 
++  BufferInfoMinigbm::InitializeGralloc1(drm_);
+   return ChosePreferredConfig();
+ }
+ 
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.cpp b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+index d030dff..206ff20 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.cpp
++++ b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+@@ -55,4 +55,93 @@ int BufferInfoMinigbm::ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) {
+   return 0;
+ }
+ 
+-}  // namespace android
++void BufferInfoMinigbm::DumpBuffer(DrmDevice *drmDevice, buffer_handle_t handle, hwc_drm_bo_t buffer_info) {
++  if (NULL == handle)
++    return;
++  char dump_file[256] = {0};
++  buffer_handle_t handle_copy;
++  uint8_t* pixels = nullptr;
++  gralloc1_rect_t accessRegion = {0, 0, (int32_t)buffer_info.width, (int32_t)buffer_info.height};;
++
++  struct dri2_drm_display *dri_drm = (dri2_drm_display *)drmDevice->dri_drm;
++
++  assert (dri_drm == nullptr ||
++          dri_drm->pfn_importBuffer  == nullptr ||
++          dri_drm->pfn_lock  == nullptr ||
++          dri_drm->pfn_unlock  == nullptr ||
++          dri_drm->pfn_release  == nullptr ||
++          dri_drm->pfn_get_stride);
++
++  int ret = dri_drm->pfn_importBuffer(dri_drm->gralloc1_dvc, handle, &handle_copy);
++  if (ret) {
++    ALOGE("Gralloc importBuffer failed");
++    return;
++  }
++
++  ret = dri_drm->pfn_lock(dri_drm->gralloc1_dvc, handle_copy,
++                          GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN, GRALLOC1_PRODUCER_USAGE_CPU_WRITE_NEVER,
++                          &accessRegion, reinterpret_cast<void**>(&pixels), 0);
++  if (ret) {
++    ALOGE("gralloc->lock failed: %d", ret);
++    return;
++  } else {
++    char ctime[32];
++    time_t t = time(0);
++    static int i = 0;
++    if (i >= 1000) {
++      i = 0;
++    }
++    strftime(ctime, sizeof(ctime), "%Y-%m-%d", localtime(&t));
++    sprintf(dump_file, "/data/local/traces/dump_%dx%d_0x%x_%s_%d", buffer_info.width, buffer_info.height, buffer_info.format, ctime,i++);
++    int file_fd = 0;
++    file_fd = open(dump_file, O_RDWR|O_CREAT, 0666);
++    if (file_fd == -1) {
++      ALOGE("Failed to open %s while dumping", dump_file);
++    } else {
++      uint32_t bytes = 64;
++      size_t size = buffer_info.width * buffer_info.height * bytes;
++      ALOGE("write file buffer_info.size = %zu", size);
++      write(file_fd, pixels, size);
++      close(file_fd);
++    }
++    int outReleaseFence = 0;
++    dri_drm->pfn_unlock(dri_drm->gralloc1_dvc, handle_copy, &outReleaseFence);
++    dri_drm->pfn_release(dri_drm->gralloc1_dvc, handle_copy);
++  }
++}
++
++void BufferInfoMinigbm::InitializeGralloc1(DrmDevice *drmDevice) {
++  hw_device_t *device;
++
++  struct dri2_drm_display *dri_drm = (dri2_drm_display *)calloc(1, sizeof(*dri_drm));
++  if (!dri_drm)
++    return;
++
++  dri_drm->fd = -1;
++  int ret = hw_get_module(GRALLOC_HARDWARE_MODULE_ID,
++                      (const hw_module_t **)&dri_drm->gralloc);
++  if (ret) {
++    return;
++  }
++
++  dri_drm->gralloc_version = dri_drm->gralloc->common.module_api_version;
++  if (dri_drm->gralloc_version == HARDWARE_MODULE_API_VERSION(1, 0)) {
++    ret = dri_drm->gralloc->common.methods->open(&dri_drm->gralloc->common, GRALLOC_HARDWARE_MODULE_ID, &device);
++    if (ret) {
++      ALOGE("Failed to open device");
++      return;
++    } else {
++      ALOGE("success to open device, Initialize");
++      dri_drm->gralloc1_dvc = (gralloc1_device_t *)device;
++      dri_drm->pfn_lock = (GRALLOC1_PFN_LOCK)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_LOCK);
++      dri_drm->pfn_importBuffer = (GRALLOC1_PFN_IMPORT_BUFFER)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_IMPORT_BUFFER);
++      dri_drm->pfn_release = (GRALLOC1_PFN_RELEASE)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_RELEASE);
++      dri_drm->pfn_unlock = (GRALLOC1_PFN_UNLOCK)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_UNLOCK);
++      dri_drm->pfn_get_stride = (GRALLOC1_PFN_GET_STRIDE)dri_drm->gralloc1_dvc->getFunction(dri_drm->gralloc1_dvc, GRALLOC1_FUNCTION_GET_STRIDE);
++      drmDevice->dri_drm = (void *)dri_drm;
++      }
++    }
++  return;
++};
++
++}  // namespace android
+\ No newline at end of file
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.h b/bufferinfo/legacy/BufferInfoMinigbm.h
+index bff9d74..1b1f504 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.h
++++ b/bufferinfo/legacy/BufferInfoMinigbm.h
+@@ -18,15 +18,42 @@
+ #define BUFFERINFOMINIGBM_H_
+ 
+ #include <hardware/gralloc.h>
++#include <hardware/gralloc1.h>
+ 
+ #include "bufferinfo/BufferInfoGetter.h"
+ 
++#define DRV_MAX_PLANES 4
++#define DRV_MAX_FDS (DRV_MAX_PLANES + 1)
++
++enum INITIALIZE_ERROR{
++	INITIALIZE_CALLOC_ERROR = 1,
++	INITIALIZE_GET_MODULE_ERROR,
++	INITIALIZE_OPEN_DEVICE_ERROR,
++	INITIALIZE_NONE = 0,
++};
++
++struct dri2_drm_display
++{
++   int fd;
++   const gralloc_module_t *gralloc;
++   uint16_t gralloc_version;
++   gralloc1_device_t *gralloc1_dvc;
++   GRALLOC1_PFN_LOCK pfn_lock;
++   GRALLOC1_PFN_GET_FORMAT pfn_getFormat;
++   GRALLOC1_PFN_UNLOCK pfn_unlock;
++   GRALLOC1_PFN_IMPORT_BUFFER pfn_importBuffer;
++   GRALLOC1_PFN_RELEASE pfn_release;
++   GRALLOC1_PFN_GET_STRIDE pfn_get_stride;
++};
++
+ namespace android {
+ 
+ class BufferInfoMinigbm : public LegacyBufferInfoGetter {
+  public:
+   using LegacyBufferInfoGetter::LegacyBufferInfoGetter;
+   int ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) override;
++  static void InitializeGralloc1(DrmDevice *drmDevice);
++  static void DumpBuffer(DrmDevice *drmDevice, buffer_handle_t handle, hwc_drm_bo_t buffer_info);
+ };
+ 
+ }  // namespace android
+diff --git a/drm/DrmDevice.h b/drm/DrmDevice.h
+index a84d1f9..dd8638f 100644
+--- a/drm/DrmDevice.h
++++ b/drm/DrmDevice.h
+@@ -97,6 +97,8 @@ class DrmDevice {
+     return *mDrmFbImporter.get();
+   }
+ 
++  void *dri_drm;
++
+  private:
+   int TryEncoderForDisplay(int display, DrmEncoder *enc);
+   int GetProperty(uint32_t obj_id, uint32_t obj_type, const char *prop_name,
+diff --git a/utils/hwcutils.cpp b/utils/hwcutils.cpp
+index 6de6500..852e724 100644
+--- a/utils/hwcutils.cpp
++++ b/utils/hwcutils.cpp
+@@ -20,10 +20,12 @@
+ #include <log/log.h>
+ #include <ui/Gralloc.h>
+ #include <ui/GraphicBufferMapper.h>
++#include <cutils/properties.h>
+ 
+ #include "bufferinfo/BufferInfoGetter.h"
+ #include "drm/DrmFbImporter.h"
+ #include "drmhwcomposer.h"
++#include "bufferinfo/legacy/BufferInfoMinigbm.h"
+ 
+ #define UNUSED(x) (void)(x)
+ 
+@@ -45,6 +47,15 @@ int DrmHwcLayer::ImportBuffer(DrmDevice *drmDevice) {
+     return -EINVAL;
+   }
+ 
++  char status[PROPERTY_VALUE_MAX];
++  if (property_get("drm.dumpbuffer.on", status, NULL) > 0) {
++    ALOGE("drm.dumpbuffer.on does support");
++    if (status != "0") {
++      BufferInfoMinigbm::DumpBuffer(drmDevice, sf_handle, buffer_info);
++    } else {
++      ALOGE("DumpBuffer does not support");
++    }
++  }
+   return 0;
+ }
+ 
+-- 
+2.36.0
+
