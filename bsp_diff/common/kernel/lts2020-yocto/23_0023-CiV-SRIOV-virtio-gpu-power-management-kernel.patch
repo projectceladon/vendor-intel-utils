@@ -1,0 +1,217 @@
+From 0dcb6fea318366069a88c4ac60ad37acff4b3904 Mon Sep 17 00:00:00 2001
+From: "Yuan, Hang" <hang.yuan@intel.com>
+Date: Thu, 30 Jun 2022 18:42:17 +0800
+Subject: [PATCH 2/2] CiV SRIOV virtio-gpu power management kernel
+
+Tracked-On: OAM-102664
+Signed-off-by: Yuan, Hang <hang.yuan@intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_drv.c | 54 +++++++++++++++++++++++++++-
+ drivers/gpu/drm/virtio/virtgpu_drv.h |  2 ++
+ drivers/gpu/drm/virtio/virtgpu_kms.c | 20 ++++++++---
+ drivers/gpu/drm/virtio/virtgpu_vq.c  |  6 ++++
+ drivers/virtio/virtio_pci_common.c   | 12 +++++++
+ include/uapi/linux/virtio_config.h   |  4 +++
+ 6 files changed, 92 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index ed85a7863256..7dde3b1f8732 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -155,6 +155,54 @@ static void virtio_gpu_config_changed(struct virtio_device *vdev)
+ 	schedule_work(&vgdev->config_changed_work);
+ }
+ 
++#ifdef CONFIG_PM_SLEEP
++static int virtgpu_freeze(struct virtio_device *vdev)
++{
++	struct drm_device *dev = vdev->priv;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	struct virtio_gpu_vbuffer *vbuf;
++	struct virtqueue *vq;
++	int ret;
++
++	ret = drm_mode_config_helper_suspend(dev);
++	if (ret)
++		printk(KERN_ERR "virtgpu freeze failed\n");
++
++	vq = vgdev->ctrlq.vq;
++	while ((vbuf = virtqueue_detach_unused_buf(vq)) != NULL) {
++		virtio_gpu_free_vbuf(vgdev, vbuf);
++	}
++
++	vq = vgdev->cursorq.vq;
++	while ((vbuf = virtqueue_detach_unused_buf(vq)) != NULL) {
++		virtio_gpu_free_vbuf(vgdev, vbuf);
++	}
++
++	vdev->config->set_status(vdev, VIRTIO_CONFIG_S_SUSPEND);
++	vdev->config->del_vqs(vdev);
++
++	return 0;
++}
++
++static int virtgpu_restore(struct virtio_device *vdev)
++{
++	struct drm_device *dev = vdev->priv;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	int ret;
++
++	ret = virtio_gpu_find_vqs(vgdev);
++	if (ret)
++		printk(KERN_ERR "virtgpu find vqs failed\n");
++
++	ret = drm_mode_config_helper_resume(dev);
++	if (ret)
++		printk(KERN_ERR "virtgpu resume failed\n");
++
++	vdev->config->set_status(vdev, VIRTIO_CONFIG_S_RESUME);
++	return 0;
++}
++#endif
++
+ static struct virtio_device_id id_table[] = {
+ 	{ VIRTIO_ID_GPU, VIRTIO_DEV_ANY_ID },
+ 	{ 0 },
+@@ -181,7 +229,11 @@ static struct virtio_driver virtio_gpu_driver = {
+ 	.id_table = id_table,
+ 	.probe = virtio_gpu_probe,
+ 	.remove = virtio_gpu_remove,
+-	.config_changed = virtio_gpu_config_changed
++	.config_changed = virtio_gpu_config_changed,
++#ifdef CONFIG_PM_SLEEP
++	.freeze = virtgpu_freeze,
++	.restore = virtgpu_restore,
++#endif
+ };
+ 
+ module_virtio_driver(virtio_gpu_driver);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index d4e610a44e12..0158572be52c 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -269,6 +269,7 @@ void virtio_gpu_deinit(struct drm_device *dev);
+ void virtio_gpu_release(struct drm_device *dev);
+ int virtio_gpu_driver_open(struct drm_device *dev, struct drm_file *file);
+ void virtio_gpu_driver_postclose(struct drm_device *dev, struct drm_file *file);
++int virtio_gpu_find_vqs(struct virtio_gpu_device *vgdev);
+ 
+ /* virtgpu_gem.c */
+ int virtio_gpu_gem_object_open(struct drm_gem_object *obj,
+@@ -299,6 +300,7 @@ void virtio_gpu_array_put_free_work(struct work_struct *work);
+ /* virtgpu_vq.c */
+ int virtio_gpu_alloc_vbufs(struct virtio_gpu_device *vgdev);
+ void virtio_gpu_free_vbufs(struct virtio_gpu_device *vgdev);
++void virtio_gpu_free_vbuf(struct virtio_gpu_device *vgdev, struct virtio_gpu_vbuffer *vbuf);
+ void virtio_gpu_cmd_create_resource(struct virtio_gpu_device *vgdev,
+ 				    struct virtio_gpu_object *bo,
+ 				    struct virtio_gpu_object_params *params,
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index f3379059f324..fbb0dd548870 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -94,16 +94,28 @@ static void virtio_gpu_get_capsets(struct virtio_gpu_device *vgdev,
+ 	vgdev->num_capsets = num_capsets;
+ }
+ 
+-int virtio_gpu_init(struct drm_device *dev)
++int virtio_gpu_find_vqs(struct virtio_gpu_device *vgdev)
+ {
+ 	static vq_callback_t *callbacks[] = {
+ 		virtio_gpu_ctrl_ack, virtio_gpu_cursor_ack
+ 	};
+ 	static const char * const names[] = { "control", "cursor" };
++	struct virtqueue *vqs[2];
++	int ret;
++
++	ret = virtio_find_vqs(vgdev->vdev, 2, vqs, callbacks, names, NULL);
++	if (ret) return ret;
++
++	vgdev->ctrlq.vq = vqs[0];
++	vgdev->cursorq.vq = vqs[1];
++
++	return 0;
++}
+ 
++int virtio_gpu_init(struct drm_device *dev)
++{
+ 	struct virtio_gpu_device *vgdev;
+ 	/* this will expand later */
+-	struct virtqueue *vqs[2];
+ 	u32 num_scanouts, num_capsets;
+ 	int ret = 0;
+ 
+@@ -182,13 +194,11 @@ int virtio_gpu_init(struct drm_device *dev)
+ 		 vgdev->has_resource_blob ? '+' : '-',
+ 		 vgdev->has_host_visible ? '+' : '-');
+ 
+-	ret = virtio_find_vqs(vgdev->vdev, 2, vqs, callbacks, names, NULL);
++	ret = virtio_gpu_find_vqs(vgdev);
+ 	if (ret) {
+ 		DRM_ERROR("failed to find virt queues\n");
+ 		goto err_vqs;
+ 	}
+-	vgdev->ctrlq.vq = vqs[0];
+-	vgdev->cursorq.vq = vqs[1];
+ 	ret = virtio_gpu_alloc_vbufs(vgdev);
+ 	if (ret) {
+ 		DRM_ERROR("failed to alloc vbufs\n");
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index 2e71e91278b4..1bd364accdec 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -183,6 +183,12 @@ static void free_vbuf(struct virtio_gpu_device *vgdev,
+ 	kmem_cache_free(vgdev->vbufs, vbuf);
+ }
+ 
++void virtio_gpu_free_vbuf(struct virtio_gpu_device *vgdev,
++		      struct virtio_gpu_vbuffer *vbuf)
++{
++	free_vbuf(vgdev, vbuf);
++}
++
+ static void reclaim_vbufs(struct virtqueue *vq, struct list_head *reclaim_list)
+ {
+ 	struct virtio_gpu_vbuffer *vbuf;
+diff --git a/drivers/virtio/virtio_pci_common.c b/drivers/virtio/virtio_pci_common.c
+index b35bb2d57f62..f08c1b1bc9ea 100644
+--- a/drivers/virtio/virtio_pci_common.c
++++ b/drivers/virtio/virtio_pci_common.c
+@@ -484,7 +484,19 @@ static int virtio_pci_restore(struct device *dev)
+ 	return virtio_device_restore(&vp_dev->vdev);
+ }
+ 
++static int virtio_pci_prepare(struct device *dev)
++{
++	return 0;
++}
++
++static void virtio_pci_complete(struct device *dev)
++{
++	return;
++}
++
+ static const struct dev_pm_ops virtio_pci_pm_ops = {
++	.prepare = virtio_pci_prepare,
++	.complete = virtio_pci_complete,
+ 	SET_SYSTEM_SLEEP_PM_OPS(virtio_pci_freeze, virtio_pci_restore)
+ };
+ #endif
+diff --git a/include/uapi/linux/virtio_config.h b/include/uapi/linux/virtio_config.h
+index b5eda06f0d57..8a1429963eef 100644
+--- a/include/uapi/linux/virtio_config.h
++++ b/include/uapi/linux/virtio_config.h
+@@ -40,6 +40,10 @@
+ #define VIRTIO_CONFIG_S_DRIVER_OK	4
+ /* Driver has finished configuring features */
+ #define VIRTIO_CONFIG_S_FEATURES_OK	8
++/* Device will suspend */
++#define VIRTIO_CONFIG_S_SUSPEND		0x10
++/* Device resumed */
++#define VIRTIO_CONFIG_S_RESUME		0x11
+ /* Device entered invalid state, driver must reset it */
+ #define VIRTIO_CONFIG_S_NEEDS_RESET	0x40
+ /* We've given up on this device. */
+-- 
+2.31.0
+
