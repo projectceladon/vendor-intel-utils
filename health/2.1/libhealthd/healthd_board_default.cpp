@@ -21,6 +21,7 @@
 #include "battery_notifypkt.h"
 #include <cutils/klog.h>
 #include <unistd.h>
+#include <string.h>
 #define HLOG_TAG "android.hardware.health@2.1-impl.intel"
 #define KLOG_LEVEL 6
 #define HEALTH_PORT 14196
@@ -42,6 +43,18 @@ static void parse_battery_status(uint8_t *status)
         s_props.batteryStatus = android::BATTERY_STATUS_NOT_CHARGING;
     else if(!strncmp((char *)status, "Full", 4))
         s_props.batteryStatus = android::BATTERY_STATUS_FULL;
+}
+
+static void update_battery_health(struct monitor_pkt *mpkt)
+{
+        if ((mpkt->charge_full == 0) || (mpkt->charge_full_design == 0)) {
+            s_props.batteryHealth = android::BATTERY_HEALTH_DEAD;
+        }
+        else if ((((mpkt->charge_full)*100)/mpkt->charge_full_design) >= 80) {
+            s_props.batteryHealth = android::BATTERY_HEALTH_GOOD;
+        }
+        else
+            s_props.batteryHealth = android::BATTERY_HEALTH_UNKNOWN;
 }
 
 static void parse_battery_health(uint8_t *health)
@@ -85,7 +98,12 @@ static void parse_battery_properties(struct monitor_pkt *mpkt)
     s_props.batteryFullCharge = mpkt->charge_full;
     s_props.batteryChargeCounter = mpkt->charge_now;
     parse_battery_status(mpkt->status);
-    parse_battery_health(mpkt->health);
+    if (strlen((const char*)mpkt->health) == 0 ) {
+	    update_battery_health(mpkt);
+    }
+    else {
+	    parse_battery_health(mpkt->health);
+    }
 }
 
 static int connect_vsock(int *vsock_fd) {
@@ -179,3 +197,8 @@ int healthd_board_battery_update(struct android::BatteryProperties *props)
     }	    
     return 0;
 }
+
+bool get_battery_mediation_present(void) {
+    return is_vsock_present;
+}
+

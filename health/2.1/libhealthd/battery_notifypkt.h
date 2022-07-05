@@ -6,7 +6,7 @@
 #define INTELIPCID "INTELIPC"
 
 using namespace android;
-
+bool get_battery_mediation_present(void);
 bool get_battery_properties(android::BatteryProperties *props);
 
 struct header {

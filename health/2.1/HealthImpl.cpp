@@ -4,6 +4,7 @@
 #include <health/utils.h>
 #include <health2impl/Health.h>
 #include <hidl/Status.h>
+#include <libhealthd/battery_notifypkt.h>
 
 using ::android::sp;
 using ::android::hardware::Return;
@@ -58,9 +59,11 @@ void HealthImpl::UpdateHealthInfo(HealthInfo* health_info) {
     convertFromHealthInfo(health_info->legacy.legacy, &props);
     healthd_board_battery_update(&props);
     convertToHealthInfo(&props, health_info->legacy.legacy);
-    health_info->batteryCapacityLevel = android::hardware::health::V2_1::BatteryCapacityLevel::UNKNOWN;
-    health_info->batteryChargeTimeToFullNowSeconds = 0;
-    health_info->batteryFullChargeDesignCapacityUah = 0;
+    if (get_battery_mediation_present() == false) {
+        health_info->batteryCapacityLevel = android::hardware::health::V2_1::BatteryCapacityLevel::UNKNOWN;
+        health_info->batteryChargeTimeToFullNowSeconds = 0;
+        health_info->batteryFullChargeDesignCapacityUah = 0;
+    }
 }
 
 }  // namespace implementation
