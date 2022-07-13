@@ -87,7 +87,12 @@ void iioClient::iioThread(struct iioclient_device *devlist) {
                 struct iio_channel *channel = devlist[id].channel_raw[index];
                 char buf[1024] = {0};
                 if (iio_channel_attr_read(channel, "raw", buf, sizeof(buf)) > 0)
-                    devlist[id].data[index] = strtof(buf, NULL) * devlist[id].scale;
+		{
+                    if (strcmp(devlist[id].name, "magn_3d") == 0)
+                        devlist[id].data[index] = strtof(buf, NULL) * devlist[id].scale * 100;
+                    else
+                        devlist[id].data[index] = strtof(buf, NULL) * devlist[id].scale;
+		}
             }
 #if 0  // data probing point for debug
             sleep(1);
