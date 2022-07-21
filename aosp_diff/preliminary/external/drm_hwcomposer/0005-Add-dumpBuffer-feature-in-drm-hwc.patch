@@ -1,0 +1,253 @@
+From de1db5ed3c899debf8a87810a0cc727a222db146 Mon Sep 17 00:00:00 2001
+From: "wei, wushuangx" <wushuangx.wei@intel.com>
+Date: Wed, 13 Jul 2022 16:47:57 +0800
+Subject: [PATCH] Add dumpBuffer feature in drm-hwc
+
+Enable dumpBuffer for debug purpose. when necessary, DumpBuffer() function is called to execute.
+After "setenforce 0" and "setprop drm.dumpbuffer.on 1" is executed in the adb shell,
+dumpfiles will be generated in the /data/local/tarce directory
+
+Tracked-On: OAM-102488
+Signed-off-by: wei, wushuangx <wushuangx.wei@intel.com>
+---
+ bufferinfo/legacy/BufferInfoMinigbm.cpp | 141 +++++++++++++++++++++++-
+ bufferinfo/legacy/BufferInfoMinigbm.h   |  35 +++++-
+ utils/hwcutils.cpp                      |  11 ++
+ 3 files changed, 185 insertions(+), 2 deletions(-)
+
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.cpp b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+index d030dff..0194177 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.cpp
++++ b/bufferinfo/legacy/BufferInfoMinigbm.cpp
+@@ -55,4 +55,143 @@ int BufferInfoMinigbm::ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) {
+   return 0;
+ }
+ 
+-}  // namespace android
++void BufferInfoMinigbm::DumpBuffer(buffer_handle_t handle, hwc_drm_bo_t buffer_info) {
++  if (NULL == handle)
++    return;
++  char dump_file[256] = {0};
++  buffer_handle_t handle_copy;
++  uint8_t* pixels = nullptr;
++  gralloc1_rect_t accessRegion = {0, 0, (int32_t)buffer_info.width, (int32_t)buffer_info.height};
++  struct android_ycbcr ycbcr;
++  struct android_flex_layout outFlexLayout;
++
++  InitializeGralloc1();
++
++  assert (!drm_display ||
++          !drm_display.pfn_importBuffer ||
++          !drm_display.pfn_lock ||
++          !drm_display.pfn_unlock ||
++          !drm_display.pfn_release ||
++          drm_display.gralloc->lock_ycbcr ||
++          drm_display.gralloc->unlock);
++
++  int ret = drm_display.pfn_importBuffer(drm_display.gralloc1_dvc, handle, &handle_copy);
++  if (ret) {
++    ALOGE("Drm Minigbm importBuffer failed");
++    return;
++  }
++
++  if (buffer_info.format == DRM_BO_FORMAT_YUV) {
++    ret = drm_display.pfn_lockflex(drm_display.gralloc1_dvc, handle_copy,
++                                       0, 0, &accessRegion, &outFlexLayout, -1);
++  } else {
++    ret = drm_display.pfn_lock(drm_display.gralloc1_dvc, handle_copy,
++                            GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN, GRALLOC1_PRODUCER_USAGE_CPU_WRITE_NEVER,
++                            &accessRegion, reinterpret_cast<void**>(&pixels), 0);
++  }
++
++  if (ret) {
++    ALOGE("gralloc lock failed: %d", ret);
++  } else {
++    char ctime[32];
++    time_t t = time(0);
++    static int num = 0;
++    if (num >= 1000) {
++      num = 0;
++    }
++    strftime(ctime, sizeof(ctime), "%Y-%m-%d", localtime(&t));
++    sprintf(dump_file, "/data/local/traces/dump_%dx%d_0x%x_%s_%d", buffer_info.width, buffer_info.height, buffer_info.format, ctime,num++);
++    int file_fd = 0;
++    file_fd = open(dump_file, O_RDWR|O_CREAT, 0666);
++    if (file_fd == -1) {
++      ALOGE("Failed to open %s while dumping", dump_file);
++    } else {
++      size_t size = buffer_info.width * buffer_info.height;
++      if (buffer_info.format == DRM_BO_FORMAT_YUV) {
++        get_ycbcr_from_flexlayout(&outFlexLayout, &ycbcr);
++
++        const uint8_t *srcY = (const uint8_t *)ycbcr.y;
++        const uint8_t *srcU = (const uint8_t *)ycbcr.cb;
++        const uint8_t *srcV = (const uint8_t *)ycbcr.cr;
++
++        for (size_t y = buffer_info.height; y > 0; --y) {
++            srcY += ycbcr.ystride;
++        }
++        for (size_t y = buffer_info.height >> 1; y > 0; --y) {
++            srcU += ycbcr.cstride;
++            srcV += ycbcr.cstride;
++        }
++        write(file_fd, srcY, size);
++        // write(file_fd, srcU, size / 4);
++        // write(file_fd, srcV, size / 4);
++        // for (unsigned int i = 0; i < (size / 4); i++) {
++        //   write(file_fd, (uint8_t*)ycbcr.cb, 1);
++        //   write(file_fd, (uint8_t*)ycbcr.cr, 1);
++		    // }
++      } else {
++        write(file_fd, pixels, size * 4);
++      }
++    }
++    close(file_fd);
++    int outReleaseFence = 0;
++    drm_display.pfn_unlock(drm_display.gralloc1_dvc, handle_copy, &outReleaseFence);
++    drm_display.pfn_release(drm_display.gralloc1_dvc, handle_copy);
++  }
++  return;
++}
++
++
++void BufferInfoMinigbm::get_ycbcr_from_flexlayout(struct android_flex_layout *outFlexLayout, struct android_ycbcr *ycbcr)
++{
++  for( int i = 0; i < outFlexLayout->num_planes; i++) {
++    switch(outFlexLayout->planes[i].component){
++      case FLEX_COMPONENT_Y:
++        ycbcr->y = outFlexLayout->planes[i].top_left;
++        ycbcr->ystride = outFlexLayout->planes[i].v_increment;
++      break;
++      case FLEX_COMPONENT_Cb:
++        ycbcr->cb = outFlexLayout->planes[i].top_left;
++        ycbcr->cstride = outFlexLayout->planes[i].v_increment;
++      break;
++      case FLEX_COMPONENT_Cr:
++        ycbcr->cr = outFlexLayout->planes[i].top_left;
++        ycbcr->chroma_step = outFlexLayout->planes[i].h_increment;
++      break;
++      default:
++        ALOGE("unknown component 0x%x", outFlexLayout->planes[i].component);
++      break;
++    }
++  }
++  return;
++}
++
++void BufferInfoMinigbm::InitializeGralloc1() {
++  if (!switchinit) {
++    hw_device_t *device;
++    int ret = hw_get_module("gralloc",
++                        (const hw_module_t **)&drm_display.gralloc);
++    if (ret) {
++      ALOGE("weiwushx hw_get_module failed");
++      return;
++    }
++    drm_display.gralloc_version = drm_display.gralloc->common.module_api_version;
++    if (drm_display.gralloc_version == HARDWARE_MODULE_API_VERSION(1, 0)) {
++      ret = drm_display.gralloc->common.methods->open(&drm_display.gralloc->common, GRALLOC_HARDWARE_MODULE_ID, &device);
++      if (ret) {
++        ALOGE("Failed to open device");
++        return;
++      } else {
++        ALOGE("success to open device, Initialize");
++        drm_display.gralloc1_dvc = (gralloc1_device_t *)device;
++        drm_display.pfn_lock = (GRALLOC1_PFN_LOCK)drm_display.gralloc1_dvc->getFunction(drm_display.gralloc1_dvc, GRALLOC1_FUNCTION_LOCK);
++        drm_display.pfn_importBuffer = (GRALLOC1_PFN_IMPORT_BUFFER)drm_display.gralloc1_dvc->getFunction(drm_display.gralloc1_dvc, GRALLOC1_FUNCTION_IMPORT_BUFFER);
++        drm_display.pfn_release = (GRALLOC1_PFN_RELEASE)drm_display.gralloc1_dvc->getFunction(drm_display.gralloc1_dvc, GRALLOC1_FUNCTION_RELEASE);
++        drm_display.pfn_unlock = (GRALLOC1_PFN_UNLOCK)drm_display.gralloc1_dvc->getFunction(drm_display.gralloc1_dvc, GRALLOC1_FUNCTION_UNLOCK);
++        drm_display.pfn_lockflex = (GRALLOC1_PFN_LOCK_FLEX)drm_display.gralloc1_dvc->getFunction(drm_display.gralloc1_dvc, GRALLOC1_FUNCTION_LOCK_FLEX);
++        switchinit = true;
++        }
++      }
++  }
++  return;
++}
++}  // namespace android
+\ No newline at end of file
+diff --git a/bufferinfo/legacy/BufferInfoMinigbm.h b/bufferinfo/legacy/BufferInfoMinigbm.h
+index bff9d74..897a1ec 100644
+--- a/bufferinfo/legacy/BufferInfoMinigbm.h
++++ b/bufferinfo/legacy/BufferInfoMinigbm.h
+@@ -18,15 +18,48 @@
+ #define BUFFERINFOMINIGBM_H_
+ 
+ #include <hardware/gralloc.h>
++#include <hardware/gralloc1.h>
+ 
+-#include "bufferinfo/BufferInfoGetter.h"
++ #include "bufferinfo/BufferInfoGetter.h"
++
++#define DRV_MAX_PLANES 4
++#define DRV_MAX_FDS (DRV_MAX_PLANES + 1)
++#define DRM_BO_FORMAT_RGB 875708993
++#define DRM_BO_FORMAT_YUV 926497081
++
++enum INITIALIZE_ERROR{
++	INITIALIZE_CALLOC_ERROR = 1,
++	INITIALIZE_GET_MODULE_ERROR,
++	INITIALIZE_OPEN_DEVICE_ERROR,
++	INITIALIZE_NONE = 0,
++};
++
++struct dri2_drm_display
++{
++   int fd;
++   const gralloc_module_t *gralloc;
++   uint16_t gralloc_version;
++   gralloc1_device_t *gralloc1_dvc;
++   GRALLOC1_PFN_LOCK pfn_lock;
++   GRALLOC1_PFN_LOCK_FLEX pfn_lockflex;
++   GRALLOC1_PFN_GET_FORMAT pfn_getFormat;
++   GRALLOC1_PFN_UNLOCK pfn_unlock;
++   GRALLOC1_PFN_IMPORT_BUFFER pfn_importBuffer;
++   GRALLOC1_PFN_RELEASE pfn_release;
++};
+ 
+ namespace android {
+ 
++static bool switchinit = false;
++static dri2_drm_display drm_display;
++
+ class BufferInfoMinigbm : public LegacyBufferInfoGetter {
+  public:
+   using LegacyBufferInfoGetter::LegacyBufferInfoGetter;
+   int ConvertBoInfo(buffer_handle_t handle, hwc_drm_bo_t *bo) override;
++  static void InitializeGralloc1();
++  static void DumpBuffer(buffer_handle_t handle, hwc_drm_bo_t buffer_info);
++  static void get_ycbcr_from_flexlayout(struct android_flex_layout *outFlexLayout, struct android_ycbcr *ycbcr);
+ };
+ 
+ }  // namespace android
+diff --git a/utils/hwcutils.cpp b/utils/hwcutils.cpp
+index 6de6500..9d433d4 100644
+--- a/utils/hwcutils.cpp
++++ b/utils/hwcutils.cpp
+@@ -24,6 +24,8 @@
+ #include "bufferinfo/BufferInfoGetter.h"
+ #include "drm/DrmFbImporter.h"
+ #include "drmhwcomposer.h"
++#include "bufferinfo/legacy/BufferInfoMinigbm.h"
++#include "utils/properties.h"
+ 
+ #define UNUSED(x) (void)(x)
+ 
+@@ -39,6 +41,15 @@ int DrmHwcLayer::ImportBuffer(DrmDevice *drmDevice) {
+     return ret;
+   }
+ 
++  char status[PROPERTY_VALUE_MAX];
++  if (property_get("drm.dumpbuffer.on", status, NULL) > 0) {
++    if (status != "0") {
++      // hwc_drm_bo bo{};
++      // BufferInfoGetter::GetInstance()->ConvertBoInfo(buffer_info, &bo);
++      BufferInfoMinigbm::DumpBuffer(sf_handle, buffer_info);
++    }
++  }
++
+   FbIdHandle = drmDevice->GetDrmFbImporter().GetOrCreateFbId(&buffer_info);
+   if (!FbIdHandle) {
+     ALOGE("Failed to import buffer");
+-- 
+2.36.0
+
