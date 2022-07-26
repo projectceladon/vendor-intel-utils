@@ -1,0 +1,497 @@
+From a22128257af2acf89a9d6719a432c75ec9e3e277 Mon Sep 17 00:00:00 2001
+From: Wenhao Wang <wenhaowang@google.com>
+Date: Wed, 2 Feb 2022 10:56:44 -0800
+Subject: [PATCH] DO NOT MERGE Suppress notifications when device enter
+ lockdown
+
+This CL makes the following modifcations:
+1. Add LockPatternUtils.StrongAuthTracker to monitor
+the lockdown mode status of the phone.
+2. Call mListeners.notifyRemovedLocked with all the
+notifications in the mNotificationList when entering
+the lockdown mode.
+3. Call mListeners.notifyPostedLocked with all the
+notifications in the mNotificationList when exiting
+the lockdown mode.
+4. Dismiss the function calls of notifyPostedLocked,
+notifyRemovedLocked, and notifyRankingUpdateLocked
+during the lockdown mode.
+
+The CL also adds corresponding tests.
+
+Bug: 173721373
+Test: atest NotificationManagerServiceTest
+Test: atest NotificationListenersTest
+Test: manually verify the paired device cannot receive
+notifications when the host phone is in lockdown mode.
+Ignore-AOSP-First: pending fix for a security issue.
+
+Change-Id: I7e83544863eeadf8272b6ff8a9bb8136d6466203
+Merged-In: I7e83544863eeadf8272b6ff8a9bb8136d6466203
+(cherry picked from commit 3cb6842a053e236cc98d7616ba4433c31ffda3ac)
+(cherry picked from commit 2e1c70b6b22422fb1f16be7add728327853f4618)
+Merged-In: I7e83544863eeadf8272b6ff8a9bb8136d6466203
+---
+ .../NotificationManagerService.java           | 107 +++++++++++++-
+ .../tests/uiservicestests/AndroidManifest.xml |   1 +
+ .../NotificationListenersTest.java            | 133 ++++++++++++++++++
+ .../NotificationManagerServiceTest.java       |  64 +++++++++
+ 4 files changed, 301 insertions(+), 4 deletions(-)
+ create mode 100644 services/tests/uiservicestests/src/com/android/server/notification/NotificationListenersTest.java
+
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index f5efd33e7cd..d5e7a15be72 100755
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -223,6 +223,7 @@ import android.util.Log;
+ import android.util.Pair;
+ import android.util.Slog;
+ import android.util.SparseArray;
++import android.util.SparseBooleanArray;
+ import android.util.StatsEvent;
+ import android.util.Xml;
+ import android.util.proto.ProtoOutputStream;
+@@ -253,6 +254,7 @@ import com.android.internal.util.FastXmlSerializer;
+ import com.android.internal.util.Preconditions;
+ import com.android.internal.util.XmlUtils;
+ import com.android.internal.util.function.TriPredicate;
++import com.android.internal.widget.LockPatternUtils;
+ import com.android.server.DeviceIdleInternal;
+ import com.android.server.EventLogTags;
+ import com.android.server.IoThread;
+@@ -1711,6 +1713,54 @@ public class NotificationManagerService extends SystemService {
+         return out;
+     }
+ 
++    protected class StrongAuthTracker extends LockPatternUtils.StrongAuthTracker {
++
++        SparseBooleanArray mUserInLockDownMode = new SparseBooleanArray();
++        boolean mIsInLockDownMode = false;
++
++        StrongAuthTracker(Context context) {
++            super(context);
++        }
++
++        private boolean containsFlag(int haystack, int needle) {
++            return (haystack & needle) != 0;
++        }
++
++        public boolean isInLockDownMode() {
++            return mIsInLockDownMode;
++        }
++
++        @Override
++        public synchronized void onStrongAuthRequiredChanged(int userId) {
++            boolean userInLockDownModeNext = containsFlag(getStrongAuthForUser(userId),
++                    STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN);
++            mUserInLockDownMode.put(userId, userInLockDownModeNext);
++            boolean isInLockDownModeNext = mUserInLockDownMode.indexOfValue(true) != -1;
++
++            if (mIsInLockDownMode == isInLockDownModeNext) {
++                return;
++            }
++
++            if (isInLockDownModeNext) {
++                cancelNotificationsWhenEnterLockDownMode();
++            }
++
++            // When the mIsInLockDownMode is true, both notifyPostedLocked and
++            // notifyRemovedLocked will be dismissed. So we shall call
++            // cancelNotificationsWhenEnterLockDownMode before we set mIsInLockDownMode
++            // as true and call postNotificationsWhenExitLockDownMode after we set
++            // mIsInLockDownMode as false.
++            mIsInLockDownMode = isInLockDownModeNext;
++
++            if (!isInLockDownModeNext) {
++                postNotificationsWhenExitLockDownMode();
++            }
++        }
++    }
++
++    private LockPatternUtils mLockPatternUtils;
++    private StrongAuthTracker mStrongAuthTracker;
++
+     public NotificationManagerService(Context context) {
+         this(context,
+                 new NotificationRecordLoggerImpl(),
+@@ -1736,6 +1786,11 @@ public class NotificationManagerService extends SystemService {
+         mAudioManager = audioMananger;
+     }
+ 
++    @VisibleForTesting
++    void setStrongAuthTracker(StrongAuthTracker strongAuthTracker) {
++        mStrongAuthTracker = strongAuthTracker;
++    }
++
+     @VisibleForTesting
+     void setKeyguardManager(KeyguardManager keyguardManager) {
+         mKeyguardManager = keyguardManager;
+@@ -1923,6 +1978,8 @@ public class NotificationManagerService extends SystemService {
+                 ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE));
+ 
+         mUiHandler = new Handler(UiThread.get().getLooper());
++        mLockPatternUtils = new LockPatternUtils(getContext());
++        mStrongAuthTracker = new StrongAuthTracker(getContext());
+         String[] extractorNames;
+         try {
+             extractorNames = resources.getStringArray(R.array.config_notificationSignalExtractors);
+@@ -2111,7 +2168,8 @@ public class NotificationManagerService extends SystemService {
+         init(handler, new RankingHandlerWorker(mRankingThread.getLooper()),
+                 AppGlobals.getPackageManager(), getContext().getPackageManager(),
+                 getLocalService(LightsManager.class),
+-                new NotificationListeners(AppGlobals.getPackageManager()),
++                new NotificationListeners(getContext(), mNotificationLock, mUserProfiles,
++                        AppGlobals.getPackageManager()),
+                 new NotificationAssistants(getContext(), mNotificationLock, mUserProfiles,
+                         AppGlobals.getPackageManager()),
+                 new ConditionProviders(getContext(), mUserProfiles, AppGlobals.getPackageManager()),
+@@ -2353,6 +2411,7 @@ public class NotificationManagerService extends SystemService {
+                 bubbsExtractor.setShortcutHelper(mShortcutHelper);
+             }
+             registerNotificationPreferencesPullers();
++            mLockPatternUtils.registerStrongAuthTracker(mStrongAuthTracker);
+         } else if (phase == SystemService.PHASE_THIRD_PARTY_APPS_CAN_START) {
+             // This observer will force an update when observe is called, causing us to
+             // bind to listener services.
+@@ -8491,6 +8550,29 @@ public class NotificationManagerService extends SystemService {
+         }
+     }
+ 
++    private void cancelNotificationsWhenEnterLockDownMode() {
++        synchronized (mNotificationLock) {
++            int numNotifications = mNotificationList.size();
++            for (int i = 0; i < numNotifications; i++) {
++                NotificationRecord rec = mNotificationList.get(i);
++                mListeners.notifyRemovedLocked(rec, REASON_CANCEL_ALL,
++                        rec.getStats());
++            }
++
++        }
++    }
++
++    private void postNotificationsWhenExitLockDownMode() {
++        synchronized (mNotificationLock) {
++            int numNotifications = mNotificationList.size();
++            for (int i = 0; i < numNotifications; i++) {
++                NotificationRecord rec = mNotificationList.get(i);
++                mListeners.notifyPostedLocked(rec, rec);
++            }
++
++        }
++    }
++
+     private void updateNotificationPulse() {
+         synchronized (mNotificationLock) {
+             updateLightsLocked();
+@@ -8720,6 +8802,10 @@ public class NotificationManagerService extends SystemService {
+                 rankings.toArray(new NotificationListenerService.Ranking[0]));
+     }
+ 
++    boolean isInLockDownMode() {
++        return mStrongAuthTracker.isInLockDownMode();
++    }
++
+     boolean hasCompanionDevice(ManagedServiceInfo info) {
+         if (mCompanionManager == null) {
+             mCompanionManager = getCompanionManager();
+@@ -9300,8 +9386,9 @@ public class NotificationManagerService extends SystemService {
+ 
+         private final ArraySet<ManagedServiceInfo> mLightTrimListeners = new ArraySet<>();
+ 
+-        public NotificationListeners(IPackageManager pm) {
+-            super(getContext(), mNotificationLock, mUserProfiles, pm);
++        public NotificationListeners(Context context, Object lock, UserProfiles userProfiles,
++                IPackageManager pm) {
++            super(context, lock, userProfiles, pm);
+         }
+ 
+         @Override
+@@ -9433,8 +9520,12 @@ public class NotificationManagerService extends SystemService {
+          *                           targetting <= O_MR1
+          */
+         @GuardedBy("mNotificationLock")
+-        private void notifyPostedLocked(NotificationRecord r, NotificationRecord old,
++        void notifyPostedLocked(NotificationRecord r, NotificationRecord old,
+                 boolean notifyAllListeners) {
++            if (isInLockDownMode()) {
++                return;
++            }
++
+             try {
+                 // Lazily initialized snapshots of the notification.
+                 StatusBarNotification sbn = r.getSbn();
+@@ -9502,6 +9593,10 @@ public class NotificationManagerService extends SystemService {
+         @GuardedBy("mNotificationLock")
+         public void notifyRemovedLocked(NotificationRecord r, int reason,
+                 NotificationStats notificationStats) {
++            if (isInLockDownMode()) {
++                return;
++            }
++
+             final StatusBarNotification sbn = r.getSbn();
+ 
+             // make a copy in case changes are made to the underlying Notification object
+@@ -9554,6 +9649,10 @@ public class NotificationManagerService extends SystemService {
+          */
+         @GuardedBy("mNotificationLock")
+         public void notifyRankingUpdateLocked(List<NotificationRecord> changedHiddenNotifications) {
++            if (isInLockDownMode()) {
++                return;
++            }
++
+             boolean isHiddenRankingUpdate = changedHiddenNotifications != null
+                     && changedHiddenNotifications.size() > 0;
+ 
+diff --git a/services/tests/uiservicestests/AndroidManifest.xml b/services/tests/uiservicestests/AndroidManifest.xml
+index 767857bf2de..e8e3a8f84f2 100644
+--- a/services/tests/uiservicestests/AndroidManifest.xml
++++ b/services/tests/uiservicestests/AndroidManifest.xml
+@@ -33,6 +33,7 @@
+     <uses-permission android:name="android.permission.OBSERVE_ROLE_HOLDERS" />
+     <uses-permission android:name="android.permission.GET_INTENT_SENDER_INTENT"/>
+     <uses-permission android:name="android.permission.WRITE_DEVICE_CONFIG" />
++    <uses-permission android:name="android.permission.ACCESS_KEYGUARD_SECURE_STORAGE" />
+ 
+     <application android:debuggable="true">
+         <uses-library android:name="android.test.runner" />
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationListenersTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationListenersTest.java
+new file mode 100644
+index 00000000000..7244fcdda73
+--- /dev/null
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationListenersTest.java
+@@ -0,0 +1,133 @@
++/*
++ * Copyright (C) 2022 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package com.android.server.notification;
++
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.atLeast;
++import static org.mockito.Mockito.doNothing;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.reset;
++import static org.mockito.Mockito.spy;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++import android.app.INotificationManager;
++import android.content.pm.IPackageManager;
++import android.content.pm.PackageManager;
++import android.service.notification.NotificationStats;
++import android.service.notification.StatusBarNotification;
++import android.testing.TestableContext;
++
++import com.android.server.UiServiceTestCase;
++
++import org.junit.Before;
++import org.junit.Test;
++import org.mockito.Mock;
++import org.mockito.MockitoAnnotations;
++import org.mockito.internal.util.reflection.FieldSetter;
++
++import java.util.List;
++
++public class NotificationListenersTest extends UiServiceTestCase {
++
++    @Mock
++    private PackageManager mPm;
++    @Mock
++    private IPackageManager miPm;
++
++    @Mock
++    NotificationManagerService mNm;
++    @Mock
++    private INotificationManager mINm;
++    private TestableContext mContext = spy(getContext());
++
++    NotificationManagerService.NotificationListeners mListeners;
++
++    @Before
++    public void setUp() throws Exception {
++        MockitoAnnotations.initMocks(this);
++        getContext().setMockPackageManager(mPm);
++        doNothing().when(mContext).sendBroadcastAsUser(any(), any(), any());
++
++        mListeners = spy(mNm.new NotificationListeners(
++                mContext, new Object(), mock(ManagedServices.UserProfiles.class), miPm));
++        when(mNm.getBinderService()).thenReturn(mINm);
++    }
++
++
++    @Test
++    public void testNotifyPostedLockedInLockdownMode() {
++        NotificationRecord r = mock(NotificationRecord.class);
++        NotificationRecord old = mock(NotificationRecord.class);
++
++        // before the lockdown mode
++        when(mNm.isInLockDownMode()).thenReturn(false);
++        mListeners.notifyPostedLocked(r, old, true);
++        mListeners.notifyPostedLocked(r, old, false);
++        verify(r, atLeast(2)).getSbn();
++
++        // in the lockdown mode
++        reset(r);
++        reset(old);
++        when(mNm.isInLockDownMode()).thenReturn(true);
++        mListeners.notifyPostedLocked(r, old, true);
++        mListeners.notifyPostedLocked(r, old, false);
++        verify(r, never()).getSbn();
++    }
++
++    @Test
++    public void testnotifyRankingUpdateLockedInLockdownMode() {
++        List chn = mock(List.class);
++
++        // before the lockdown mode
++        when(mNm.isInLockDownMode()).thenReturn(false);
++        mListeners.notifyRankingUpdateLocked(chn);
++        verify(chn, atLeast(1)).size();
++
++        // in the lockdown mode
++        reset(chn);
++        when(mNm.isInLockDownMode()).thenReturn(true);
++        mListeners.notifyRankingUpdateLocked(chn);
++        verify(chn, never()).size();
++    }
++
++    @Test
++    public void testNotifyRemovedLockedInLockdownMode() throws NoSuchFieldException {
++        NotificationRecord r = mock(NotificationRecord.class);
++        NotificationStats rs = mock(NotificationStats.class);
++        StatusBarNotification sbn = mock(StatusBarNotification.class);
++        FieldSetter.setField(mNm,
++                NotificationManagerService.class.getDeclaredField("mHandler"),
++                mock(NotificationManagerService.WorkerHandler.class));
++
++        // before the lockdown mode
++        when(mNm.isInLockDownMode()).thenReturn(false);
++        when(r.getSbn()).thenReturn(sbn);
++        mListeners.notifyRemovedLocked(r, 0, rs);
++        mListeners.notifyRemovedLocked(r, 0, rs);
++        verify(r, atLeast(2)).getSbn();
++
++        // in the lockdown mode
++        reset(r);
++        reset(rs);
++        when(mNm.isInLockDownMode()).thenReturn(true);
++        when(r.getSbn()).thenReturn(sbn);
++        mListeners.notifyRemovedLocked(r, 0, rs);
++        mListeners.notifyRemovedLocked(r, 0, rs);
++        verify(r, never()).getSbn();
++    }
++}
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+index 62a423e3277..e12eda92ef2 100755
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -52,9 +52,12 @@ import static android.os.Build.VERSION_CODES.P;
+ import static android.os.UserHandle.USER_SYSTEM;
+ import static android.service.notification.Adjustment.KEY_IMPORTANCE;
+ import static android.service.notification.Adjustment.KEY_USER_SENTIMENT;
++import static android.service.notification.NotificationListenerService.REASON_CANCEL_ALL;
+ import static android.service.notification.NotificationListenerService.Ranking.USER_SENTIMENT_NEGATIVE;
+ import static android.service.notification.NotificationListenerService.Ranking.USER_SENTIMENT_NEUTRAL;
+ 
++import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN;
++
+ import static junit.framework.Assert.assertEquals;
+ import static junit.framework.Assert.assertFalse;
+ import static junit.framework.Assert.assertNotNull;
+@@ -395,8 +398,26 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         interface NotificationAssistantAccessGrantedCallback {
+             void onGranted(ComponentName assistant, int userId, boolean granted);
+         }
++
++        class StrongAuthTrackerFake extends NotificationManagerService.StrongAuthTracker {
++            private int mGetStrongAuthForUserReturnValue = 0;
++            StrongAuthTrackerFake(Context context) {
++                super(context);
++            }
++
++            public void setGetStrongAuthForUserReturnValue(int val) {
++                mGetStrongAuthForUserReturnValue = val;
++            }
++
++            @Override
++            public int getStrongAuthForUser(int userId) {
++                return mGetStrongAuthForUserReturnValue;
++            }
++        }
+     }
+ 
++    TestableNotificationManagerService.StrongAuthTrackerFake mStrongAuthTracker;
++
+     private class TestableToastCallback extends ITransientNotification.Stub {
+         @Override
+         public void show(IBinder windowToken) {
+@@ -513,6 +534,9 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+ 
+         mService.setAudioManager(mAudioManager);
+ 
++        mStrongAuthTracker = mService.new StrongAuthTrackerFake(mContext);
++        mService.setStrongAuthTracker(mStrongAuthTracker);
++
+         mShortcutHelper = mService.getShortcutHelper();
+         mShortcutHelper.setLauncherApps(mLauncherApps);
+         mShortcutHelper.setShortcutServiceInternal(mShortcutServiceInternal);
+@@ -7106,4 +7130,44 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+             }
+         }
+     }
++
++    @Test
++    public void testStrongAuthTracker_isInLockDownMode() {
++        mStrongAuthTracker.setGetStrongAuthForUserReturnValue(
++                STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN);
++        mStrongAuthTracker.onStrongAuthRequiredChanged(mContext.getUserId());
++        assertTrue(mStrongAuthTracker.isInLockDownMode());
++        mStrongAuthTracker.setGetStrongAuthForUserReturnValue(0);
++        mStrongAuthTracker.onStrongAuthRequiredChanged(mContext.getUserId());
++        assertFalse(mStrongAuthTracker.isInLockDownMode());
++    }
++
++    @Test
++    public void testCancelAndPostNotificationsWhenEnterAndExitLockDownMode() {
++        // post 2 notifications from 2 packages
++        NotificationRecord pkgA = new NotificationRecord(mContext,
++                generateSbn("a", 1000, 9, 0), mTestNotificationChannel);
++        mService.addNotification(pkgA);
++        NotificationRecord pkgB = new NotificationRecord(mContext,
++                generateSbn("b", 1001, 9, 0), mTestNotificationChannel);
++        mService.addNotification(pkgB);
++
++        // when entering the lockdown mode, cancel the 2 notifications.
++        mStrongAuthTracker.setGetStrongAuthForUserReturnValue(
++                STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN);
++        mStrongAuthTracker.onStrongAuthRequiredChanged(mContext.getUserId());
++        assertTrue(mStrongAuthTracker.isInLockDownMode());
++
++        // the notifyRemovedLocked function is called twice due to REASON_LOCKDOWN.
++        ArgumentCaptor<Integer> captor = ArgumentCaptor.forClass(Integer.class);
++        verify(mListeners, times(2)).notifyRemovedLocked(any(), captor.capture(), any());
++        assertEquals(REASON_CANCEL_ALL, captor.getValue().intValue());
++
++        // exit lockdown mode.
++        mStrongAuthTracker.setGetStrongAuthForUserReturnValue(0);
++        mStrongAuthTracker.onStrongAuthRequiredChanged(mContext.getUserId());
++
++        // the notifyPostedLocked function is called twice.
++        verify(mListeners, times(2)).notifyPostedLocked(any(), any());
++    }
+ }
+-- 
+2.37.0.rc0.161.g10f37bed90-goog
+
