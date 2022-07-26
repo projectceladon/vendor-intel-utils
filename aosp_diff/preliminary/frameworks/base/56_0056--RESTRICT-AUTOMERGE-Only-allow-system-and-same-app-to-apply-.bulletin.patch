@@ -1,0 +1,237 @@
+From 40b2e821bdd6b21c404e2a1328257b9c23a2db05 Mon Sep 17 00:00:00 2001
+From: Jeff Chang <chengjeff@google.com>
+Date: Mon, 21 Feb 2022 17:42:22 +0800
+Subject: [PATCH] [RESTRICT AUTOMERGE]Only allow system and same app to apply
+ relinquishTaskIdentity
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Any malicious application could hijack tasks by
+android:relinquishTaskIdentity. This vulnerability can perform UI
+spoofing or spy on user’s activities.
+
+This CL limit the usage which only allow system and same app to apply
+relinquishTaskIdentity. Based on the condition of updateIdentity from
+Task#setIntent, update the intent with the parent's task together to
+align with original code logic. Moreover, we shouldn't save launch
+params for such tasks with null realActivity.
+
+Bug: 185810717
+Bug: 218243793
+Test: atest IntentTests
+      atest ActivityStarterTests
+      atest TaskRecordTests
+      atest testSplitscreenPortraitAppOrientationRequests
+Change-Id: I42c671e66c39c82be1dcef1f374d56d4593f9f57
+(cherry picked from commit 7221a25a035bc7397492e15460b40395efce7023)
+Merged-In: I42c671e66c39c82be1dcef1f374d56d4593f9f57
+---
+ .../server/wm/LaunchParamsPersister.java      |  3 +
+ .../core/java/com/android/server/wm/Task.java | 62 ++++++++++++++-----
+ .../android/server/wm/TaskRecordTests.java    | 44 +++++++++++++
+ 3 files changed, 92 insertions(+), 17 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wm/LaunchParamsPersister.java b/services/core/java/com/android/server/wm/LaunchParamsPersister.java
+index a974332fd85..b037e59942c 100644
+--- a/services/core/java/com/android/server/wm/LaunchParamsPersister.java
++++ b/services/core/java/com/android/server/wm/LaunchParamsPersister.java
+@@ -214,6 +214,9 @@ class LaunchParamsPersister {
+ 
+     void saveTask(Task task, DisplayContent display) {
+         final ComponentName name = task.realActivity;
++        if (name == null) {
++            return;
++        }
+         final int userId = task.mUserId;
+         PersistableLaunchParams params;
+         ArrayMap<ComponentName, PersistableLaunchParams> map = mLaunchParamsMap.get(userId);
+diff --git a/services/core/java/com/android/server/wm/Task.java b/services/core/java/com/android/server/wm/Task.java
+index 7e8221df12e..eec95689d5c 100644
+--- a/services/core/java/com/android/server/wm/Task.java
++++ b/services/core/java/com/android/server/wm/Task.java
+@@ -119,6 +119,7 @@ import android.graphics.Point;
+ import android.graphics.Rect;
+ import android.os.Debug;
+ import android.os.IBinder;
++import android.os.Process;
+ import android.os.RemoteException;
+ import android.os.SystemClock;
+ import android.os.Trace;
+@@ -227,6 +228,11 @@ class Task extends WindowContainer<WindowContainer> {
+     // Do not move the stack as a part of reparenting
+     static final int REPARENT_LEAVE_STACK_IN_PLACE = 2;
+ 
++    /**
++     * Used to identify if the activity that is installed from device's system image.
++     */
++    boolean mIsEffectivelySystemApp;
++
+     String affinity;        // The affinity name for this task, or null; may change identity.
+     String rootAffinity;    // Initial base affinity, or null; does not change from initial root.
+     String mWindowLayoutAffinity; // Launch param affinity of this task or null. Used when saving
+@@ -477,11 +483,24 @@ class Task extends WindowContainer<WindowContainer> {
+ 
+             if (r.finishing) return false;
+ 
+-            // Set this as the candidate root since it isn't finishing.
+-            mRoot = r;
++            if (mRoot == null || mRoot.finishing) {
++                // Set this as the candidate root since it isn't finishing.
++                mRoot = r;
++            }
+ 
+-            // Only end search if we are ignore relinquishing identity or we are not relinquishing.
+-            return ignoreRelinquishIdentity || (r.info.flags & FLAG_RELINQUISH_TASK_IDENTITY) == 0;
++            final int uid = mRoot == r ? effectiveUid : r.info.applicationInfo.uid;
++            if (ignoreRelinquishIdentity
++                    || (mRoot.info.flags & FLAG_RELINQUISH_TASK_IDENTITY) == 0
++                    || (mRoot.info.applicationInfo.uid != Process.SYSTEM_UID
++                    && !mRoot.info.applicationInfo.isSystemApp()
++                    && mRoot.info.applicationInfo.uid != uid)) {
++                // No need to relinquish identity, end search.
++                return true;
++            }
++
++            // Relinquish to next activity
++            mRoot = r;
++            return false;
+         }
+     }
+ 
+@@ -929,27 +948,35 @@ class Task extends WindowContainer<WindowContainer> {
+      * @param info The activity info which could be different from {@code r.info} if set.
+      */
+     void setIntent(ActivityRecord r, @Nullable Intent intent, @Nullable ActivityInfo info) {
+-        mCallingUid = r.launchedFromUid;
+-        mCallingPackage = r.launchedFromPackage;
+-        mCallingFeatureId = r.launchedFromFeatureId;
+-        setIntent(intent != null ? intent : r.intent, info != null ? info : r.info);
+-        setLockTaskAuth(r);
+-
+-        final WindowContainer parent = getParent();
+-        if (parent != null) {
+-            final Task t = parent.asTask();
+-            if (t != null) {
+-                t.setIntent(r);
++        boolean updateIdentity = false;
++        if (this.intent == null) {
++            updateIdentity = true;
++        } else if (!mNeverRelinquishIdentity) {
++            final ActivityInfo activityInfo = info != null ? info : r.info;
++            updateIdentity = (effectiveUid == Process.SYSTEM_UID || mIsEffectivelySystemApp
++                    || effectiveUid == activityInfo.applicationInfo.uid);
++        }
++        if (updateIdentity) {
++            mCallingUid = r.launchedFromUid;
++            mCallingPackage = r.launchedFromPackage;
++            mCallingFeatureId = r.launchedFromFeatureId;
++            setIntent(intent != null ? intent : r.intent, info != null ? info : r.info);
++            final WindowContainer parent = getParent();
++            if (parent != null) {
++                final Task t = parent.asTask();
++                if (t != null) {
++                    t.setIntent(r);
++                }
+             }
+         }
++        setLockTaskAuth(r);
+     }
+ 
+     /** Sets the original intent, _without_ updating the calling uid or package. */
+     private void setIntent(Intent _intent, ActivityInfo info) {
+         final boolean isLeaf = isLeafTask();
+         if (intent == null) {
+-            mNeverRelinquishIdentity =
+-                    (info.flags & FLAG_RELINQUISH_TASK_IDENTITY) == 0;
++            mNeverRelinquishIdentity = (info.flags & FLAG_RELINQUISH_TASK_IDENTITY) == 0;
+         } else if (mNeverRelinquishIdentity && isLeaf) {
+             return;
+         }
+@@ -962,6 +989,7 @@ class Task extends WindowContainer<WindowContainer> {
+             rootAffinity = affinity;
+         }
+         effectiveUid = info.applicationInfo.uid;
++        mIsEffectivelySystemApp = info.applicationInfo.isSystemApp();
+         stringName = null;
+ 
+         if (info.targetActivity == null) {
+diff --git a/services/tests/wmtests/src/com/android/server/wm/TaskRecordTests.java b/services/tests/wmtests/src/com/android/server/wm/TaskRecordTests.java
+index fb24d868e97..d04e2ba3f43 100644
+--- a/services/tests/wmtests/src/com/android/server/wm/TaskRecordTests.java
++++ b/services/tests/wmtests/src/com/android/server/wm/TaskRecordTests.java
+@@ -591,6 +591,7 @@ public class TaskRecordTests extends ActivityTestsBase {
+         // one above as finishing.
+         final ActivityRecord activity0 = task.getBottomMostActivity();
+         activity0.info.flags |= FLAG_RELINQUISH_TASK_IDENTITY;
++        task.effectiveUid = activity0.getUid();
+         final ActivityRecord activity1 = new ActivityBuilder(mService).setTask(task).build();
+         activity1.finishing = true;
+         new ActivityBuilder(mService).setTask(task).build();
+@@ -625,6 +626,7 @@ public class TaskRecordTests extends ActivityTestsBase {
+         // Set relinquishTaskIdentity for all activities in the task
+         final ActivityRecord activity0 = task.getBottomMostActivity();
+         activity0.info.flags |= FLAG_RELINQUISH_TASK_IDENTITY;
++        task.effectiveUid = activity0.getUid();
+         final ActivityRecord activity1 = new ActivityBuilder(mService).setTask(task).build();
+         activity1.info.flags |= FLAG_RELINQUISH_TASK_IDENTITY;
+ 
+@@ -777,6 +779,7 @@ public class TaskRecordTests extends ActivityTestsBase {
+         // Make the current root activity relinquish task identity
+         final ActivityRecord activity0 = task.getBottomMostActivity();
+         activity0.info.flags |= FLAG_RELINQUISH_TASK_IDENTITY;
++        task.effectiveUid = activity0.getUid();
+         // Add an extra activity on top - this will be the new root
+         final ActivityRecord activity1 = new ActivityBuilder(mService).setTask(task).build();
+         // Add one more on top
+@@ -871,6 +874,47 @@ public class TaskRecordTests extends ActivityTestsBase {
+         verify(task).setIntent(eq(activity0));
+     }
+ 
++    /**
++     * Test {@link Task#updateEffectiveIntent()} when activity with relinquishTaskIdentity but
++     * another with different uid. This should make the task use the root activity when updating the
++     * intent.
++     */
++    @Test
++    public void testUpdateEffectiveIntent_relinquishingWithDifferentUid() {
++        final ActivityRecord activity0 = new ActivityBuilder(mService)
++                .setActivityFlags(FLAG_RELINQUISH_TASK_IDENTITY).setCreateTask(true).build();
++        final Task task = activity0.getTask();
++
++        // Add an extra activity on top
++        new ActivityBuilder(mService).setUid(11).setTask(task).build();
++
++        spyOn(task);
++        task.updateEffectiveIntent();
++        verify(task).setIntent(eq(activity0));
++    }
++
++    /**
++     * Test {@link Task#updateEffectiveIntent()} with activities set as relinquishTaskIdentity.
++     * This should make the task use the topmost activity when updating the intent.
++     */
++    @Test
++    public void testUpdateEffectiveIntent_relinquishingMultipleActivities() {
++        final ActivityRecord activity0 = new ActivityBuilder(mService)
++                .setActivityFlags(FLAG_RELINQUISH_TASK_IDENTITY).setCreateTask(true).build();
++        final Task task = activity0.getTask();
++        task.effectiveUid = activity0.getUid();
++        // Add an extra activity on top
++        final ActivityRecord activity1 = new ActivityBuilder(mService).setTask(task).build();
++        activity1.info.flags |= FLAG_RELINQUISH_TASK_IDENTITY;
++
++        // Add an extra activity on top
++        final ActivityRecord activity2 = new ActivityBuilder(mService).setTask(task).build();
++
++        spyOn(task);
++        task.updateEffectiveIntent();
++        verify(task).setIntent(eq(activity2));
++    }
++
+     @Test
+     public void testSaveLaunchingStateWhenConfigurationChanged() {
+         LaunchParamsPersister persister = mService.mStackSupervisor.mLaunchParamsPersister;
+-- 
+2.37.0.rc0.161.g10f37bed90-goog
+
