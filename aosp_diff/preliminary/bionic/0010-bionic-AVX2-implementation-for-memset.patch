@@ -1,0 +1,232 @@
+From 181394c2317981f42541c1d6c61e208b4a715ccb Mon Sep 17 00:00:00 2001
+From: Kaushlendra Kumar <kaushlendra.kumar@intel.com>
+Date: Thu, 4 Aug 2022 20:15:37 +0530
+Subject: [PATCH] bionic: AVX2 implementation for memset
+
+Tracked-On:
+---
+ libc/Android.bp                               |   1 +
+ .../arch-x86_64/dynamic_function_dispatch.cpp |  14 ++
+ .../kabylake/string/avx2-memset-kbl.S         | 131 ++++++++++++++++++
+ .../silvermont/string/sse2-memset-slm.S       |   8 +-
+ libc/arch-x86_64/static_function_dispatch.S   |   2 +
+ 5 files changed, 152 insertions(+), 4 deletions(-)
+ create mode 100644 libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index 9aa0aca1a..3a2f9dabf 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -1017,6 +1017,7 @@ cc_library_static {
+                 "arch-x86_64/silvermont/string/ssse3-strncmp-slm.S",
+ 
+                 "arch-x86_64/kabylake/string/avx2-wmemset-kbl.S",
++		"arch-x86_64/kabylake/string/avx2-memset-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-memcpy-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-memcmp-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-memmove-kbl.S",
+diff --git a/libc/arch-x86_64/dynamic_function_dispatch.cpp b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+index eca295c5c..4f7a313bc 100644
+--- a/libc/arch-x86_64/dynamic_function_dispatch.cpp
++++ b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+@@ -32,6 +32,20 @@
+ 
+ extern "C" {
+ 
++typedef int memset_func(void* __dst, int __ch, size_t __n);
++DEFINE_IFUNC_FOR(memset) {
++	  __builtin_cpu_init();
++	    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memset_func, memset_avx2);
++	      RETURN_FUNC(memset_func, memset_generic);
++}
++
++typedef void* __memset_chk_func(void* s, int c, size_t n, size_t n2);
++DEFINE_IFUNC_FOR(__memset_chk) {
++	  __builtin_cpu_init();
++	    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(__memset_chk_func, __memset_chk_avx2);
++	      RETURN_FUNC(__memset_chk_func, __memset_chk_generic);
++}
++
+ typedef int memcmp_func(const void* __lhs, const void* __rhs, size_t __n);
+ DEFINE_IFUNC_FOR(memcmp) {
+     __builtin_cpu_init();
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+new file mode 100644
+index 000000000..cb6c02939
+--- /dev/null
++++ b/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+@@ -0,0 +1,131 @@
++
++#include <private/bionic_asm.h>
++
++#include "cache.h"
++
++#ifndef L
++# define L(label)	.L##label
++#endif
++
++#ifndef ALIGN
++# define ALIGN(n)	.p2align n
++#endif
++
++	.section .text.avx2,"ax",@progbits
++
++ENTRY(__memset_chk_avx2)
++	# %rdi = dst, %rsi = byte, %rdx = n, %rcx = dst_len
++	cmp %rcx, %rdx
++	ja __memset_chk_fail
++	// Fall through to memset...
++END(__memset_chk_avx2)
++
++ENTRY(memset_avx2)
++	movq	%rdi, %rax
++	and	$0xff, %rsi
++	mov	$0x0101010101010101, %rcx
++	imul	%rsi, %rcx
++	cmpq	$16, %rdx
++	jae	L(16bytesormore)
++	testb	$8, %dl
++	jnz	L(8_15bytes)
++	testb	$4, %dl
++	jnz	L(4_7bytes)
++	testb	$2, %dl
++	jnz	L(2_3bytes)
++	testb	$1, %dl
++	jz	L(return)
++	movb	%cl, (%rdi)
++L(return):
++	ret
++
++L(8_15bytes):
++	movq	%rcx, (%rdi)
++	movq	%rcx, -8(%rdi, %rdx)
++	ret
++
++L(4_7bytes):
++	movl	%ecx, (%rdi)
++	movl	%ecx, -4(%rdi, %rdx)
++	ret
++
++L(2_3bytes):
++	movw	%cx, (%rdi)
++	movw	%cx, -2(%rdi, %rdx)
++	ret
++
++	ALIGN (4)
++L(16bytesormore):
++	movd	%rcx, %xmm0
++	pshufd	$0, %xmm0, %xmm0
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm0, -16(%rdi, %rdx)
++	cmpq	$32, %rdx
++	jbe	L(32bytesless)
++	movdqu	%xmm0, 16(%rdi)
++	movdqu	%xmm0, -32(%rdi, %rdx)
++	cmpq	$64, %rdx
++	jbe	L(64bytesless)
++	movdqu	%xmm0, 32(%rdi)
++	movdqu	%xmm0, 48(%rdi)
++	movdqu	%xmm0, -64(%rdi, %rdx)
++	movdqu	%xmm0, -48(%rdi, %rdx)
++	cmpq	$128, %rdx
++	jbe	L(128bytesless)
++        vpbroadcastb %xmm0, %ymm0
++	vmovdqu	%ymm0, 64(%rdi)
++	vmovdqu	%ymm0, 96(%rdi)
++	vmovdqu	%ymm0, -128(%rdi, %rdx)
++	vmovdqu	%ymm0, -96(%rdi, %rdx)
++	cmpq	$256, %rdx
++        ja      L(256bytesmore)
++L(32bytesless):
++L(64bytesless):
++L(128bytesless):
++	ret
++
++	ALIGN (4)
++L(256bytesmore):
++	leaq	128(%rdi), %rcx
++	andq	$-128, %rcx
++	movq	%rdx, %r8
++	addq	%rdi, %rdx
++	andq	$-128, %rdx
++	cmpq	%rcx, %rdx
++	je	L(return)
++
++#ifdef SHARED_CACHE_SIZE
++	cmp	$SHARED_CACHE_SIZE, %r8
++#else
++	cmp	__x86_64_shared_cache_size(%rip), %r8
++#endif
++	ja	L(256bytesmore_nt)
++
++	ALIGN (4)
++L(256bytesmore_normal):
++	vmovdqa	%ymm0, (%rcx)
++	vmovdqa	%ymm0, 32(%rcx)
++	vmovdqa	%ymm0, 64(%rcx)
++	vmovdqa	%ymm0, 96(%rcx)
++	addq	$128, %rcx
++	cmpq	%rcx, %rdx
++	jne	L(256bytesmore_normal)
++	ret
++
++	ALIGN (4)
++L(256bytesmore_nt):
++	movntdq	 %xmm0, (%rcx)
++	movntdq	 %xmm0, 16(%rcx)
++	movntdq	 %xmm0, 32(%rcx)
++	movntdq	 %xmm0, 48(%rcx)
++	movntdq	 %xmm0, 64(%rcx)
++	movntdq	 %xmm0, 80(%rcx)
++	movntdq	 %xmm0, 96(%rcx)
++	movntdq	 %xmm0, 112(%rcx)
++	leaq	128(%rcx), %rcx
++	cmpq	%rcx, %rdx
++	jne	L(256bytesmore_nt)
++	sfence
++	ret
++
++END(memset_avx2)
+diff --git a/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+index 3999cefa4..70f237497 100644
+--- a/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+@@ -44,16 +44,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ # define MEMSET        memset
+ #endif
+ 
+-ENTRY(__memset_chk)
++ENTRY(__memset_chk_generic)
+   # %rdi = dst, %rsi = byte, %rdx = n, %rcx = dst_len
+   cmp %rcx, %rdx
+   ja __memset_chk_fail
+   // Fall through to memset...
+-END(__memset_chk)
++END(__memset_chk_generic)
+ 
+ 
+ 	.section .text.sse2,"ax",@progbits
+-ENTRY(MEMSET)
++ENTRY(memset_generic)
+ 	movq	%rdi, %rax
+ 	and	$0xff, %rsi
+ 	mov	$0x0101010101010101, %rcx
+@@ -149,4 +149,4 @@ L(128bytesmore_nt):
+ 	sfence
+ 	ret
+ 
+-END(MEMSET)
++END(memset_generic)
+diff --git a/libc/arch-x86_64/static_function_dispatch.S b/libc/arch-x86_64/static_function_dispatch.S
+index b8a8eb765..044e47a4f 100644
+--- a/libc/arch-x86_64/static_function_dispatch.S
++++ b/libc/arch-x86_64/static_function_dispatch.S
+@@ -57,3 +57,5 @@ FUNCTION_DELEGATE(wcslen, wcslen_generic)
+ FUNCTION_DELEGATE(wcsnlen, wcsnlen_generic)
+ FUNCTION_DELEGATE(wcschr, wcschr_generic)
+ FUNCTION_DELEGATE(wcsrchr, wcsrchr_generic)
++FUNCTION_DELEGATE(memset, memset_generic)
++FUNCTION_DELEGATE(__memset_chk, __memset_chk_generic)
+-- 
+2.33.0
+
