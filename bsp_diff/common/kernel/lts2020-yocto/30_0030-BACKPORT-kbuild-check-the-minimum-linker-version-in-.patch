@@ -1,0 +1,270 @@
+From 2442eec00c2fb6f0949174d4899fb3b7cf4e7cff Mon Sep 17 00:00:00 2001
+From: Masahiro Yamada <masahiroy@kernel.org>
+Date: Tue, 16 Feb 2021 12:10:04 +0900
+Subject: [PATCH 03/22] BACKPORT: kbuild: check the minimum linker version in
+ Kconfig
+
+Unify the two scripts/ld-version.sh and scripts/lld-version.sh, and
+check the minimum linker version like scripts/cc-version.sh did.
+
+I tested this script for some corner cases reported in the past:
+
+ - GNU ld version 2.25-15.fc23
+   as reported by commit 8083013fc320 ("ld-version: Fix it on Fedora")
+
+ - GNU ld (GNU Binutils) 2.20.1.20100303
+   as reported by commit 0d61ed17dd30 ("ld-version: Drop the 4th and
+   5th version components")
+
+This script show an error message if the linker is too old:
+
+  $ make LD=ld.lld-9
+    SYNC    include/config/auto.conf
+  ***
+  *** Linker is too old.
+  ***   Your LLD version:    9.0.1
+  ***   Minimum LLD version: 10.0.1
+  ***
+  scripts/Kconfig.include:50: Sorry, this linker is not supported.
+  make[2]: *** [scripts/kconfig/Makefile:71: syncconfig] Error 1
+  make[1]: *** [Makefile:600: syncconfig] Error 2
+  make: *** [Makefile:708: include/config/auto.conf] Error 2
+
+I also moved the check for gold to this script, so gold is still rejected:
+
+  $ make LD=gold
+    SYNC    include/config/auto.conf
+  gold linker is not supported as it is not capable of linking the kernel proper.
+  scripts/Kconfig.include:50: Sorry, this linker is not supported.
+  make[2]: *** [scripts/kconfig/Makefile:71: syncconfig] Error 1
+  make[1]: *** [Makefile:600: syncconfig] Error 2
+  make: *** [Makefile:708: include/config/auto.conf] Error 2
+
+Thanks to David Laight for suggesting shell script improvements.
+
+Signed-off-by: Masahiro Yamada <masahiroy@kernel.org>
+Acked-by: Nick Desaulniers <ndesaulniers@google.com>
+Reviewed-by: Nathan Chancellor <nathan@kernel.org>
+Tested-by: Nathan Chancellor <nathan@kernel.org>
+[nd: conflict in scripts/lld-version.sh due to df58fb431aa3
+  ("scripts/lld-version.sh: Rewrite based on upstream ld-version.sh")
+  being 5.10 only]
+Bug: 210043760
+(cherry picked from commit 02aff85922043cf175ebbe5fc3430acfeaeb8393)
+Signed-off-by: Nick Desaulniers <ndesaulniers@google.com>
+Change-Id: I1618f31566b84dd601ca2c9665f6d341df56537d
+---
+ MAINTAINERS             |  1 -
+ init/Kconfig            | 21 +++++++----
+ scripts/Kconfig.include |  7 +++-
+ scripts/ld-version.sh   | 82 ++++++++++++++++++++++++++++++++++++-----
+ scripts/lld-version.sh  | 37 -------------------
+ 5 files changed, 90 insertions(+), 58 deletions(-)
+ delete mode 100755 scripts/lld-version.sh
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 3d8e0dc0b082..f6f9b72ea7af 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -4332,7 +4332,6 @@ B:	https://github.com/ClangBuiltLinux/linux/issues
+ C:	irc://chat.freenode.net/clangbuiltlinux
+ F:	Documentation/kbuild/llvm.rst
+ F:	scripts/clang-tools/
+-F:	scripts/lld-version.sh
+ K:	\b(?i:clang|llvm)\b
+ 
+ CLEANCACHE API
+diff --git a/init/Kconfig b/init/Kconfig
+index 059ac26bf7fe..20df9f5601e1 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -33,24 +33,29 @@ config GCC_VERSION
+ 	default $(cc-version) if CC_IS_GCC
+ 	default 0
+ 
+-config LD_VERSION
+-	int
+-	default $(shell,$(LD) --version | $(srctree)/scripts/ld-version.sh)
+-
+ config CC_IS_CLANG
+ 	def_bool $(success,test "$(cc-name)" = Clang)
+ 
+-config LD_IS_LLD
+-	def_bool $(success,$(LD) -v | head -n 1 | grep -q LLD)
+-
+ config CLANG_VERSION
+ 	int
+ 	default $(cc-version) if CC_IS_CLANG
+ 	default 0
+ 
++config LD_IS_BFD
++	def_bool $(success,test "$(ld-name)" = BFD)
++
++config LD_VERSION
++	int
++	default $(ld-version) if LD_IS_BFD
++	default 0
++
++config LD_IS_LLD
++	def_bool $(success,test "$(ld-name)" = LLD)
++
+ config LLD_VERSION
+ 	int
+-	default $(shell,$(srctree)/scripts/lld-version.sh $(LD))
++	default $(ld-version) if LD_IS_LLD
++	default 0
+ 
+ config CC_CAN_LINK
+ 	bool
+diff --git a/scripts/Kconfig.include b/scripts/Kconfig.include
+index 0228cb9c74aa..58fdb5308725 100644
+--- a/scripts/Kconfig.include
++++ b/scripts/Kconfig.include
+@@ -45,8 +45,11 @@ $(error-if,$(success,test -z "$(cc-info)"),Sorry$(comma) this compiler is not su
+ cc-name := $(shell,set -- $(cc-info) && echo $1)
+ cc-version := $(shell,set -- $(cc-info) && echo $2)
+ 
+-# Fail if the linker is gold as it's not capable of linking the kernel proper
+-$(error-if,$(success, $(LD) -v | grep -q gold), gold linker '$(LD)' not supported)
++# Get the linker name, version, and error out if it is not supported.
++ld-info := $(shell,$(srctree)/scripts/ld-version.sh $(LD))
++$(error-if,$(success,test -z "$(ld-info)"),Sorry$(comma) this linker is not supported.)
++ld-name := $(shell,set -- $(ld-info) && echo $1)
++ld-version := $(shell,set -- $(ld-info) && echo $2)
+ 
+ # machine bit flags
+ #  $(m32-flag): -m32 if the compiler supports it, or an empty string otherwise.
+diff --git a/scripts/ld-version.sh b/scripts/ld-version.sh
+index 0f8a2c0f9502..a463273509b5 100755
+--- a/scripts/ld-version.sh
++++ b/scripts/ld-version.sh
+@@ -1,11 +1,73 @@
+-#!/usr/bin/awk -f
++#!/bin/sh
+ # SPDX-License-Identifier: GPL-2.0
+-# extract linker version number from stdin and turn into single number
+-	{
+-	gsub(".*\\)", "");
+-	gsub(".*version ", "");
+-	gsub("-.*", "");
+-	split($1,a, ".");
+-	print a[1]*10000 + a[2]*100 + a[3];
+-	exit
+-	}
++#
++# Print the linker name and its version in a 5 or 6-digit form.
++# Also, perform the minimum version check.
++
++set -e
++
++# When you raise the minimum linker version, please update
++# Documentation/process/changes.rst as well.
++bfd_min_version=2.23.0
++lld_min_version=10.0.1
++
++# Convert the version string x.y.z to a canonical 5 or 6-digit form.
++get_canonical_version()
++{
++	IFS=.
++	set -- $1
++
++	# If the 2nd or 3rd field is missing, fill it with a zero.
++	#
++	# The 4th field, if present, is ignored.
++	# This occurs in development snapshots as in 2.35.1.20201116
++	echo $((10000 * $1 + 100 * ${2:-0} + ${3:-0}))
++}
++
++orig_args="$@"
++
++# Get the first line of the --version output.
++IFS='
++'
++set -- $("$@" --version)
++
++# Split the line on spaces.
++IFS=' '
++set -- $1
++
++if [ "$1" = GNU -a "$2" = ld ]; then
++	shift $(($# - 1))
++	version=$1
++	min_version=$bfd_min_version
++	name=BFD
++	disp_name="GNU ld"
++elif [ "$1" = GNU -a "$2" = gold ]; then
++	echo "gold linker is not supported as it is not capable of linking the kernel proper." >&2
++	exit 1
++elif [ "$1" = LLD ]; then
++	version=$2
++	min_version=$lld_min_version
++	name=LLD
++	disp_name=LLD
++else
++	echo "$orig_args: unknown linker" >&2
++	exit 1
++fi
++
++# Some distributions append a package release number, as in 2.34-4.fc32
++# Trim the hyphen and any characters that follow.
++version=${version%-*}
++
++cversion=$(get_canonical_version $version)
++min_cversion=$(get_canonical_version $min_version)
++
++if [ "$cversion" -lt "$min_cversion" ]; then
++	echo >&2 "***"
++	echo >&2 "*** Linker is too old."
++	echo >&2 "***   Your $disp_name version:    $version"
++	echo >&2 "***   Minimum $disp_name version: $min_version"
++	echo >&2 "***"
++	exit 1
++fi
++
++echo $name $cversion
+diff --git a/scripts/lld-version.sh b/scripts/lld-version.sh
+deleted file mode 100755
+index f1eeee450a23..000000000000
+--- a/scripts/lld-version.sh
++++ /dev/null
+@@ -1,37 +0,0 @@
+-#!/bin/sh
+-# SPDX-License-Identifier: GPL-2.0
+-#
+-# Usage: $ ./scripts/lld-version.sh ld.lld
+-#
+-# Print the linker version of `ld.lld' in a 5 or 6-digit form
+-# such as `100001' for ld.lld 10.0.1 etc.
+-
+-set -e
+-
+-# Convert the version string x.y.z to a canonical 5 or 6-digit form.
+-get_canonical_version()
+-{
+-	IFS=.
+-	set -- $1
+-
+-	# If the 2nd or 3rd field is missing, fill it with a zero.
+-	echo $((10000 * $1 + 100 * ${2:-0} + ${3:-0}))
+-}
+-
+-# Get the first line of the --version output.
+-IFS='
+-'
+-set -- $(LC_ALL=C "$@" --version)
+-
+-# Split the line on spaces.
+-IFS=' '
+-set -- $1
+-
+-while [ $# -gt 1 -a "$1" != "LLD" ]; do
+-	shift
+-done
+-if [ "$1" = LLD ]; then
+-	echo $(get_canonical_version ${2%-*})
+-else
+-	echo 0
+-fi
+-- 
+2.35.1
+

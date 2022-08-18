@@ -1,0 +1,249 @@
+From f730bd1244bae061dab1b84dc8647688949d164b Mon Sep 17 00:00:00 2001
+From: Masahiro Yamada <masahiroy@kernel.org>
+Date: Tue, 16 Mar 2021 01:12:56 +0900
+Subject: [PATCH 07/22] BACKPORT: kbuild: check the minimum assembler version
+ in Kconfig
+
+Documentation/process/changes.rst defines the minimum assembler version
+(binutils version), but we have never checked it in the build time.
+
+Kbuild never invokes 'as' directly because all assembly files in the
+kernel tree are *.S, hence must be preprocessed. I do not expect
+raw assembly source files (*.s) would be added to the kernel tree.
+
+Therefore, we always use $(CC) as the assembler driver, and commit
+aa824e0c962b ("kbuild: remove AS variable") removed 'AS'. However,
+we are still interested in the version of the assembler acting behind.
+
+As usual, the --version option prints the version string.
+
+  $ as --version | head -n 1
+  GNU assembler (GNU Binutils for Ubuntu) 2.35.1
+
+But, we do not have $(AS). So, we can add the -Wa prefix so that
+$(CC) passes --version down to the backing assembler.
+
+  $ gcc -Wa,--version | head -n 1
+  gcc: fatal error: no input files
+  compilation terminated.
+
+OK, we need to input something to satisfy gcc.
+
+  $ gcc -Wa,--version -c -x assembler /dev/null -o /dev/null | head -n 1
+  GNU assembler (GNU Binutils for Ubuntu) 2.35.1
+
+The combination of Clang and GNU assembler works in the same way:
+
+  $ clang -no-integrated-as -Wa,--version -c -x assembler /dev/null -o /dev/null | head -n 1
+  GNU assembler (GNU Binutils for Ubuntu) 2.35.1
+
+Clang with the integrated assembler fails like this:
+
+  $ clang -integrated-as -Wa,--version -c -x assembler /dev/null -o /dev/null | head -n 1
+  clang: error: unsupported argument '--version' to option 'Wa,'
+
+For the last case, checking the error message is fragile. If the
+proposal for -Wa,--version support [1] is accepted, this may not be
+even an error in the future.
+
+One easy way is to check if -integrated-as is present in the passed
+arguments. We did not pass -integrated-as to CLANG_FLAGS before, but
+we can make it explicit.
+
+Nathan pointed out -integrated-as is the default for all of the
+architectures/targets that the kernel cares about, but it goes
+along with "explicit is better than implicit" policy. [2]
+
+With all this in my mind, I implemented scripts/as-version.sh to
+check the assembler version in Kconfig time.
+
+  $ scripts/as-version.sh gcc
+  GNU 23501
+  $ scripts/as-version.sh clang -no-integrated-as
+  GNU 23501
+  $ scripts/as-version.sh clang -integrated-as
+  LLVM 0
+
+[1]: https://github.com/ClangBuiltLinux/linux/issues/1320
+[2]: https://lore.kernel.org/linux-kbuild/20210307044253.v3h47ucq6ng25iay@archlinux-ax161/
+
+Signed-off-by: Masahiro Yamada <masahiroy@kernel.org>
+Reviewed-by: Nathan Chancellor <nathan@kernel.org>
+[nd: conflict in arch/Kconfig due to missing dc5723b02e523 ("kbuild: add
+  support for Clang LTO") which landed in v5.12-rc1]
+Signed-off-by: Nick Desaulniers <ndesaulniers@google.com>
+(cherry picked from commit ba64beb17493a4bfec563100c86a462a15926f24)
+Bug: 210043760
+Change-Id: I9bcc528adbb86fa902123611ce979af0dd455ad5
+---
+ Makefile                |  4 +-
+ init/Kconfig            | 12 ++++++
+ scripts/Kconfig.include |  6 +++
+ scripts/as-version.sh   | 82 +++++++++++++++++++++++++++++++++++++++++
+ scripts/dummy-tools/gcc |  6 +++
+ 5 files changed, 109 insertions(+), 1 deletion(-)
+ create mode 100755 scripts/as-version.sh
+
+diff --git a/Makefile b/Makefile
+index 68fc70171c9f..35d4a245d128 100644
+--- a/Makefile
++++ b/Makefile
+@@ -584,7 +584,9 @@ endif
+ ifneq ($(GCC_TOOLCHAIN),)
+ CLANG_FLAGS	+= --gcc-toolchain=$(GCC_TOOLCHAIN)
+ endif
+-ifneq ($(LLVM_IAS),1)
++ifeq ($(LLVM_IAS),1)
++CLANG_FLAGS	+= -integrated-as
++else
+ CLANG_FLAGS	+= -no-integrated-as
+ endif
+ CLANG_FLAGS	+= -Werror=unknown-warning-option
+diff --git a/init/Kconfig b/init/Kconfig
+index 20df9f5601e1..c4d075a4e514 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -41,6 +41,18 @@ config CLANG_VERSION
+ 	default $(cc-version) if CC_IS_CLANG
+ 	default 0
+ 
++config AS_IS_GNU
++	def_bool $(success,test "$(as-name)" = GNU)
++
++config AS_IS_LLVM
++	def_bool $(success,test "$(as-name)" = LLVM)
++
++config AS_VERSION
++	int
++	# Use clang version if this is the integrated assembler
++	default CLANG_VERSION if AS_IS_LLVM
++	default $(as-version)
++
+ config LD_IS_BFD
+ 	def_bool $(success,test "$(ld-name)" = BFD)
+ 
+diff --git a/scripts/Kconfig.include b/scripts/Kconfig.include
+index 58fdb5308725..0496efd6e117 100644
+--- a/scripts/Kconfig.include
++++ b/scripts/Kconfig.include
+@@ -45,6 +45,12 @@ $(error-if,$(success,test -z "$(cc-info)"),Sorry$(comma) this compiler is not su
+ cc-name := $(shell,set -- $(cc-info) && echo $1)
+ cc-version := $(shell,set -- $(cc-info) && echo $2)
+ 
++# Get the assembler name, version, and error out if it is not supported.
++as-info := $(shell,$(srctree)/scripts/as-version.sh $(CC) $(CLANG_FLAGS))
++$(error-if,$(success,test -z "$(as-info)"),Sorry$(comma) this assembler is not supported.)
++as-name := $(shell,set -- $(as-info) && echo $1)
++as-version := $(shell,set -- $(as-info) && echo $2)
++
+ # Get the linker name, version, and error out if it is not supported.
+ ld-info := $(shell,$(srctree)/scripts/ld-version.sh $(LD))
+ $(error-if,$(success,test -z "$(ld-info)"),Sorry$(comma) this linker is not supported.)
+diff --git a/scripts/as-version.sh b/scripts/as-version.sh
+new file mode 100755
+index 000000000000..8b9410e329df
+--- /dev/null
++++ b/scripts/as-version.sh
+@@ -0,0 +1,82 @@
++#!/bin/sh
++# SPDX-License-Identifier: GPL-2.0-only
++#
++# Print the assembler name and its version in a 5 or 6-digit form.
++# Also, perform the minimum version check.
++# (If it is the integrated assembler, return 0 as the version, and
++# skip the version check.)
++
++set -e
++
++# Convert the version string x.y.z to a canonical 5 or 6-digit form.
++get_canonical_version()
++{
++	IFS=.
++	set -- $1
++
++	# If the 2nd or 3rd field is missing, fill it with a zero.
++	#
++	# The 4th field, if present, is ignored.
++	# This occurs in development snapshots as in 2.35.1.20201116
++	echo $((10000 * $1 + 100 * ${2:-0} + ${3:-0}))
++}
++
++# Clang fails to handle -Wa,--version unless -no-integrated-as is given.
++# We check -(f)integrated-as, expecting it is explicitly passed in for the
++# integrated assembler case.
++check_integrated_as()
++{
++	while [ $# -gt 0 ]; do
++		if [ "$1" = -integrated-as -o "$1" = -fintegrated-as ]; then
++			# For the intergrated assembler, we do not check the
++			# version here. It is the same as the clang version, and
++			# it has been already checked by scripts/cc-version.sh.
++			echo LLVM 0
++			exit 0
++		fi
++		shift
++	done
++}
++
++check_integrated_as "$@"
++
++orig_args="$@"
++
++# Get the first line of the --version output.
++IFS='
++'
++set -- $(LC_ALL=C "$@" -Wa,--version -c -x assembler /dev/null -o /dev/null 2>/dev/null)
++
++# Split the line on spaces.
++IFS=' '
++set -- $1
++
++min_tool_version=$(dirname $0)/min-tool-version.sh
++
++if [ "$1" = GNU -a "$2" = assembler ]; then
++	shift $(($# - 1))
++	version=$1
++	min_version=$($min_tool_version binutils)
++	name=GNU
++else
++	echo "$orig_args: unknown assembler invoked" >&2
++	exit 1
++fi
++
++# Some distributions append a package release number, as in 2.34-4.fc32
++# Trim the hyphen and any characters that follow.
++version=${version%-*}
++
++cversion=$(get_canonical_version $version)
++min_cversion=$(get_canonical_version $min_version)
++
++if [ "$cversion" -lt "$min_cversion" ]; then
++	echo >&2 "***"
++	echo >&2 "*** Assembler is too old."
++	echo >&2 "***   Your $name assembler version:    $version"
++	echo >&2 "***   Minimum $name assembler version: $min_version"
++	echo >&2 "***"
++	exit 1
++fi
++
++echo $name $cversion
+diff --git a/scripts/dummy-tools/gcc b/scripts/dummy-tools/gcc
+index 0d0589cf8184..9f5e943e7491 100755
+--- a/scripts/dummy-tools/gcc
++++ b/scripts/dummy-tools/gcc
+@@ -67,6 +67,12 @@ if arg_contain -E "$@"; then
+ 	fi
+ fi
+ 
++# To set CONFIG_AS_IS_GNU
++if arg_contain -Wa,--version "$@"; then
++	echo "GNU assembler (scripts/dummy-tools) 2.50"
++	exit 0
++fi
++
+ if arg_contain -S "$@"; then
+ 	# For scripts/gcc-x86-*-has-stack-protector.sh
+ 	if arg_contain -fstack-protector "$@"; then
+-- 
+2.35.1
+
