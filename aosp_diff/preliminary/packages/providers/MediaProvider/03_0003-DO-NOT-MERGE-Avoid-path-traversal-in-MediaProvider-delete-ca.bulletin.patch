@@ -1,0 +1,168 @@
+From d4b0487f80c258b86c48c034d34f60db10f2cd06 Mon Sep 17 00:00:00 2001
+From: Dipankar Bhardwaj <dipankarb@google.com>
+Date: Tue, 7 Jun 2022 07:37:18 +0000
+Subject: [PATCH] DO NOT MERGE Avoid path traversal in MediaProvider delete
+ call
+
+Added changes to ensure invalid paths are not inserted into MP database
+and cannonical path is used during file deletion.
+
+Test: atest MediaProviderTest
+Bug: 221855295
+Change-Id: Ibeadf4425ae4ecc39613b8c1fb190319dc98b2f6
+(cherry picked from commit 47767be45f3486cb59b3c19c4296b38a0408dccb)
+Merged-In: Ibeadf4425ae4ecc39613b8c1fb190319dc98b2f6
+---
+ .../providers/media/MediaProvider.java        |  2 +-
+ .../providers/media/util/FileUtils.java       | 17 +++++++--
+ .../providers/media/MediaProviderTest.java    | 37 +++++++++++++++++++
+ .../providers/media/util/FileUtilsTest.java   | 24 ++++++++++++
+ 4 files changed, 75 insertions(+), 5 deletions(-)
+
+diff --git a/src/com/android/providers/media/MediaProvider.java b/src/com/android/providers/media/MediaProvider.java
+index c1abeeb5..114152bd 100644
+--- a/src/com/android/providers/media/MediaProvider.java
++++ b/src/com/android/providers/media/MediaProvider.java
+@@ -7673,7 +7673,7 @@ public class MediaProvider extends ContentProvider {
+ 
+     private void deleteIfAllowed(Uri uri, Bundle extras, String path) {
+         try {
+-            final File file = new File(path);
++            final File file = new File(path).getCanonicalFile();
+             checkAccess(uri, extras, file, true);
+             deleteAndInvalidate(file);
+         } catch (Exception e) {
+diff --git a/src/com/android/providers/media/util/FileUtils.java b/src/com/android/providers/media/util/FileUtils.java
+index 937e58a1..5c5e6b1c 100644
+--- a/src/com/android/providers/media/util/FileUtils.java
++++ b/src/com/android/providers/media/util/FileUtils.java
+@@ -49,8 +49,8 @@ import android.content.pm.PackageManager;
+ import android.net.Uri;
+ import android.os.Environment;
+ import android.os.ParcelFileDescriptor;
+-import android.os.UserHandle;
+ import android.os.SystemProperties;
++import android.os.UserHandle;
+ import android.os.storage.StorageManager;
+ import android.os.storage.StorageVolume;
+ import android.provider.MediaStore;
+@@ -1370,9 +1370,18 @@ public class FileUtils {
+             resolvedDisplayName = displayName;
+         }
+ 
+-        final File filePath = buildPath(volumePath,
+-                values.getAsString(MediaColumns.RELATIVE_PATH), resolvedDisplayName);
+-        values.put(MediaColumns.DATA, filePath.getAbsolutePath());
++        String relativePath = values.getAsString(MediaColumns.RELATIVE_PATH);
++        if (relativePath == null) {
++          relativePath = "";
++        }
++        try {
++            final File filePath = buildPath(volumePath, relativePath, resolvedDisplayName);
++            values.put(MediaColumns.DATA, filePath.getCanonicalPath());
++        } catch (IOException e) {
++            throw new IllegalArgumentException(
++                    String.format("Failure in conversion to canonical file path. Failure path: %s.",
++                            relativePath.concat(resolvedDisplayName)), e);
++        }
+     }
+ 
+     public static void sanitizeValues(@NonNull ContentValues values,
+diff --git a/tests/src/com/android/providers/media/MediaProviderTest.java b/tests/src/com/android/providers/media/MediaProviderTest.java
+index b716f4bd..11fc327b 100644
+--- a/tests/src/com/android/providers/media/MediaProviderTest.java
++++ b/tests/src/com/android/providers/media/MediaProviderTest.java
+@@ -72,6 +72,7 @@ import com.android.providers.media.util.FileUtilsTest;
+ import com.android.providers.media.util.SQLiteQueryBuilder;
+ 
+ import org.junit.AfterClass;
++import org.junit.Assert;
+ import org.junit.Assume;
+ import org.junit.BeforeClass;
+ import org.junit.Ignore;
+@@ -373,6 +374,42 @@ public class MediaProviderTest {
+         }
+     }
+ 
++    @Test
++    public void testInsertionWithInvalidFilePath_throwsIllegalArgumentException() {
++        final ContentValues values = new ContentValues();
++        values.put(MediaStore.MediaColumns.RELATIVE_PATH, "Android/media/com.example");
++        values.put(MediaStore.Images.Media.DISPLAY_NAME,
++                "./../../../../../../../../../../../data/media/test.txt");
++
++        IllegalArgumentException illegalArgumentException = Assert.assertThrows(
++                IllegalArgumentException.class, () -> sIsolatedResolver.insert(
++                        MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
++                        values));
++
++        assertThat(illegalArgumentException).hasMessageThat().contains(
++                "Primary directory Android not allowed for content://media/external_primary/file;"
++                        + " allowed directories are [Download, Documents]");
++    }
++
++    @Test
++    public void testUpdationWithInvalidFilePath_throwsIllegalArgumentException() {
++        final ContentValues values = new ContentValues();
++        values.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download");
++        values.put(MediaStore.Images.Media.DISPLAY_NAME, "test.txt");
++        Uri uri = sIsolatedResolver.insert(
++                MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
++                values);
++
++        final ContentValues newValues = new ContentValues();
++        newValues.put(MediaStore.MediaColumns.DATA, "/storage/emulated/0/../../../data/media/");
++        IllegalArgumentException illegalArgumentException = Assert.assertThrows(
++                IllegalArgumentException.class,
++                () -> sIsolatedResolver.update(uri, newValues, null));
++
++        assertThat(illegalArgumentException).hasMessageThat().contains(
++                "Requested path /data/media doesn't appear under [/storage/emulated/0]");
++    }
++
+     /**
+      * We already have solid coverage of this logic in
+      * {@code CtsProviderTestCases}, but the coverage system currently doesn't
+diff --git a/tests/src/com/android/providers/media/util/FileUtilsTest.java b/tests/src/com/android/providers/media/util/FileUtilsTest.java
+index a8d4f6df..3501245d 100644
+--- a/tests/src/com/android/providers/media/util/FileUtilsTest.java
++++ b/tests/src/com/android/providers/media/util/FileUtilsTest.java
+@@ -61,6 +61,7 @@ import static com.google.common.truth.Truth.assertThat;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertThrows;
+ import static org.junit.Assert.assertTrue;
+ import static org.junit.Assert.fail;
+ 
+@@ -1015,4 +1016,27 @@ public class FileUtilsTest {
+             assertFalse(isExternalMediaDirectory(prefix + "Android/media/foo.jpg", "NotAppClone"));
+         }
+     }
++
++    @Test
++    public void testComputeDataFromValuesForValidPath_success() {
++        final ContentValues values = new ContentValues();
++        values.put(MediaColumns.RELATIVE_PATH, "Android/media/com.example");
++        values.put(MediaColumns.DISPLAY_NAME, "./../../abc.txt");
++
++        FileUtils.computeDataFromValues(values, new File("/storage/emulated/0"), false);
++
++        assertThat(values.getAsString(MediaColumns.DATA)).isEqualTo(
++                "/storage/emulated/0/Android/abc.txt");
++    }
++
++    @Test
++    public void testComputeDataFromValuesForInvalidPath_throwsIllegalArgumentException() {
++        final ContentValues values = new ContentValues();
++        values.put(MediaColumns.RELATIVE_PATH, "\0");
++        values.put(MediaColumns.DISPLAY_NAME, "./../../abc.txt");
++
++        assertThrows(IllegalArgumentException.class,
++                () -> FileUtils.computeDataFromValues(values, new File("/storage/emulated/0"),
++                        false));
++    }
+ }
+-- 
+2.37.1.359.gd136c6c3e2-goog
+
