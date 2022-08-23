@@ -1,0 +1,129 @@
+From 8538f06f29d321cb28bcad1b09fc1835c1364018 Mon Sep 17 00:00:00 2001
+From: Manjeet Rulhania <mrulhania@google.com>
+Date: Wed, 27 Apr 2022 22:55:11 +0000
+Subject: [PATCH] Fix duplicate permission privilege escalation
+
+Duplicate permissions definition with different group allows
+privilege permission escalation to a different permission group.
+
+Android studio and gradle plugin does not allow duplicate permissions
+with different attributes, these tools only allow if duplicate
+permissions are exact copies.
+
+Also platform stores permissions in map at multiple places with permission
+name as key. This suggests that we can disallow duplicate permissions
+during package install/update
+
+Bug: 213323615
+Test: AppSecurityTests
+Change-Id: I34120fff2ec2a158dfa55779d2afd4bbd49487ff
+Merged-In: I9bc839836786a0876e67fd73c05f8944bb532249
+(cherry picked from commit 548edbb850227e076735615f83f8e23352b0b82d)
+Merged-In: I34120fff2ec2a158dfa55779d2afd4bbd49487ff
+---
+ .../pm/parsing/ParsingPackageUtils.java       |  8 +++
+ .../component/ParsedPermissionUtils.java      | 50 +++++++++++++++++++
+ 2 files changed, 58 insertions(+)
+
+diff --git a/core/java/android/content/pm/parsing/ParsingPackageUtils.java b/core/java/android/content/pm/parsing/ParsingPackageUtils.java
+index dce242c9d87..b785d35d744 100644
+--- a/core/java/android/content/pm/parsing/ParsingPackageUtils.java
++++ b/core/java/android/content/pm/parsing/ParsingPackageUtils.java
+@@ -20,6 +20,7 @@ import static android.content.pm.ActivityInfo.FLAG_SUPPORTS_PICTURE_IN_PICTURE;
+ import static android.content.pm.ActivityInfo.RESIZE_MODE_UNRESIZEABLE;
+ import static android.content.pm.PackageManager.INSTALL_PARSE_FAILED_BAD_MANIFEST;
+ import static android.content.pm.PackageManager.INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES;
++import static android.content.pm.PackageManager.INSTALL_PARSE_FAILED_MANIFEST_MALFORMED;
+ import static android.content.pm.PackageManager.INSTALL_PARSE_FAILED_ONLY_COREAPP_ALLOWED;
+ import static android.content.pm.PackageManager.INSTALL_PARSE_FAILED_RESOURCES_ARSC_COMPRESSED;
+ import static android.content.pm.PackageManager.INSTALL_PARSE_FAILED_UNEXPECTED_EXCEPTION;
+@@ -905,6 +906,13 @@ public class ParsingPackageUtils {
+             );
+         }
+ 
++        if (ParsedPermissionUtils.declareDuplicatePermission(pkg)) {
++            return input.error(
++                    INSTALL_PARSE_FAILED_MANIFEST_MALFORMED,
++                    "Declare duplicate permissions with different protection levels or group."
++            );
++        }
++
+         convertNewPermissions(pkg);
+ 
+         convertSplitPermissions(pkg);
+diff --git a/core/java/android/content/pm/parsing/component/ParsedPermissionUtils.java b/core/java/android/content/pm/parsing/component/ParsedPermissionUtils.java
+index 8afa70ec636..8f8cba4b0c9 100644
+--- a/core/java/android/content/pm/parsing/component/ParsedPermissionUtils.java
++++ b/core/java/android/content/pm/parsing/component/ParsedPermissionUtils.java
+@@ -25,6 +25,8 @@ import android.content.pm.parsing.result.ParseResult;
+ import android.content.res.Resources;
+ import android.content.res.TypedArray;
+ import android.content.res.XmlResourceParser;
++import android.util.ArrayMap;
++import android.util.EventLog;
+ import android.util.Slog;
+ 
+ import com.android.internal.R;
+@@ -32,6 +34,8 @@ import com.android.internal.R;
+ import org.xmlpull.v1.XmlPullParserException;
+ 
+ import java.io.IOException;
++import java.util.List;
++import java.util.Objects;
+ 
+ /** @hide */
+ public class ParsedPermissionUtils {
+@@ -233,4 +237,50 @@ public class ParsedPermissionUtils {
+         return ComponentParseUtils.parseAllMetaData(pkg, res, parser, tag, permissionGroup,
+                 input);
+     }
++
++    /**
++     * Determines if a duplicate permission is malformed .i.e. defines different protection level
++     * or group
++     */
++    private static boolean isMalformedDuplicate(ParsedPermission p1, ParsedPermission p2) {
++        // Since a permission tree is also added as a permission with normal protection
++        // level, we need to skip if the parsedPermission is a permission tree.
++        if (p1 == null || p2 == null || p1.isTree() || p2.isTree()) {
++            return false;
++        }
++
++        if (p1.getProtectionLevel() != p2.getProtectionLevel()) {
++            return true;
++        }
++        if (!Objects.equals(p1.getGroup(), p2.getGroup())) {
++            return true;
++        }
++
++        return false;
++    }
++
++    /**
++     * @return {@code true} if the package declares malformed duplicate permissions.
++     *
++     */
++    public static boolean declareDuplicatePermission(@NonNull ParsingPackage pkg) {
++        final List<ParsedPermission> permissions = pkg.getPermissions();
++        final int size = permissions.size();
++        if (size > 0) {
++            final ArrayMap<String, ParsedPermission> checkDuplicatePerm = new ArrayMap<>(size);
++            for (int i = 0; i < size; i++) {
++                final ParsedPermission parsedPermission = permissions.get(i);
++                final String name = parsedPermission.getName();
++                final ParsedPermission perm = checkDuplicatePerm.get(name);
++                if (isMalformedDuplicate(parsedPermission, perm)) {
++                    // Fix for b/213323615
++                    EventLog.writeEvent(0x534e4554, "213323615",
++                            "The package " + pkg.getPackageName() + " seems malicious");
++                    return true;
++                }
++                checkDuplicatePerm.put(name, parsedPermission);
++            }
++        }
++        return false;
++    }
+ }
+-- 
+2.37.1.359.gd136c6c3e2-goog
+
