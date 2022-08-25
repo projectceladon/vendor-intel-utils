@@ -26,6 +26,8 @@
 #include <string.h>
 #include <stdio.h>
 
+#define REQUEST_CLIENT_ID "REQUEST_CLIENT_ID\r\n"
+
 struct iiod_client {
     struct iio_context_pdata *pdata;
     const struct iiod_client_ops *ops;
@@ -154,6 +156,30 @@ struct iiod_client * iiod_client_new(struct iio_context_pdata *pdata,
 void iiod_client_destroy(struct iiod_client *client)
 {
     free(client);
+}
+
+int iiod_client_request_client_id(struct iiod_client *client, void *desc)
+{
+    struct iio_context_pdata *pdata = client->pdata;
+    const struct iiod_client_ops *ops = client->ops;
+    char buf[256], *ptr = buf, *end;
+    int ret, to_read;
+
+    iio_mutex_lock(client->lock);
+
+    ret = ops->write(pdata, desc, REQUEST_CLIENT_ID, strlen(REQUEST_CLIENT_ID));
+    if (ret < 0) {
+        iio_mutex_unlock(client->lock);
+        return ret;
+    }
+
+    ret = iiod_client_read_integer(client, desc, &to_read);
+
+    iio_mutex_unlock(client->lock);
+    if (ret < 0)
+        return ret;
+
+    return to_read;
 }
 
 int iiod_client_get_version(struct iiod_client *client, void *desc,
@@ -497,6 +523,8 @@ struct iio_context * iiod_client_create_context(
     char *xml;
     int ret;
 
+    int client_id = iiod_client_request_client_id(client, desc);
+
     iio_mutex_lock(client->lock);
     ret = iiod_client_exec_command(client, desc, "PRINT\r\n");
     if (ret < 0)
@@ -517,6 +545,8 @@ struct iio_context * iiod_client_create_context(
     ctx = iio_create_xml_context_mem(xml, xml_len);
     if (!ctx)
         ret = -errno;
+    if (client_id >= 0)
+        ctx->client_id = client_id;
 
 out_free_xml:
     free(xml);
@@ -568,9 +598,10 @@ static int iiod_client_read_mask(struct iiod_client *client,
         return -ENOMEM;
 
     ret = iiod_client_read_all(client, desc, buf, words * 8 + 1);
-    if (ret < 0)
+    if (ret < 0) {
+        ERROR("READ ALL: %zu\n", ret);
         goto out_buf_free;
-    else
+    } else
         ret = 0;
 
     buf[words*8] = '\0';
@@ -590,6 +621,26 @@ out_buf_free:
     return (int) ret;
 }
 
+int iiod_client_register_client_id(struct iiod_client *client, void *desc,
+    int client_id)
+{
+    char buf[1024];
+    ssize_t ret;
+    int to_read;
+
+    iio_snprintf(buf, sizeof(buf), "REGISTER_CLIENT_ID %i\r\n", client_id);
+
+    ret = iiod_client_write_all(client, desc, buf, strlen(buf));
+    if (ret < 0)
+        return ret;
+
+    ret = iiod_client_read_integer(client, desc, &to_read);
+    if (ret < 0)
+        return ret;
+
+    return to_read;
+}
+
 ssize_t iiod_client_read_unlocked(struct iiod_client *client, void *desc,
         const struct iio_device *dev, void *dst, size_t len,
         uint32_t *mask, size_t words)
@@ -606,15 +657,19 @@ ssize_t iiod_client_read_unlocked(struct iiod_client *client, void *desc,
             iio_device_get_id(dev), (unsigned long) len);
 
     ret = iiod_client_write_all(client, desc, buf, strlen(buf));
-    if (ret < 0)
+    if (ret < 0) {
+        ERROR("WRITE ALL: %zu\n", ret);
         return ret;
+    }
 
     do {
         int to_read;
 
         ret = iiod_client_read_integer(client, desc, &to_read);
-        if (ret < 0)
+        if (ret < 0) {
+            ERROR("READ INTEGER: %zu\n", ret);
             return ret;
+        }
         if (to_read < 0)
             return (ssize_t) to_read;
         if (!to_read)
@@ -622,8 +677,9 @@ ssize_t iiod_client_read_unlocked(struct iiod_client *client, void *desc,
 
         if (mask) {
             ret = iiod_client_read_mask(client, desc, mask, words);
-            if (ret < 0)
+            if (ret < 0) {
                 return ret;
+            }
 
             mask = NULL; /* We read the mask only once */
         }

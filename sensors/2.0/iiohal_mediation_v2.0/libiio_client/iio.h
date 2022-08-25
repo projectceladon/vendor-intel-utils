@@ -337,6 +337,14 @@ __api struct iio_context * iio_create_xml_context_mem(
  * @return On failure, NULL is returned and errno is set appropriately */
 __api struct iio_context * iio_create_network_context(const char *host);
 
+/** @brief Create a context from a VSOCK
+ * @param port The port number to a listening VSOCK
+ * @return On success, a pointer to an iio_context structure
+ * @return On failure, NULL is returned and errno is set appropriately */
+__api struct iio_context * iio_create_vm_context(const char *port);
+
+/*function declaration for reserve socket file descriptor*/
+int get_reserve_fd_context();
 
 /** @brief Create a context from a URI description
  * @param uri A URI describing the context location

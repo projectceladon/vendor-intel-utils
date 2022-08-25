@@ -23,6 +23,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/limits.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/types.h>
@@ -38,6 +39,7 @@
 
 #else /* _WIN32 */
 #include <arpa/inet.h>
+#include <linux/vm_sockets.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -45,6 +47,7 @@
 #include <sys/mman.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #endif /* _WIN32 */
 
@@ -54,8 +57,10 @@
 #include <avahi-client/lookup.h>
 #include <avahi-common/simple-watch.h>
 #endif
-
+#include <log/log.h>
 #include "debug.h"
+
+static int vsock_fd;
 
 #define DEFAULT_TIMEOUT_MS 5000
 
@@ -87,6 +92,7 @@ struct iio_context_pdata {
     struct iio_mutex *lock;
     struct iiod_client *iiod_client;
     bool msg_trunc_supported;
+    bool peek_supported;
 };
 
 struct iio_device_pdata {
@@ -572,14 +578,19 @@ static void network_cancel(const struct iio_device *dev)
 #define SOCK_CLOEXEC 0
 #endif
 
+int get_reserve_fd()
+{
+  return vsock_fd;
+}
+
 static int do_create_socket(const struct addrinfo *addrinfo)
 {
     int fd;
 
     fd = socket(addrinfo->ai_family, addrinfo->ai_socktype | SOCK_CLOEXEC, 0);
+    vsock_fd =fd;
     if (fd < 0)
         return -errno;
-
     return fd;
 }
 
@@ -641,10 +652,11 @@ static int do_connect(int fd, const struct addrinfo *addrinfo,
 #else
     struct pollfd pfd;
 #endif
-
     ret = set_blocking_mode(fd, false);
-    if (ret < 0)
+    if (ret < 0) {
+        ERROR("set_blocking_mode failed\n");
         return ret;
+    }
 
     ret = connect(fd, addrinfo->ai_addr, (int) addrinfo->ai_addrlen);
     if (ret < 0) {
@@ -675,7 +687,6 @@ static int do_connect(int fd, const struct addrinfo *addrinfo,
         ret = poll(&pfd, 1, timeout);
     } while (ret == -1 && errno == EINTR);
 #endif
-
     if (ret < 0)
         return network_get_error();
 
@@ -694,8 +705,39 @@ static int do_connect(int fd, const struct addrinfo *addrinfo,
     ret = set_blocking_mode(fd, true);
     if (ret < 0)
         return ret;
-
     return 0;
+}
+
+static int is_host_socket(int ai_family)
+{
+    switch (ai_family) {
+        case AF_UNIX:
+        case AF_VSOCK:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static int is_vm_socket(int ai_family)
+{
+    switch (ai_family) {
+        case AF_VSOCK:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static int is_inet_socket(int ai_family)
+{
+    switch (ai_family) {
+        case AF_INET:
+        case AF_INET6:
+            return true;
+        default:
+            return false;
+    }
 }
 
 static int create_socket(const struct addrinfo *addrinfo, unsigned int timeout)
@@ -713,11 +755,14 @@ static int create_socket(const struct addrinfo *addrinfo, unsigned int timeout)
     }
 
     set_socket_timeout(fd, timeout);
-    if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
-                (const char *) &yes, sizeof(yes)) < 0) {
-        ret = -errno;
-        close(fd);
-        return ret;
+
+    if (is_inet_socket(addrinfo->ai_family)) {
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+                    (const char *) &yes, sizeof(yes)) < 0) {
+            ret = -errno;
+            close(fd);
+            return ret;
+        }
     }
 
     return fd;
@@ -735,18 +780,27 @@ static int network_open(const struct iio_device *dev,
         goto out_mutex_unlock;
 
     ret = create_socket(pdata->addrinfo, DEFAULT_TIMEOUT_MS);
-    if (ret < 0)
+    if (ret < 0) {
+        ERROR("Create socket: %d\n", ret);
         goto out_mutex_unlock;
+    }
 
     ppdata->io_ctx.fd = ret;
     ppdata->io_ctx.cancelled = false;
     ppdata->io_ctx.cancellable = false;
     ppdata->io_ctx.timeout_ms = DEFAULT_TIMEOUT_MS;
 
+    ret = iiod_client_register_client_id(dev->ctx->pdata->iiod_client,
+            &ppdata->io_ctx, dev->ctx->client_id);
+    if (ret < 0)
+        printf ("Failed to register client id: %i\n", ret);
+
     ret = iiod_client_open_unlocked(pdata->iiod_client,
             &ppdata->io_ctx, dev, samples_count, cyclic);
-    if (ret < 0)
+    if (ret < 0) {
+        ERROR("Open unlocked: %d\n", ret);
         goto err_close_socket;
+    }
 
     ret = setup_cancel(&ppdata->io_ctx);
     if (ret < 0)
@@ -849,8 +903,10 @@ static ssize_t read_all(struct iio_network_io_context *io_ctx,
     uintptr_t ptr = (uintptr_t) dst;
     while (len) {
         ssize_t ret = network_recv(io_ctx, (void *) ptr, len, 0);
-        if (ret < 0)
+        if (ret < 0) {
+            ERROR("NETWORK RECV: %zu\n", ret);
             return ret;
+        }
         ptr += ret;
         len -= ret;
     }
@@ -892,8 +948,10 @@ static ssize_t network_read_mask(struct iio_network_io_context *io_ctx,
     ssize_t ret;
 
     ret = read_integer(io_ctx, &read_len);
-    if (ret < 0)
+    if (ret < 0) {
+        ERROR("READ INTEGER: %zu\n", ret);
         return ret;
+    }
 
     if (read_len > 0 && mask) {
         size_t i;
@@ -1224,7 +1282,11 @@ static void network_shutdown(struct iio_context *ctx)
 
     iiod_client_destroy(pdata->iiod_client);
     iio_mutex_destroy(pdata->lock);
-    freeaddrinfo(pdata->addrinfo);
+    if (pdata->addrinfo->ai_family == AF_UNIX ||
+            is_vm_socket(pdata->addrinfo->ai_family))
+        free(pdata->addrinfo->ai_addr);
+    else
+        freeaddrinfo(pdata->addrinfo);
     free(pdata);
 }
 
@@ -1332,7 +1394,10 @@ static ssize_t network_read_line(struct iio_context_pdata *pdata,
     do {
         size_t to_trunc;
 
-        ret = network_recv(io_ctx, dst, len, MSG_PEEK);
+        if (pdata->peek_supported)
+            ret = network_recv(io_ctx, dst, len, MSG_PEEK);
+        else
+            ret = network_recv(io_ctx, dst, 1, 0);
         if (ret < 0)
             return ret;
 
@@ -1350,19 +1415,24 @@ static ssize_t network_read_line(struct iio_context_pdata *pdata,
 
         /* Advance the read offset to the byte following the \n if
          * found, or after the last charater read otherwise */
-        if (pdata->msg_trunc_supported)
-            ret = network_recv(io_ctx, NULL, to_trunc, MSG_TRUNC);
-        else
-            ret = network_recv(io_ctx, dst - ret, to_trunc, 0);
-        if (ret < 0)
-            return ret;
+        if (pdata->peek_supported) {
+            if (pdata->msg_trunc_supported)
+                ret = network_recv(io_ctx, NULL, to_trunc, MSG_TRUNC);
+            else
+                ret = network_recv(io_ctx, dst - ret, to_trunc, 0);
+            if (ret < 0) {
+                ERROR("NETWORK RECV: %zu\n", ret);
+                return ret;
+            }
+        }
 
         bytes_read += to_trunc;
     } while (!found && len);
 
-    if (!found)
+    if (!found) {
+        ERROR("EIO: %zu\n", ret);
         return -EIO;
-    else
+    } else
         return bytes_read;
 #else
     for (i = 0; i < len - 1; i++) {
@@ -1397,87 +1467,53 @@ static const struct iiod_client_ops network_iiod_client_ops = {
  * applications this is not something that can be detected at compile time. If
  * we want to support WSL we have to have a runtime workaround.
  */
-static bool msg_trunc_supported(struct iio_network_io_context *io_ctx)
+static bool msg_trunc_supported(struct iio_network_io_context *io_ctx,
+                int ai_family)
 {
     int ret;
 
-    ret = network_recv(io_ctx, NULL, 0, MSG_TRUNC | MSG_DONTWAIT);
+    if (is_host_socket(ai_family))
+        return false;
+
+    ret = network_recv(io_ctx,
+               NULL,
+               0,
+               MSG_TRUNC | MSG_DONTWAIT);
 
     return ret != -EFAULT && ret != -EINVAL;
 }
+
+static bool peek_supported(int ai_family)
+{
+    return !is_vm_socket(ai_family);
+}
+
 #else
-static bool msg_trunc_supported(struct iio_network_io_context *io_ctx)
+static bool msg_trunc_supported(struct iio_network_io_context *io_ctx,
+                int ai_family)
+{
+    return false;
+}
+
+static bool peek_supported(int ai_family)
 {
     return false;
 }
 #endif
 
-struct iio_context * network_create_context(const char *host)
+struct iio_context * do_network_create_context(struct addrinfo* ai)
 {
-    struct addrinfo hints, *res;
     struct iio_context *ctx;
     struct iio_context_pdata *pdata;
-    size_t i, len;
-    int fd, ret;
     char *description;
-
-#ifdef _WIN32
-    WSADATA wsaData;
-
-    ret = WSAStartup(MAKEWORD(2, 0), &wsaData);
-    if (ret < 0) {
-        ERROR("WSAStartup failed with error %i\n", ret);
-        errno = -ret;
-        return NULL;
-    }
-#endif
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-#ifdef HAVE_AVAHI
-    if (!host) {
-        char addr_str[AVAHI_ADDRESS_STR_MAX];
-        char port_str[6];
-        AvahiAddress address;
-        uint16_t port = IIOD_PORT;
-
-        memset(&address, 0, sizeof(address));
-
-        ret = discover_host(&address, &port);
-        if (ret < 0) {
-            char buf[1024];
-            iio_strerror(-ret, buf, sizeof(buf));
-            DEBUG("Unable to find host: %s\n", buf);
-            errno = -ret;
-            return NULL;
-        }
-
-        avahi_address_snprint(addr_str, sizeof(addr_str), &address);
-        iio_snprintf(port_str, sizeof(port_str), "%hu", port);
-        ret = getaddrinfo(addr_str, port_str, &hints, &res);
-    } else
-#endif
-    {
-        ret = getaddrinfo(host, IIOD_PORT_STR, &hints, &res);
-    }
-
-    if (ret) {
-        ERROR("Unable to find host: %s\n", gai_strerror(ret));
-#ifndef _WIN32
-        if (ret != EAI_SYSTEM)
-            errno = -ret;
-#endif
-        return NULL;
-    }
-
-    fd = create_socket(res, DEFAULT_TIMEOUT_MS);
+    size_t i, len;
+    int ret;
+    int fd = create_socket(ai, DEFAULT_TIMEOUT_MS);
     if (fd < 0) {
+        ERROR("I could not create socket: %d\n", fd);
         errno = -fd;
-        goto err_free_addrinfo;
+        goto err_exit;
     }
-
     pdata = zalloc(sizeof(*pdata));
     if (!pdata) {
         errno = ENOMEM;
@@ -1485,7 +1521,7 @@ struct iio_context * network_create_context(const char *host)
     }
 
     pdata->io_ctx.fd = fd;
-    pdata->addrinfo = res;
+    pdata->addrinfo = ai;
     pdata->io_ctx.timeout_ms = DEFAULT_TIMEOUT_MS;
 
     pdata->lock = iio_mutex_create();
@@ -1493,11 +1529,13 @@ struct iio_context * network_create_context(const char *host)
         errno = ENOMEM;
         goto err_free_pdata;
     }
-
     pdata->iiod_client = iiod_client_new(pdata, pdata->lock,
             &network_iiod_client_ops);
 
-    pdata->msg_trunc_supported = msg_trunc_supported(&pdata->io_ctx);
+    pdata->msg_trunc_supported = msg_trunc_supported(&pdata->io_ctx,
+                             ai->ai_family);
+    pdata->peek_supported = peek_supported(ai->ai_family);
+
     if (pdata->msg_trunc_supported)
         DEBUG("MSG_TRUNC is supported\n");
     else
@@ -1517,6 +1555,9 @@ struct iio_context * network_create_context(const char *host)
     ctx->ops = &network_ops;
     ctx->pdata = pdata;
 
+    if (is_host_socket(ai->ai_family))
+        len = PATH_MAX;
+    else
 #ifdef HAVE_IPV6
     len = INET6_ADDRSTRLEN + IF_NAMESIZE + 2;
 #else
@@ -1531,9 +1572,17 @@ struct iio_context * network_create_context(const char *host)
 
     description[0] = '\0';
 
+    if (ai->ai_family == AF_UNIX) {
+        struct sockaddr_un* un = (struct sockaddr_un*)ai->ai_addr;
+        strncpy(description, un->sun_path, len);
+    }
+    if (is_vm_socket(ai->ai_family)) {
+        struct sockaddr_vm* vm = (struct sockaddr_vm*)ai->ai_addr;
+        snprintf(description, len, "%d:%d", vm->svm_cid, vm->svm_port);
+    }
 #ifdef HAVE_IPV6
-    if (res->ai_family == AF_INET6) {
-        struct sockaddr_in6 *in = (struct sockaddr_in6 *) res->ai_addr;
+    if (ai->ai_family == AF_INET6) {
+        struct sockaddr_in6 *in = (struct sockaddr_in6 *) ai->ai_addr;
         char *ptr;
         inet_ntop(AF_INET6, &in->sin6_addr,
                 description, INET6_ADDRSTRLEN);
@@ -1551,8 +1600,8 @@ struct iio_context * network_create_context(const char *host)
         }
     }
 #endif
-    if (res->ai_family == AF_INET) {
-        struct sockaddr_in *in = (struct sockaddr_in *) res->ai_addr;
+    if (ai->ai_family == AF_INET) {
+        struct sockaddr_in *in = (struct sockaddr_in *) ai->ai_addr;
 #if (!_WIN32 || _WIN32_WINNT >= 0x600)
         inet_ntop(AF_INET, &in->sin_addr, description, INET_ADDRSTRLEN);
 #else
@@ -1612,8 +1661,6 @@ struct iio_context * network_create_context(const char *host)
 err_free_description:
     free(description);
 err_network_shutdown:
-    close(fd);
-    freeaddrinfo(res);
     iio_context_destroy(ctx);
     errno = -ret;
     return NULL;
@@ -1626,7 +1673,124 @@ err_free_pdata:
     free(pdata);
 err_close_socket:
     close(fd);
+err_exit:
+    return NULL;
+}
+
+struct iio_context * network_create_context(const char *host)
+{
+    struct addrinfo hints, *res;
+    int ret;
+    struct iio_context *ctx;
+#ifdef _WIN32
+    WSADATA wsaData;
+
+    ret = WSAStartup(MAKEWORD(2, 0), &wsaData);
+    if (ret < 0) {
+        ERROR("WSAStartup failed with error %i\n", ret);
+        errno = -ret;
+        return NULL;
+    }
+#endif
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+#ifdef HAVE_AVAHI
+    if (!host) {
+        char addr_str[AVAHI_ADDRESS_STR_MAX];
+        char port_str[6];
+        AvahiAddress address;
+        uint16_t port = IIOD_PORT;
+
+        memset(&address, 0, sizeof(address));
+
+        ret = discover_host(&address, &port);
+        if (ret < 0) {
+            char buf[1024];
+            iio_strerror(-ret, buf, sizeof(buf));
+            DEBUG("Unable to find host: %s\n", buf);
+            errno = -ret;
+            return NULL;
+        }
+
+        avahi_address_snprint(addr_str, sizeof(addr_str), &address);
+        iio_snprintf(port_str, sizeof(port_str), "%hu", port);
+        ret = getaddrinfo(addr_str, port_str, &hints, &res);
+    } else
+#endif
+    {
+        ret = getaddrinfo(host, IIOD_PORT_STR, &hints, &res);
+    }
+
+    if (ret) {
+        ERROR("Unable to find host: %s\n", gai_strerror(ret));
+#ifndef _WIN32
+        if (ret != EAI_SYSTEM)
+            errno = -ret;
+#endif
+        return NULL;
+    }
+
+    ctx = do_network_create_context(res);
+    if (ctx == NULL)
+        goto err_free_addrinfo;
+    else
+        return ctx;
+
 err_free_addrinfo:
     freeaddrinfo(res);
+    return NULL;
+}
+
+static struct iio_context * sock_create_context(sa_family_t family,
+                        struct sockaddr* addr,
+                        size_t addrlen)
+{
+    struct addrinfo *ai = zalloc(sizeof(*ai));
+    struct iio_context *network_context;
+
+    if (!ai) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    ai->ai_family = addr->sa_family = family;
+    ai->ai_socktype = SOCK_STREAM;
+
+    ai->ai_addr = addr;
+    ai->ai_addrlen = addrlen;
+
+    network_context = do_network_create_context(ai);
+    if (network_context == NULL)
+        free(ai);
+
+    return network_context;
+}
+
+struct iio_context * vm_create_context(unsigned int port)
+{
+    struct iio_context *ctx;
+    struct sockaddr_vm *addr = zalloc(sizeof(*addr));
+
+    if (!addr) {
+        errno = ENOMEM;
+        goto err_exit;
+    }
+    addr->svm_port = port;
+    addr->svm_cid = VMADDR_CID_HOST;
+
+    ctx = sock_create_context(AF_VSOCK, (struct sockaddr*)addr,
+                  sizeof(*addr));
+    if (ctx == NULL) {
+        goto err_free;
+    }
+    else
+        return ctx;
+
+err_free:
+    free(addr);
+err_exit:
     return NULL;
 }

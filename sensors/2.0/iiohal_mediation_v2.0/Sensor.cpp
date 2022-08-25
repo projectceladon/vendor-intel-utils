@@ -160,7 +160,12 @@ std::vector<Event> Sensor::readEvents() {
         event.u.vec3.y = iioc->devlist[mSensorInfo.sensorHandle].data[1];
         event.u.vec3.z = iioc->devlist[mSensorInfo.sensorHandle].data[2];
     } else {
-        event.u.vec3.x = event.u.vec3.y = event.u.vec3.z = 0;
+        if (event.sensorHandle == 1) {
+            event.u.vec3.x = event.u.vec3.y = 0;
+            event.u.vec3.z = -9.8;
+        }
+        else
+            event.u.vec3.x = event.u.vec3.y = event.u.vec3.z = 0;
     }
     event.u.vec3.status = SensorStatus::ACCURACY_HIGH;
     events.push_back(event);
@@ -330,7 +335,7 @@ GyroSensor::GyroSensor(int32_t sensorHandle,
     mSensorInfo.name = "Gyro Sensor";
     mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
-    mSensorInfo.type = SensorType::GYROSCOPE;
+    mSensorInfo.type = SensorType::GYROSCOPE_UNCALIBRATED;
     mSensorInfo.typeAsString = "";
     mSensorInfo.maxRange = 1000.0f * M_PI / 180.0f;
     mSensorInfo.resolution = 1000.0f * M_PI / (180.0f * 32768.0f);

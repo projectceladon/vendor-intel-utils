@@ -15,7 +15,9 @@
  * Lesser General Public License for more details.
  *
  * */
-
+#include <sys/socket.h>
+#include <linux/vm_sockets.h>
+#include <unistd.h>
 #include "debug.h"
 #include "iio-config.h"
 #include "iio-private.h"
@@ -23,6 +25,7 @@
 
 #include <errno.h>
 #include <string.h>
+#include <log/log.h>
 
 #ifdef _WIN32
 #define LOCAL_BACKEND 0
@@ -277,28 +280,39 @@ struct iio_context * iio_context_clone(const struct iio_context *ctx)
 
 struct iio_context * iio_create_context_from_uri(const char *uri)
 {
+    int prefix_size;
+
 #ifdef WITH_LOCAL_BACKEND
-    if (strcmp(uri, "local:") == 0) /* No address part */
+    prefix_size = strlen("local:");
+    if (strncmp(uri, "local:", prefix_size) == 0) /* No address part */
         return iio_create_local_context();
 #endif
 
 #ifdef WITH_XML_BACKEND
-    if (strncmp(uri, "xml:", sizeof("xml:") - 1) == 0)
-        return iio_create_xml_context(uri + sizeof("xml:") - 1);
+    prefix_size = strlen("xml:");
+    if (strncmp(uri, "xml:", prefix_size) == 0)
+        return iio_create_xml_context(uri + prefix_size);
 #endif
 
 #ifdef WITH_NETWORK_BACKEND
-    if (strncmp(uri, "ip:", sizeof("ip:") - 1) == 0)
-        return iio_create_network_context(uri+3);
+    prefix_size = strlen("ip:");
+    if (strncmp(uri, "ip:", prefix_size) == 0)
+        return iio_create_network_context(uri + prefix_size);
+    prefix_size = strlen("vsock:");
+    if (strncmp(uri, "vsock:", prefix_size) == 0) {
+        return iio_create_vm_context(uri + prefix_size);
+    }
 #endif
 
 #ifdef WITH_USB_BACKEND
-    if (strncmp(uri, "usb:", sizeof("usb:") - 1) == 0)
+    prefix_size = strlen("usb:");
+    if (strncmp(uri, "usb:", prefix_size) == 0)
         return usb_create_context_from_uri(uri);
 #endif
 
 #ifdef WITH_SERIAL_BACKEND
-    if (strncmp(uri, "serial:", sizeof("serial:") - 1) == 0)
+    prefix_size = strlen("serial:");
+    if (strncmp(uri, "serial:", prefix_size) == 0)
         return serial_create_context_from_uri(uri);
 #endif
 
@@ -348,6 +362,25 @@ struct iio_context * iio_create_network_context(const char *hostname)
     errno = ENOSYS;
     return NULL;
 #endif
+}
+
+struct iio_context * iio_create_vm_context(const char *port)
+{
+#ifdef WITH_NETWORK_BACKEND
+    char *end = NULL;
+    unsigned int port_num = strtol(port, &end, 10);
+
+    return vm_create_context(port_num);
+#else
+    errno = ENOSYS;
+    return NULL;
+#endif
+}
+
+//reserve socket file descriptor
+int get_reserve_fd_context()
+{
+    return get_reserve_fd();
 }
 
 struct iio_context * iio_create_xml_context_mem(const char *xml, size_t len)

@@ -132,6 +132,8 @@ struct iio_backend_ops {
 
     void (*shutdown)(struct iio_context *ctx);
 
+    int (*request_client_id)(const struct iio_context *ctx);
+    int (*register_client_id)(const struct iio_device *dev);
     int (*get_version)(const struct iio_context *ctx, unsigned int *major,
             unsigned int *minor, char git_tag[8]);
 
@@ -167,6 +169,7 @@ struct iio_context {
     char **attrs;
     char **values;
     unsigned int nb_attrs;
+    int client_id;
 };
 
 struct iio_channel {
@@ -260,6 +263,7 @@ int write_double(char *buf, size_t len, double val);
 
 struct iio_context * local_create_context(void);
 struct iio_context * network_create_context(const char *hostname);
+struct iio_context * vm_create_context(unsigned int port);
 struct iio_context * xml_create_context_mem(const char *xml, size_t len);
 struct iio_context * xml_create_context(const char *xml_file);
 struct iio_context * usb_create_context(unsigned int bus, unsigned int address,
@@ -287,6 +291,7 @@ char *iio_strdup(const char *str);
 int iio_context_add_attr(struct iio_context *ctx,
         const char *key, const char *value);
 
+int get_reserve_fd();
 #undef __api
 
 #endif /* __IIO_PRIVATE_H__ */

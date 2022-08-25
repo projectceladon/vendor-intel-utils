@@ -41,6 +41,8 @@
 
 #define MAX_SENSOR 9
 #define MAX_CHANNEL 3
+#define SENSOR_PORT "30431"
+#define USE_VM_CONTEXT
 
 struct iio_sensor_map {
     const char *name;

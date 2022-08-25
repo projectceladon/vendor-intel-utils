@@ -38,6 +38,7 @@ struct iiod_client * iiod_client_new(struct iio_context_pdata *pdata,
         struct iio_mutex *lock, const struct iiod_client_ops *ops);
 void iiod_client_destroy(struct iiod_client *client);
 
+int iiod_client_request_client_id(struct iiod_client *client, void *desc);
 int iiod_client_get_version(struct iiod_client *client, void *desc,
         unsigned int *major, unsigned int *minor, char *git_tag);
 int iiod_client_get_trigger(struct iiod_client *client, void *desc,
@@ -59,7 +60,9 @@ int iiod_client_open_unlocked(struct iiod_client *client, void *desc,
         const struct iio_device *dev, size_t samples_count,
         bool cyclic);
 int iiod_client_close_unlocked(struct iiod_client *client, void *desc,
-        const struct iio_device *dev);
+                const struct iio_device *dev);
+int iiod_client_register_client_id(struct iiod_client *client, void *desc,
+                int client_id);
 ssize_t iiod_client_read_unlocked(struct iiod_client *client, void *desc,
         const struct iio_device *dev, void *dst, size_t len,
         uint32_t *mask, size_t words);
