@@ -1,0 +1,176 @@
+From f26573383a48096b0d62325d54535c9d3547513b Mon Sep 17 00:00:00 2001
+From: kanlihu <kanli.hu@intel.com>
+Date: Wed, 31 Aug 2022 19:18:56 +0800
+Subject: [PATCH] hwc: DrmFbImporter cache manager need to erase drm_fb_id
+
+when plug-out external display
+we will find the framebuffer obj will be increase
+we can use the following command to find it
+
+cat /sys/kernel/debug/dri/128/framebuffer
+
+this bug was caused by
+
+commit c857539fdc26fb8f11eeff795c9ab19de7f036a0
+Author: Li, HaihongX <haihongx.li@intel.com>
+Date:   Thu Apr 14 18:16:16 2022 +0800
+
+    Shouldn't call AddFB2 in HWC for every commit
+
+in this patch we modify the
+
+DrmFbImporter.h
+
+-  std::map<GemHandle, std::weak_ptr<DrmFbIdHandle>> drm_fb_id_handle_cache_;
++  std::map<GemHandle, std::shared_ptr<DrmFbIdHandle>> drm_fb_id_handle_cache_;
+
+we need to erase the drm_fb_id_handle_cache_ when the display is disconnected
+
+Tracked-On: OAM-103715
+Signed-off-by: Kanli, Hu <kanli.hu@intel.com>
+---
+ DrmHwcTwo.cpp           |  9 ++++++++-
+ drm/DrmFbImporter.cpp   | 26 +++++++++++++++++++++++++-
+ drm/DrmFbImporter.h     |  5 ++++-
+ include/drmhwcomposer.h |  2 +-
+ utils/hwcutils.cpp      |  4 ++--
+ 5 files changed, 40 insertions(+), 6 deletions(-)
+
+diff --git a/DrmHwcTwo.cpp b/DrmHwcTwo.cpp
+index 461fd2a..345f416 100644
+--- a/DrmHwcTwo.cpp
++++ b/DrmHwcTwo.cpp
+@@ -667,7 +667,11 @@ HWC2::Error DrmHwcTwo::HwcDisplay::CreateComposition(bool test) {
+   for (std::pair<const uint32_t, DrmHwcTwo::HwcLayer *> &l : z_map) {
+     DrmHwcLayer layer;
+     l.second->PopulateDrmLayer(&layer);
+-    int ret = layer.ImportBuffer(drm_);
++    int display_id = 0;
++    if (connector()) {
++        display_id = connector()->display();
++    }
++    int ret = layer.ImportBuffer(drm_, display_id);
+     if (ret) {
+       ALOGE("Failed to import layer, ret=%d", ret);
+       return HWC2::Error::NoResources;
+@@ -1298,6 +1302,9 @@ void DrmHwcTwo::DrmHotplugHandler::HandleEvent(uint64_t timestamp_us) {
+ 
+     if (display_id != 0 || (display_id == 0 && cur_state == DRM_MODE_CONNECTED))
+       hwc2_->HandleDisplayHotplug(display_id, cur_state);
++
++    if (cur_state != DRM_MODE_CONNECTED)
++      drm_->GetDrmFbImporter().RemoveCache(display_id);
+   }
+ }
+ 
+diff --git a/drm/DrmFbImporter.cpp b/drm/DrmFbImporter.cpp
+index 80c9994..8a13eab 100644
+--- a/drm/DrmFbImporter.cpp
++++ b/drm/DrmFbImporter.cpp
+@@ -124,8 +124,9 @@ DrmFbIdHandle::~DrmFbIdHandle() {
+   }
+ }
+ 
+-auto DrmFbImporter::GetOrCreateFbId(hwc_drm_bo_t *bo)
++auto DrmFbImporter::GetOrCreateFbId(hwc_drm_bo_t *bo, int display_id)
+     -> std::shared_ptr<DrmFbIdHandle> {
++  const std::lock_guard<std::mutex> lock(gem_lock);
+   /* Lookup DrmFbIdHandle in cache first. First handle serves as a cache key. */
+   GemHandle first_handle = 0;
+   int32_t err = drmPrimeFDToHandle(drm_->fd(), bo->prime_fds[0], &first_handle);
+@@ -135,6 +136,8 @@ auto DrmFbImporter::GetOrCreateFbId(hwc_drm_bo_t *bo)
+     return std::shared_ptr<DrmFbIdHandle>();
+   }
+ 
++  display_id_cache_[first_handle] = display_id;
++
+   auto drm_fb_id_cached = drm_fb_id_handle_cache_.find(first_handle);
+ 
+   if (drm_fb_id_cached != drm_fb_id_handle_cache_.end()) {
+@@ -159,4 +162,25 @@ auto DrmFbImporter::GetOrCreateFbId(hwc_drm_bo_t *bo)
+   return fb_id_handle;
+ }
+ 
++auto DrmFbImporter::RemoveCache(int display_id) -> void
++{
++  const std::lock_guard<std::mutex> lock(gem_lock);
++  std::vector<GemHandle> need_remove_handle;
++  auto iter = std::begin(display_id_cache_);
++  while(iter != std::end(display_id_cache_)) {
++    if (iter->second == display_id) {
++        need_remove_handle.push_back(iter->first);
++    }
++    iter++;
++  }
++  for(auto handle:need_remove_handle) {
++    auto it = display_id_cache_.find(handle);
++    display_id_cache_.erase(it);
++  }
++  for(auto handle:need_remove_handle) {
++    auto it = drm_fb_id_handle_cache_.find(handle);
++    drm_fb_id_handle_cache_.erase(it);
++  }
++}
++
+ }  // namespace android
+diff --git a/drm/DrmFbImporter.h b/drm/DrmFbImporter.h
+index 6d4910a..3d26ec7 100644
+--- a/drm/DrmFbImporter.h
++++ b/drm/DrmFbImporter.h
+@@ -70,7 +70,8 @@ class DrmFbImporter {
+   auto operator=(const DrmFbImporter &) = delete;
+   auto operator=(DrmFbImporter &&) = delete;
+ 
+-  auto GetOrCreateFbId(hwc_drm_bo_t *bo) -> std::shared_ptr<DrmFbIdHandle>;
++  auto GetOrCreateFbId(hwc_drm_bo_t *bo, int display_id) -> std::shared_ptr<DrmFbIdHandle>;
++  auto RemoveCache(int display_id) -> void;
+ 
+  private:
+   void CleanupEmptyCacheElements() {
+@@ -82,6 +83,8 @@ class DrmFbImporter {
+ 
+   const std::shared_ptr<DrmDevice> drm_;
+ 
++  std::mutex gem_lock;
++  std::map<GemHandle, int> display_id_cache_;
+   std::map<GemHandle, std::shared_ptr<DrmFbIdHandle>> drm_fb_id_handle_cache_;
+ };
+ 
+diff --git a/include/drmhwcomposer.h b/include/drmhwcomposer.h
+index 6528f86..49b23d3 100644
+--- a/include/drmhwcomposer.h
++++ b/include/drmhwcomposer.h
+@@ -63,7 +63,7 @@ struct DrmHwcLayer {
+ 
+   UniqueFd acquire_fence;
+ 
+-  int ImportBuffer(DrmDevice *drmDevice);
++  int ImportBuffer(DrmDevice *drmDevice, int display_id);
+ 
+   void SetTransform(int32_t sf_transform);
+ 
+diff --git a/utils/hwcutils.cpp b/utils/hwcutils.cpp
+index 6de6500..f41af5c 100644
+--- a/utils/hwcutils.cpp
++++ b/utils/hwcutils.cpp
+@@ -29,7 +29,7 @@
+ 
+ namespace android {
+ 
+-int DrmHwcLayer::ImportBuffer(DrmDevice *drmDevice) {
++int DrmHwcLayer::ImportBuffer(DrmDevice *drmDevice, int display_id) {
+   buffer_info = hwc_drm_bo_t{};
+ 
+   int ret = BufferInfoGetter::GetInstance()->ConvertBoInfo(sf_handle,
+@@ -39,7 +39,7 @@ int DrmHwcLayer::ImportBuffer(DrmDevice *drmDevice) {
+     return ret;
+   }
+ 
+-  FbIdHandle = drmDevice->GetDrmFbImporter().GetOrCreateFbId(&buffer_info);
++  FbIdHandle = drmDevice->GetDrmFbImporter().GetOrCreateFbId(&buffer_info, display_id);
+   if (!FbIdHandle) {
+     ALOGE("Failed to import buffer");
+     return -EINVAL;
+-- 
+2.31.0
+
