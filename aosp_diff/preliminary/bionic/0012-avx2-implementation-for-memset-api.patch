@@ -1,0 +1,266 @@
+From 6e88c94e456dfcb9b79c83a0e6776eb9826ec3ac Mon Sep 17 00:00:00 2001
+From: celadon <celadon@intel.com>
+Date: Thu, 5 Jan 2023 06:27:56 +0000
+Subject: [PATCH] avx2 implementation for memset api.
+
+This patch includes handwritten avx2
+assembly for memset 64-bit. Uses
+non-temporal stores for very large sizes.
+Also includes dynamic dispatch for APIs
+having multiple implementations.
+
+Convincing benchmark improvements for sizes
+above 512 bytes, and slight regression may
+observe in small sizes however it is ignorable
+as the workloads generate very less such payloads
+
+bionic-benchmark results:
+    size in KB      %gain
+    =============    =====
+    1                32%
+    2                55%
+    4                87%
+    8                90%
+    16               93%
+
+Tracked-On: OAM-103728
+Signed-off-by: ahs <amrita.h.s@intel.com>
+---
+ libc/Android.bp                               |   1 +
+ .../arch-x86_64/dynamic_function_dispatch.cpp |   7 +
+ .../kabylake/string/avx2-memset-kbl.S         | 166 ++++++++++++++++++
+ .../silvermont/string/sse2-memset-slm.S       |   2 +-
+ libc/arch-x86_64/static_function_dispatch.S   |   1 +
+ 5 files changed, 176 insertions(+), 1 deletion(-)
+ create mode 100644 libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index e742e47b3..e4f40b323 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -1018,6 +1018,7 @@ cc_library_static {
+                 "arch-x86_64/kabylake/string/avx2-memcmp-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-memchr-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-memrchr-kbl.S",
++                "arch-x86_64/kabylake/string/avx2-memset-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-strcmp-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-strncmp-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-strlen-kbl.S",
+diff --git a/libc/arch-x86_64/dynamic_function_dispatch.cpp b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+index 2f2ac9d9d..1c7cf1a5a 100644
+--- a/libc/arch-x86_64/dynamic_function_dispatch.cpp
++++ b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+@@ -39,6 +39,13 @@ DEFINE_IFUNC_FOR(memcmp) {
+     RETURN_FUNC(memcmp_func, memcmp_generic);
+ }
+ 
++typedef int memset_func(void* __dst, int value, size_t __n);
++DEFINE_IFUNC_FOR(memset) {
++    __builtin_cpu_init();
++    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memset_func, memset_avx2);
++    RETURN_FUNC(memset_func, memset_generic);
++}
++
+ typedef void* memmove_func(void* __dst, const void* __src, size_t __n);
+ DEFINE_IFUNC_FOR(memmove) {
+     RETURN_FUNC(memmove_func, memmove_generic);
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+new file mode 100644
+index 000000000..abd517e69
+--- /dev/null
++++ b/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+@@ -0,0 +1,166 @@
++/*
++Copyright (c) 2014, Intel Corporation
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++    * Redistributions of source code must retain the above copyright notice,
++    * this list of conditions and the following disclaimer.
++
++    * Redistributions in binary form must reproduce the above copyright notice,
++    * this list of conditions and the following disclaimer in the documentation
++    * and/or other materials provided with the distribution.
++
++    * Neither the name of Intel Corporation nor the names of its contributors
++    * may be used to endorse or promote products derived from this software
++    * without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
++ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++*/
++
++#include <private/bionic_asm.h>
++
++#include "cache.h"
++
++#ifndef L
++# define L(label)	.L##label
++#endif
++
++#ifndef ALIGN
++# define ALIGN(n)	.p2align n
++#endif
++
++	.section .text.avx2,"ax",@progbits
++
++ENTRY(__memset_chk_avx2)
++	# %rdi = dst, %rsi = byte, %rdx = n, %rcx = dst_len
++	cmp %rcx, %rdx
++	ja __memset_chk_fail
++	// Fall through to memset...
++END(__memset_chk_avx2)
++
++ENTRY(memset_avx2)
++	movq	%rdi, %rax
++	and	$0xff, %rsi
++	mov	$0x0101010101010101, %rcx
++	imul	%rsi, %rcx
++	cmpq	$16, %rdx
++	jae	L(16bytesormore)
++	testb	$8, %dl
++	jnz	L(8_15bytes)
++	testb	$4, %dl
++	jnz	L(4_7bytes)
++	testb	$2, %dl
++	jnz	L(2_3bytes)
++	testb	$1, %dl
++	jz	L(return)
++	movb	%cl, (%rdi)
++L(return):
++	ret
++
++L(8_15bytes):
++	movq	%rcx, (%rdi)
++	movq	%rcx, -8(%rdi, %rdx)
++	ret
++
++L(4_7bytes):
++	movl	%ecx, (%rdi)
++	movl	%ecx, -4(%rdi, %rdx)
++	ret
++
++L(2_3bytes):
++	movw	%cx, (%rdi)
++	movw	%cx, -2(%rdi, %rdx)
++	ret
++
++	ALIGN (4)
++L(16bytesormore):
++	movd	%rcx, %xmm0
++	pshufd	$0, %xmm0, %xmm0
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm0, -16(%rdi, %rdx)
++	cmpq	$32, %rdx
++	jbe	L(32bytesless)
++	movdqu	%xmm0, 16(%rdi)
++	movdqu	%xmm0, -32(%rdi, %rdx)
++	cmpq	$64, %rdx
++	jbe	L(64bytesless)
++	movdqu	%xmm0, 32(%rdi)
++	movdqu	%xmm0, 48(%rdi)
++	movdqu	%xmm0, -64(%rdi, %rdx)
++	movdqu	%xmm0, -48(%rdi, %rdx)
++	cmpq	$128, %rdx
++	jbe	L(128bytesless)
++	movdqu	%xmm0, 64(%rdi)
++	movdqu	%xmm0, 80(%rdi)
++	movdqu	%xmm0, 96(%rdi)
++	movdqu	%xmm0, 112(%rdi)
++	movdqu	%xmm0, -128(%rdi, %rdx)
++	movdqu	%xmm0, -112(%rdi, %rdx)
++	movdqu	%xmm0, -96(%rdi, %rdx)
++	movdqu	%xmm0, -80(%rdi, %rdx)
++	cmpq	$256, %rdx
++	ja      L(256bytesmore)
++L(32bytesless):
++L(64bytesless):
++L(128bytesless):
++	ret
++
++	ALIGN (4)
++L(256bytesmore):
++	leaq	128(%rdi), %rcx
++	andq	$-128, %rcx
++	movq	%rdx, %r8
++	addq	%rdi, %rdx
++	andq	$-128, %rdx
++	cmpq	%rcx, %rdx
++	je	L(return)
++
++#ifdef SHARED_CACHE_SIZE
++	cmp	$SHARED_CACHE_SIZE, %r8
++#else
++	cmp	__x86_64_shared_cache_size(%rip), %r8
++#endif
++	ja	L(256bytesmore_nt)
++
++	vpbroadcastb %xmm0, %ymm0
++	ALIGN (4)
++L(256bytesmore_normal):
++	vmovdqa	%ymm0, (%rcx)
++	vmovdqa	%ymm0, 32(%rcx)
++	vmovdqa	%ymm0, 64(%rcx)
++	vmovdqa	%ymm0, 96(%rcx)
++	addq	$128, %rcx
++	cmpq	%rcx, %rdx
++	jne	L(256bytesmore_normal)
++	vzeroupper
++	ret
++
++	ALIGN (4)
++L(256bytesmore_nt):
++	movntdq	 %xmm0, (%rcx)
++	movntdq	 %xmm0, 16(%rcx)
++	movntdq	 %xmm0, 32(%rcx)
++	movntdq	 %xmm0, 48(%rcx)
++	movntdq	 %xmm0, 64(%rcx)
++	movntdq	 %xmm0, 80(%rcx)
++	movntdq	 %xmm0, 96(%rcx)
++	movntdq	 %xmm0, 112(%rcx)
++	leaq	128(%rcx), %rcx
++	cmpq	%rcx, %rdx
++	jne	L(256bytesmore_nt)
++	sfence
++	ret
++
++END(memset_avx2)
++
+diff --git a/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+index 3999cefa4..883078d8c 100644
+--- a/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+@@ -41,7 +41,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #endif
+ 
+ #ifndef MEMSET
+-# define MEMSET        memset
++# define MEMSET        memset_generic
+ #endif
+ 
+ ENTRY(__memset_chk)
+diff --git a/libc/arch-x86_64/static_function_dispatch.S b/libc/arch-x86_64/static_function_dispatch.S
+index b8a8eb765..09af797de 100644
+--- a/libc/arch-x86_64/static_function_dispatch.S
++++ b/libc/arch-x86_64/static_function_dispatch.S
+@@ -34,6 +34,7 @@ ENTRY(name); \
+ END(name)
+ 
+ FUNCTION_DELEGATE(memcmp, memcmp_generic)
++FUNCTION_DELEGATE(memset, memset_generic)
+ FUNCTION_DELEGATE(memcpy, memmove_generic)
+ FUNCTION_DELEGATE(memmove, memmove_generic)
+ FUNCTION_DELEGATE(memchr, memchr_generic)
+-- 
+2.39.0
+
