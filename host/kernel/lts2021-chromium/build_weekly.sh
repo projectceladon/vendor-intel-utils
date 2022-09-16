@@ -5,7 +5,7 @@ mkdir -p host_kernel
 cd host_kernel
 git clone https://github.com/projectceladon/vendor-intel-utils.git
 cd vendor-intel-utils
-git checkout 7507c2fa8b6b548e3889b4c5fc32d5511a8af07e
+git checkout 7d246edc3370d823194d2306ca2a484568dea75e
 cd ../
 git clone https://github.com/projectceladon/linux-intel-lts2021-chromium.git
 cd linux-intel-lts2021-chromium
