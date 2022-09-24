@@ -189,6 +189,7 @@ enum {
     IRRV_STREAM_FORMAT_H264_RTMP    = 2,
     IRRV_STREAM_FORMAT_H265_RAW     = 3,
     IRRV_STREAM_FORMAT_MJPEG        = 4,
+    IRRV_STREAM_FORMAT_AV1_RAW      = 5,
 
     IRRV_STREAM_FORMAT_COUNT
 };
@@ -223,6 +224,7 @@ typedef enum {
     MJPEG = 7,    // equal to AV_CODEC_ID_MJPEG
     H264  = 27,   // equal to AV_CODEC_ID_H264
     H265  = 173,  // equal to AV_CODEC_ID_H265
+    AV1   = 226,  // equal to AV_CODEC_ID_AV1
 } EncodeType;
 
 typedef enum _MessageType {

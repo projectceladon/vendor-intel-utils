@@ -75,6 +75,8 @@ const std::map<VCtrlType, std::string> VCtrlTypeMap = {
 static inline int ConvertCodecTypeToStreamFormat(int codec_id) {
     switch (codec_id)
     {
+    case AV1:
+        return IRRV_STREAM_FORMAT_AV1_RAW;
     case MJPEG:
         return IRRV_STREAM_FORMAT_MJPEG;
     case H264:

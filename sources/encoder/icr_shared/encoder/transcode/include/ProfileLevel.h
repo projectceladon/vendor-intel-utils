@@ -46,6 +46,13 @@ const static std::map<std::string, int> vaapi_encode_mjpeg_profiles = {
     { "default",                  FF_PROFILE_MJPEG_HUFFMAN_BASELINE_DCT },
 };
 
+const static std::map<std::string, int> vaapi_encode_av1_profiles = {
+    { "main",                 FF_PROFILE_AV1_MAIN    },
+    { "high",                 FF_PROFILE_AV1_HIGH    },
+    { "professional",         FF_PROFILE_AV1_PROFESSIONAL },
+    { "default",              FF_PROFILE_AV1_MAIN    },
+};
+
 const static std::map<std::string, int> vaapi_encode_h264_levels = {
     { "1",           10 },
     { "1.1",         11 },
@@ -84,6 +91,34 @@ const static std::map<std::string, int> vaapi_encode_h265_levels = {
     { "6.1",        183 },
     { "6.2",        186 },
     { "default",    120 },
+};
+
+const static std::map<std::string, int> vaapi_encode_av1_levels = {
+    { "2",           20 },
+    { "2.1",         21 },
+    { "2.2",         22 },
+    { "2.3",         23 },
+    { "3",           30 },
+    { "3.1",         31 },
+    { "3.2",         32 },
+    { "3.3",         33 },
+    { "4",           40 },
+    { "4.1",         41 },
+    { "4.2",         42 },
+    { "4.3",         43 },
+    { "5",           50 },
+    { "5.1",         51 },
+    { "5.2",         52 },
+    { "5.3",         53 },
+    { "6",           60 },
+    { "6.1",         61 },
+    { "6.2",         62 },
+    { "6.3",         63 },
+    { "7 ",          70 },
+    { "7.1",         71 },
+    { "7.2",         72 },
+    { "7.3",         73 },
+    { "default",     40 },
 };
 
 #endif  /* __PROFILELEVEL_H */

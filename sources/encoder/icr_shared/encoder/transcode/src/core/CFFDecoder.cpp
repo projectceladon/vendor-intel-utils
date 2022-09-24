@@ -69,6 +69,7 @@ AVCompat_AVCodec *CFFDecoder::FindDecoder(AVCodecID id) {
         case AV_CODEC_ID_H264:       return avcodec_find_decoder_by_name("h264_qsv");
         case AV_CODEC_ID_MPEG2VIDEO: return avcodec_find_decoder_by_name("mpeg2_qsv");
         case AV_CODEC_ID_H265:       return avcodec_find_decoder_by_name("hevc_qsv");
+        case AV_CODEC_ID_AV1:        return avcodec_find_decoder_by_name("av1_qsv");
         default:                     return avcodec_find_decoder(id);
     }
 }

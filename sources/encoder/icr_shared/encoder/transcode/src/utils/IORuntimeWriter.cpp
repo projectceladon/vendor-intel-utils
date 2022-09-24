@@ -210,7 +210,15 @@ int IORuntimeWriter::startWriting(const RUNTIME_WRITE_MODE mode, const int frame
 
     // Start output writing
     if (!(mStatus & OUTPUT_WRITING) && (mode & OUTPUT)) {
-        std::string ext = (mCodecID == AV_CODEC_ID_H264) ? ".264" : ".265";
+        std::string ext;
+
+        if (mCodecID == AV_CODEC_ID_H264)
+            ext = ".264";
+        else if (mCodecID == AV_CODEC_ID_H265)
+            ext = ".265";
+        else if (mCodecID == AV_CODEC_ID_AV1)
+            ext = ".ivf";
+
         std::string file_name = mPrefix + "output" + "_" + current_time + ext;
         auto os = std::make_shared<std::ofstream>(file_name);
         assert (os.get() != nullptr && "Expected a valid file stream");

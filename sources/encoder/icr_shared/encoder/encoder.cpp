@@ -72,8 +72,10 @@ extern std::map<sock_server_t*, sock_client_proxy_t*> clients;
 const static std::vector<std::string> valid_url = {
     "irrv:264",
     "irrv:265",
+    "irrv:av1",
     "local:264",
     "local:265",
+    "local:av1",
 };
 
 #define DEFAULT_URL "irrv:264"
@@ -249,6 +251,8 @@ int irr_check_encode_profile(encoder_info_t *encode_info) {
         encode_profiles = &vaapi_encode_h264_profiles;
     } else if (encode_type == "265") {
         encode_profiles = &vaapi_encode_h265_profiles;
+    } else if (encode_type == "av1") {
+        encode_profiles = &vaapi_encode_av1_profiles;
     }
 
     auto profile = encode_profiles->find(encode_info->profile);
@@ -271,6 +275,8 @@ int irr_check_encode_level(encoder_info_t *encode_info) {
         encode_levels = &vaapi_encode_h264_levels;
     } else if (encode_type == "265") {
         encode_levels = &vaapi_encode_h265_levels;
+    } else if (encode_type == "av1") {
+        encode_levels = &vaapi_encode_av1_levels;
     }
 
     auto level = encode_levels->find(encode_info->level);

@@ -108,6 +108,11 @@ void CFFEncoder::init(AVDictionary *pDict) {
         case AV_CODEC_ID_MJPEG:
             profiles = &vaapi_encode_mjpeg_profiles;
             break;
+        case AV_CODEC_ID_AV1:
+            profiles = &vaapi_encode_av1_profiles;
+            levels   = &vaapi_encode_av1_levels;
+            Info("CFFEncoder::init by AV_CODEC_ID_AV1\n");
+            break;
         default:
             Warn("unsupported codec id %d.\n", m_Info.m_pCodecPars->codec_id);
             break;
@@ -184,6 +189,7 @@ AVCompat_AVCodec *CFFEncoder::FindEncoder(AVCodecID id) {
         case AV_CODEC_ID_MPEG2VIDEO: return avcodec_find_encoder_by_name("mpeg2_vaapi");
         case AV_CODEC_ID_H265:       return avcodec_find_encoder_by_name("hevc_vaapi");
         case AV_CODEC_ID_MJPEG:      return avcodec_find_encoder_by_name("mjpeg_vaapi");
+        case AV_CODEC_ID_AV1:        return avcodec_find_encoder_by_name("av1_vaapi");
         default:                     return avcodec_find_encoder(id);
     }
 }
@@ -359,6 +365,9 @@ void CFFEncoder::getProfileNameByValue(std::string &strProfileName, const int iP
     case AV_CODEC_ID_MJPEG:
         profiles = &vaapi_encode_mjpeg_profiles;
         break;
+    case AV_CODEC_ID_AV1:
+        profiles = &vaapi_encode_av1_profiles;
+        break;
     default:
         Warn("unsupported codec id %d.\n", m_Info.m_pCodecPars->codec_id);
         break;
@@ -387,6 +396,9 @@ void CFFEncoder::getLevelNameByValue(std::string &strLevelName, const int iLevel
         levels = &vaapi_encode_h265_levels;
         break;
     case AV_CODEC_ID_MJPEG:
+        break;
+    case AV_CODEC_ID_AV1:
+        levels = &vaapi_encode_av1_levels;
         break;
     default:
         Warn("unsupported codec id %d.\n", m_Info.m_pCodecPars->codec_id);

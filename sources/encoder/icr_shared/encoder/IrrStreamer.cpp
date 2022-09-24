@@ -74,6 +74,16 @@ IrrStreamer::~IrrStreamer() {
     av_buffer_pool_uninit(&m_pPool);
 }
 
+static inline const char* get_codec_name(AVCodecID id)
+{
+    switch (id) {
+    case AV_CODEC_ID_H264: return "h264";
+    case AV_CODEC_ID_HEVC: return "h265";
+    case AV_CODEC_ID_AV1: return "av1";
+    default: return "unknown";
+    }
+}
+
 int IrrStreamer::start(IrrStreamInfo *param) {
     CCallbackMux *pMux = nullptr;
     lock_guard<mutex> lock(m_Lock);
@@ -168,11 +178,13 @@ int IrrStreamer::start(IrrStreamInfo *param) {
         codec_type = AV_CODEC_ID_H264;
     } else if (strncmp(param->url, "irrv:265", strlen("irrv:265")) == 0) {
         codec_type = AV_CODEC_ID_HEVC;
+    } else if (strncmp(param->url, "irrv:av1", strlen("irrv:av1")) == 0) {
+        codec_type = AV_CODEC_ID_AV1;
     } else {
         codec_type = AV_CODEC_ID_H264;
         Warn("%s : %d : incorrect codec setting, use h264 codec by default!\n", __func__, __LINE__);
     }
-    Info("%s : %d : ICR encode type is %s\n", __func__, __LINE__, codec_type == AV_CODEC_ID_HEVC ? "h265": "h264");
+    Info("%s : %d : ICR encode type is %s\n", __func__, __LINE__, get_codec_name(codec_type));
     m_nCodecId = codec_type;
 
     m_pTrans->init(m_id, m_hw_frames_ctx, codec_type);
@@ -637,6 +649,13 @@ int IrrStreamer::change_resolution(int width, int height){
         }
     }
 
+    if (m_nCodecId == AV_CODEC_ID_AV1) {
+        if (width < MIN_REROLUTION_VALUE_AV1 || height < MIN_REROLUTION_VALUE_AV1) {
+            Error("%s : %d : When codec is AV1, min width or height is 128! width = %d, height = %d\n", __func__, __LINE__, width, height);
+            return AVERROR(EINVAL);
+        }
+    }
+
     m_pTrans->changeResolution(width, height);
     return 0;
 }
@@ -649,8 +668,8 @@ int IrrStreamer::change_codec(AVCodecID codec_type){
         return AVERROR(EINVAL);
     }
 
-    if (m_nCodecId != AV_CODEC_ID_H264 && m_nCodecId != AV_CODEC_ID_HEVC) {
-        Error("%s : %d : Only can set two codec types: 27(AV_CODEC_ID_H264) or 173(AV_CODEC_ID_HEVC), codec_type = %d\n", __func__, __LINE__, codec_type);
+    if (m_nCodecId != AV_CODEC_ID_H264 && m_nCodecId != AV_CODEC_ID_HEVC && m_nCodecId != AV_CODEC_ID_AV1) {
+        Error("unsupported codec: %d\n", codec_type);
         return AVERROR(EINVAL);
     }
 
@@ -890,6 +909,11 @@ void IrrStreamer::set_output_prop(CTransCoder *m_pTrans, IrrStreamInfo *param) {
                 m_pTrans->setOutputProp("c", "hevc_qsv");
             else
                 m_pTrans->setOutputProp("c", "hevc_vaapi");
+        } else if (strncmp(param->url, "irrv:av1", strlen("irrv:av1")) == 0) {
+            if (strncmp(param->plugin, "qsv", strlen("qsv")) == 0)
+                m_pTrans->setOutputProp("c", "av1_qsv");
+            else
+                m_pTrans->setOutputProp("c", "av1_vaapi");
         }
     }
 

@@ -64,6 +64,7 @@ typedef enum {
     NONE = 0,
     MJPEG = AV_CODEC_ID_MJPEG,
     H264 = AV_CODEC_ID_H264,
+    AV1 = AV_CODEC_ID_AV1,
 } EncodeType;
 
 
@@ -411,6 +412,11 @@ int CTransCoder::decode(int strIdx) {
                         pVal = getOutOptVal("c", "codec", "hevc_vaapi");
                     else if (m_qsvPlugin)
                         pVal = getOutOptVal("c", "codec", "hevc_qsv");
+                } else if (m_nCodecId  == AV_CODEC_ID_AV1) {
+                    if (m_vaapiPlugin)
+                        pVal = getOutOptVal("c", "codec", "av1_vaapi");
+                    else if (m_qsvPlugin)
+                        pVal = getOutOptVal("c", "codec", "av1_qsv");
                 }
 
                 if (pVal) {
@@ -421,6 +427,10 @@ int CTransCoder::decode(int strIdx) {
                 }
 
                 EncInfo.m_pCodecPars->format = CFFEncoder::GetBestFormat(pVal, EncInfo.m_pCodecPars->format);
+                if (EncInfo.m_pCodecPars->format < 0) {
+                    m_Log->Error("Encoder is not available\n");
+                    return -1;
+                }
                 break;
             case AVMEDIA_TYPE_AUDIO:
                 pVal = getOutOptVal("sr", "sample_rate");
@@ -839,6 +849,11 @@ int CTransCoder::doOutput(bool flush) {
                         pVal = getOutOptVal("c", "codec", "hevc_qsv");
                     else if (m_vaapiPlugin)
                         pVal = getOutOptVal("c", "codec", "hevc_vaapi");
+                } else if (m_nCodecId == AV_CODEC_ID_AV1) {
+                    if (m_qsvPlugin)
+                        pVal = getOutOptVal("c", "codec", "av1_qsv");
+                    else if (m_vaapiPlugin)
+                        pVal = getOutOptVal("c", "codec", "av1_vaapi");
                 }
             } else {
                 pVal = getOutOptVal("ac", "acodec", "aac");
@@ -1600,12 +1615,17 @@ int CTransCoder::changeCodec(AVCodecID codec_type) {
             } else if (m_qsvPlugin) {
                 setOutputProp("c", "h264_qsv");
             }
-        }
-        else if (m_nCodecId == AV_CODEC_ID_HEVC) {
+        } else if (m_nCodecId == AV_CODEC_ID_HEVC) {
             if (m_vaapiPlugin) {
                 setOutputProp("c", "hevc_vaapi");
             } else if (m_qsvPlugin) {
                 setOutputProp("c", "hevc_qsv");
+            }
+        } else if (m_nCodecId == AV_CODEC_ID_AV1) {
+            if (m_vaapiPlugin) {
+                setOutputProp("c", "av1_vaapi");
+            } else if (m_qsvPlugin) {
+                setOutputProp("c", "av1_qsv");
             }
 
         }
