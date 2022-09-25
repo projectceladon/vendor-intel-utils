@@ -1,0 +1,305 @@
+From 7f685be5e4f5669f7dc68e11baba854f35b7f20b Mon Sep 17 00:00:00 2001
+From: Julia Reynolds <juliacr@google.com>
+Date: Wed, 16 Jun 2021 14:00:39 -0400
+Subject: [PATCH] Validate config activities with their rule owners
+
+Test: RoboTests
+Bug: 189332346
+Bug: 235823407
+Change-Id: Iee1b1caca4d6eb2729feb872c3e4954b6c16519c
+Merged-In: Iee1b1caca4d6eb2729feb872c3e4954b6c16519c
+(cherry picked from commit b161a3b8502376ed12c308fce33f9592919a579e)
+Merged-In: Iee1b1caca4d6eb2729feb872c3e4954b6c16519c
+---
+ ...ModeAutomaticRulePreferenceController.java |  54 ++++--
+ .../notification/zen/ZenRulePreference.java   |   2 +-
+ ...AutomaticRulePreferenceControllerTest.java | 169 ++++++++++++++++++
+ 3 files changed, 207 insertions(+), 18 deletions(-)
+ create mode 100644 tests/robotests/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceControllerTest.java
+
+diff --git a/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceController.java b/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceController.java
+index f6f183995e..701abbb0b6 100644
+--- a/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceController.java
++++ b/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceController.java
+@@ -26,8 +26,11 @@ import android.content.pm.ActivityInfo;
+ import android.content.pm.ComponentInfo;
+ import android.content.pm.PackageManager;
+ import android.content.pm.ServiceInfo;
++import android.os.Binder;
+ import android.provider.Settings;
+ import android.service.notification.ConditionProviderService;
++import android.util.Log;
++import android.util.Slog;
+ 
+ import androidx.fragment.app.Fragment;
+ import androidx.preference.Preference;
+@@ -36,6 +39,7 @@ import com.android.settings.core.PreferenceControllerMixin;
+ import com.android.settingslib.core.lifecycle.Lifecycle;
+ 
+ import java.util.Map;
++import java.util.Objects;
+ 
+ abstract public class AbstractZenModeAutomaticRulePreferenceController extends
+         AbstractZenModePreferenceController implements PreferenceControllerMixin {
+@@ -92,7 +96,7 @@ abstract public class AbstractZenModeAutomaticRulePreferenceController extends
+                 ? ci.metaData.getString(ConditionProviderService.META_DATA_RULE_TYPE)
+                 : ci.metaData.getString(NotificationManager.META_DATA_AUTOMATIC_RULE_TYPE);
+ 
+-        final ComponentName configurationActivity = getSettingsActivity(null, ci);
++        final ComponentName configurationActivity = getSettingsActivity(pm, null, ci);
+         if (ruleType != null && !ruleType.trim().isEmpty() && configurationActivity != null) {
+             final ZenRuleInfo ri = new ZenRuleInfo();
+             ri.serviceComponent =
+@@ -110,28 +114,44 @@ abstract public class AbstractZenModeAutomaticRulePreferenceController extends
+         return null;
+     }
+ 
+-    protected static ComponentName getSettingsActivity(AutomaticZenRule rule, ComponentInfo ci) {
++    protected static ComponentName getSettingsActivity(PackageManager pm, AutomaticZenRule rule,
++            ComponentInfo ci) {
++        String owner = rule != null ? rule.getPackageName() : ci.packageName;
++        ComponentName settingsActivity = null;
+         // prefer config activity on the rule itself; fallback to manifest definition
+         if (rule != null && rule.getConfigurationActivity() != null) {
+-            return rule.getConfigurationActivity();
+-        }
+-        if (ci == null) {
+-            return null;
++            settingsActivity = rule.getConfigurationActivity();
++        } else {
++            if (ci == null) {
++                settingsActivity = null;
++            } else if (ci instanceof ActivityInfo) {
++                // new activity backed rule
++                settingsActivity = new ComponentName(ci.packageName, ci.name);
++            } else if (ci.metaData != null) {
++                // old service backed rule
++                final String configurationActivity = ci.metaData.getString(
++                        ConditionProviderService.META_DATA_CONFIGURATION_ACTIVITY);
++                if (configurationActivity != null) {
++                    settingsActivity = ComponentName.unflattenFromString(configurationActivity);
++                }
++            }
+         }
+-        // new activity backed rule
+-        if (ci instanceof ActivityInfo) {
+-            return new ComponentName(ci.packageName, ci.name);
++        if (settingsActivity == null || owner == null) {
++            return settingsActivity;
+         }
+-        // old service backed rule
+-        if (ci.metaData != null) {
+-            final String configurationActivity = ci.metaData.getString(
+-                    ConditionProviderService.META_DATA_CONFIGURATION_ACTIVITY);
+-            if (configurationActivity != null) {
+-                return ComponentName.unflattenFromString(configurationActivity);
++        try {
++            int ownerUid = pm.getPackageUid(owner, 0);
++            int configActivityOwnerUid = pm.getPackageUid(settingsActivity.getPackageName(), 0);
++            if (ownerUid == configActivityOwnerUid) {
++                return settingsActivity;
++            } else {
++                Log.w(TAG, "Config activity not in owner package for " + rule.getName());
++                return null;
+             }
++        } catch (PackageManager.NameNotFoundException e) {
++            Log.e(TAG, "Failed to find config activity");
++            return null;
+         }
+-
+-        return null;
+     }
+ 
+     public class RuleNameChangeListener implements ZenRuleNameDialog.PositiveClickListener {
+diff --git a/src/com/android/settings/notification/zen/ZenRulePreference.java b/src/com/android/settings/notification/zen/ZenRulePreference.java
+index 1f1283d90c..24e3296415 100644
+--- a/src/com/android/settings/notification/zen/ZenRulePreference.java
++++ b/src/com/android/settings/notification/zen/ZenRulePreference.java
+@@ -168,7 +168,7 @@ public class ZenRulePreference extends TwoTargetPreference {
+                 : isEvent ? ZenModeEventRuleSettings.ACTION : "";
+         ComponentInfo si = mServiceListing.findService(rule.getOwner());
+         ComponentName settingsActivity = AbstractZenModeAutomaticRulePreferenceController.
+-                getSettingsActivity(rule, si);
++                getSettingsActivity(mPm, rule, si);
+         mIntent = AbstractZenModeAutomaticRulePreferenceController.getRuleIntent(action,
+                 settingsActivity, mId);
+         if (mIntent.resolveActivity(mPm) == null) {
+diff --git a/tests/robotests/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceControllerTest.java b/tests/robotests/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceControllerTest.java
+new file mode 100644
+index 0000000000..ae6e1d0c9c
+--- /dev/null
++++ b/tests/robotests/src/com/android/settings/notification/zen/AbstractZenModeAutomaticRulePreferenceControllerTest.java
+@@ -0,0 +1,169 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.settings.notification.zen;
++
++import static com.google.common.truth.Truth.assertThat;
++
++import static org.mockito.Mockito.when;
++
++import android.app.AutomaticZenRule;
++import android.app.NotificationManager;
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.pm.ComponentInfo;
++import android.content.pm.PackageManager;
++import android.net.Uri;
++import android.os.Bundle;
++import android.service.notification.ConditionProviderService;
++import android.service.notification.ZenPolicy;
++
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.mockito.Mock;
++import org.mockito.MockitoAnnotations;
++import org.robolectric.RobolectricTestRunner;
++import org.robolectric.RuntimeEnvironment;
++
++@RunWith(RobolectricTestRunner.class)
++public class AbstractZenModeAutomaticRulePreferenceControllerTest {
++
++    @Mock
++    private PackageManager mPm;
++    private Context mContext;
++
++    @Before
++    public void setup() {
++        MockitoAnnotations.initMocks(this);
++        mContext = RuntimeEnvironment.application;
++    }
++
++    @Test
++    public void testGetSettingsActivity_configActivity() throws Exception {
++        AutomaticZenRule rule = new AutomaticZenRule("name", null,
++                new ComponentName(mContext.getPackageName(), "test"),  Uri.EMPTY,
++                new ZenPolicy(), NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++        rule.setPackageName(mContext.getPackageName());
++
++        when(mPm.getPackageUid(null, 0)).thenReturn(-1);
++        when(mPm.getPackageUid(mContext.getPackageName(), 0)).thenReturn(1);
++
++        ComponentName actual = AbstractZenModeAutomaticRulePreferenceController
++                .getSettingsActivity(mPm, rule, null);
++
++        assertThat(actual).isEqualTo(new ComponentName(mContext.getPackageName(), "test"));
++    }
++
++    @Test
++    public void testGetSettingsActivity_configActivity_wrongPackage() throws Exception {
++        AutomaticZenRule rule = new AutomaticZenRule("name", null,
++                new ComponentName("another", "test"),  Uri.EMPTY,
++                new ZenPolicy(), NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++        rule.setPackageName(mContext.getPackageName());
++
++        when(mPm.getPackageUid(null, 0)).thenReturn(-1);
++        when(mPm.getPackageUid(mContext.getPackageName(), 0)).thenReturn(1);
++
++        ComponentName actual = AbstractZenModeAutomaticRulePreferenceController
++                .getSettingsActivity(mPm, rule, null);
++
++        assertThat(actual).isNull();
++    }
++
++    @Test
++    public void testGetSettingsActivity_configActivity_unspecifiedOwner() throws Exception {
++        AutomaticZenRule rule = new AutomaticZenRule("name", null,
++                new ComponentName("another", "test"),  Uri.EMPTY,
++                new ZenPolicy(), NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++
++        when(mPm.getPackageUid(null, 0)).thenReturn(-1);
++        when(mPm.getPackageUid(mContext.getPackageName(), 0)).thenReturn(1);
++
++        ComponentName actual = AbstractZenModeAutomaticRulePreferenceController
++                .getSettingsActivity(mPm, rule, null);
++
++        assertThat(actual).isEqualTo(new ComponentName("another", "test"));
++    }
++
++    @Test
++    public void testGetSettingsActivity_cps() throws Exception {
++        AutomaticZenRule rule = new AutomaticZenRule("name",
++                new ComponentName(mContext.getPackageName(), "service"), null, Uri.EMPTY,
++                new ZenPolicy(), NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++        rule.setPackageName(mContext.getPackageName());
++
++        ComponentInfo ci = new ComponentInfo();
++        ci.packageName = mContext.getPackageName();
++        ci.metaData = new Bundle();
++        ci.metaData.putString(ConditionProviderService.META_DATA_CONFIGURATION_ACTIVITY,
++                ComponentName.flattenToShortString(
++                        new ComponentName(mContext.getPackageName(), "activity")));
++
++        when(mPm.getPackageUid(null, 0)).thenReturn(-1);
++        when(mPm.getPackageUid(mContext.getPackageName(), 0)).thenReturn(1);
++
++        ComponentName actual = AbstractZenModeAutomaticRulePreferenceController
++                .getSettingsActivity(mPm, rule, ci);
++
++        assertThat(actual).isEqualTo(new ComponentName(mContext.getPackageName(), "activity"));
++    }
++
++    @Test
++    public void testGetSettingsActivity_cps_wrongPackage() throws Exception {
++        AutomaticZenRule rule = new AutomaticZenRule("name",
++                new ComponentName(mContext.getPackageName(), "service"), null, Uri.EMPTY,
++                new ZenPolicy(), NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++        rule.setPackageName("other");
++
++        ComponentInfo ci = new ComponentInfo();
++        ci.packageName = mContext.getPackageName();
++        ci.metaData = new Bundle();
++        ci.metaData.putString(ConditionProviderService.META_DATA_CONFIGURATION_ACTIVITY,
++                ComponentName.flattenToShortString(
++                        new ComponentName(mContext.getPackageName(), "activity")));
++
++        when(mPm.getPackageUid(null, 0)).thenReturn(-1);
++        when(mPm.getPackageUid(mContext.getPackageName(), 0)).thenReturn(1);
++
++        ComponentName actual = AbstractZenModeAutomaticRulePreferenceController
++                .getSettingsActivity(mPm, rule, ci);
++
++        assertThat(actual).isNull();
++    }
++
++    @Test
++    public void testGetSettingsActivity_cps_unspecifiedPackage() throws Exception {
++        AutomaticZenRule rule = new AutomaticZenRule("name",
++                new ComponentName(mContext.getPackageName(), "service"), null, Uri.EMPTY,
++                new ZenPolicy(), NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++
++        ComponentInfo ci = new ComponentInfo();
++        ci.packageName = mContext.getPackageName();
++        ci.metaData = new Bundle();
++        ci.metaData.putString(ConditionProviderService.META_DATA_CONFIGURATION_ACTIVITY,
++                ComponentName.flattenToShortString(
++                        new ComponentName(mContext.getPackageName(), "activity")));
++
++        when(mPm.getPackageUid(null, 0)).thenReturn(-1);
++        when(mPm.getPackageUid(mContext.getPackageName(), 0)).thenReturn(1);
++
++        ComponentName actual = AbstractZenModeAutomaticRulePreferenceController
++                .getSettingsActivity(mPm, rule, ci);
++
++        assertThat(actual).isEqualTo(new ComponentName(mContext.getPackageName(), "activity"));
++    }
++}
+\ No newline at end of file
+-- 
+2.37.2.789.g6183377224-goog
+

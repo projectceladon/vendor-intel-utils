@@ -1,0 +1,430 @@
+From a837890c39d5a2428381356decb88263d23dba03 Mon Sep 17 00:00:00 2001
+From: Julia Reynolds <juliacr@google.com>
+Date: Wed, 16 Jun 2021 14:00:23 -0400
+Subject: [PATCH] Store DND rule owners
+
+Test: uiservicestest, cts
+Bug: 189332346
+Bug: 235823407
+
+Change-Id: Ie546c15c25fcbd193b67cb997220f075691e9bab
+Merged-In: Ie546c15c25fcbd193b67cb997220f075691e9bab
+(cherry picked from commit 422cffbefa80c3b248458ef8ffe58d5fcf90ea3b)
+Merged-In: Ie546c15c25fcbd193b67cb997220f075691e9bab
+---
+ core/java/android/app/AutomaticZenRule.java   | 21 ++++++-
+ .../android/app/INotificationManager.aidl     |  2 +-
+ .../java/android/app/NotificationManager.java |  8 ++-
+ .../service/notification/ZenModeConfig.java   | 15 +++--
+ .../NotificationManagerService.java           |  5 +-
+ .../server/notification/ZenModeHelper.java    | 19 ++++---
+ .../NotificationManagerServiceTest.java       |  6 +-
+ .../notification/ZenModeConfigTest.java       | 55 ++++++++++++++++++-
+ .../notification/ZenModeHelperTest.java       |  6 +-
+ 9 files changed, 108 insertions(+), 29 deletions(-)
+
+diff --git a/core/java/android/app/AutomaticZenRule.java b/core/java/android/app/AutomaticZenRule.java
+index 7180c01143a5..a6cd6d511caf 100644
+--- a/core/java/android/app/AutomaticZenRule.java
++++ b/core/java/android/app/AutomaticZenRule.java
+@@ -45,6 +45,7 @@ public final class AutomaticZenRule implements Parcelable {
+     private long creationTime;
+     private ZenPolicy mZenPolicy;
+     private boolean mModified = false;
++    private String mPkg;
+ 
+     /**
+      * Creates an automatic zen rule.
+@@ -123,6 +124,7 @@ public final class AutomaticZenRule implements Parcelable {
+         creationTime = source.readLong();
+         mZenPolicy = source.readParcelable(null);
+         mModified = source.readInt() == ENABLED;
++        mPkg = source.readString();
+     }
+ 
+     /**
+@@ -244,6 +246,20 @@ public final class AutomaticZenRule implements Parcelable {
+         this.configurationActivity = componentName;
+     }
+ 
++    /**
++     * @hide
++     */
++    public void setPackageName(String pkgName) {
++        mPkg = pkgName;
++    }
++
++    /**
++     * @hide
++     */
++    public String getPackageName() {
++        return mPkg;
++    }
++
+     @Override
+     public int describeContents() {
+         return 0;
+@@ -265,6 +281,7 @@ public final class AutomaticZenRule implements Parcelable {
+         dest.writeLong(creationTime);
+         dest.writeParcelable(mZenPolicy, 0);
+         dest.writeInt(mModified ? ENABLED : DISABLED);
++        dest.writeString(mPkg);
+     }
+ 
+     @Override
+@@ -273,6 +290,7 @@ public final class AutomaticZenRule implements Parcelable {
+                 .append("enabled=").append(enabled)
+                 .append(",name=").append(name)
+                 .append(",interruptionFilter=").append(interruptionFilter)
++                .append(",pkg=").append(mPkg)
+                 .append(",conditionId=").append(conditionId)
+                 .append(",owner=").append(owner)
+                 .append(",configActivity=").append(configurationActivity)
+@@ -294,13 +312,14 @@ public final class AutomaticZenRule implements Parcelable {
+                 && Objects.equals(other.owner, owner)
+                 && Objects.equals(other.mZenPolicy, mZenPolicy)
+                 && Objects.equals(other.configurationActivity, configurationActivity)
++                && Objects.equals(other.mPkg, mPkg)
+                 && other.creationTime == creationTime;
+     }
+ 
+     @Override
+     public int hashCode() {
+         return Objects.hash(enabled, name, interruptionFilter, conditionId, owner,
+-                configurationActivity, mZenPolicy, mModified, creationTime);
++                configurationActivity, mZenPolicy, mModified, creationTime, mPkg);
+     }
+ 
+     public static final @android.annotation.NonNull Parcelable.Creator<AutomaticZenRule> CREATOR
+diff --git a/core/java/android/app/INotificationManager.aidl b/core/java/android/app/INotificationManager.aidl
+index 0deef53c478f..d0cecc27074f 100644
+--- a/core/java/android/app/INotificationManager.aidl
++++ b/core/java/android/app/INotificationManager.aidl
+@@ -201,7 +201,7 @@ interface INotificationManager
+     void setNotificationPolicyAccessGrantedForUser(String pkg, int userId, boolean granted);
+     AutomaticZenRule getAutomaticZenRule(String id);
+     List<ZenModeConfig.ZenRule> getZenRules();
+-    String addAutomaticZenRule(in AutomaticZenRule automaticZenRule);
++    String addAutomaticZenRule(in AutomaticZenRule automaticZenRule, String pkg);
+     boolean updateAutomaticZenRule(String id, in AutomaticZenRule automaticZenRule);
+     boolean removeAutomaticZenRule(String id);
+     boolean removeAutomaticZenRules(String packageName);
+diff --git a/core/java/android/app/NotificationManager.java b/core/java/android/app/NotificationManager.java
+index eef9c022fda8..553cc91fdd5f 100644
+--- a/core/java/android/app/NotificationManager.java
++++ b/core/java/android/app/NotificationManager.java
+@@ -1072,10 +1072,12 @@ public class NotificationManager {
+             List<ZenModeConfig.ZenRule> rules = service.getZenRules();
+             Map<String, AutomaticZenRule> ruleMap = new HashMap<>();
+             for (ZenModeConfig.ZenRule rule : rules) {
+-                ruleMap.put(rule.id, new AutomaticZenRule(rule.name, rule.component,
++                AutomaticZenRule azr = new AutomaticZenRule(rule.name, rule.component,
+                         rule.configurationActivity, rule.conditionId, rule.zenPolicy,
+                         zenModeToInterruptionFilter(rule.zenMode), rule.enabled,
+-                        rule.creationTime));
++                        rule.creationTime);
++                azr.setPackageName(rule.pkg);
++                ruleMap.put(rule.id, azr);
+             }
+             return ruleMap;
+         } catch (RemoteException e) {
+@@ -1116,7 +1118,7 @@ public class NotificationManager {
+     public String addAutomaticZenRule(AutomaticZenRule automaticZenRule) {
+         INotificationManager service = getService();
+         try {
+-            return service.addAutomaticZenRule(automaticZenRule);
++            return service.addAutomaticZenRule(automaticZenRule, mContext.getPackageName());
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+diff --git a/core/java/android/service/notification/ZenModeConfig.java b/core/java/android/service/notification/ZenModeConfig.java
+index 0827fef60252..9c6e0ef4cec3 100644
+--- a/core/java/android/service/notification/ZenModeConfig.java
++++ b/core/java/android/service/notification/ZenModeConfig.java
+@@ -46,6 +46,7 @@ import android.util.Slog;
+ import android.util.proto.ProtoOutputStream;
+ 
+ import com.android.internal.R;
++import com.android.internal.util.XmlUtils;
+ 
+ import org.xmlpull.v1.XmlPullParser;
+ import org.xmlpull.v1.XmlPullParserException;
+@@ -159,6 +160,7 @@ public class ZenModeConfig implements Parcelable {
+     private static final String RULE_ATT_ENABLED = "enabled";
+     private static final String RULE_ATT_SNOOZING = "snoozing";
+     private static final String RULE_ATT_NAME = "name";
++    private static final String RULE_ATT_PKG = "pkg";
+     private static final String RULE_ATT_COMPONENT = "component";
+     private static final String RULE_ATT_CONFIG_ACTIVITY = "configActivity";
+     private static final String RULE_ATT_ZEN = "zen";
+@@ -669,11 +671,11 @@ public class ZenModeConfig implements Parcelable {
+         rt.conditionId = safeUri(parser, RULE_ATT_CONDITION_ID);
+         rt.component = safeComponentName(parser, RULE_ATT_COMPONENT);
+         rt.configurationActivity = safeComponentName(parser, RULE_ATT_CONFIG_ACTIVITY);
+-        rt.pkg = (rt.component != null)
+-                ? rt.component.getPackageName()
+-                : (rt.configurationActivity != null)
+-                        ? rt.configurationActivity.getPackageName()
+-                        : null;
++        rt.pkg = XmlUtils.readStringAttribute(parser, RULE_ATT_PKG);
++        if (rt.pkg == null) {
++            // backfill from component, if present. configActivity is not safe to backfill from
++            rt.pkg = rt.component != null ? rt.component.getPackageName() : null;
++        }
+         rt.creationTime = safeLong(parser, RULE_ATT_CREATION_TIME, 0);
+         rt.enabler = parser.getAttributeValue(null, RULE_ATT_ENABLER);
+         rt.condition = readConditionXml(parser);
+@@ -695,6 +697,9 @@ public class ZenModeConfig implements Parcelable {
+             out.attribute(null, RULE_ATT_NAME, rule.name);
+         }
+         out.attribute(null, RULE_ATT_ZEN, Integer.toString(rule.zenMode));
++        if (rule.pkg != null) {
++            out.attribute(null, RULE_ATT_PKG, rule.pkg);
++        }
+         if (rule.component != null) {
+             out.attribute(null, RULE_ATT_COMPONENT, rule.component.flattenToString());
+         }
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index cc90a810238c..a6acc9bd391e 100755
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -4456,7 +4456,7 @@ public class NotificationManagerService extends SystemService {
+         }
+ 
+         @Override
+-        public String addAutomaticZenRule(AutomaticZenRule automaticZenRule) {
++        public String addAutomaticZenRule(AutomaticZenRule automaticZenRule, String pkg) {
+             Objects.requireNonNull(automaticZenRule, "automaticZenRule is null");
+             Objects.requireNonNull(automaticZenRule.getName(), "Name is null");
+             if (automaticZenRule.getOwner() == null
+@@ -4465,6 +4465,7 @@ public class NotificationManagerService extends SystemService {
+                         "Rule must have a conditionproviderservice and/or configuration activity");
+             }
+             Objects.requireNonNull(automaticZenRule.getConditionId(), "ConditionId is null");
++            checkCallerIsSameApp(pkg);
+             if (automaticZenRule.getZenPolicy() != null
+                     && automaticZenRule.getInterruptionFilter() != INTERRUPTION_FILTER_PRIORITY) {
+                 throw new IllegalArgumentException("ZenPolicy is only applicable to "
+@@ -4472,7 +4473,7 @@ public class NotificationManagerService extends SystemService {
+             }
+             enforcePolicyAccess(Binder.getCallingUid(), "addAutomaticZenRule");
+ 
+-            return mZenModeHelper.addAutomaticZenRule(automaticZenRule,
++            return mZenModeHelper.addAutomaticZenRule(pkg, automaticZenRule,
+                     "addAutomaticZenRule");
+         }
+ 
+diff --git a/services/core/java/com/android/server/notification/ZenModeHelper.java b/services/core/java/com/android/server/notification/ZenModeHelper.java
+index 49a016cb45b0..fc536a985d34 100644
+--- a/services/core/java/com/android/server/notification/ZenModeHelper.java
++++ b/services/core/java/com/android/server/notification/ZenModeHelper.java
+@@ -303,7 +303,8 @@ public class ZenModeHelper {
+         return null;
+     }
+ 
+-    public String addAutomaticZenRule(AutomaticZenRule automaticZenRule, String reason) {
++    public String addAutomaticZenRule(String pkg, AutomaticZenRule automaticZenRule,
++            String reason) {
+         if (!isSystemRule(automaticZenRule)) {
+             PackageItemInfo component = getServiceInfo(automaticZenRule.getOwner());
+             if (component == null) {
+@@ -336,7 +337,7 @@ public class ZenModeHelper {
+             }
+             newConfig = mConfig.copy();
+             ZenRule rule = new ZenRule();
+-            populateZenRule(automaticZenRule, rule, true);
++            populateZenRule(pkg, automaticZenRule, rule, true);
+             newConfig.automaticRules.put(rule.id, rule);
+             if (setConfigLocked(newConfig, reason, rule.component, true)) {
+                 return rule.id;
+@@ -372,7 +373,7 @@ public class ZenModeHelper {
+                                 ? AUTOMATIC_RULE_STATUS_ENABLED : AUTOMATIC_RULE_STATUS_DISABLED);
+             }
+ 
+-            populateZenRule(automaticZenRule, rule, false);
++            populateZenRule(rule.pkg, automaticZenRule, rule, false);
+             return setConfigLocked(newConfig, reason, rule.component, true);
+         }
+     }
+@@ -568,15 +569,14 @@ public class ZenModeHelper {
+         return null;
+     }
+ 
+-    private void populateZenRule(AutomaticZenRule automaticZenRule, ZenRule rule, boolean isNew) {
++    private void populateZenRule(String pkg, AutomaticZenRule automaticZenRule, ZenRule rule,
++            boolean isNew) {
+         if (isNew) {
+             rule.id = ZenModeConfig.newRuleId();
+             rule.creationTime = System.currentTimeMillis();
+             rule.component = automaticZenRule.getOwner();
+             rule.configurationActivity = automaticZenRule.getConfigurationActivity();
+-            rule.pkg = (rule.component != null)
+-                    ? rule.component.getPackageName()
+-                    : rule.configurationActivity.getPackageName();
++            rule.pkg = pkg;
+         }
+ 
+         if (rule.enabled != automaticZenRule.isEnabled()) {
+@@ -593,10 +593,13 @@ public class ZenModeHelper {
+     }
+ 
+     protected AutomaticZenRule createAutomaticZenRule(ZenRule rule) {
+-        return new AutomaticZenRule(rule.name, rule.component, rule.configurationActivity,
++        AutomaticZenRule azr =  new AutomaticZenRule(rule.name, rule.component,
++                rule.configurationActivity,
+                 rule.conditionId, rule.zenPolicy,
+                 NotificationManager.zenModeToInterruptionFilter(rule.zenMode),
+                 rule.enabled, rule.creationTime);
++        azr.setPackageName(rule.pkg);
++        return azr;
+     }
+ 
+     public void setManualZenMode(int zenMode, Uri conditionId, String caller, String reason) {
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+index 39e5e4881092..ad84391857fb 100755
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -5898,7 +5898,7 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+                 zenPolicy, NotificationManager.INTERRUPTION_FILTER_NONE, isEnabled);
+ 
+         try {
+-            mBinderService.addAutomaticZenRule(rule);
++            mBinderService.addAutomaticZenRule(rule, mContext.getPackageName());
+             fail("Zen policy only applies to priority only mode");
+         } catch (IllegalArgumentException e) {
+             // yay
+@@ -5906,11 +5906,11 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+ 
+         rule = new AutomaticZenRule("test", owner, owner, mock(Uri.class),
+                 zenPolicy, NotificationManager.INTERRUPTION_FILTER_PRIORITY, isEnabled);
+-        mBinderService.addAutomaticZenRule(rule);
++        mBinderService.addAutomaticZenRule(rule, mContext.getPackageName());
+ 
+         rule = new AutomaticZenRule("test", owner, owner, mock(Uri.class),
+                 null, NotificationManager.INTERRUPTION_FILTER_NONE, isEnabled);
+-        mBinderService.addAutomaticZenRule(rule);
++        mBinderService.addAutomaticZenRule(rule, mContext.getPackageName());
+     }
+ 
+     @Test
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java
+index 013a99433041..684d8cfed5b6 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java
+@@ -188,7 +188,7 @@ public class ZenModeConfigTest extends UiServiceTestCase {
+ 
+         ZenModeConfig.ZenRule rule = new ZenModeConfig.ZenRule();
+         rule.configurationActivity = new ComponentName("a", "a");
+-        rule.component = new ComponentName("a", "b");
++        rule.component = new ComponentName("b", "b");
+         rule.conditionId = new Uri.Builder().scheme("hello").build();
+         rule.condition = new Condition(rule.conditionId, "", Condition.STATE_TRUE);
+         rule.enabled = true;
+@@ -198,6 +198,7 @@ public class ZenModeConfigTest extends UiServiceTestCase {
+         rule.modified = true;
+         rule.name = "name";
+         rule.snoozing = true;
++        rule.pkg = "b";
+ 
+         XmlSerializer out = new FastXmlSerializer();
+         ByteArrayOutputStream baos = new ByteArrayOutputStream();
+@@ -213,8 +214,7 @@ public class ZenModeConfigTest extends UiServiceTestCase {
+                 new ByteArrayInputStream(baos.toByteArray())), null);
+         parser.nextTag();
+         ZenModeConfig.ZenRule fromXml = ZenModeConfig.readRuleXml(parser);
+-        // read from backing component
+-        assertEquals("a", fromXml.pkg);
++        assertEquals("b", fromXml.pkg);
+         // always resets on reboot
+         assertFalse(fromXml.snoozing);
+         //should all match original
+@@ -230,6 +230,55 @@ public class ZenModeConfigTest extends UiServiceTestCase {
+         assertEquals(rule.zenMode, fromXml.zenMode);
+     }
+ 
++    @Test
++    public void testRuleXml_pkg_component() throws Exception {
++        String tag = "tag";
++
++        ZenModeConfig.ZenRule rule = new ZenModeConfig.ZenRule();
++        rule.configurationActivity = new ComponentName("a", "a");
++        rule.component = new ComponentName("b", "b");
++
++        XmlSerializer out = new FastXmlSerializer();
++        ByteArrayOutputStream baos = new ByteArrayOutputStream();
++        out.setOutput(new BufferedOutputStream(baos), "utf-8");
++        out.startDocument(null, true);
++        out.startTag(null, tag);
++        ZenModeConfig.writeRuleXml(rule, out);
++        out.endTag(null, tag);
++        out.endDocument();
++
++        XmlPullParser parser = Xml.newPullParser();
++        parser.setInput(new BufferedInputStream(
++                new ByteArrayInputStream(baos.toByteArray())), null);
++        parser.nextTag();
++        ZenModeConfig.ZenRule fromXml = ZenModeConfig.readRuleXml(parser);
++        assertEquals("b", fromXml.pkg);
++    }
++
++    @Test
++    public void testRuleXml_pkg_configActivity() throws Exception {
++        String tag = "tag";
++
++        ZenModeConfig.ZenRule rule = new ZenModeConfig.ZenRule();
++        rule.configurationActivity = new ComponentName("a", "a");
++
++        XmlSerializer out = new FastXmlSerializer();
++        ByteArrayOutputStream baos = new ByteArrayOutputStream();
++        out.setOutput(new BufferedOutputStream(baos), "utf-8");
++        out.startDocument(null, true);
++        out.startTag(null, tag);
++        ZenModeConfig.writeRuleXml(rule, out);
++        out.endTag(null, tag);
++        out.endDocument();
++
++        XmlPullParser parser = Xml.newPullParser();
++        parser.setInput(new BufferedInputStream(
++                new ByteArrayInputStream(baos.toByteArray())), null);
++        parser.nextTag();
++        ZenModeConfig.ZenRule fromXml = ZenModeConfig.readRuleXml(parser);
++        assertNull(fromXml.pkg);
++    }
++
+     private ZenModeConfig getMutedRingerConfig() {
+         ZenModeConfig config = new ZenModeConfig();
+         // Allow alarms, media
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+index c98745e9041d..48506c035de4 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+@@ -1562,7 +1562,7 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+                 new ComponentName("android", "ScheduleConditionProvider"),
+                 ZenModeConfig.toScheduleConditionId(new ScheduleInfo()),
+                 NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
+-        String id = mZenModeHelperSpy.addAutomaticZenRule(zenRule, "test");
++        String id = mZenModeHelperSpy.addAutomaticZenRule("android", zenRule, "test");
+ 
+         assertTrue(id != null);
+         ZenModeConfig.ZenRule ruleInConfig = mZenModeHelperSpy.mConfig.automaticRules.get(id);
+@@ -1586,7 +1586,7 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+                     ZenModeConfig.toScheduleConditionId(si),
+                     new ZenPolicy.Builder().build(),
+                     NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
+-            String id = mZenModeHelperSpy.addAutomaticZenRule(zenRule, "test");
++            String id = mZenModeHelperSpy.addAutomaticZenRule("android", zenRule, "test");
+             assertNotNull(id);
+         }
+         try {
+@@ -1596,7 +1596,7 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+                     ZenModeConfig.toScheduleConditionId(new ScheduleInfo()),
+                     new ZenPolicy.Builder().build(),
+                     NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
+-            String id = mZenModeHelperSpy.addAutomaticZenRule(zenRule, "test");
++            String id = mZenModeHelperSpy.addAutomaticZenRule("android", zenRule, "test");
+             fail("allowed too many rules to be created");
+         } catch (IllegalArgumentException e) {
+             // yay
+-- 
+2.37.2.789.g6183377224-goog
+
