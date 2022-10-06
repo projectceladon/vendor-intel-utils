@@ -77,7 +77,7 @@ public:
             void *opaque2;         ///< Used by callback functions
             int (*cbOpen) (void */*opaque*/, int /*w*/, int /*h*/, float /*frame_rate*/);
             /* Synchronous write callback*/
-            int (*cbWrite) (void */*opaque*/, uint8_t */*data*/, size_t/*size*/);
+            int (*cbWrite) (void */*opaque*/, uint8_t */*data*/, size_t/*size*/, unsigned int /*flags*/);
             int (*cbWrite2) (void */*opaque*/, uint8_t */*data*/, size_t/*size*/, int /* type */);
             void (*cbClose) (void */*opaque*/);
             int (*cbCheckNewConn) (void */*opaque*/);

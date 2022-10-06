@@ -207,6 +207,7 @@ void usage(const char* app) {
     printf("\n");
     printf("Video encoding options:\n");
     printf("  --codec <codec>                 Video codec (default: %s)\n", default_codec);
+    printf("          av1\n");
     printf("          h264 or avc\n");
     printf("          h265 or hevc\n");
     printf("  --enable-render-drc 0|1         Enable render resolution change automatically with client window size change (default: %s)\n", default_enable_render_drc);

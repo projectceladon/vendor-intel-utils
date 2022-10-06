@@ -337,6 +337,9 @@ int ICSP2PClient::Init(void *arg) {
       std::string("hevc") == codec) {
     video_param.name = VideoCodec::kH265;
     ga_logger(Severity::INFO, "selected H265 codec\n");
+  } else if (std::string("av1") == codec) {
+    video_param.name = VideoCodec::kAv1;
+    ga_logger(Severity::INFO, "selected AV1 codec\n");
   } else {
     video_param.name = VideoCodec::kH264;
     ga_logger(Severity::INFO, "selected H264 codec\n");
@@ -737,6 +740,11 @@ void ICSP2PClient::InsertFrame(ga_packet_t* packet) {
 
   if (!side_data)
     return;
+
+#ifndef _WIN32
+  if (packet->flags & GA_PKT_FLAG_KEY)
+      meta_data.is_keyframe = true;
+#endif
 
 #ifndef DISABLE_TS_FT
   meta_data.picture_id = static_cast<uint16_t>(packet->pts);

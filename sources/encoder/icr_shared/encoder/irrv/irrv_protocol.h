@@ -119,6 +119,12 @@ typedef struct _irrv_vhead_event_t {
     irrv_vhead_t    info;
 } irrv_vhead_event_t;
 
+typedef enum {
+    IRRV_VFRAME_FLAG_NONE    = 0,
+    IRRV_VFRAME_FLAG_KEY     = 0x1,   // equal to AV_PKT_FLAG_KEY
+    IRRV_VFRAME_FLAG_CORRUPT = 0x2,   // equal to AV_PKT_FLAG_CORRUPT
+} irrv_vframe_flags_t;
+
 typedef struct _irrv_vframe_t {
     unsigned int    flags;
     unsigned int    data_size;

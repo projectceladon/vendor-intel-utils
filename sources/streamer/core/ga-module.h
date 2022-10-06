@@ -161,6 +161,12 @@ typedef struct ga_packet_side_data_s {
     ga_packet_side_data_type type;
 } ga_packet_side_data_t;
 
+typedef enum {
+    GA_PKT_FLAG_NONE    = 0,
+    GA_PKT_FLAG_KEY     = 0x1,   // equal to AV_PKT_FLAG_KEY
+    GA_PKT_FLAG_CORRUPT = 0x2,   // equal to AV_PKT_FLAG_CORRUPT
+} ga_packet_flags_t;
+
 /**
  * Data strucure to represent a packet data. (Replace AVPacket)
  */

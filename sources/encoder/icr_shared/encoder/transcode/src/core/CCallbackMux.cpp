@@ -77,7 +77,7 @@ int CCallbackMux::write(AVPacket *pPkt) {
     }
 
     if (m_pWrite && (bAllowTransmit || isEncodeEnableByEnv || isEncodeUnconditionally)) {
-        ret = m_pWrite(m_Opaque, pPkt->data, static_cast<size_t>(pPkt->size));
+        ret = m_pWrite(m_Opaque, pPkt->data, static_cast<size_t>(pPkt->size), pPkt->flags);
         if(m_Opaque2 && m_pWrite2) {
             // There will be another connection when the m_Opaque2 is NOT NULL.
            m_pCheckNewConn(m_Opaque2);

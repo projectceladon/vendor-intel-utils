@@ -24,7 +24,7 @@
 #include <condition_variable>
 
 typedef int (*cbOpen) (void *, int /*w*/, int /*h*/, float /*framerate*/);
-typedef int (*cbWrite) (void *, uint8_t *, size_t);
+typedef int (*cbWrite) (void *, uint8_t *, size_t, unsigned int);
 typedef int (*cbWrite2) (void *, uint8_t *, size_t, int /* type */);
 typedef void (*cbClose) (void *);
 typedef int (*cbCheckNewConn) (void *);

@@ -592,8 +592,8 @@ void CSendRecvMessage::recv_es_stream() {
                 if (ret < 0)
                     return;
 
-                ga_logger(Severity::DBG, LOG_PREFIX "data_size=%d, video_size=%d, alpha_size=%d\n",
-                    frame.data_size, frame.video_size, frame.alpha_size);
+                ga_logger(Severity::DBG, LOG_PREFIX "data_size=%d, video_size=%d, alpha_size=%d, flags=%d\n",
+                    frame.data_size, frame.video_size, frame.alpha_size, frame.flags);
 
                 if (!frame.data_size || frame.data_size < frame.video_size) {
                     ga_logger(Severity::ERR, "broken frame\n");
@@ -628,6 +628,7 @@ void CSendRecvMessage::recv_es_stream() {
                 ga_init_packet(&pkt);
                 pkt.data = &m_frameData[0];
                 pkt.size = frame.data_size;
+                pkt.flags = (int)frame.flags;
                 pkt.pts = 0;
 
                 FrameMetaData* sp = (FrameMetaData*)ga_packet_new_side_data(&pkt, ga_packet_side_data_type::GA_PACKET_DATA_NEW_EXTRADATA, sizeof(FrameMetaData));

@@ -26,7 +26,7 @@ extern "C" {
 
 int irrv_checknewconn(void *opaque);
 bool irrv_check_authentication(irrv_uuid_t id, irrv_uuid_t key);
-int irrv_writeback(void *opaque, uint8_t *data, size_t size);
+int irrv_writeback(void *opaque, uint8_t *data, size_t size, unsigned int flags);
 int irrv_writeback2(void *opaque, uint8_t *data, size_t size, int type);
 int irrv_send_message(void *opaque, int msg, unsigned int value);
 void irrv_close(void *opaque);

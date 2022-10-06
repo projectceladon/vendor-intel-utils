@@ -118,7 +118,7 @@ bool irrv_have_client(sock_server_t *server) {
     return ret;
 }
 
-int irrv_writeback(void *opaque, uint8_t *data, size_t size)
+int irrv_writeback(void *opaque, uint8_t *data, size_t size, unsigned int flags)
 {
     sock_server_t *server = static_cast<sock_server_t*> (opaque);
     bool auth_required    = irr_stream_getAuthFlag();
@@ -148,7 +148,7 @@ int irrv_writeback(void *opaque, uint8_t *data, size_t size)
             frame_ev.event.type  = IRRV_EVENT_VFRAME;
             frame_ev.event.size  = sizeof(frame_ev);
             frame_ev.event.value = 0;
-            frame_ev.info.flags  = 0;
+            frame_ev.info.flags  = flags;
             frame_ev.info.data_size = size;
             frame_ev.info.width = width  > 0 ? width : 720;
             frame_ev.info.height = height > 0 ? height : 1280;

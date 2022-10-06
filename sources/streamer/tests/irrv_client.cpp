@@ -114,7 +114,9 @@ static void signal_handler(int signal) {
 
 void usage(const char* app)
 {
-    printf("usage: %s [options] <output.h264|output.h265>\n", app);
+    printf("usage: %s [options] <output>\n", app);
+    printf("\n");
+    printf("Captured output will be in a raw encoded format, i.e. .h264, .h265, .av1\n");
     printf("\n");
     printf("Global options:\n");
     printf("  -h, --help              Print this help\n");
