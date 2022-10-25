@@ -1,0 +1,127 @@
+From 036f3f27203222a5e1ecf1d878024fbf1087cb7b Mon Sep 17 00:00:00 2001
+From: Hani Kazmi <hanikazmi@google.com>
+Date: Mon, 8 Aug 2022 08:44:00 +0000
+Subject: [PATCH] Update BaseBundle to not use LazyValues when using
+ ReadWriteHelper
+
+This is a partial backport of ag/19532036. It fixes a bug where a
+LazyValue might have been pointing to a parcel which was already
+recycled.
+
+Bug: 240138318
+Test: atest android.os.cts.ParcelTest android.os.cts.BundleTest
+android.os.BundleTest android.os.ParcelTest
+android.os.BundleRecylingTest
+Test: Running PoC app from linked bug
+
+Change-Id: I3acf7127fdf373ee8b38a55702ae315be499601c
+Merged-In: I8a878a6d0055b04b2611909b4b17977ba5677a4f
+(cherry picked from commit d2f9cc6342141cdb39f08a229d548d7b29cadd86)
+Merged-In: I3acf7127fdf373ee8b38a55702ae315be499601c
+---
+ core/java/android/os/BaseBundle.java          |  6 +-
+ .../coretests/src/android/os/BundleTest.java  | 63 +++++++++++++++++++
+ 2 files changed, 67 insertions(+), 2 deletions(-)
+
+diff --git a/core/java/android/os/BaseBundle.java b/core/java/android/os/BaseBundle.java
+index 0418a4bb9f80..b599028ccb9b 100644
+--- a/core/java/android/os/BaseBundle.java
++++ b/core/java/android/os/BaseBundle.java
+@@ -438,8 +438,11 @@ public class BaseBundle {
+             map.ensureCapacity(count);
+         }
+         try {
++            // recycleParcel being false implies that we do not own the parcel. In this case, do
++            // not use lazy values to be safe, as the parcel could be recycled outside of our
++            // control.
+             recycleParcel &= parcelledData.readArrayMap(map, count, !parcelledByNative,
+-                    /* lazy */ true, mClassLoader);
++                    /* lazy */ recycleParcel, mClassLoader);
+         } catch (BadParcelableException e) {
+             if (sShouldDefuse) {
+                 Log.w(TAG, "Failed to parse Bundle, but defusing quietly", e);
+@@ -1845,7 +1848,6 @@ public class BaseBundle {
+             // bundle immediately; neither of which is obvious.
+             synchronized (this) {
+                 initializeFromParcelLocked(parcel, /*recycleParcel=*/ false, isNativeBundle);
+-                unparcel(/* itemwise */ true);
+             }
+             return;
+         }
+diff --git a/core/tests/coretests/src/android/os/BundleTest.java b/core/tests/coretests/src/android/os/BundleTest.java
+index a3bda8b23f30..0fa5ec33749f 100644
+--- a/core/tests/coretests/src/android/os/BundleTest.java
++++ b/core/tests/coretests/src/android/os/BundleTest.java
+@@ -408,6 +408,69 @@ public class BundleTest {
+         assertThat(bundle.<Parcelable>getParcelable("key")).isEqualTo(parcelable);
+     }
+ 
++    @Test
++    public void readFromParcel_withLazyValues_copiesUnderlyingParcel() {
++        Bundle bundle = new Bundle();
++        Parcelable parcelable = new CustomParcelable(13, "Tiramisu");
++        bundle.putParcelable("key", parcelable);
++        bundle.putString("string", "value");
++        Parcel parcelledBundle = getParcelledBundle(bundle);
++
++        Bundle testBundle = new Bundle();
++        testBundle.setClassLoader(getClass().getClassLoader());
++        testBundle.readFromParcel(parcelledBundle);
++        // Recycle the parcel as it should have been copied
++        parcelledBundle.recycle();
++        assertThat(testBundle.getString("string")).isEqualTo("value");
++        assertThat(testBundle.<Parcelable>getParcelable("key")).isEqualTo(parcelable);
++    }
++
++    @Test
++    public void readFromParcelWithRwHelper_whenThrowingAndNotDefusing_throws() {
++        Bundle bundle = new Bundle();
++        Parcelable parcelable = new CustomParcelable(13, "Tiramisu");
++        bundle.putParcelable("key", parcelable);
++        bundle.putString("string", "value");
++        Parcel parcelledBundle = getParcelledBundle(bundle);
++        parcelledBundle.setReadWriteHelper(new Parcel.ReadWriteHelper());
++
++        Bundle testBundle = new Bundle();
++        assertThrows(BadParcelableException.class,
++                () -> testBundle.readFromParcel(parcelledBundle));
++    }
++
++    @Test
++    public void readFromParcelWithRwHelper_whenThrowingAndDefusing_returnsNull() {
++        Bundle bundle = new Bundle();
++        Parcelable parcelable = new CustomParcelable(13, "Tiramisu");
++        bundle.putParcelable("key", parcelable);
++        bundle.putString("string", "value");
++        Parcel parcelledBundle = getParcelledBundle(bundle);
++        parcelledBundle.setReadWriteHelper(new Parcel.ReadWriteHelper());
++
++        Bundle.setShouldDefuse(true);
++        Bundle testBundle = new Bundle();
++        testBundle.readFromParcel(parcelledBundle);
++        // Recycle the parcel as it should not be referenced
++        parcelledBundle.recycle();
++        assertThat(testBundle.getString("string")).isNull();
++        assertThat(testBundle.<Parcelable>getParcelable("key")).isNull();
++    }
++
++    @Test
++    public void readFromParcelWithRwHelper_withoutLazyObject_returnsValue() {
++        Bundle bundle = new Bundle();
++        bundle.putString("string", "value");
++        Parcel parcelledBundle = getParcelledBundle(bundle);
++        parcelledBundle.setReadWriteHelper(new Parcel.ReadWriteHelper());
++
++        Bundle testBundle = new Bundle();
++        testBundle.readFromParcel(parcelledBundle);
++        // Recycle the parcel as it should not be referenced
++        parcelledBundle.recycle();
++        assertThat(testBundle.getString("string")).isEqualTo("value");
++    }
++
+     @Test
+     public void partialDeserialization_whenNotDefusing_throws() throws Exception {
+         Bundle.setShouldDefuse(false);
+-- 
+2.38.0.413.g74048e4d9e-goog
+
