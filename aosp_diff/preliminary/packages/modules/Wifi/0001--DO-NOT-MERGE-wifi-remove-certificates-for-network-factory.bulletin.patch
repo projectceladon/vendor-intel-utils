@@ -1,0 +1,302 @@
+From 5b657bd5bd12f556c14fce7849cedb27eede6041 Mon Sep 17 00:00:00 2001
+From: Jimmy Chen <jimmycmchen@google.com>
+Date: Fri, 12 Aug 2022 12:06:55 +0800
+Subject: [PATCH] [DO NOT MERGE] wifi: remove certificates for network factory
+ reset
+
+When a user does network factory reset, wifi certificate should
+also be cleared as these certificates are also personal credentials.
+
+Bug: 231985227
+Test: atest FrameworksWifiTests
+Merged-In: I0334064347080e43096d01f00cf516804812d0c0
+Change-Id: I0334064347080e43096d01f00cf516804812d0c0
+(cherry picked from commit 4a354057cb4c5e9c2daebe574c10593885bf94b4)
+Merged-In: I0334064347080e43096d01f00cf516804812d0c0
+---
+ .../server/wifi/WifiConfigManager.java        |  2 +-
+ .../com/android/server/wifi/WifiInjector.java |  5 ++++
+ .../com/android/server/wifi/WifiKeyStore.java |  7 +++--
+ .../wifi/WifiNetworkSuggestionsManager.java   |  2 +-
+ .../android/server/wifi/WifiServiceImpl.java  | 19 ++++++++----
+ .../server/wifi/WifiConfigManagerTest.java    |  6 ++--
+ .../android/server/wifi/WifiKeyStoreTest.java | 29 +++++++++++++++----
+ .../WifiNetworkSuggestionsManagerTest.java    |  3 +-
+ .../server/wifi/WifiServiceImplTest.java      | 15 ++++++++--
+ 9 files changed, 64 insertions(+), 24 deletions(-)
+
+diff --git a/service/java/com/android/server/wifi/WifiConfigManager.java b/service/java/com/android/server/wifi/WifiConfigManager.java
+index 1c87eb2fa..b0212133a 100644
+--- a/service/java/com/android/server/wifi/WifiConfigManager.java
++++ b/service/java/com/android/server/wifi/WifiConfigManager.java
+@@ -1553,7 +1553,7 @@ public class WifiConfigManager {
+         // will remove the enterprise keys when provider is uninstalled. Suggestion enterprise
+         // networks will remove the enterprise keys when suggestion is removed.
+         if (!config.fromWifiNetworkSuggestion && !config.isPasspoint() && config.isEnterprise()) {
+-            mWifiKeyStore.removeKeys(config.enterpriseConfig);
++            mWifiKeyStore.removeKeys(config.enterpriseConfig, false);
+         }
+ 
+         // Do not remove the user choice when passpoint or suggestion networks are removed from
+diff --git a/service/java/com/android/server/wifi/WifiInjector.java b/service/java/com/android/server/wifi/WifiInjector.java
+index 7a43efe7b..05e790ebc 100644
+--- a/service/java/com/android/server/wifi/WifiInjector.java
++++ b/service/java/com/android/server/wifi/WifiInjector.java
+@@ -1062,4 +1062,9 @@ public class WifiInjector {
+     public LinkProbeManager getLinkProbeManager() {
+         return mLinkProbeManager;
+     }
++
++    @NonNull
++    public WifiKeyStore getWifiKeyStore() {
++        return mWifiKeyStore;
++    }
+ }
+diff --git a/service/java/com/android/server/wifi/WifiKeyStore.java b/service/java/com/android/server/wifi/WifiKeyStore.java
+index 71559d271..7c240a0b2 100644
+--- a/service/java/com/android/server/wifi/WifiKeyStore.java
++++ b/service/java/com/android/server/wifi/WifiKeyStore.java
+@@ -214,11 +214,12 @@ public class WifiKeyStore {
+      * Remove enterprise keys from the network config.
+      *
+      * @param config Config corresponding to the network.
++     * @param forceRemove remove keys regardless of the key installer.
+      */
+-    public void removeKeys(WifiEnterpriseConfig config) {
++    public void removeKeys(WifiEnterpriseConfig config, boolean forceRemove) {
+         Preconditions.checkNotNull(mKeyStore);
+         // Do not remove keys that were manually installed by the user
+-        if (config.isAppInstalledDeviceKeyAndCert()) {
++        if (forceRemove || config.isAppInstalledDeviceKeyAndCert()) {
+             String client = config.getClientCertificateAlias();
+             // a valid client certificate is configured
+             if (!TextUtils.isEmpty(client)) {
+@@ -232,7 +233,7 @@ public class WifiKeyStore {
+         }
+ 
+         // Do not remove CA certs that were manually installed by the user
+-        if (config.isAppInstalledCaCert()) {
++        if (forceRemove || config.isAppInstalledCaCert()) {
+             String[] aliases = config.getCaCertificateAliases();
+             if (aliases == null || aliases.length == 0) {
+                 return;
+diff --git a/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java b/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java
+index f5a1ebe64..30894209e 100644
+--- a/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java
++++ b/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java
+@@ -1269,7 +1269,7 @@ public class WifiNetworkSuggestionsManager {
+                 removeFromPassPointInfoMap(ewns);
+             } else {
+                 if (ewns.wns.wifiConfiguration.isEnterprise()) {
+-                    mWifiKeyStore.removeKeys(ewns.wns.wifiConfiguration.enterpriseConfig);
++                    mWifiKeyStore.removeKeys(ewns.wns.wifiConfiguration.enterpriseConfig, false);
+                 }
+                 removeFromScanResultMatchInfoMapAndRemoveRelatedScoreCard(ewns);
+                 mWifiConfigManager.removeConnectChoiceFromAllNetworks(ewns
+diff --git a/service/java/com/android/server/wifi/WifiServiceImpl.java b/service/java/com/android/server/wifi/WifiServiceImpl.java
+index d4337873a..c93c724d5 100644
+--- a/service/java/com/android/server/wifi/WifiServiceImpl.java
++++ b/service/java/com/android/server/wifi/WifiServiceImpl.java
+@@ -123,6 +123,7 @@ import android.telephony.PhoneStateListener;
+ import android.telephony.SubscriptionManager;
+ import android.telephony.TelephonyManager;
+ import android.text.TextUtils;
++import android.util.EventLog;
+ import android.util.Log;
+ 
+ import androidx.annotation.RequiresApi;
+@@ -4085,12 +4086,18 @@ public class WifiServiceImpl extends BaseWifiService {
+             return;
+         }
+         // Delete all Wifi SSIDs
+-        List<WifiConfiguration> networks = mWifiThreadRunner.call(
+-                () -> mWifiConfigManager.getSavedNetworks(Process.WIFI_UID),
+-                Collections.emptyList());
+-        for (WifiConfiguration network : networks) {
+-            removeNetwork(network.networkId, packageName);
+-        }
++        mWifiThreadRunner.run(() -> {
++            List<WifiConfiguration> networks = mWifiConfigManager
++                    .getSavedNetworks(Process.WIFI_UID);
++            EventLog.writeEvent(0x534e4554, "231985227", -1,
++                    "Remove certs for factory reset");
++            for (WifiConfiguration network : networks) {
++                if (network.isEnterprise()) {
++                    mWifiInjector.getWifiKeyStore().removeKeys(network.enterpriseConfig, true);
++                }
++                removeNetwork(network.networkId, packageName);
++            }
++        });
+         // Delete all Passpoint configurations
+         List<PasspointConfiguration> configs = mWifiThreadRunner.call(
+                 () -> mPasspointManager.getProviderConfigs(Process.WIFI_UID /* ignored */, true),
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java
+index 24118349b..d0c223445 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java
+@@ -1029,7 +1029,7 @@ public class WifiConfigManagerTest extends WifiBaseTest {
+         assertEquals(suggestionNetwork.networkId, wifiConfigCaptor.getValue().networkId);
+         assertTrue(mWifiConfigManager
+                 .removeNetwork(suggestionNetwork.networkId, TEST_CREATOR_UID, TEST_CREATOR_NAME));
+-        verify(mWifiKeyStore, never()).removeKeys(any());
++        verify(mWifiKeyStore, never()).removeKeys(any(), eq(false));
+     }
+ 
+     /**
+@@ -1289,7 +1289,7 @@ public class WifiConfigManagerTest extends WifiBaseTest {
+                 passpointNetwork.networkId, Process.WIFI_UID, null));
+ 
+         // Verify keys are not being removed.
+-        verify(mWifiKeyStore, never()).removeKeys(any(WifiEnterpriseConfig.class));
++        verify(mWifiKeyStore, never()).removeKeys(any(WifiEnterpriseConfig.class), eq(false));
+         verifyNetworkRemoveBroadcast();
+         // Ensure that the write was not invoked for Passpoint network remove.
+         mContextConfigStoreMockOrder.verify(mWifiConfigStore, never()).write(anyBoolean());
+@@ -5799,7 +5799,7 @@ public class WifiConfigManagerTest extends WifiBaseTest {
+                 configuration.networkId, TEST_CREATOR_UID, TEST_CREATOR_NAME));
+ 
+         // Verify keys are not being removed.
+-        verify(mWifiKeyStore, never()).removeKeys(any(WifiEnterpriseConfig.class));
++        verify(mWifiKeyStore, never()).removeKeys(any(WifiEnterpriseConfig.class), eq(false));
+         verifyNetworkRemoveBroadcast();
+         // Ensure that the write was not invoked for Passpoint network remove.
+         mContextConfigStoreMockOrder.verify(mWifiConfigStore, never()).write(anyBoolean());
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiKeyStoreTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiKeyStoreTest.java
+index 279a35806..a412a1bbf 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiKeyStoreTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiKeyStoreTest.java
+@@ -108,7 +108,7 @@ public class WifiKeyStoreTest extends WifiBaseTest {
+     public void testRemoveKeysForAppInstalledCerts() throws Exception {
+         when(mWifiEnterpriseConfig.isAppInstalledDeviceKeyAndCert()).thenReturn(true);
+         when(mWifiEnterpriseConfig.isAppInstalledCaCert()).thenReturn(true);
+-        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig);
++        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig, false);
+ 
+         // Method calls the KeyStore#delete method 4 times, user key, user cert, and 2 CA cert
+         verify(mKeyStore).deleteEntry(USER_CERT_ALIAS);
+@@ -123,7 +123,7 @@ public class WifiKeyStoreTest extends WifiBaseTest {
+     public void testRemoveKeysForMixedInstalledCerts1() throws Exception {
+         when(mWifiEnterpriseConfig.isAppInstalledDeviceKeyAndCert()).thenReturn(true);
+         when(mWifiEnterpriseConfig.isAppInstalledCaCert()).thenReturn(false);
+-        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig);
++        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig, false);
+ 
+         // Method calls the KeyStore#deleteEntry method: user key and user cert
+         verify(mKeyStore).deleteEntry(USER_CERT_ALIAS);
+@@ -138,7 +138,7 @@ public class WifiKeyStoreTest extends WifiBaseTest {
+     public void testRemoveKeysForMixedInstalledCerts2() throws Exception {
+         when(mWifiEnterpriseConfig.isAppInstalledDeviceKeyAndCert()).thenReturn(false);
+         when(mWifiEnterpriseConfig.isAppInstalledCaCert()).thenReturn(true);
+-        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig);
++        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig, false);
+ 
+         // Method calls the KeyStore#delete method 2 times: 2 CA certs
+         verify(mKeyStore).deleteEntry(USER_CA_CERT_ALIASES[0]);
+@@ -153,7 +153,24 @@ public class WifiKeyStoreTest extends WifiBaseTest {
+     public void testRemoveKeysForUserInstalledCerts() {
+         when(mWifiEnterpriseConfig.isAppInstalledDeviceKeyAndCert()).thenReturn(false);
+         when(mWifiEnterpriseConfig.isAppInstalledCaCert()).thenReturn(false);
+-        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig);
++        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig, false);
++        verifyNoMoreInteractions(mKeyStore);
++    }
++
++    /**
++     * Verifies that keys and certs are removed when they were not installed by the user
++     * when forceRemove is true.
++     */
++    @Test
++    public void testForceRemoveKeysForUserInstalledCerts() throws Exception {
++        when(mWifiEnterpriseConfig.isAppInstalledDeviceKeyAndCert()).thenReturn(false);
++        when(mWifiEnterpriseConfig.isAppInstalledCaCert()).thenReturn(false);
++        mWifiKeyStore.removeKeys(mWifiEnterpriseConfig, true);
++
++        // KeyStore#deleteEntry() is called three time for user cert, and 2 CA cert.
++        verify(mKeyStore).deleteEntry(USER_CERT_ALIAS);
++        verify(mKeyStore).deleteEntry(USER_CA_CERT_ALIASES[0]);
++        verify(mKeyStore).deleteEntry(USER_CA_CERT_ALIASES[1]);
+         verifyNoMoreInteractions(mKeyStore);
+     }
+ 
+@@ -227,8 +244,8 @@ public class WifiKeyStoreTest extends WifiBaseTest {
+         WifiConfiguration suggestionNetwork = new WifiConfiguration(savedNetwork);
+         suggestionNetwork.fromWifiNetworkSuggestion = true;
+         suggestionNetwork.creatorName = TEST_PACKAGE_NAME;
+-        mWifiKeyStore.removeKeys(savedNetwork.enterpriseConfig);
+-        mWifiKeyStore.removeKeys(suggestionNetwork.enterpriseConfig);
++        mWifiKeyStore.removeKeys(savedNetwork.enterpriseConfig, false);
++        mWifiKeyStore.removeKeys(suggestionNetwork.enterpriseConfig, false);
+         verify(mKeyStore, never()).deleteEntry(any());
+     }
+ 
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
+index 13c8077f1..46942ead2 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
+@@ -487,7 +487,8 @@ public class WifiNetworkSuggestionsManagerTest extends WifiBaseTest {
+                         new ArrayList<WifiNetworkSuggestion>() {{ add(removingSuggestion); }},
+                         TEST_UID_1, TEST_PACKAGE_1));
+         // Make sure remove the keyStore with the internal config
+-        verify(mWifiKeyStore).removeKeys(networkSuggestion1.wifiConfiguration.enterpriseConfig);
++        verify(mWifiKeyStore).removeKeys(eq(networkSuggestion1.wifiConfiguration.enterpriseConfig),
++                eq(false));
+         verify(mLruConnectionTracker).removeNetwork(any());
+     }
+ 
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiServiceImplTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiServiceImplTest.java
+index f8f7e652e..6727c16da 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiServiceImplTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiServiceImplTest.java
+@@ -379,6 +379,7 @@ public class WifiServiceImplTest extends WifiBaseTest {
+     @Mock LastCallerInfoManager mLastCallerInfoManager;
+     @Mock BuildProperties mBuildProperties;
+     @Mock LinkProbeManager mLinkProbeManager;
++    @Mock WifiKeyStore mWifiKeyStore;
+ 
+     @Captor ArgumentCaptor<Intent> mIntentCaptor;
+     @Captor ArgumentCaptor<Runnable> mOnStoppedListenerCaptor;
+@@ -510,6 +511,7 @@ public class WifiServiceImplTest extends WifiBaseTest {
+         when(mActiveModeWarden.getClientModeManagers()).thenReturn(mClientModeManagers);
+         when(mWifiInjector.getSelfRecovery()).thenReturn(mSelfRecovery);
+         when(mWifiInjector.getLastCallerInfoManager()).thenReturn(mLastCallerInfoManager);
++        when(mWifiInjector.getWifiKeyStore()).thenReturn(mWifiKeyStore);
+ 
+         doAnswer(new AnswerWithArguments() {
+             public void answer(Runnable onStoppedListener) throws Throwable {
+@@ -5609,7 +5611,11 @@ public class WifiServiceImplTest extends WifiBaseTest {
+                 anyInt(), anyInt())).thenReturn(PackageManager.PERMISSION_GRANTED);
+         when(mWifiPermissionsUtil.checkNetworkSettingsPermission(anyInt())).thenReturn(true);
+         final String fqdn = "example.com";
+-        WifiConfiguration network = WifiConfigurationTestUtil.createOpenNetwork();
++        WifiConfiguration openNetwork = WifiConfigurationTestUtil.createOpenNetwork();
++        openNetwork.networkId = TEST_NETWORK_ID;
++        WifiConfiguration eapNetwork = WifiConfigurationTestUtil.createEapNetwork(
++                WifiEnterpriseConfig.Eap.TLS, WifiEnterpriseConfig.Phase2.NONE);
++        eapNetwork.networkId = TEST_NETWORK_ID + 1;
+         PasspointConfiguration config = new PasspointConfiguration();
+         HomeSp homeSp = new HomeSp();
+         homeSp.setFqdn(fqdn);
+@@ -5619,7 +5625,7 @@ public class WifiServiceImplTest extends WifiBaseTest {
+         config.setCredential(credential);
+ 
+         when(mWifiConfigManager.getSavedNetworks(anyInt()))
+-                .thenReturn(Arrays.asList(network));
++                .thenReturn(Arrays.asList(openNetwork, eapNetwork));
+         when(mPasspointManager.getProviderConfigs(anyInt(), anyBoolean()))
+                 .thenReturn(Arrays.asList(config));
+ 
+@@ -5631,7 +5637,10 @@ public class WifiServiceImplTest extends WifiBaseTest {
+         mLooper.dispatchAll();
+ 
+         verify(mWifiConfigManager).removeNetwork(
+-                network.networkId, Binder.getCallingUid(), TEST_PACKAGE_NAME);
++                openNetwork.networkId, Binder.getCallingUid(), TEST_PACKAGE_NAME);
++        verify(mWifiConfigManager).removeNetwork(
++                eapNetwork.networkId, Binder.getCallingUid(), TEST_PACKAGE_NAME);
++        verify(mWifiKeyStore).removeKeys(eapNetwork.enterpriseConfig, true);
+         verify(mPasspointManager).removeProvider(anyInt(), anyBoolean(), eq(config.getUniqueId()),
+                 isNull());
+         verify(mPasspointManager).clearAnqpRequestsAndFlushCache();
+-- 
+2.38.0.413.g74048e4d9e-goog
+

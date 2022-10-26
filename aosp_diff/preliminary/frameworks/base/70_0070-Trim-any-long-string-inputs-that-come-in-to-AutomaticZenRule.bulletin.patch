@@ -1,0 +1,299 @@
+From 0582b3159bc19b0645f138816e0d09a4e35e5ba6 Mon Sep 17 00:00:00 2001
+From: Yuri Lin <yurilin@google.com>
+Date: Mon, 29 Aug 2022 17:40:14 -0400
+Subject: [PATCH] Trim any long string inputs that come in to AutomaticZenRule
+
+This change both prevents any rules from being unable to be written to disk and also avoids risk of running out of memory while handling all the zen rules.
+
+Bug: 242703460
+Bug: 242703505
+Bug: 242703780
+Bug: 242704043
+Bug: 243794204
+Test: cts AutomaticZenRuleTest; atest android.app.AutomaticZenRuleTest; manually confirmed each exploit example either saves the rule successfully with a truncated string (in the case of name & conditionId) or may fail to save the rule at all (if the owner/configactivity is invalid). Additionally ran the memory-exhausting PoC without device crashes.
+
+Change-Id: I110172a43f28528dd274b3b346eb29c3796ff2c6
+Merged-In: I110172a43f28528dd274b3b346eb29c3796ff2c6
+(cherry picked from commit de172ba0d434c940be9e2aad8685719731ab7da2)
+(cherry picked from commit 19bc2c3559620ed00e448117e65f6b44e6eb6d9b)
+Merged-In: I110172a43f28528dd274b3b346eb29c3796ff2c6
+---
+ core/java/android/app/AutomaticZenRule.java   |  58 +++++--
+ .../src/android/app/AutomaticZenRuleTest.java | 153 ++++++++++++++++++
+ 2 files changed, 201 insertions(+), 10 deletions(-)
+ create mode 100644 core/tests/coretests/src/android/app/AutomaticZenRuleTest.java
+
+diff --git a/core/java/android/app/AutomaticZenRule.java b/core/java/android/app/AutomaticZenRule.java
+index 7a806bdf473d..27a9a27e59a2 100644
+--- a/core/java/android/app/AutomaticZenRule.java
++++ b/core/java/android/app/AutomaticZenRule.java
+@@ -47,6 +47,13 @@ public final class AutomaticZenRule implements Parcelable {
+     private boolean mModified = false;
+     private String mPkg;
+ 
++    /**
++     * The maximum string length for any string contained in this automatic zen rule. This pertains
++     * both to fields in the rule itself (such as its name) and items with sub-fields.
++     * @hide
++     */
++    public static final int MAX_STRING_LENGTH = 1000;
++
+     /**
+      * Creates an automatic zen rule.
+      *
+@@ -93,10 +100,10 @@ public final class AutomaticZenRule implements Parcelable {
+     public AutomaticZenRule(@NonNull String name, @Nullable ComponentName owner,
+             @Nullable ComponentName configurationActivity, @NonNull Uri conditionId,
+             @Nullable ZenPolicy policy, int interruptionFilter, boolean enabled) {
+-        this.name = name;
+-        this.owner = owner;
+-        this.configurationActivity = configurationActivity;
+-        this.conditionId = conditionId;
++        this.name = getTrimmedString(name);
++        this.owner = getTrimmedComponentName(owner);
++        this.configurationActivity = getTrimmedComponentName(configurationActivity);
++        this.conditionId = getTrimmedUri(conditionId);
+         this.interruptionFilter = interruptionFilter;
+         this.enabled = enabled;
+         this.mZenPolicy = policy;
+@@ -115,12 +122,12 @@ public final class AutomaticZenRule implements Parcelable {
+     public AutomaticZenRule(Parcel source) {
+         enabled = source.readInt() == ENABLED;
+         if (source.readInt() == ENABLED) {
+-            name = source.readString();
++            name = getTrimmedString(source.readString());
+         }
+         interruptionFilter = source.readInt();
+         conditionId = source.readParcelable(null);
+-        owner = source.readParcelable(null);
+-        configurationActivity = source.readParcelable(null);
++        owner = getTrimmedComponentName(source.readParcelable(null));
++        configurationActivity = getTrimmedComponentName(source.readParcelable(null));
+         creationTime = source.readLong();
+         mZenPolicy = source.readParcelable(null);
+         mModified = source.readInt() == ENABLED;
+@@ -196,7 +203,7 @@ public final class AutomaticZenRule implements Parcelable {
+      * Sets the representation of the state that causes this rule to become active.
+      */
+     public void setConditionId(Uri conditionId) {
+-        this.conditionId = conditionId;
++        this.conditionId = getTrimmedUri(conditionId);
+     }
+ 
+     /**
+@@ -211,7 +218,7 @@ public final class AutomaticZenRule implements Parcelable {
+      * Sets the name of this rule.
+      */
+     public void setName(String name) {
+-        this.name = name;
++        this.name = getTrimmedString(name);
+     }
+ 
+     /**
+@@ -243,7 +250,7 @@ public final class AutomaticZenRule implements Parcelable {
+      * that are not backed by {@link android.service.notification.ConditionProviderService}.
+      */
+     public void setConfigurationActivity(@Nullable ComponentName componentName) {
+-        this.configurationActivity = componentName;
++        this.configurationActivity = getTrimmedComponentName(componentName);
+     }
+ 
+     /**
+@@ -333,4 +340,35 @@ public final class AutomaticZenRule implements Parcelable {
+             return new AutomaticZenRule[size];
+         }
+     };
++
++    /**
++     * If the package or class name of the provided ComponentName are longer than MAX_STRING_LENGTH,
++     * return a trimmed version that truncates each of the package and class name at the max length.
++     */
++    private static ComponentName getTrimmedComponentName(ComponentName cn) {
++        if (cn == null) return null;
++        return new ComponentName(getTrimmedString(cn.getPackageName()),
++                getTrimmedString(cn.getClassName()));
++    }
++
++    /**
++     * Returns a truncated copy of the string if the string is longer than MAX_STRING_LENGTH.
++     */
++    private static String getTrimmedString(String input) {
++        if (input != null && input.length() > MAX_STRING_LENGTH) {
++            return input.substring(0, MAX_STRING_LENGTH);
++        }
++        return input;
++    }
++
++    /**
++     * Returns a truncated copy of the Uri by trimming the string representation to the maximum
++     * string length.
++     */
++    private static Uri getTrimmedUri(Uri input) {
++        if (input != null && input.toString().length() > MAX_STRING_LENGTH) {
++            return Uri.parse(getTrimmedString(input.toString()));
++        }
++        return input;
++    }
+ }
+diff --git a/core/tests/coretests/src/android/app/AutomaticZenRuleTest.java b/core/tests/coretests/src/android/app/AutomaticZenRuleTest.java
+new file mode 100644
+index 000000000000..282fdad294eb
+--- /dev/null
++++ b/core/tests/coretests/src/android/app/AutomaticZenRuleTest.java
+@@ -0,0 +1,153 @@
++/*
++ * Copyright (C) 2022 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.app;
++
++import static junit.framework.Assert.assertEquals;
++import static junit.framework.Assert.fail;
++
++import android.content.ComponentName;
++import android.net.Uri;
++import android.os.Parcel;
++
++import androidx.test.ext.junit.runners.AndroidJUnit4;
++import androidx.test.filters.SmallTest;
++
++import com.google.common.base.Strings;
++
++import org.junit.Test;
++import org.junit.runner.RunWith;
++
++import java.lang.reflect.Field;
++
++@RunWith(AndroidJUnit4.class)
++@SmallTest
++public class AutomaticZenRuleTest {
++    private static final String CLASS = "android.app.AutomaticZenRule";
++
++    @Test
++    public void testLongFields_inConstructor() {
++        String longString = Strings.repeat("A", 65536);
++        Uri longUri = Uri.parse("uri://" + Strings.repeat("A", 65530));
++
++        // test both variants where there's an owner, and where there's a configuration activity
++        AutomaticZenRule rule1 = new AutomaticZenRule(
++                longString, // name
++                new ComponentName("pkg", longString), // owner
++                null,  // configuration activity
++                longUri, // conditionId
++                null, // zen policy
++                0, // interruption filter
++                true); // enabled
++
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH, rule1.getName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                rule1.getConditionId().toString().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH, rule1.getOwner().getClassName().length());
++
++        AutomaticZenRule rule2 = new AutomaticZenRule(
++                longString, // name
++                null, // owner
++                new ComponentName(longString, "SomeClassName"), // configuration activity
++                longUri, // conditionId
++                null, // zen policy
++                0, // interruption filter
++                false); // enabled
++
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH, rule2.getName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                rule2.getConditionId().toString().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                rule2.getConfigurationActivity().getPackageName().length());
++    }
++
++    @Test
++    public void testLongFields_inSetters() {
++        String longString = Strings.repeat("A", 65536);
++        Uri longUri = Uri.parse("uri://" + Strings.repeat("A", 65530));
++
++        AutomaticZenRule rule = new AutomaticZenRule(
++                "sensible name",
++                new ComponentName("pkg", "ShortClass"),
++                null,
++                Uri.parse("uri://short"),
++                null, 0, true);
++
++        rule.setName(longString);
++        rule.setConditionId(longUri);
++        rule.setConfigurationActivity(new ComponentName(longString, longString));
++
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH, rule.getName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                rule.getConditionId().toString().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                rule.getConfigurationActivity().getPackageName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                rule.getConfigurationActivity().getClassName().length());
++    }
++
++    @Test
++    public void testLongInputsFromParcel() {
++        // Create a rule with long fields, set directly via reflection so that we can confirm that
++        // a rule with too-long fields that comes in via a parcel has its fields truncated directly.
++        AutomaticZenRule rule = new AutomaticZenRule(
++                "placeholder",
++                new ComponentName("place", "holder"),
++                null,
++                Uri.parse("uri://placeholder"),
++                null, 0, true);
++
++        try {
++            String longString = Strings.repeat("A", 65536);
++            Uri longUri = Uri.parse("uri://" + Strings.repeat("A", 65530));
++            Field name = Class.forName(CLASS).getDeclaredField("name");
++            name.setAccessible(true);
++            name.set(rule, longString);
++            Field conditionId = Class.forName(CLASS).getDeclaredField("conditionId");
++            conditionId.setAccessible(true);
++            conditionId.set(rule, longUri);
++            Field owner = Class.forName(CLASS).getDeclaredField("owner");
++            owner.setAccessible(true);
++            owner.set(rule, new ComponentName(longString, longString));
++            Field configActivity = Class.forName(CLASS).getDeclaredField("configurationActivity");
++            configActivity.setAccessible(true);
++            configActivity.set(rule, new ComponentName(longString, longString));
++        } catch (NoSuchFieldException e) {
++            fail(e.toString());
++        } catch (ClassNotFoundException e) {
++            fail(e.toString());
++        } catch (IllegalAccessException e) {
++            fail(e.toString());
++        }
++
++        Parcel parcel = Parcel.obtain();
++        rule.writeToParcel(parcel, 0);
++        parcel.setDataPosition(0);
++
++        AutomaticZenRule fromParcel = new AutomaticZenRule(parcel);
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH, fromParcel.getName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                fromParcel.getConditionId().toString().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                fromParcel.getConfigurationActivity().getPackageName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                fromParcel.getConfigurationActivity().getClassName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                fromParcel.getOwner().getPackageName().length());
++        assertEquals(AutomaticZenRule.MAX_STRING_LENGTH,
++                fromParcel.getOwner().getClassName().length());
++    }
++}
+-- 
+2.38.0.413.g74048e4d9e-goog
+
