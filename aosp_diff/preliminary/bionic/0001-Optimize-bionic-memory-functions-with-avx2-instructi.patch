@@ -1,0 +1,3758 @@
+From b65df4aa373f12fc4a78365ffbe92020989a9e5e Mon Sep 17 00:00:00 2001
+From: ahs <amrita.h.s@intel.com>
+Date: Thu, 27 Oct 2022 17:29:33 +0530
+Subject: [PATCH 1/3] Optimize bionic memory functions with avx2 instructions
+
+Following memory related functions are optimized with
+avx2 implementation ported from glibc 2.20
+(only for 64-bit)
+ - memchr
+ - memcmp
+ - memrchr
+
+Tracked-On: OAM-104407
+Signed-off-by: ahs <amrita.h.s@intel.com>
+---
+ libc/Android.bp                               |   53 +-
+ .../kabylake/string/avx2-memcpy-kbl.S         | 2052 +++++++++++++++++
+ .../arch-x86_64/dynamic_function_dispatch.cpp |   73 +
+ libc/arch-x86_64/generic/string/memchr.c      |   19 +
+ libc/arch-x86_64/generic/string/memrchr.c     |   19 +
+ libc/arch-x86_64/generic/string/wmemset.c     |   19 +
+ libc/arch-x86_64/{string => include}/cache.h  |    0
+ .../kabylake/string/avx2-memchr-kbl.S         |  371 +++
+ .../kabylake/string/avx2-memcmp-kbl.S         |  428 ++++
+ .../kabylake/string/avx2-memrchr-kbl.S        |  408 ++++
+ .../{ => kabylake}/string/avx2-wmemset-kbl.S  |    0
+ .../string/sse2-memmove-slm.S                 |    4 +-
+ .../{ => silvermont}/string/sse2-memset-slm.S |    7 +-
+ .../{ => silvermont}/string/sse2-stpcpy-slm.S |    0
+ .../string/sse2-stpncpy-slm.S                 |    0
+ .../{ => silvermont}/string/sse2-strcat-slm.S |    0
+ .../{ => silvermont}/string/sse2-strcpy-slm.S |    0
+ .../{ => silvermont}/string/sse2-strlen-slm.S |    0
+ .../string/sse2-strncat-slm.S                 |    0
+ .../string/sse2-strncpy-slm.S                 |    0
+ .../{ => silvermont}/string/sse4-memcmp-slm.S |    2 +-
+ .../string/ssse3-strcmp-slm.S                 |    0
+ .../string/ssse3-strncmp-slm.S                |    0
+ libc/arch-x86_64/static_function_dispatch.S   |   41 +
+ 24 files changed, 3478 insertions(+), 18 deletions(-)
+ create mode 100644 libc/arch-x86/kabylake/string/avx2-memcpy-kbl.S
+ create mode 100644 libc/arch-x86_64/dynamic_function_dispatch.cpp
+ create mode 100644 libc/arch-x86_64/generic/string/memchr.c
+ create mode 100644 libc/arch-x86_64/generic/string/memrchr.c
+ create mode 100644 libc/arch-x86_64/generic/string/wmemset.c
+ rename libc/arch-x86_64/{string => include}/cache.h (100%)
+ create mode 100644 libc/arch-x86_64/kabylake/string/avx2-memchr-kbl.S
+ create mode 100644 libc/arch-x86_64/kabylake/string/avx2-memcmp-kbl.S
+ create mode 100644 libc/arch-x86_64/kabylake/string/avx2-memrchr-kbl.S
+ rename libc/arch-x86_64/{ => kabylake}/string/avx2-wmemset-kbl.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-memmove-slm.S (99%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-memset-slm.S (97%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-stpcpy-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-stpncpy-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-strcat-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-strcpy-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-strlen-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-strncat-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse2-strncpy-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/sse4-memcmp-slm.S (99%)
+ rename libc/arch-x86_64/{ => silvermont}/string/ssse3-strcmp-slm.S (100%)
+ rename libc/arch-x86_64/{ => silvermont}/string/ssse3-strncmp-slm.S (100%)
+ create mode 100644 libc/arch-x86_64/static_function_dispatch.S
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index 97146aa6f..84d41b0ba 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -375,6 +375,11 @@ cc_library_static {
+                 "upstream-freebsd/lib/libc/string/wmemset.c",
+             ],
+         },
++        x86_64: {
++            exclude_srcs: [
++                "upstream-freebsd/lib/libc/string/wmemset.c",
++            ],
++        },
+     },
+ 
+     cflags: [
+@@ -683,6 +688,8 @@ cc_library_static {
+ 
+         x86_64: {
+             exclude_srcs: [
++                "upstream-openbsd/lib/libc/string/memchr.c",
++                "upstream-openbsd/lib/libc/string/memrchr.c",
+                 "upstream-openbsd/lib/libc/string/stpcpy.c",
+                 "upstream-openbsd/lib/libc/string/stpncpy.c",
+                 "upstream-openbsd/lib/libc/string/strcat.c",
+@@ -985,20 +992,34 @@ cc_library_static {
+             ],
+         },
+         x86_64: {
++            cflags: ["-include openbsd-compat.h"],
++            include_dirs: ["bionic/libc/arch-x86_64/include"],
++            local_include_dirs: [
++                // "private",
++                 "upstream-openbsd/android/include",
++            ],
+             srcs: [
+-                "arch-x86_64/string/sse2-memmove-slm.S",
+-                "arch-x86_64/string/sse2-memset-slm.S",
+-                "arch-x86_64/string/sse2-stpcpy-slm.S",
+-                "arch-x86_64/string/sse2-stpncpy-slm.S",
+-                "arch-x86_64/string/sse2-strcat-slm.S",
+-                "arch-x86_64/string/sse2-strcpy-slm.S",
+-                "arch-x86_64/string/sse2-strlen-slm.S",
+-                "arch-x86_64/string/sse2-strncat-slm.S",
+-                "arch-x86_64/string/sse2-strncpy-slm.S",
+-                "arch-x86_64/string/sse4-memcmp-slm.S",
+-                "arch-x86_64/string/ssse3-strcmp-slm.S",
+-                "arch-x86_64/string/ssse3-strncmp-slm.S",
+-                "arch-x86_64/string/avx2-wmemset-kbl.S",
++                "arch-x86_64/generic/string/wmemset.c",
++                "arch-x86_64/generic/string/memchr.c",
++                "arch-x86_64/generic/string/memrchr.c",
++
++                "arch-x86_64/silvermont/string/sse2-memmove-slm.S",
++                "arch-x86_64/silvermont/string/sse2-memset-slm.S",
++                "arch-x86_64/silvermont/string/sse2-stpcpy-slm.S",
++                "arch-x86_64/silvermont/string/sse2-stpncpy-slm.S",
++                "arch-x86_64/silvermont/string/sse2-strcat-slm.S",
++                "arch-x86_64/silvermont/string/sse2-strcpy-slm.S",
++                "arch-x86_64/silvermont/string/sse2-strlen-slm.S",
++                "arch-x86_64/silvermont/string/sse2-strncat-slm.S",
++                "arch-x86_64/silvermont/string/sse2-strncpy-slm.S",
++                "arch-x86_64/silvermont/string/sse4-memcmp-slm.S",
++                "arch-x86_64/silvermont/string/ssse3-strcmp-slm.S",
++                "arch-x86_64/silvermont/string/ssse3-strncmp-slm.S",
++
++                "arch-x86_64/kabylake/string/avx2-wmemset-kbl.S",
++                "arch-x86_64/kabylake/string/avx2-memcmp-kbl.S",
++                "arch-x86_64/kabylake/string/avx2-memchr-kbl.S",
++                "arch-x86_64/kabylake/string/avx2-memrchr-kbl.S",
+ 
+                 "arch-x86_64/bionic/__bionic_clone.S",
+                 "arch-x86_64/bionic/_exit_with_stack_teardown.S",
+@@ -1514,6 +1535,9 @@ cc_library_static {
+         x86: {
+             srcs: ["arch-x86/static_function_dispatch.S"],
+         },
++        x86_64: {
++            srcs: ["arch-x86_64/static_function_dispatch.S"],
++        },
+         arm: {
+             srcs: ["arch-arm/static_function_dispatch.S"],
+         },
+@@ -1539,6 +1563,9 @@ cc_library_static {
+         x86: {
+             srcs: ["arch-x86/dynamic_function_dispatch.cpp"],
+         },
++        x86_64: {
++            srcs: ["arch-x86_64/dynamic_function_dispatch.cpp"],
++        },
+         arm: {
+             srcs: ["arch-arm/dynamic_function_dispatch.cpp"],
+         },
+diff --git a/libc/arch-x86/kabylake/string/avx2-memcpy-kbl.S b/libc/arch-x86/kabylake/string/avx2-memcpy-kbl.S
+new file mode 100644
+index 000000000..69fca7cf1
+--- /dev/null
++++ b/libc/arch-x86/kabylake/string/avx2-memcpy-kbl.S
+@@ -0,0 +1,2052 @@
++#define ENTRY(f) \
++    .text; \
++    .globl f; \
++    .p2align    4, 0x90; \
++    .type f,@function; \
++    f: \
++
++#define END(f)
++    .size f, .-f; \
++    .section        .rodata,"a",@progbits; \
++    .p2align        2 \
++
++ENTRY(memcpy_avx2)
++# %bb.0:
++	pushl	%ebp
++	pushl	%ebx
++	pushl	%edi
++	pushl	%esi
++	movl	28(%esp), %ebx
++	movl	24(%esp), %ecx
++	movl	20(%esp), %eax
++	calll	.L0$pb
++.L0$pb:
++	popl	%esi
++.Ltmp0:
++	addl	$_GLOBAL_OFFSET_TABLE_+(.Ltmp0-.L0$pb), %esi
++	cmpl	$256, %ebx              # imm = 0x100
++	ja	.LBB0_251
++# %bb.1:
++	leal	-1(%ebx), %edi
++	cmpl	$255, %edi
++	ja	.LBB0_270
++# %bb.2:
++	addl	.LJTI0_1@GOTOFF(%esi,%edi,4), %esi
++	leal	(%eax,%ebx), %edx
++	addl	%ebx, %ecx
++	jmpl	*%esi
++.LBB0_251:
++	movl	%eax, %ebp
++	vmovups	(%ecx), %ymm0
++	movl	%ebx, %edi
++	negl	%ebp
++	andl	$31, %ebp
++	subl	%ebp, %edi
++	addl	%ebp, %ecx
++	leal	(%eax,%ebp), %edx
++	cmpl	$2097152, %edi          # imm = 0x200000
++	vmovups	%ymm0, (%eax)
++	ja	.LBB0_256
++# %bb.252:
++	cmpl	$256, %edi              # imm = 0x100
++	jb	.LBB0_260
++# %bb.253:
++	subl	%ebp, %ebx
++	.p2align	4, 0x90
++.LBB0_254:                              # =>This Inner Loop Header: Depth=1
++	vmovups	(%ecx), %ymm0
++	vmovups	32(%ecx), %ymm1
++	vmovups	64(%ecx), %ymm2
++	vmovups	96(%ecx), %ymm3
++	vmovups	128(%ecx), %ymm4
++	vmovups	160(%ecx), %ymm5
++	vmovups	192(%ecx), %ymm6
++	vmovups	224(%ecx), %ymm7
++	prefetchnta	512(%ecx)
++	addl	$-256, %edi
++	addl	$256, %ecx              # imm = 0x100
++	vmovups	%ymm0, (%edx)
++	vmovups	%ymm1, 32(%edx)
++	vmovups	%ymm2, 64(%edx)
++	vmovups	%ymm3, 96(%edx)
++	vmovups	%ymm4, 128(%edx)
++	vmovups	%ymm5, 160(%edx)
++	vmovups	%ymm6, 192(%edx)
++	vmovups	%ymm7, 224(%edx)
++	addl	$256, %edx              # imm = 0x100
++	cmpl	$255, %edi
++	ja	.LBB0_254
++# %bb.255:
++	movzbl	%bl, %edi
++	leal	-1(%edi), %ebx
++	cmpl	$255, %ebx
++	jbe	.LBB0_261
++	jmp	.LBB0_270
++.LBB0_256:
++	prefetchnta	(%ecx)
++	subl	%ebp, %ebx
++	testb	$31, %cl
++	je	.LBB0_257
++	.p2align	4, 0x90
++.LBB0_258:                              # =>This Inner Loop Header: Depth=1
++	vmovups	(%ecx), %ymm0
++	vmovups	32(%ecx), %ymm1
++	vmovups	64(%ecx), %ymm2
++	vmovups	96(%ecx), %ymm3
++	vmovups	128(%ecx), %ymm4
++	vmovups	160(%ecx), %ymm5
++	vmovups	192(%ecx), %ymm6
++	vmovups	224(%ecx), %ymm7
++	prefetchnta	512(%ecx)
++	addl	$-256, %edi
++	addl	$256, %ecx              # imm = 0x100
++	vmovntps	%ymm0, (%edx)
++	vmovntps	%ymm1, 32(%edx)
++	vmovntps	%ymm2, 64(%edx)
++	vmovntps	%ymm3, 96(%edx)
++	vmovntps	%ymm4, 128(%edx)
++	vmovntps	%ymm5, 160(%edx)
++	vmovntps	%ymm6, 192(%edx)
++	vmovntps	%ymm7, 224(%edx)
++	addl	$256, %edx              # imm = 0x100
++	cmpl	$255, %edi
++	ja	.LBB0_258
++	jmp	.LBB0_259
++	.p2align	4, 0x90
++.LBB0_257:                              # =>This Inner Loop Header: Depth=1
++	vmovaps	(%ecx), %ymm0
++	vmovaps	32(%ecx), %ymm1
++	vmovaps	64(%ecx), %ymm2
++	vmovaps	96(%ecx), %ymm3
++	vmovaps	128(%ecx), %ymm4
++	vmovaps	160(%ecx), %ymm5
++	vmovaps	192(%ecx), %ymm6
++	vmovaps	224(%ecx), %ymm7
++	prefetchnta	512(%ecx)
++	addl	$-256, %edi
++	addl	$256, %ecx              # imm = 0x100
++	vmovntps	%ymm0, (%edx)
++	vmovntps	%ymm1, 32(%edx)
++	vmovntps	%ymm2, 64(%edx)
++	vmovntps	%ymm3, 96(%edx)
++	vmovntps	%ymm4, 128(%edx)
++	vmovntps	%ymm5, 160(%edx)
++	vmovntps	%ymm6, 192(%edx)
++	vmovntps	%ymm7, 224(%edx)
++	addl	$256, %edx              # imm = 0x100
++	cmpl	$255, %edi
++	ja	.LBB0_257
++.LBB0_259:
++	sfence
++	movzbl	%bl, %edi
++.LBB0_260:
++	leal	-1(%edi), %ebx
++	cmpl	$255, %ebx
++	ja	.LBB0_270
++.LBB0_261:
++	addl	.LJTI0_0@GOTOFF(%esi,%ebx,4), %esi
++	addl	%edi, %edx
++	addl	%edi, %ecx
++	jmpl	*%esi
++.LBB0_11:
++	vmovups	-131(%ecx), %ymm0
++	vmovups	%ymm0, -131(%edx)
++	vmovups	-99(%ecx), %ymm0
++	vmovups	%ymm0, -99(%edx)
++	vmovups	-67(%ecx), %ymm0
++	vmovups	%ymm0, -67(%edx)
++	vmovups	-35(%ecx), %ymm0
++	vmovups	%ymm0, -35(%edx)
++.LBB0_12:
++	movzwl	-3(%ecx), %esi
++	movw	%si, -3(%edx)
++	jmp	.LBB0_6
++.LBB0_17:
++	vmovups	-133(%ecx), %ymm0
++	vmovups	%ymm0, -133(%edx)
++	vmovups	-101(%ecx), %ymm0
++	vmovups	%ymm0, -101(%edx)
++	vmovups	-69(%ecx), %ymm0
++	vmovups	%ymm0, -69(%edx)
++	vmovups	-37(%ecx), %ymm0
++	vmovups	%ymm0, -37(%edx)
++.LBB0_18:
++	movl	-5(%ecx), %esi
++	movl	%esi, -5(%edx)
++	jmp	.LBB0_6
++.LBB0_19:
++	vmovups	-134(%ecx), %ymm0
++	vmovups	%ymm0, -134(%edx)
++	vmovups	-102(%ecx), %ymm0
++	vmovups	%ymm0, -102(%edx)
++	vmovups	-70(%ecx), %ymm0
++	vmovups	%ymm0, -70(%edx)
++	vmovups	-38(%ecx), %ymm0
++	vmovups	%ymm0, -38(%edx)
++.LBB0_20:
++	movl	-6(%ecx), %esi
++	movl	%esi, -6(%edx)
++	jmp	.LBB0_10
++.LBB0_21:
++	vmovups	-135(%ecx), %ymm0
++	vmovups	%ymm0, -135(%edx)
++	vmovups	-103(%ecx), %ymm0
++	vmovups	%ymm0, -103(%edx)
++	vmovups	-71(%ecx), %ymm0
++	vmovups	%ymm0, -71(%edx)
++	vmovups	-39(%ecx), %ymm0
++	vmovups	%ymm0, -39(%edx)
++.LBB0_22:
++	movl	-7(%ecx), %esi
++	movl	%esi, -7(%edx)
++	jmp	.LBB0_16
++.LBB0_27:
++	vmovups	-137(%ecx), %ymm0
++	vmovups	%ymm0, -137(%edx)
++	vmovups	-105(%ecx), %ymm0
++	vmovups	%ymm0, -105(%edx)
++	vmovups	-73(%ecx), %ymm0
++	vmovups	%ymm0, -73(%edx)
++	vmovups	-41(%ecx), %ymm0
++	vmovups	%ymm0, -41(%edx)
++.LBB0_28:
++	vmovsd	-9(%ecx), %xmm0         # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -9(%edx)
++	jmp	.LBB0_6
++.LBB0_29:
++	vmovups	-138(%ecx), %ymm0
++	vmovups	%ymm0, -138(%edx)
++	vmovups	-106(%ecx), %ymm0
++	vmovups	%ymm0, -106(%edx)
++	vmovups	-74(%ecx), %ymm0
++	vmovups	%ymm0, -74(%edx)
++	vmovups	-42(%ecx), %ymm0
++	vmovups	%ymm0, -42(%edx)
++.LBB0_30:
++	vmovsd	-10(%ecx), %xmm0        # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -10(%edx)
++	jmp	.LBB0_10
++.LBB0_31:
++	vmovups	-139(%ecx), %ymm0
++	vmovups	%ymm0, -139(%edx)
++	vmovups	-107(%ecx), %ymm0
++	vmovups	%ymm0, -107(%edx)
++	vmovups	-75(%ecx), %ymm0
++	vmovups	%ymm0, -75(%edx)
++	vmovups	-43(%ecx), %ymm0
++	vmovups	%ymm0, -43(%edx)
++.LBB0_32:
++	vmovsd	-11(%ecx), %xmm0        # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -11(%edx)
++	jmp	.LBB0_16
++.LBB0_33:
++	vmovups	-140(%ecx), %ymm0
++	vmovups	%ymm0, -140(%edx)
++	vmovups	-108(%ecx), %ymm0
++	vmovups	%ymm0, -108(%edx)
++	vmovups	-76(%ecx), %ymm0
++	vmovups	%ymm0, -76(%edx)
++	vmovups	-44(%ecx), %ymm0
++	vmovups	%ymm0, -44(%edx)
++.LBB0_34:
++	vmovsd	-12(%ecx), %xmm0        # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -12(%edx)
++	jmp	.LBB0_16
++.LBB0_35:
++	vmovups	-141(%ecx), %ymm0
++	vmovups	%ymm0, -141(%edx)
++	vmovups	-109(%ecx), %ymm0
++	vmovups	%ymm0, -109(%edx)
++	vmovups	-77(%ecx), %ymm0
++	vmovups	%ymm0, -77(%edx)
++	vmovups	-45(%ecx), %ymm0
++	vmovups	%ymm0, -45(%edx)
++.LBB0_36:
++	vmovsd	-13(%ecx), %xmm0        # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -13(%edx)
++	jmp	.LBB0_26
++.LBB0_37:
++	vmovups	-142(%ecx), %ymm0
++	vmovups	%ymm0, -142(%edx)
++	vmovups	-110(%ecx), %ymm0
++	vmovups	%ymm0, -110(%edx)
++	vmovups	-78(%ecx), %ymm0
++	vmovups	%ymm0, -78(%edx)
++	vmovups	-46(%ecx), %ymm0
++	vmovups	%ymm0, -46(%edx)
++.LBB0_38:
++	vmovsd	-14(%ecx), %xmm0        # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -14(%edx)
++	jmp	.LBB0_26
++.LBB0_39:
++	vmovups	-143(%ecx), %ymm0
++	vmovups	%ymm0, -143(%edx)
++	vmovups	-111(%ecx), %ymm0
++	vmovups	%ymm0, -111(%edx)
++	vmovups	-79(%ecx), %ymm0
++	vmovups	%ymm0, -79(%edx)
++	vmovups	-47(%ecx), %ymm0
++	vmovups	%ymm0, -47(%edx)
++.LBB0_40:
++	vmovsd	-15(%ecx), %xmm0        # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -15(%edx)
++	jmp	.LBB0_26
++.LBB0_45:
++	vmovups	-145(%ecx), %ymm0
++	vmovups	%ymm0, -145(%edx)
++	vmovups	-113(%ecx), %ymm0
++	vmovups	%ymm0, -113(%edx)
++	vmovups	-81(%ecx), %ymm0
++	vmovups	%ymm0, -81(%edx)
++	vmovups	-49(%ecx), %ymm0
++	vmovups	%ymm0, -49(%edx)
++.LBB0_46:
++	vmovups	-17(%ecx), %xmm0
++	vmovups	%xmm0, -17(%edx)
++	jmp	.LBB0_6
++.LBB0_47:
++	vmovups	-146(%ecx), %ymm0
++	vmovups	%ymm0, -146(%edx)
++	vmovups	-114(%ecx), %ymm0
++	vmovups	%ymm0, -114(%edx)
++	vmovups	-82(%ecx), %ymm0
++	vmovups	%ymm0, -82(%edx)
++	vmovups	-50(%ecx), %ymm0
++	vmovups	%ymm0, -50(%edx)
++.LBB0_48:
++	vmovups	-18(%ecx), %xmm0
++	vmovups	%xmm0, -18(%edx)
++	jmp	.LBB0_10
++.LBB0_49:
++	vmovups	-147(%ecx), %ymm0
++	vmovups	%ymm0, -147(%edx)
++	vmovups	-115(%ecx), %ymm0
++	vmovups	%ymm0, -115(%edx)
++	vmovups	-83(%ecx), %ymm0
++	vmovups	%ymm0, -83(%edx)
++	vmovups	-51(%ecx), %ymm0
++	vmovups	%ymm0, -51(%edx)
++.LBB0_50:
++	vmovups	-19(%ecx), %xmm0
++	vmovups	%xmm0, -19(%edx)
++	jmp	.LBB0_16
++.LBB0_51:
++	vmovups	-148(%ecx), %ymm0
++	vmovups	%ymm0, -148(%edx)
++	vmovups	-116(%ecx), %ymm0
++	vmovups	%ymm0, -116(%edx)
++	vmovups	-84(%ecx), %ymm0
++	vmovups	%ymm0, -84(%edx)
++	vmovups	-52(%ecx), %ymm0
++	vmovups	%ymm0, -52(%edx)
++.LBB0_52:
++	vmovups	-20(%ecx), %xmm0
++	vmovups	%xmm0, -20(%edx)
++	jmp	.LBB0_16
++.LBB0_53:
++	vmovups	-149(%ecx), %ymm0
++	vmovups	%ymm0, -149(%edx)
++	vmovups	-117(%ecx), %ymm0
++	vmovups	%ymm0, -117(%edx)
++	vmovups	-85(%ecx), %ymm0
++	vmovups	%ymm0, -85(%edx)
++	vmovups	-53(%ecx), %ymm0
++	vmovups	%ymm0, -53(%edx)
++.LBB0_54:
++	vmovups	-21(%ecx), %xmm0
++	vmovups	%xmm0, -21(%edx)
++	jmp	.LBB0_26
++.LBB0_55:
++	vmovups	-150(%ecx), %ymm0
++	vmovups	%ymm0, -150(%edx)
++	vmovups	-118(%ecx), %ymm0
++	vmovups	%ymm0, -118(%edx)
++	vmovups	-86(%ecx), %ymm0
++	vmovups	%ymm0, -86(%edx)
++	vmovups	-54(%ecx), %ymm0
++	vmovups	%ymm0, -54(%edx)
++.LBB0_56:
++	vmovups	-22(%ecx), %xmm0
++	vmovups	%xmm0, -22(%edx)
++	jmp	.LBB0_26
++.LBB0_57:
++	vmovups	-151(%ecx), %ymm0
++	vmovups	%ymm0, -151(%edx)
++	vmovups	-119(%ecx), %ymm0
++	vmovups	%ymm0, -119(%edx)
++	vmovups	-87(%ecx), %ymm0
++	vmovups	%ymm0, -87(%edx)
++	vmovups	-55(%ecx), %ymm0
++	vmovups	%ymm0, -55(%edx)
++.LBB0_58:
++	vmovups	-23(%ecx), %xmm0
++	vmovups	%xmm0, -23(%edx)
++	jmp	.LBB0_26
++.LBB0_59:
++	vmovups	-152(%ecx), %ymm0
++	vmovups	%ymm0, -152(%edx)
++	vmovups	-120(%ecx), %ymm0
++	vmovups	%ymm0, -120(%edx)
++	vmovups	-88(%ecx), %ymm0
++	vmovups	%ymm0, -88(%edx)
++	vmovups	-56(%ecx), %ymm0
++	vmovups	%ymm0, -56(%edx)
++.LBB0_60:
++	vmovups	-24(%ecx), %xmm0
++	vmovups	%xmm0, -24(%edx)
++	jmp	.LBB0_26
++.LBB0_61:
++	vmovups	-153(%ecx), %ymm0
++	vmovups	%ymm0, -153(%edx)
++	vmovups	-121(%ecx), %ymm0
++	vmovups	%ymm0, -121(%edx)
++	vmovups	-89(%ecx), %ymm0
++	vmovups	%ymm0, -89(%edx)
++	vmovups	-57(%ecx), %ymm0
++	vmovups	%ymm0, -57(%edx)
++.LBB0_62:
++	vmovups	-25(%ecx), %xmm0
++	vmovups	%xmm0, -25(%edx)
++	jmp	.LBB0_44
++.LBB0_63:
++	vmovups	-154(%ecx), %ymm0
++	vmovups	%ymm0, -154(%edx)
++	vmovups	-122(%ecx), %ymm0
++	vmovups	%ymm0, -122(%edx)
++	vmovups	-90(%ecx), %ymm0
++	vmovups	%ymm0, -90(%edx)
++	vmovups	-58(%ecx), %ymm0
++	vmovups	%ymm0, -58(%edx)
++.LBB0_64:
++	vmovups	-26(%ecx), %xmm0
++	vmovups	%xmm0, -26(%edx)
++	jmp	.LBB0_44
++.LBB0_65:
++	vmovups	-155(%ecx), %ymm0
++	vmovups	%ymm0, -155(%edx)
++	vmovups	-123(%ecx), %ymm0
++	vmovups	%ymm0, -123(%edx)
++	vmovups	-91(%ecx), %ymm0
++	vmovups	%ymm0, -91(%edx)
++	vmovups	-59(%ecx), %ymm0
++	vmovups	%ymm0, -59(%edx)
++.LBB0_66:
++	vmovups	-27(%ecx), %xmm0
++	vmovups	%xmm0, -27(%edx)
++	jmp	.LBB0_44
++.LBB0_67:
++	vmovups	-156(%ecx), %ymm0
++	vmovups	%ymm0, -156(%edx)
++	vmovups	-124(%ecx), %ymm0
++	vmovups	%ymm0, -124(%edx)
++	vmovups	-92(%ecx), %ymm0
++	vmovups	%ymm0, -92(%edx)
++	vmovups	-60(%ecx), %ymm0
++	vmovups	%ymm0, -60(%edx)
++.LBB0_68:
++	vmovups	-28(%ecx), %xmm0
++	vmovups	%xmm0, -28(%edx)
++	jmp	.LBB0_44
++.LBB0_69:
++	vmovups	-157(%ecx), %ymm0
++	vmovups	%ymm0, -157(%edx)
++	vmovups	-125(%ecx), %ymm0
++	vmovups	%ymm0, -125(%edx)
++	vmovups	-93(%ecx), %ymm0
++	vmovups	%ymm0, -93(%edx)
++	vmovups	-61(%ecx), %ymm0
++	vmovups	%ymm0, -61(%edx)
++.LBB0_70:
++	vmovups	-29(%ecx), %xmm0
++	vmovups	%xmm0, -29(%edx)
++	jmp	.LBB0_44
++.LBB0_71:
++	vmovups	-158(%ecx), %ymm0
++	vmovups	%ymm0, -158(%edx)
++	vmovups	-126(%ecx), %ymm0
++	vmovups	%ymm0, -126(%edx)
++	vmovups	-94(%ecx), %ymm0
++	vmovups	%ymm0, -94(%edx)
++	vmovups	-62(%ecx), %ymm0
++	vmovups	%ymm0, -62(%edx)
++.LBB0_72:
++	vmovups	-30(%ecx), %xmm0
++	vmovups	%xmm0, -30(%edx)
++	jmp	.LBB0_44
++.LBB0_73:
++	vmovups	-159(%ecx), %ymm0
++	vmovups	%ymm0, -159(%edx)
++	vmovups	-127(%ecx), %ymm0
++	vmovups	%ymm0, -127(%edx)
++	vmovups	-95(%ecx), %ymm0
++	vmovups	%ymm0, -95(%edx)
++	vmovups	-63(%ecx), %ymm0
++	vmovups	%ymm0, -63(%edx)
++.LBB0_74:
++	vmovups	-31(%ecx), %xmm0
++	vmovups	%xmm0, -31(%edx)
++	jmp	.LBB0_44
++.LBB0_75:
++	vmovups	-193(%ecx), %ymm0
++	vmovups	%ymm0, -193(%edx)
++.LBB0_76:
++	vmovups	-161(%ecx), %ymm0
++	vmovups	%ymm0, -161(%edx)
++.LBB0_3:
++	vmovups	-129(%ecx), %ymm0
++	vmovups	%ymm0, -129(%edx)
++	vmovups	-97(%ecx), %ymm0
++	vmovups	%ymm0, -97(%edx)
++.LBB0_4:
++	vmovups	-65(%ecx), %ymm0
++	vmovups	%ymm0, -65(%edx)
++.LBB0_5:
++	vmovups	-33(%ecx), %ymm0
++	vmovups	%ymm0, -33(%edx)
++.LBB0_6:
++	movb	-1(%ecx), %cl
++	movb	%cl, -1(%edx)
++	jmp	.LBB0_270
++.LBB0_77:
++	vmovups	-194(%ecx), %ymm0
++	vmovups	%ymm0, -194(%edx)
++.LBB0_78:
++	vmovups	-162(%ecx), %ymm0
++	vmovups	%ymm0, -162(%edx)
++.LBB0_7:
++	vmovups	-130(%ecx), %ymm0
++	vmovups	%ymm0, -130(%edx)
++	vmovups	-98(%ecx), %ymm0
++	vmovups	%ymm0, -98(%edx)
++.LBB0_8:
++	vmovups	-66(%ecx), %ymm0
++	vmovups	%ymm0, -66(%edx)
++.LBB0_9:
++	vmovups	-34(%ecx), %ymm0
++	vmovups	%ymm0, -34(%edx)
++.LBB0_10:
++	movzwl	-2(%ecx), %ecx
++	movw	%cx, -2(%edx)
++	jmp	.LBB0_270
++.LBB0_79:
++	vmovups	-195(%ecx), %ymm0
++	vmovups	%ymm0, -195(%edx)
++.LBB0_80:
++	vmovups	-163(%ecx), %ymm0
++	vmovups	%ymm0, -163(%edx)
++	vmovups	-131(%ecx), %ymm0
++	vmovups	%ymm0, -131(%edx)
++	vmovups	-99(%ecx), %ymm0
++	vmovups	%ymm0, -99(%edx)
++.LBB0_81:
++	vmovups	-67(%ecx), %ymm0
++	vmovups	%ymm0, -67(%edx)
++.LBB0_82:
++	vmovups	-35(%ecx), %ymm0
++	vmovups	%ymm0, -35(%edx)
++	jmp	.LBB0_16
++.LBB0_83:
++	vmovups	-196(%ecx), %ymm0
++	vmovups	%ymm0, -196(%edx)
++.LBB0_84:
++	vmovups	-164(%ecx), %ymm0
++	vmovups	%ymm0, -164(%edx)
++.LBB0_13:
++	vmovups	-132(%ecx), %ymm0
++	vmovups	%ymm0, -132(%edx)
++	vmovups	-100(%ecx), %ymm0
++	vmovups	%ymm0, -100(%edx)
++.LBB0_14:
++	vmovups	-68(%ecx), %ymm0
++	vmovups	%ymm0, -68(%edx)
++.LBB0_15:
++	vmovups	-36(%ecx), %ymm0
++	vmovups	%ymm0, -36(%edx)
++.LBB0_16:
++	movl	-4(%ecx), %ecx
++	movl	%ecx, -4(%edx)
++	jmp	.LBB0_270
++.LBB0_85:
++	vmovups	-197(%ecx), %ymm0
++	vmovups	%ymm0, -197(%edx)
++.LBB0_86:
++	vmovups	-165(%ecx), %ymm0
++	vmovups	%ymm0, -165(%edx)
++	vmovups	-133(%ecx), %ymm0
++	vmovups	%ymm0, -133(%edx)
++	vmovups	-101(%ecx), %ymm0
++	vmovups	%ymm0, -101(%edx)
++.LBB0_87:
++	vmovups	-69(%ecx), %ymm0
++	vmovups	%ymm0, -69(%edx)
++.LBB0_88:
++	vmovups	-37(%ecx), %ymm0
++	vmovups	%ymm0, -37(%edx)
++	jmp	.LBB0_26
++.LBB0_89:
++	vmovups	-198(%ecx), %ymm0
++	vmovups	%ymm0, -198(%edx)
++.LBB0_90:
++	vmovups	-166(%ecx), %ymm0
++	vmovups	%ymm0, -166(%edx)
++	vmovups	-134(%ecx), %ymm0
++	vmovups	%ymm0, -134(%edx)
++	vmovups	-102(%ecx), %ymm0
++	vmovups	%ymm0, -102(%edx)
++.LBB0_91:
++	vmovups	-70(%ecx), %ymm0
++	vmovups	%ymm0, -70(%edx)
++.LBB0_92:
++	vmovups	-38(%ecx), %ymm0
++	vmovups	%ymm0, -38(%edx)
++	jmp	.LBB0_26
++.LBB0_93:
++	vmovups	-199(%ecx), %ymm0
++	vmovups	%ymm0, -199(%edx)
++.LBB0_94:
++	vmovups	-167(%ecx), %ymm0
++	vmovups	%ymm0, -167(%edx)
++	vmovups	-135(%ecx), %ymm0
++	vmovups	%ymm0, -135(%edx)
++	vmovups	-103(%ecx), %ymm0
++	vmovups	%ymm0, -103(%edx)
++.LBB0_95:
++	vmovups	-71(%ecx), %ymm0
++	vmovups	%ymm0, -71(%edx)
++.LBB0_96:
++	vmovups	-39(%ecx), %ymm0
++	vmovups	%ymm0, -39(%edx)
++	jmp	.LBB0_26
++.LBB0_97:
++	vmovups	-200(%ecx), %ymm0
++	vmovups	%ymm0, -200(%edx)
++.LBB0_98:
++	vmovups	-168(%ecx), %ymm0
++	vmovups	%ymm0, -168(%edx)
++.LBB0_23:
++	vmovups	-136(%ecx), %ymm0
++	vmovups	%ymm0, -136(%edx)
++	vmovups	-104(%ecx), %ymm0
++	vmovups	%ymm0, -104(%edx)
++.LBB0_24:
++	vmovups	-72(%ecx), %ymm0
++	vmovups	%ymm0, -72(%edx)
++.LBB0_25:
++	vmovups	-40(%ecx), %ymm0
++	vmovups	%ymm0, -40(%edx)
++.LBB0_26:
++	vmovsd	-8(%ecx), %xmm0         # xmm0 = mem[0],zero
++	vmovsd	%xmm0, -8(%edx)
++	jmp	.LBB0_270
++.LBB0_99:
++	vmovups	-201(%ecx), %ymm0
++	vmovups	%ymm0, -201(%edx)
++.LBB0_100:
++	vmovups	-169(%ecx), %ymm0
++	vmovups	%ymm0, -169(%edx)
++	vmovups	-137(%ecx), %ymm0
++	vmovups	%ymm0, -137(%edx)
++	vmovups	-105(%ecx), %ymm0
++	vmovups	%ymm0, -105(%edx)
++.LBB0_101:
++	vmovups	-73(%ecx), %ymm0
++	vmovups	%ymm0, -73(%edx)
++.LBB0_102:
++	vmovups	-41(%ecx), %ymm0
++	vmovups	%ymm0, -41(%edx)
++	jmp	.LBB0_44
++.LBB0_103:
++	vmovups	-202(%ecx), %ymm0
++	vmovups	%ymm0, -202(%edx)
++.LBB0_104:
++	vmovups	-170(%ecx), %ymm0
++	vmovups	%ymm0, -170(%edx)
++	vmovups	-138(%ecx), %ymm0
++	vmovups	%ymm0, -138(%edx)
++	vmovups	-106(%ecx), %ymm0
++	vmovups	%ymm0, -106(%edx)
++.LBB0_105:
++	vmovups	-74(%ecx), %ymm0
++	vmovups	%ymm0, -74(%edx)
++.LBB0_106:
++	vmovups	-42(%ecx), %ymm0
++	vmovups	%ymm0, -42(%edx)
++	jmp	.LBB0_44
++.LBB0_107:
++	vmovups	-203(%ecx), %ymm0
++	vmovups	%ymm0, -203(%edx)
++.LBB0_108:
++	vmovups	-171(%ecx), %ymm0
++	vmovups	%ymm0, -171(%edx)
++	vmovups	-139(%ecx), %ymm0
++	vmovups	%ymm0, -139(%edx)
++	vmovups	-107(%ecx), %ymm0
++	vmovups	%ymm0, -107(%edx)
++.LBB0_109:
++	vmovups	-75(%ecx), %ymm0
++	vmovups	%ymm0, -75(%edx)
++.LBB0_110:
++	vmovups	-43(%ecx), %ymm0
++	vmovups	%ymm0, -43(%edx)
++	jmp	.LBB0_44
++.LBB0_111:
++	vmovups	-204(%ecx), %ymm0
++	vmovups	%ymm0, -204(%edx)
++.LBB0_112:
++	vmovups	-172(%ecx), %ymm0
++	vmovups	%ymm0, -172(%edx)
++	vmovups	-140(%ecx), %ymm0
++	vmovups	%ymm0, -140(%edx)
++	vmovups	-108(%ecx), %ymm0
++	vmovups	%ymm0, -108(%edx)
++.LBB0_113:
++	vmovups	-76(%ecx), %ymm0
++	vmovups	%ymm0, -76(%edx)
++.LBB0_114:
++	vmovups	-44(%ecx), %ymm0
++	vmovups	%ymm0, -44(%edx)
++	jmp	.LBB0_44
++.LBB0_115:
++	vmovups	-205(%ecx), %ymm0
++	vmovups	%ymm0, -205(%edx)
++.LBB0_116:
++	vmovups	-173(%ecx), %ymm0
++	vmovups	%ymm0, -173(%edx)
++	vmovups	-141(%ecx), %ymm0
++	vmovups	%ymm0, -141(%edx)
++	vmovups	-109(%ecx), %ymm0
++	vmovups	%ymm0, -109(%edx)
++.LBB0_117:
++	vmovups	-77(%ecx), %ymm0
++	vmovups	%ymm0, -77(%edx)
++.LBB0_118:
++	vmovups	-45(%ecx), %ymm0
++	vmovups	%ymm0, -45(%edx)
++	jmp	.LBB0_44
++.LBB0_119:
++	vmovups	-206(%ecx), %ymm0
++	vmovups	%ymm0, -206(%edx)
++.LBB0_120:
++	vmovups	-174(%ecx), %ymm0
++	vmovups	%ymm0, -174(%edx)
++	vmovups	-142(%ecx), %ymm0
++	vmovups	%ymm0, -142(%edx)
++	vmovups	-110(%ecx), %ymm0
++	vmovups	%ymm0, -110(%edx)
++.LBB0_121:
++	vmovups	-78(%ecx), %ymm0
++	vmovups	%ymm0, -78(%edx)
++.LBB0_122:
++	vmovups	-46(%ecx), %ymm0
++	vmovups	%ymm0, -46(%edx)
++	jmp	.LBB0_44
++.LBB0_123:
++	vmovups	-207(%ecx), %ymm0
++	vmovups	%ymm0, -207(%edx)
++.LBB0_124:
++	vmovups	-175(%ecx), %ymm0
++	vmovups	%ymm0, -175(%edx)
++	vmovups	-143(%ecx), %ymm0
++	vmovups	%ymm0, -143(%edx)
++	vmovups	-111(%ecx), %ymm0
++	vmovups	%ymm0, -111(%edx)
++.LBB0_125:
++	vmovups	-79(%ecx), %ymm0
++	vmovups	%ymm0, -79(%edx)
++.LBB0_126:
++	vmovups	-47(%ecx), %ymm0
++	vmovups	%ymm0, -47(%edx)
++	jmp	.LBB0_44
++.LBB0_127:
++	vmovups	-208(%ecx), %ymm0
++	vmovups	%ymm0, -208(%edx)
++.LBB0_128:
++	vmovups	-176(%ecx), %ymm0
++	vmovups	%ymm0, -176(%edx)
++.LBB0_41:
++	vmovups	-144(%ecx), %ymm0
++	vmovups	%ymm0, -144(%edx)
++	vmovups	-112(%ecx), %ymm0
++	vmovups	%ymm0, -112(%edx)
++.LBB0_42:
++	vmovups	-80(%ecx), %ymm0
++	vmovups	%ymm0, -80(%edx)
++.LBB0_43:
++	vmovups	-48(%ecx), %ymm0
++	vmovups	%ymm0, -48(%edx)
++.LBB0_44:
++	vmovups	-16(%ecx), %xmm0
++	vmovups	%xmm0, -16(%edx)
++	jmp	.LBB0_270
++.LBB0_129:
++	vmovups	-209(%ecx), %ymm0
++	vmovups	%ymm0, -209(%edx)
++.LBB0_130:
++	vmovups	-177(%ecx), %ymm0
++	vmovups	%ymm0, -177(%edx)
++	vmovups	-145(%ecx), %ymm0
++	vmovups	%ymm0, -145(%edx)
++	vmovups	-113(%ecx), %ymm0
++	vmovups	%ymm0, -113(%edx)
++.LBB0_131:
++	vmovups	-81(%ecx), %ymm0
++	vmovups	%ymm0, -81(%edx)
++.LBB0_132:
++	vmovups	-49(%ecx), %ymm0
++	vmovups	%ymm0, -49(%edx)
++	jmp	.LBB0_269
++.LBB0_133:
++	vmovups	-210(%ecx), %ymm0
++	vmovups	%ymm0, -210(%edx)
++.LBB0_134:
++	vmovups	-178(%ecx), %ymm0
++	vmovups	%ymm0, -178(%edx)
++	vmovups	-146(%ecx), %ymm0
++	vmovups	%ymm0, -146(%edx)
++	vmovups	-114(%ecx), %ymm0
++	vmovups	%ymm0, -114(%edx)
++.LBB0_135:
++	vmovups	-82(%ecx), %ymm0
++	vmovups	%ymm0, -82(%edx)
++.LBB0_136:
++	vmovups	-50(%ecx), %ymm0
++	vmovups	%ymm0, -50(%edx)
++	jmp	.LBB0_269
++.LBB0_137:
++	vmovups	-211(%ecx), %ymm0
++	vmovups	%ymm0, -211(%edx)
++.LBB0_138:
++	vmovups	-179(%ecx), %ymm0
++	vmovups	%ymm0, -179(%edx)
++	vmovups	-147(%ecx), %ymm0
++	vmovups	%ymm0, -147(%edx)
++	vmovups	-115(%ecx), %ymm0
++	vmovups	%ymm0, -115(%edx)
++.LBB0_139:
++	vmovups	-83(%ecx), %ymm0
++	vmovups	%ymm0, -83(%edx)
++.LBB0_140:
++	vmovups	-51(%ecx), %ymm0
++	vmovups	%ymm0, -51(%edx)
++	jmp	.LBB0_269
++.LBB0_141:
++	vmovups	-212(%ecx), %ymm0
++	vmovups	%ymm0, -212(%edx)
++.LBB0_142:
++	vmovups	-180(%ecx), %ymm0
++	vmovups	%ymm0, -180(%edx)
++	vmovups	-148(%ecx), %ymm0
++	vmovups	%ymm0, -148(%edx)
++	vmovups	-116(%ecx), %ymm0
++	vmovups	%ymm0, -116(%edx)
++.LBB0_143:
++	vmovups	-84(%ecx), %ymm0
++	vmovups	%ymm0, -84(%edx)
++.LBB0_144:
++	vmovups	-52(%ecx), %ymm0
++	vmovups	%ymm0, -52(%edx)
++	jmp	.LBB0_269
++.LBB0_145:
++	vmovups	-213(%ecx), %ymm0
++	vmovups	%ymm0, -213(%edx)
++.LBB0_146:
++	vmovups	-181(%ecx), %ymm0
++	vmovups	%ymm0, -181(%edx)
++	vmovups	-149(%ecx), %ymm0
++	vmovups	%ymm0, -149(%edx)
++	vmovups	-117(%ecx), %ymm0
++	vmovups	%ymm0, -117(%edx)
++.LBB0_147:
++	vmovups	-85(%ecx), %ymm0
++	vmovups	%ymm0, -85(%edx)
++.LBB0_148:
++	vmovups	-53(%ecx), %ymm0
++	vmovups	%ymm0, -53(%edx)
++	jmp	.LBB0_269
++.LBB0_149:
++	vmovups	-214(%ecx), %ymm0
++	vmovups	%ymm0, -214(%edx)
++.LBB0_150:
++	vmovups	-182(%ecx), %ymm0
++	vmovups	%ymm0, -182(%edx)
++	vmovups	-150(%ecx), %ymm0
++	vmovups	%ymm0, -150(%edx)
++	vmovups	-118(%ecx), %ymm0
++	vmovups	%ymm0, -118(%edx)
++.LBB0_151:
++	vmovups	-86(%ecx), %ymm0
++	vmovups	%ymm0, -86(%edx)
++.LBB0_152:
++	vmovups	-54(%ecx), %ymm0
++	vmovups	%ymm0, -54(%edx)
++	jmp	.LBB0_269
++.LBB0_153:
++	vmovups	-215(%ecx), %ymm0
++	vmovups	%ymm0, -215(%edx)
++.LBB0_154:
++	vmovups	-183(%ecx), %ymm0
++	vmovups	%ymm0, -183(%edx)
++	vmovups	-151(%ecx), %ymm0
++	vmovups	%ymm0, -151(%edx)
++	vmovups	-119(%ecx), %ymm0
++	vmovups	%ymm0, -119(%edx)
++.LBB0_155:
++	vmovups	-87(%ecx), %ymm0
++	vmovups	%ymm0, -87(%edx)
++.LBB0_156:
++	vmovups	-55(%ecx), %ymm0
++	vmovups	%ymm0, -55(%edx)
++	jmp	.LBB0_269
++.LBB0_157:
++	vmovups	-216(%ecx), %ymm0
++	vmovups	%ymm0, -216(%edx)
++.LBB0_158:
++	vmovups	-184(%ecx), %ymm0
++	vmovups	%ymm0, -184(%edx)
++	vmovups	-152(%ecx), %ymm0
++	vmovups	%ymm0, -152(%edx)
++	vmovups	-120(%ecx), %ymm0
++	vmovups	%ymm0, -120(%edx)
++.LBB0_159:
++	vmovups	-88(%ecx), %ymm0
++	vmovups	%ymm0, -88(%edx)
++.LBB0_160:
++	vmovups	-56(%ecx), %ymm0
++	vmovups	%ymm0, -56(%edx)
++	jmp	.LBB0_269
++.LBB0_161:
++	vmovups	-217(%ecx), %ymm0
++	vmovups	%ymm0, -217(%edx)
++.LBB0_162:
++	vmovups	-185(%ecx), %ymm0
++	vmovups	%ymm0, -185(%edx)
++	vmovups	-153(%ecx), %ymm0
++	vmovups	%ymm0, -153(%edx)
++	vmovups	-121(%ecx), %ymm0
++	vmovups	%ymm0, -121(%edx)
++.LBB0_163:
++	vmovups	-89(%ecx), %ymm0
++	vmovups	%ymm0, -89(%edx)
++.LBB0_164:
++	vmovups	-57(%ecx), %ymm0
++	vmovups	%ymm0, -57(%edx)
++	jmp	.LBB0_269
++.LBB0_165:
++	vmovups	-218(%ecx), %ymm0
++	vmovups	%ymm0, -218(%edx)
++.LBB0_166:
++	vmovups	-186(%ecx), %ymm0
++	vmovups	%ymm0, -186(%edx)
++	vmovups	-154(%ecx), %ymm0
++	vmovups	%ymm0, -154(%edx)
++	vmovups	-122(%ecx), %ymm0
++	vmovups	%ymm0, -122(%edx)
++.LBB0_167:
++	vmovups	-90(%ecx), %ymm0
++	vmovups	%ymm0, -90(%edx)
++.LBB0_168:
++	vmovups	-58(%ecx), %ymm0
++	vmovups	%ymm0, -58(%edx)
++	jmp	.LBB0_269
++.LBB0_169:
++	vmovups	-219(%ecx), %ymm0
++	vmovups	%ymm0, -219(%edx)
++.LBB0_170:
++	vmovups	-187(%ecx), %ymm0
++	vmovups	%ymm0, -187(%edx)
++	vmovups	-155(%ecx), %ymm0
++	vmovups	%ymm0, -155(%edx)
++	vmovups	-123(%ecx), %ymm0
++	vmovups	%ymm0, -123(%edx)
++.LBB0_171:
++	vmovups	-91(%ecx), %ymm0
++	vmovups	%ymm0, -91(%edx)
++.LBB0_172:
++	vmovups	-59(%ecx), %ymm0
++	vmovups	%ymm0, -59(%edx)
++	jmp	.LBB0_269
++.LBB0_173:
++	vmovups	-220(%ecx), %ymm0
++	vmovups	%ymm0, -220(%edx)
++.LBB0_174:
++	vmovups	-188(%ecx), %ymm0
++	vmovups	%ymm0, -188(%edx)
++	vmovups	-156(%ecx), %ymm0
++	vmovups	%ymm0, -156(%edx)
++	vmovups	-124(%ecx), %ymm0
++	vmovups	%ymm0, -124(%edx)
++.LBB0_175:
++	vmovups	-92(%ecx), %ymm0
++	vmovups	%ymm0, -92(%edx)
++.LBB0_176:
++	vmovups	-60(%ecx), %ymm0
++	vmovups	%ymm0, -60(%edx)
++	jmp	.LBB0_269
++.LBB0_177:
++	vmovups	-221(%ecx), %ymm0
++	vmovups	%ymm0, -221(%edx)
++.LBB0_178:
++	vmovups	-189(%ecx), %ymm0
++	vmovups	%ymm0, -189(%edx)
++	vmovups	-157(%ecx), %ymm0
++	vmovups	%ymm0, -157(%edx)
++	vmovups	-125(%ecx), %ymm0
++	vmovups	%ymm0, -125(%edx)
++.LBB0_179:
++	vmovups	-93(%ecx), %ymm0
++	vmovups	%ymm0, -93(%edx)
++.LBB0_180:
++	vmovups	-61(%ecx), %ymm0
++	vmovups	%ymm0, -61(%edx)
++	jmp	.LBB0_269
++.LBB0_181:
++	vmovups	-222(%ecx), %ymm0
++	vmovups	%ymm0, -222(%edx)
++.LBB0_182:
++	vmovups	-190(%ecx), %ymm0
++	vmovups	%ymm0, -190(%edx)
++	vmovups	-158(%ecx), %ymm0
++	vmovups	%ymm0, -158(%edx)
++	vmovups	-126(%ecx), %ymm0
++	vmovups	%ymm0, -126(%edx)
++.LBB0_183:
++	vmovups	-94(%ecx), %ymm0
++	vmovups	%ymm0, -94(%edx)
++.LBB0_184:
++	vmovups	-62(%ecx), %ymm0
++	vmovups	%ymm0, -62(%edx)
++	jmp	.LBB0_269
++.LBB0_185:
++	vmovups	-223(%ecx), %ymm0
++	vmovups	%ymm0, -223(%edx)
++.LBB0_186:
++	vmovups	-191(%ecx), %ymm0
++	vmovups	%ymm0, -191(%edx)
++	vmovups	-159(%ecx), %ymm0
++	vmovups	%ymm0, -159(%edx)
++	vmovups	-127(%ecx), %ymm0
++	vmovups	%ymm0, -127(%edx)
++.LBB0_187:
++	vmovups	-95(%ecx), %ymm0
++	vmovups	%ymm0, -95(%edx)
++.LBB0_188:
++	vmovups	-63(%ecx), %ymm0
++	vmovups	%ymm0, -63(%edx)
++	jmp	.LBB0_269
++.LBB0_189:
++	vmovups	-225(%ecx), %ymm0
++	vmovups	%ymm0, -225(%edx)
++	vmovups	-193(%ecx), %ymm0
++	vmovups	%ymm0, -193(%edx)
++	vmovups	-161(%ecx), %ymm0
++	vmovups	%ymm0, -161(%edx)
++	vmovups	-129(%ecx), %ymm0
++	vmovups	%ymm0, -129(%edx)
++.LBB0_190:
++	vmovups	-97(%ecx), %ymm0
++	vmovups	%ymm0, -97(%edx)
++	vmovups	-65(%ecx), %ymm0
++	vmovups	%ymm0, -65(%edx)
++	jmp	.LBB0_268
++.LBB0_191:
++	vmovups	-226(%ecx), %ymm0
++	vmovups	%ymm0, -226(%edx)
++	vmovups	-194(%ecx), %ymm0
++	vmovups	%ymm0, -194(%edx)
++	vmovups	-162(%ecx), %ymm0
++	vmovups	%ymm0, -162(%edx)
++	vmovups	-130(%ecx), %ymm0
++	vmovups	%ymm0, -130(%edx)
++.LBB0_192:
++	vmovups	-98(%ecx), %ymm0
++	vmovups	%ymm0, -98(%edx)
++	vmovups	-66(%ecx), %ymm0
++	vmovups	%ymm0, -66(%edx)
++	jmp	.LBB0_268
++.LBB0_193:
++	vmovups	-227(%ecx), %ymm0
++	vmovups	%ymm0, -227(%edx)
++	vmovups	-195(%ecx), %ymm0
++	vmovups	%ymm0, -195(%edx)
++	vmovups	-163(%ecx), %ymm0
++	vmovups	%ymm0, -163(%edx)
++	vmovups	-131(%ecx), %ymm0
++	vmovups	%ymm0, -131(%edx)
++.LBB0_194:
++	vmovups	-99(%ecx), %ymm0
++	vmovups	%ymm0, -99(%edx)
++	vmovups	-67(%ecx), %ymm0
++	vmovups	%ymm0, -67(%edx)
++	jmp	.LBB0_268
++.LBB0_195:
++	vmovups	-228(%ecx), %ymm0
++	vmovups	%ymm0, -228(%edx)
++	vmovups	-196(%ecx), %ymm0
++	vmovups	%ymm0, -196(%edx)
++	vmovups	-164(%ecx), %ymm0
++	vmovups	%ymm0, -164(%edx)
++	vmovups	-132(%ecx), %ymm0
++	vmovups	%ymm0, -132(%edx)
++.LBB0_196:
++	vmovups	-100(%ecx), %ymm0
++	vmovups	%ymm0, -100(%edx)
++	vmovups	-68(%ecx), %ymm0
++	vmovups	%ymm0, -68(%edx)
++	jmp	.LBB0_268
++.LBB0_197:
++	vmovups	-229(%ecx), %ymm0
++	vmovups	%ymm0, -229(%edx)
++	vmovups	-197(%ecx), %ymm0
++	vmovups	%ymm0, -197(%edx)
++	vmovups	-165(%ecx), %ymm0
++	vmovups	%ymm0, -165(%edx)
++	vmovups	-133(%ecx), %ymm0
++	vmovups	%ymm0, -133(%edx)
++.LBB0_198:
++	vmovups	-101(%ecx), %ymm0
++	vmovups	%ymm0, -101(%edx)
++	vmovups	-69(%ecx), %ymm0
++	vmovups	%ymm0, -69(%edx)
++	jmp	.LBB0_268
++.LBB0_199:
++	vmovups	-230(%ecx), %ymm0
++	vmovups	%ymm0, -230(%edx)
++	vmovups	-198(%ecx), %ymm0
++	vmovups	%ymm0, -198(%edx)
++	vmovups	-166(%ecx), %ymm0
++	vmovups	%ymm0, -166(%edx)
++	vmovups	-134(%ecx), %ymm0
++	vmovups	%ymm0, -134(%edx)
++.LBB0_200:
++	vmovups	-102(%ecx), %ymm0
++	vmovups	%ymm0, -102(%edx)
++	vmovups	-70(%ecx), %ymm0
++	vmovups	%ymm0, -70(%edx)
++	jmp	.LBB0_268
++.LBB0_201:
++	vmovups	-231(%ecx), %ymm0
++	vmovups	%ymm0, -231(%edx)
++	vmovups	-199(%ecx), %ymm0
++	vmovups	%ymm0, -199(%edx)
++	vmovups	-167(%ecx), %ymm0
++	vmovups	%ymm0, -167(%edx)
++	vmovups	-135(%ecx), %ymm0
++	vmovups	%ymm0, -135(%edx)
++.LBB0_202:
++	vmovups	-103(%ecx), %ymm0
++	vmovups	%ymm0, -103(%edx)
++	vmovups	-71(%ecx), %ymm0
++	vmovups	%ymm0, -71(%edx)
++	jmp	.LBB0_268
++.LBB0_203:
++	vmovups	-232(%ecx), %ymm0
++	vmovups	%ymm0, -232(%edx)
++	vmovups	-200(%ecx), %ymm0
++	vmovups	%ymm0, -200(%edx)
++	vmovups	-168(%ecx), %ymm0
++	vmovups	%ymm0, -168(%edx)
++	vmovups	-136(%ecx), %ymm0
++	vmovups	%ymm0, -136(%edx)
++.LBB0_204:
++	vmovups	-104(%ecx), %ymm0
++	vmovups	%ymm0, -104(%edx)
++	vmovups	-72(%ecx), %ymm0
++	vmovups	%ymm0, -72(%edx)
++	jmp	.LBB0_268
++.LBB0_205:
++	vmovups	-233(%ecx), %ymm0
++	vmovups	%ymm0, -233(%edx)
++	vmovups	-201(%ecx), %ymm0
++	vmovups	%ymm0, -201(%edx)
++	vmovups	-169(%ecx), %ymm0
++	vmovups	%ymm0, -169(%edx)
++	vmovups	-137(%ecx), %ymm0
++	vmovups	%ymm0, -137(%edx)
++.LBB0_206:
++	vmovups	-105(%ecx), %ymm0
++	vmovups	%ymm0, -105(%edx)
++	vmovups	-73(%ecx), %ymm0
++	vmovups	%ymm0, -73(%edx)
++	jmp	.LBB0_268
++.LBB0_207:
++	vmovups	-234(%ecx), %ymm0
++	vmovups	%ymm0, -234(%edx)
++	vmovups	-202(%ecx), %ymm0
++	vmovups	%ymm0, -202(%edx)
++	vmovups	-170(%ecx), %ymm0
++	vmovups	%ymm0, -170(%edx)
++	vmovups	-138(%ecx), %ymm0
++	vmovups	%ymm0, -138(%edx)
++.LBB0_208:
++	vmovups	-106(%ecx), %ymm0
++	vmovups	%ymm0, -106(%edx)
++	vmovups	-74(%ecx), %ymm0
++	vmovups	%ymm0, -74(%edx)
++	jmp	.LBB0_268
++.LBB0_209:
++	vmovups	-235(%ecx), %ymm0
++	vmovups	%ymm0, -235(%edx)
++	vmovups	-203(%ecx), %ymm0
++	vmovups	%ymm0, -203(%edx)
++	vmovups	-171(%ecx), %ymm0
++	vmovups	%ymm0, -171(%edx)
++	vmovups	-139(%ecx), %ymm0
++	vmovups	%ymm0, -139(%edx)
++.LBB0_210:
++	vmovups	-107(%ecx), %ymm0
++	vmovups	%ymm0, -107(%edx)
++	vmovups	-75(%ecx), %ymm0
++	vmovups	%ymm0, -75(%edx)
++	jmp	.LBB0_268
++.LBB0_211:
++	vmovups	-236(%ecx), %ymm0
++	vmovups	%ymm0, -236(%edx)
++	vmovups	-204(%ecx), %ymm0
++	vmovups	%ymm0, -204(%edx)
++	vmovups	-172(%ecx), %ymm0
++	vmovups	%ymm0, -172(%edx)
++	vmovups	-140(%ecx), %ymm0
++	vmovups	%ymm0, -140(%edx)
++.LBB0_212:
++	vmovups	-108(%ecx), %ymm0
++	vmovups	%ymm0, -108(%edx)
++	vmovups	-76(%ecx), %ymm0
++	vmovups	%ymm0, -76(%edx)
++	jmp	.LBB0_268
++.LBB0_213:
++	vmovups	-237(%ecx), %ymm0
++	vmovups	%ymm0, -237(%edx)
++	vmovups	-205(%ecx), %ymm0
++	vmovups	%ymm0, -205(%edx)
++	vmovups	-173(%ecx), %ymm0
++	vmovups	%ymm0, -173(%edx)
++	vmovups	-141(%ecx), %ymm0
++	vmovups	%ymm0, -141(%edx)
++.LBB0_214:
++	vmovups	-109(%ecx), %ymm0
++	vmovups	%ymm0, -109(%edx)
++	vmovups	-77(%ecx), %ymm0
++	vmovups	%ymm0, -77(%edx)
++	jmp	.LBB0_268
++.LBB0_215:
++	vmovups	-238(%ecx), %ymm0
++	vmovups	%ymm0, -238(%edx)
++	vmovups	-206(%ecx), %ymm0
++	vmovups	%ymm0, -206(%edx)
++	vmovups	-174(%ecx), %ymm0
++	vmovups	%ymm0, -174(%edx)
++	vmovups	-142(%ecx), %ymm0
++	vmovups	%ymm0, -142(%edx)
++.LBB0_216:
++	vmovups	-110(%ecx), %ymm0
++	vmovups	%ymm0, -110(%edx)
++	vmovups	-78(%ecx), %ymm0
++	vmovups	%ymm0, -78(%edx)
++	jmp	.LBB0_268
++.LBB0_217:
++	vmovups	-239(%ecx), %ymm0
++	vmovups	%ymm0, -239(%edx)
++	vmovups	-207(%ecx), %ymm0
++	vmovups	%ymm0, -207(%edx)
++	vmovups	-175(%ecx), %ymm0
++	vmovups	%ymm0, -175(%edx)
++	vmovups	-143(%ecx), %ymm0
++	vmovups	%ymm0, -143(%edx)
++.LBB0_218:
++	vmovups	-111(%ecx), %ymm0
++	vmovups	%ymm0, -111(%edx)
++	vmovups	-79(%ecx), %ymm0
++	vmovups	%ymm0, -79(%edx)
++	jmp	.LBB0_268
++.LBB0_219:
++	vmovups	-240(%ecx), %ymm0
++	vmovups	%ymm0, -240(%edx)
++	vmovups	-208(%ecx), %ymm0
++	vmovups	%ymm0, -208(%edx)
++	vmovups	-176(%ecx), %ymm0
++	vmovups	%ymm0, -176(%edx)
++	vmovups	-144(%ecx), %ymm0
++	vmovups	%ymm0, -144(%edx)
++.LBB0_220:
++	vmovups	-112(%ecx), %ymm0
++	vmovups	%ymm0, -112(%edx)
++	vmovups	-80(%ecx), %ymm0
++	vmovups	%ymm0, -80(%edx)
++	jmp	.LBB0_268
++.LBB0_221:
++	vmovups	-241(%ecx), %ymm0
++	vmovups	%ymm0, -241(%edx)
++	vmovups	-209(%ecx), %ymm0
++	vmovups	%ymm0, -209(%edx)
++	vmovups	-177(%ecx), %ymm0
++	vmovups	%ymm0, -177(%edx)
++	vmovups	-145(%ecx), %ymm0
++	vmovups	%ymm0, -145(%edx)
++.LBB0_222:
++	vmovups	-113(%ecx), %ymm0
++	vmovups	%ymm0, -113(%edx)
++	vmovups	-81(%ecx), %ymm0
++	vmovups	%ymm0, -81(%edx)
++	jmp	.LBB0_268
++.LBB0_223:
++	vmovups	-242(%ecx), %ymm0
++	vmovups	%ymm0, -242(%edx)
++	vmovups	-210(%ecx), %ymm0
++	vmovups	%ymm0, -210(%edx)
++	vmovups	-178(%ecx), %ymm0
++	vmovups	%ymm0, -178(%edx)
++	vmovups	-146(%ecx), %ymm0
++	vmovups	%ymm0, -146(%edx)
++.LBB0_224:
++	vmovups	-114(%ecx), %ymm0
++	vmovups	%ymm0, -114(%edx)
++	vmovups	-82(%ecx), %ymm0
++	vmovups	%ymm0, -82(%edx)
++	jmp	.LBB0_268
++.LBB0_225:
++	vmovups	-243(%ecx), %ymm0
++	vmovups	%ymm0, -243(%edx)
++	vmovups	-211(%ecx), %ymm0
++	vmovups	%ymm0, -211(%edx)
++	vmovups	-179(%ecx), %ymm0
++	vmovups	%ymm0, -179(%edx)
++	vmovups	-147(%ecx), %ymm0
++	vmovups	%ymm0, -147(%edx)
++.LBB0_226:
++	vmovups	-115(%ecx), %ymm0
++	vmovups	%ymm0, -115(%edx)
++	vmovups	-83(%ecx), %ymm0
++	vmovups	%ymm0, -83(%edx)
++	jmp	.LBB0_268
++.LBB0_227:
++	vmovups	-244(%ecx), %ymm0
++	vmovups	%ymm0, -244(%edx)
++	vmovups	-212(%ecx), %ymm0
++	vmovups	%ymm0, -212(%edx)
++	vmovups	-180(%ecx), %ymm0
++	vmovups	%ymm0, -180(%edx)
++	vmovups	-148(%ecx), %ymm0
++	vmovups	%ymm0, -148(%edx)
++.LBB0_228:
++	vmovups	-116(%ecx), %ymm0
++	vmovups	%ymm0, -116(%edx)
++	vmovups	-84(%ecx), %ymm0
++	vmovups	%ymm0, -84(%edx)
++	jmp	.LBB0_268
++.LBB0_229:
++	vmovups	-245(%ecx), %ymm0
++	vmovups	%ymm0, -245(%edx)
++	vmovups	-213(%ecx), %ymm0
++	vmovups	%ymm0, -213(%edx)
++	vmovups	-181(%ecx), %ymm0
++	vmovups	%ymm0, -181(%edx)
++	vmovups	-149(%ecx), %ymm0
++	vmovups	%ymm0, -149(%edx)
++.LBB0_230:
++	vmovups	-117(%ecx), %ymm0
++	vmovups	%ymm0, -117(%edx)
++	vmovups	-85(%ecx), %ymm0
++	vmovups	%ymm0, -85(%edx)
++	jmp	.LBB0_268
++.LBB0_231:
++	vmovups	-246(%ecx), %ymm0
++	vmovups	%ymm0, -246(%edx)
++	vmovups	-214(%ecx), %ymm0
++	vmovups	%ymm0, -214(%edx)
++	vmovups	-182(%ecx), %ymm0
++	vmovups	%ymm0, -182(%edx)
++	vmovups	-150(%ecx), %ymm0
++	vmovups	%ymm0, -150(%edx)
++.LBB0_232:
++	vmovups	-118(%ecx), %ymm0
++	vmovups	%ymm0, -118(%edx)
++	vmovups	-86(%ecx), %ymm0
++	vmovups	%ymm0, -86(%edx)
++	jmp	.LBB0_268
++.LBB0_233:
++	vmovups	-247(%ecx), %ymm0
++	vmovups	%ymm0, -247(%edx)
++	vmovups	-215(%ecx), %ymm0
++	vmovups	%ymm0, -215(%edx)
++	vmovups	-183(%ecx), %ymm0
++	vmovups	%ymm0, -183(%edx)
++	vmovups	-151(%ecx), %ymm0
++	vmovups	%ymm0, -151(%edx)
++.LBB0_234:
++	vmovups	-119(%ecx), %ymm0
++	vmovups	%ymm0, -119(%edx)
++	vmovups	-87(%ecx), %ymm0
++	vmovups	%ymm0, -87(%edx)
++	jmp	.LBB0_268
++.LBB0_235:
++	vmovups	-248(%ecx), %ymm0
++	vmovups	%ymm0, -248(%edx)
++	vmovups	-216(%ecx), %ymm0
++	vmovups	%ymm0, -216(%edx)
++	vmovups	-184(%ecx), %ymm0
++	vmovups	%ymm0, -184(%edx)
++	vmovups	-152(%ecx), %ymm0
++	vmovups	%ymm0, -152(%edx)
++.LBB0_236:
++	vmovups	-120(%ecx), %ymm0
++	vmovups	%ymm0, -120(%edx)
++	vmovups	-88(%ecx), %ymm0
++	vmovups	%ymm0, -88(%edx)
++	jmp	.LBB0_268
++.LBB0_237:
++	vmovups	-249(%ecx), %ymm0
++	vmovups	%ymm0, -249(%edx)
++	vmovups	-217(%ecx), %ymm0
++	vmovups	%ymm0, -217(%edx)
++	vmovups	-185(%ecx), %ymm0
++	vmovups	%ymm0, -185(%edx)
++	vmovups	-153(%ecx), %ymm0
++	vmovups	%ymm0, -153(%edx)
++.LBB0_238:
++	vmovups	-121(%ecx), %ymm0
++	vmovups	%ymm0, -121(%edx)
++	vmovups	-89(%ecx), %ymm0
++	vmovups	%ymm0, -89(%edx)
++	jmp	.LBB0_268
++.LBB0_239:
++	vmovups	-250(%ecx), %ymm0
++	vmovups	%ymm0, -250(%edx)
++	vmovups	-218(%ecx), %ymm0
++	vmovups	%ymm0, -218(%edx)
++	vmovups	-186(%ecx), %ymm0
++	vmovups	%ymm0, -186(%edx)
++	vmovups	-154(%ecx), %ymm0
++	vmovups	%ymm0, -154(%edx)
++.LBB0_240:
++	vmovups	-122(%ecx), %ymm0
++	vmovups	%ymm0, -122(%edx)
++	vmovups	-90(%ecx), %ymm0
++	vmovups	%ymm0, -90(%edx)
++	jmp	.LBB0_268
++.LBB0_241:
++	vmovups	-251(%ecx), %ymm0
++	vmovups	%ymm0, -251(%edx)
++	vmovups	-219(%ecx), %ymm0
++	vmovups	%ymm0, -219(%edx)
++	vmovups	-187(%ecx), %ymm0
++	vmovups	%ymm0, -187(%edx)
++	vmovups	-155(%ecx), %ymm0
++	vmovups	%ymm0, -155(%edx)
++.LBB0_242:
++	vmovups	-123(%ecx), %ymm0
++	vmovups	%ymm0, -123(%edx)
++	vmovups	-91(%ecx), %ymm0
++	vmovups	%ymm0, -91(%edx)
++	jmp	.LBB0_268
++.LBB0_243:
++	vmovups	-252(%ecx), %ymm0
++	vmovups	%ymm0, -252(%edx)
++	vmovups	-220(%ecx), %ymm0
++	vmovups	%ymm0, -220(%edx)
++	vmovups	-188(%ecx), %ymm0
++	vmovups	%ymm0, -188(%edx)
++	vmovups	-156(%ecx), %ymm0
++	vmovups	%ymm0, -156(%edx)
++.LBB0_244:
++	vmovups	-124(%ecx), %ymm0
++	vmovups	%ymm0, -124(%edx)
++	vmovups	-92(%ecx), %ymm0
++	vmovups	%ymm0, -92(%edx)
++	jmp	.LBB0_268
++.LBB0_245:
++	vmovups	-253(%ecx), %ymm0
++	vmovups	%ymm0, -253(%edx)
++	vmovups	-221(%ecx), %ymm0
++	vmovups	%ymm0, -221(%edx)
++	vmovups	-189(%ecx), %ymm0
++	vmovups	%ymm0, -189(%edx)
++	vmovups	-157(%ecx), %ymm0
++	vmovups	%ymm0, -157(%edx)
++.LBB0_246:
++	vmovups	-125(%ecx), %ymm0
++	vmovups	%ymm0, -125(%edx)
++	vmovups	-93(%ecx), %ymm0
++	vmovups	%ymm0, -93(%edx)
++	jmp	.LBB0_268
++.LBB0_247:
++	vmovups	-254(%ecx), %ymm0
++	vmovups	%ymm0, -254(%edx)
++	vmovups	-222(%ecx), %ymm0
++	vmovups	%ymm0, -222(%edx)
++	vmovups	-190(%ecx), %ymm0
++	vmovups	%ymm0, -190(%edx)
++	vmovups	-158(%ecx), %ymm0
++	vmovups	%ymm0, -158(%edx)
++.LBB0_248:
++	vmovups	-126(%ecx), %ymm0
++	vmovups	%ymm0, -126(%edx)
++	vmovups	-94(%ecx), %ymm0
++	vmovups	%ymm0, -94(%edx)
++	jmp	.LBB0_268
++.LBB0_249:
++	vmovups	-255(%ecx), %ymm0
++	vmovups	%ymm0, -255(%edx)
++	vmovups	-223(%ecx), %ymm0
++	vmovups	%ymm0, -223(%edx)
++	vmovups	-191(%ecx), %ymm0
++	vmovups	%ymm0, -191(%edx)
++	vmovups	-159(%ecx), %ymm0
++	vmovups	%ymm0, -159(%edx)
++.LBB0_250:
++	vmovups	-127(%ecx), %ymm0
++	vmovups	%ymm0, -127(%edx)
++	vmovups	-95(%ecx), %ymm0
++	vmovups	%ymm0, -95(%edx)
++	jmp	.LBB0_268
++.LBB0_262:
++	vmovups	-256(%ecx), %ymm0
++	vmovups	%ymm0, -256(%edx)
++.LBB0_263:
++	vmovups	-224(%ecx), %ymm0
++	vmovups	%ymm0, -224(%edx)
++.LBB0_264:
++	vmovups	-192(%ecx), %ymm0
++	vmovups	%ymm0, -192(%edx)
++.LBB0_265:
++	vmovups	-160(%ecx), %ymm0
++	vmovups	%ymm0, -160(%edx)
++.LBB0_266:
++	vmovups	-128(%ecx), %ymm0
++	vmovups	%ymm0, -128(%edx)
++.LBB0_267:
++	vmovups	-96(%ecx), %ymm0
++	vmovups	%ymm0, -96(%edx)
++.LBB0_268:
++	vmovups	-64(%ecx), %ymm0
++	vmovups	%ymm0, -64(%edx)
++.LBB0_269:
++	vmovups	-32(%ecx), %ymm0
++	vmovups	%ymm0, -32(%edx)
++.LBB0_270:
++	vzeroupper
++	popl	%esi
++	popl	%edi
++	popl	%ebx
++	popl	%ebp
++	retl
++END(memcpy_avx2)
++
++/*.Lfunc_end0:
++	.size	memcpy_avx2, .Lfunc_end0-memcpy_avx2
++	.section	.rodata,"a",@progbits
++	.p2align	2*/
++.LJTI0_0:
++	.long	.LBB0_6@GOTOFF
++	.long	.LBB0_10@GOTOFF
++	.long	.LBB0_12@GOTOFF
++	.long	.LBB0_16@GOTOFF
++	.long	.LBB0_18@GOTOFF
++	.long	.LBB0_20@GOTOFF
++	.long	.LBB0_22@GOTOFF
++	.long	.LBB0_26@GOTOFF
++	.long	.LBB0_28@GOTOFF
++	.long	.LBB0_30@GOTOFF
++	.long	.LBB0_32@GOTOFF
++	.long	.LBB0_34@GOTOFF
++	.long	.LBB0_36@GOTOFF
++	.long	.LBB0_38@GOTOFF
++	.long	.LBB0_40@GOTOFF
++	.long	.LBB0_44@GOTOFF
++	.long	.LBB0_46@GOTOFF
++	.long	.LBB0_48@GOTOFF
++	.long	.LBB0_50@GOTOFF
++	.long	.LBB0_52@GOTOFF
++	.long	.LBB0_54@GOTOFF
++	.long	.LBB0_56@GOTOFF
++	.long	.LBB0_58@GOTOFF
++	.long	.LBB0_60@GOTOFF
++	.long	.LBB0_62@GOTOFF
++	.long	.LBB0_64@GOTOFF
++	.long	.LBB0_66@GOTOFF
++	.long	.LBB0_68@GOTOFF
++	.long	.LBB0_70@GOTOFF
++	.long	.LBB0_72@GOTOFF
++	.long	.LBB0_74@GOTOFF
++	.long	.LBB0_269@GOTOFF
++	.long	.LBB0_5@GOTOFF
++	.long	.LBB0_9@GOTOFF
++	.long	.LBB0_82@GOTOFF
++	.long	.LBB0_15@GOTOFF
++	.long	.LBB0_88@GOTOFF
++	.long	.LBB0_92@GOTOFF
++	.long	.LBB0_96@GOTOFF
++	.long	.LBB0_25@GOTOFF
++	.long	.LBB0_102@GOTOFF
++	.long	.LBB0_106@GOTOFF
++	.long	.LBB0_110@GOTOFF
++	.long	.LBB0_114@GOTOFF
++	.long	.LBB0_118@GOTOFF
++	.long	.LBB0_122@GOTOFF
++	.long	.LBB0_126@GOTOFF
++	.long	.LBB0_43@GOTOFF
++	.long	.LBB0_132@GOTOFF
++	.long	.LBB0_136@GOTOFF
++	.long	.LBB0_140@GOTOFF
++	.long	.LBB0_144@GOTOFF
++	.long	.LBB0_148@GOTOFF
++	.long	.LBB0_152@GOTOFF
++	.long	.LBB0_156@GOTOFF
++	.long	.LBB0_160@GOTOFF
++	.long	.LBB0_164@GOTOFF
++	.long	.LBB0_168@GOTOFF
++	.long	.LBB0_172@GOTOFF
++	.long	.LBB0_176@GOTOFF
++	.long	.LBB0_180@GOTOFF
++	.long	.LBB0_184@GOTOFF
++	.long	.LBB0_188@GOTOFF
++	.long	.LBB0_268@GOTOFF
++	.long	.LBB0_4@GOTOFF
++	.long	.LBB0_8@GOTOFF
++	.long	.LBB0_81@GOTOFF
++	.long	.LBB0_14@GOTOFF
++	.long	.LBB0_87@GOTOFF
++	.long	.LBB0_91@GOTOFF
++	.long	.LBB0_95@GOTOFF
++	.long	.LBB0_24@GOTOFF
++	.long	.LBB0_101@GOTOFF
++	.long	.LBB0_105@GOTOFF
++	.long	.LBB0_109@GOTOFF
++	.long	.LBB0_113@GOTOFF
++	.long	.LBB0_117@GOTOFF
++	.long	.LBB0_121@GOTOFF
++	.long	.LBB0_125@GOTOFF
++	.long	.LBB0_42@GOTOFF
++	.long	.LBB0_131@GOTOFF
++	.long	.LBB0_135@GOTOFF
++	.long	.LBB0_139@GOTOFF
++	.long	.LBB0_143@GOTOFF
++	.long	.LBB0_147@GOTOFF
++	.long	.LBB0_151@GOTOFF
++	.long	.LBB0_155@GOTOFF
++	.long	.LBB0_159@GOTOFF
++	.long	.LBB0_163@GOTOFF
++	.long	.LBB0_167@GOTOFF
++	.long	.LBB0_171@GOTOFF
++	.long	.LBB0_175@GOTOFF
++	.long	.LBB0_179@GOTOFF
++	.long	.LBB0_183@GOTOFF
++	.long	.LBB0_187@GOTOFF
++	.long	.LBB0_267@GOTOFF
++	.long	.LBB0_190@GOTOFF
++	.long	.LBB0_192@GOTOFF
++	.long	.LBB0_194@GOTOFF
++	.long	.LBB0_196@GOTOFF
++	.long	.LBB0_198@GOTOFF
++	.long	.LBB0_200@GOTOFF
++	.long	.LBB0_202@GOTOFF
++	.long	.LBB0_204@GOTOFF
++	.long	.LBB0_206@GOTOFF
++	.long	.LBB0_208@GOTOFF
++	.long	.LBB0_210@GOTOFF
++	.long	.LBB0_212@GOTOFF
++	.long	.LBB0_214@GOTOFF
++	.long	.LBB0_216@GOTOFF
++	.long	.LBB0_218@GOTOFF
++	.long	.LBB0_220@GOTOFF
++	.long	.LBB0_222@GOTOFF
++	.long	.LBB0_224@GOTOFF
++	.long	.LBB0_226@GOTOFF
++	.long	.LBB0_228@GOTOFF
++	.long	.LBB0_230@GOTOFF
++	.long	.LBB0_232@GOTOFF
++	.long	.LBB0_234@GOTOFF
++	.long	.LBB0_236@GOTOFF
++	.long	.LBB0_238@GOTOFF
++	.long	.LBB0_240@GOTOFF
++	.long	.LBB0_242@GOTOFF
++	.long	.LBB0_244@GOTOFF
++	.long	.LBB0_246@GOTOFF
++	.long	.LBB0_248@GOTOFF
++	.long	.LBB0_250@GOTOFF
++	.long	.LBB0_266@GOTOFF
++	.long	.LBB0_3@GOTOFF
++	.long	.LBB0_7@GOTOFF
++	.long	.LBB0_11@GOTOFF
++	.long	.LBB0_13@GOTOFF
++	.long	.LBB0_17@GOTOFF
++	.long	.LBB0_19@GOTOFF
++	.long	.LBB0_21@GOTOFF
++	.long	.LBB0_23@GOTOFF
++	.long	.LBB0_27@GOTOFF
++	.long	.LBB0_29@GOTOFF
++	.long	.LBB0_31@GOTOFF
++	.long	.LBB0_33@GOTOFF
++	.long	.LBB0_35@GOTOFF
++	.long	.LBB0_37@GOTOFF
++	.long	.LBB0_39@GOTOFF
++	.long	.LBB0_41@GOTOFF
++	.long	.LBB0_45@GOTOFF
++	.long	.LBB0_47@GOTOFF
++	.long	.LBB0_49@GOTOFF
++	.long	.LBB0_51@GOTOFF
++	.long	.LBB0_53@GOTOFF
++	.long	.LBB0_55@GOTOFF
++	.long	.LBB0_57@GOTOFF
++	.long	.LBB0_59@GOTOFF
++	.long	.LBB0_61@GOTOFF
++	.long	.LBB0_63@GOTOFF
++	.long	.LBB0_65@GOTOFF
++	.long	.LBB0_67@GOTOFF
++	.long	.LBB0_69@GOTOFF
++	.long	.LBB0_71@GOTOFF
++	.long	.LBB0_73@GOTOFF
++	.long	.LBB0_265@GOTOFF
++	.long	.LBB0_76@GOTOFF
++	.long	.LBB0_78@GOTOFF
++	.long	.LBB0_80@GOTOFF
++	.long	.LBB0_84@GOTOFF
++	.long	.LBB0_86@GOTOFF
++	.long	.LBB0_90@GOTOFF
++	.long	.LBB0_94@GOTOFF
++	.long	.LBB0_98@GOTOFF
++	.long	.LBB0_100@GOTOFF
++	.long	.LBB0_104@GOTOFF
++	.long	.LBB0_108@GOTOFF
++	.long	.LBB0_112@GOTOFF
++	.long	.LBB0_116@GOTOFF
++	.long	.LBB0_120@GOTOFF
++	.long	.LBB0_124@GOTOFF
++	.long	.LBB0_128@GOTOFF
++	.long	.LBB0_130@GOTOFF
++	.long	.LBB0_134@GOTOFF
++	.long	.LBB0_138@GOTOFF
++	.long	.LBB0_142@GOTOFF
++	.long	.LBB0_146@GOTOFF
++	.long	.LBB0_150@GOTOFF
++	.long	.LBB0_154@GOTOFF
++	.long	.LBB0_158@GOTOFF
++	.long	.LBB0_162@GOTOFF
++	.long	.LBB0_166@GOTOFF
++	.long	.LBB0_170@GOTOFF
++	.long	.LBB0_174@GOTOFF
++	.long	.LBB0_178@GOTOFF
++	.long	.LBB0_182@GOTOFF
++	.long	.LBB0_186@GOTOFF
++	.long	.LBB0_264@GOTOFF
++	.long	.LBB0_75@GOTOFF
++	.long	.LBB0_77@GOTOFF
++	.long	.LBB0_79@GOTOFF
++	.long	.LBB0_83@GOTOFF
++	.long	.LBB0_85@GOTOFF
++	.long	.LBB0_89@GOTOFF
++	.long	.LBB0_93@GOTOFF
++	.long	.LBB0_97@GOTOFF
++	.long	.LBB0_99@GOTOFF
++	.long	.LBB0_103@GOTOFF
++	.long	.LBB0_107@GOTOFF
++	.long	.LBB0_111@GOTOFF
++	.long	.LBB0_115@GOTOFF
++	.long	.LBB0_119@GOTOFF
++	.long	.LBB0_123@GOTOFF
++	.long	.LBB0_127@GOTOFF
++	.long	.LBB0_129@GOTOFF
++	.long	.LBB0_133@GOTOFF
++	.long	.LBB0_137@GOTOFF
++	.long	.LBB0_141@GOTOFF
++	.long	.LBB0_145@GOTOFF
++	.long	.LBB0_149@GOTOFF
++	.long	.LBB0_153@GOTOFF
++	.long	.LBB0_157@GOTOFF
++	.long	.LBB0_161@GOTOFF
++	.long	.LBB0_165@GOTOFF
++	.long	.LBB0_169@GOTOFF
++	.long	.LBB0_173@GOTOFF
++	.long	.LBB0_177@GOTOFF
++	.long	.LBB0_181@GOTOFF
++	.long	.LBB0_185@GOTOFF
++	.long	.LBB0_263@GOTOFF
++	.long	.LBB0_189@GOTOFF
++	.long	.LBB0_191@GOTOFF
++	.long	.LBB0_193@GOTOFF
++	.long	.LBB0_195@GOTOFF
++	.long	.LBB0_197@GOTOFF
++	.long	.LBB0_199@GOTOFF
++	.long	.LBB0_201@GOTOFF
++	.long	.LBB0_203@GOTOFF
++	.long	.LBB0_205@GOTOFF
++	.long	.LBB0_207@GOTOFF
++	.long	.LBB0_209@GOTOFF
++	.long	.LBB0_211@GOTOFF
++	.long	.LBB0_213@GOTOFF
++	.long	.LBB0_215@GOTOFF
++	.long	.LBB0_217@GOTOFF
++	.long	.LBB0_219@GOTOFF
++	.long	.LBB0_221@GOTOFF
++	.long	.LBB0_223@GOTOFF
++	.long	.LBB0_225@GOTOFF
++	.long	.LBB0_227@GOTOFF
++	.long	.LBB0_229@GOTOFF
++	.long	.LBB0_231@GOTOFF
++	.long	.LBB0_233@GOTOFF
++	.long	.LBB0_235@GOTOFF
++	.long	.LBB0_237@GOTOFF
++	.long	.LBB0_239@GOTOFF
++	.long	.LBB0_241@GOTOFF
++	.long	.LBB0_243@GOTOFF
++	.long	.LBB0_245@GOTOFF
++	.long	.LBB0_247@GOTOFF
++	.long	.LBB0_249@GOTOFF
++	.long	.LBB0_262@GOTOFF
++.LJTI0_1:
++	.long	.LBB0_6@GOTOFF
++	.long	.LBB0_10@GOTOFF
++	.long	.LBB0_12@GOTOFF
++	.long	.LBB0_16@GOTOFF
++	.long	.LBB0_18@GOTOFF
++	.long	.LBB0_20@GOTOFF
++	.long	.LBB0_22@GOTOFF
++	.long	.LBB0_26@GOTOFF
++	.long	.LBB0_28@GOTOFF
++	.long	.LBB0_30@GOTOFF
++	.long	.LBB0_32@GOTOFF
++	.long	.LBB0_34@GOTOFF
++	.long	.LBB0_36@GOTOFF
++	.long	.LBB0_38@GOTOFF
++	.long	.LBB0_40@GOTOFF
++	.long	.LBB0_44@GOTOFF
++	.long	.LBB0_46@GOTOFF
++	.long	.LBB0_48@GOTOFF
++	.long	.LBB0_50@GOTOFF
++	.long	.LBB0_52@GOTOFF
++	.long	.LBB0_54@GOTOFF
++	.long	.LBB0_56@GOTOFF
++	.long	.LBB0_58@GOTOFF
++	.long	.LBB0_60@GOTOFF
++	.long	.LBB0_62@GOTOFF
++	.long	.LBB0_64@GOTOFF
++	.long	.LBB0_66@GOTOFF
++	.long	.LBB0_68@GOTOFF
++	.long	.LBB0_70@GOTOFF
++	.long	.LBB0_72@GOTOFF
++	.long	.LBB0_74@GOTOFF
++	.long	.LBB0_269@GOTOFF
++	.long	.LBB0_5@GOTOFF
++	.long	.LBB0_9@GOTOFF
++	.long	.LBB0_82@GOTOFF
++	.long	.LBB0_15@GOTOFF
++	.long	.LBB0_88@GOTOFF
++	.long	.LBB0_92@GOTOFF
++	.long	.LBB0_96@GOTOFF
++	.long	.LBB0_25@GOTOFF
++	.long	.LBB0_102@GOTOFF
++	.long	.LBB0_106@GOTOFF
++	.long	.LBB0_110@GOTOFF
++	.long	.LBB0_114@GOTOFF
++	.long	.LBB0_118@GOTOFF
++	.long	.LBB0_122@GOTOFF
++	.long	.LBB0_126@GOTOFF
++	.long	.LBB0_43@GOTOFF
++	.long	.LBB0_132@GOTOFF
++	.long	.LBB0_136@GOTOFF
++	.long	.LBB0_140@GOTOFF
++	.long	.LBB0_144@GOTOFF
++	.long	.LBB0_148@GOTOFF
++	.long	.LBB0_152@GOTOFF
++	.long	.LBB0_156@GOTOFF
++	.long	.LBB0_160@GOTOFF
++	.long	.LBB0_164@GOTOFF
++	.long	.LBB0_168@GOTOFF
++	.long	.LBB0_172@GOTOFF
++	.long	.LBB0_176@GOTOFF
++	.long	.LBB0_180@GOTOFF
++	.long	.LBB0_184@GOTOFF
++	.long	.LBB0_188@GOTOFF
++	.long	.LBB0_268@GOTOFF
++	.long	.LBB0_4@GOTOFF
++	.long	.LBB0_8@GOTOFF
++	.long	.LBB0_81@GOTOFF
++	.long	.LBB0_14@GOTOFF
++	.long	.LBB0_87@GOTOFF
++	.long	.LBB0_91@GOTOFF
++	.long	.LBB0_95@GOTOFF
++	.long	.LBB0_24@GOTOFF
++	.long	.LBB0_101@GOTOFF
++	.long	.LBB0_105@GOTOFF
++	.long	.LBB0_109@GOTOFF
++	.long	.LBB0_113@GOTOFF
++	.long	.LBB0_117@GOTOFF
++	.long	.LBB0_121@GOTOFF
++	.long	.LBB0_125@GOTOFF
++	.long	.LBB0_42@GOTOFF
++	.long	.LBB0_131@GOTOFF
++	.long	.LBB0_135@GOTOFF
++	.long	.LBB0_139@GOTOFF
++	.long	.LBB0_143@GOTOFF
++	.long	.LBB0_147@GOTOFF
++	.long	.LBB0_151@GOTOFF
++	.long	.LBB0_155@GOTOFF
++	.long	.LBB0_159@GOTOFF
++	.long	.LBB0_163@GOTOFF
++	.long	.LBB0_167@GOTOFF
++	.long	.LBB0_171@GOTOFF
++	.long	.LBB0_175@GOTOFF
++	.long	.LBB0_179@GOTOFF
++	.long	.LBB0_183@GOTOFF
++	.long	.LBB0_187@GOTOFF
++	.long	.LBB0_267@GOTOFF
++	.long	.LBB0_190@GOTOFF
++	.long	.LBB0_192@GOTOFF
++	.long	.LBB0_194@GOTOFF
++	.long	.LBB0_196@GOTOFF
++	.long	.LBB0_198@GOTOFF
++	.long	.LBB0_200@GOTOFF
++	.long	.LBB0_202@GOTOFF
++	.long	.LBB0_204@GOTOFF
++	.long	.LBB0_206@GOTOFF
++	.long	.LBB0_208@GOTOFF
++	.long	.LBB0_210@GOTOFF
++	.long	.LBB0_212@GOTOFF
++	.long	.LBB0_214@GOTOFF
++	.long	.LBB0_216@GOTOFF
++	.long	.LBB0_218@GOTOFF
++	.long	.LBB0_220@GOTOFF
++	.long	.LBB0_222@GOTOFF
++	.long	.LBB0_224@GOTOFF
++	.long	.LBB0_226@GOTOFF
++	.long	.LBB0_228@GOTOFF
++	.long	.LBB0_230@GOTOFF
++	.long	.LBB0_232@GOTOFF
++	.long	.LBB0_234@GOTOFF
++	.long	.LBB0_236@GOTOFF
++	.long	.LBB0_238@GOTOFF
++	.long	.LBB0_240@GOTOFF
++	.long	.LBB0_242@GOTOFF
++	.long	.LBB0_244@GOTOFF
++	.long	.LBB0_246@GOTOFF
++	.long	.LBB0_248@GOTOFF
++	.long	.LBB0_250@GOTOFF
++	.long	.LBB0_266@GOTOFF
++	.long	.LBB0_3@GOTOFF
++	.long	.LBB0_7@GOTOFF
++	.long	.LBB0_11@GOTOFF
++	.long	.LBB0_13@GOTOFF
++	.long	.LBB0_17@GOTOFF
++	.long	.LBB0_19@GOTOFF
++	.long	.LBB0_21@GOTOFF
++	.long	.LBB0_23@GOTOFF
++	.long	.LBB0_27@GOTOFF
++	.long	.LBB0_29@GOTOFF
++	.long	.LBB0_31@GOTOFF
++	.long	.LBB0_33@GOTOFF
++	.long	.LBB0_35@GOTOFF
++	.long	.LBB0_37@GOTOFF
++	.long	.LBB0_39@GOTOFF
++	.long	.LBB0_41@GOTOFF
++	.long	.LBB0_45@GOTOFF
++	.long	.LBB0_47@GOTOFF
++	.long	.LBB0_49@GOTOFF
++	.long	.LBB0_51@GOTOFF
++	.long	.LBB0_53@GOTOFF
++	.long	.LBB0_55@GOTOFF
++	.long	.LBB0_57@GOTOFF
++	.long	.LBB0_59@GOTOFF
++	.long	.LBB0_61@GOTOFF
++	.long	.LBB0_63@GOTOFF
++	.long	.LBB0_65@GOTOFF
++	.long	.LBB0_67@GOTOFF
++	.long	.LBB0_69@GOTOFF
++	.long	.LBB0_71@GOTOFF
++	.long	.LBB0_73@GOTOFF
++	.long	.LBB0_265@GOTOFF
++	.long	.LBB0_76@GOTOFF
++	.long	.LBB0_78@GOTOFF
++	.long	.LBB0_80@GOTOFF
++	.long	.LBB0_84@GOTOFF
++	.long	.LBB0_86@GOTOFF
++	.long	.LBB0_90@GOTOFF
++	.long	.LBB0_94@GOTOFF
++	.long	.LBB0_98@GOTOFF
++	.long	.LBB0_100@GOTOFF
++	.long	.LBB0_104@GOTOFF
++	.long	.LBB0_108@GOTOFF
++	.long	.LBB0_112@GOTOFF
++	.long	.LBB0_116@GOTOFF
++	.long	.LBB0_120@GOTOFF
++	.long	.LBB0_124@GOTOFF
++	.long	.LBB0_128@GOTOFF
++	.long	.LBB0_130@GOTOFF
++	.long	.LBB0_134@GOTOFF
++	.long	.LBB0_138@GOTOFF
++	.long	.LBB0_142@GOTOFF
++	.long	.LBB0_146@GOTOFF
++	.long	.LBB0_150@GOTOFF
++	.long	.LBB0_154@GOTOFF
++	.long	.LBB0_158@GOTOFF
++	.long	.LBB0_162@GOTOFF
++	.long	.LBB0_166@GOTOFF
++	.long	.LBB0_170@GOTOFF
++	.long	.LBB0_174@GOTOFF
++	.long	.LBB0_178@GOTOFF
++	.long	.LBB0_182@GOTOFF
++	.long	.LBB0_186@GOTOFF
++	.long	.LBB0_264@GOTOFF
++	.long	.LBB0_75@GOTOFF
++	.long	.LBB0_77@GOTOFF
++	.long	.LBB0_79@GOTOFF
++	.long	.LBB0_83@GOTOFF
++	.long	.LBB0_85@GOTOFF
++	.long	.LBB0_89@GOTOFF
++	.long	.LBB0_93@GOTOFF
++	.long	.LBB0_97@GOTOFF
++	.long	.LBB0_99@GOTOFF
++	.long	.LBB0_103@GOTOFF
++	.long	.LBB0_107@GOTOFF
++	.long	.LBB0_111@GOTOFF
++	.long	.LBB0_115@GOTOFF
++	.long	.LBB0_119@GOTOFF
++	.long	.LBB0_123@GOTOFF
++	.long	.LBB0_127@GOTOFF
++	.long	.LBB0_129@GOTOFF
++	.long	.LBB0_133@GOTOFF
++	.long	.LBB0_137@GOTOFF
++	.long	.LBB0_141@GOTOFF
++	.long	.LBB0_145@GOTOFF
++	.long	.LBB0_149@GOTOFF
++	.long	.LBB0_153@GOTOFF
++	.long	.LBB0_157@GOTOFF
++	.long	.LBB0_161@GOTOFF
++	.long	.LBB0_165@GOTOFF
++	.long	.LBB0_169@GOTOFF
++	.long	.LBB0_173@GOTOFF
++	.long	.LBB0_177@GOTOFF
++	.long	.LBB0_181@GOTOFF
++	.long	.LBB0_185@GOTOFF
++	.long	.LBB0_263@GOTOFF
++	.long	.LBB0_189@GOTOFF
++	.long	.LBB0_191@GOTOFF
++	.long	.LBB0_193@GOTOFF
++	.long	.LBB0_195@GOTOFF
++	.long	.LBB0_197@GOTOFF
++	.long	.LBB0_199@GOTOFF
++	.long	.LBB0_201@GOTOFF
++	.long	.LBB0_203@GOTOFF
++	.long	.LBB0_205@GOTOFF
++	.long	.LBB0_207@GOTOFF
++	.long	.LBB0_209@GOTOFF
++	.long	.LBB0_211@GOTOFF
++	.long	.LBB0_213@GOTOFF
++	.long	.LBB0_215@GOTOFF
++	.long	.LBB0_217@GOTOFF
++	.long	.LBB0_219@GOTOFF
++	.long	.LBB0_221@GOTOFF
++	.long	.LBB0_223@GOTOFF
++	.long	.LBB0_225@GOTOFF
++	.long	.LBB0_227@GOTOFF
++	.long	.LBB0_229@GOTOFF
++	.long	.LBB0_231@GOTOFF
++	.long	.LBB0_233@GOTOFF
++	.long	.LBB0_235@GOTOFF
++	.long	.LBB0_237@GOTOFF
++	.long	.LBB0_239@GOTOFF
++	.long	.LBB0_241@GOTOFF
++	.long	.LBB0_243@GOTOFF
++	.long	.LBB0_245@GOTOFF
++	.long	.LBB0_247@GOTOFF
++	.long	.LBB0_249@GOTOFF
++	.long	.LBB0_262@GOTOFF
++                                        # -- End function
+diff --git a/libc/arch-x86_64/dynamic_function_dispatch.cpp b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+new file mode 100644
+index 000000000..982996861
+--- /dev/null
++++ b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+@@ -0,0 +1,73 @@
++/*
++ * Copyright (C) 2008 The Android Open Source Project
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include <stddef.h>
++
++#include <private/bionic_ifuncs.h>
++
++extern "C" {
++
++typedef int memcmp_func(const void* __lhs, const void* __rhs, size_t __n);
++DEFINE_IFUNC_FOR(memcmp) {
++    __builtin_cpu_init();
++    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memcmp_func, memcmp_avx2);
++    RETURN_FUNC(memcmp_func, memcmp_generic);
++}
++
++typedef void* memmove_func(void* __dst, const void* __src, size_t __n);
++DEFINE_IFUNC_FOR(memmove) {
++    RETURN_FUNC(memmove_func, memmove_generic);
++}
++
++typedef void* memcpy_func(void* __dst, const void* __src, size_t __n);
++DEFINE_IFUNC_FOR(memcpy) {
++	return memmove_resolver();
++}
++
++typedef void* memchr_func(const void* __s, int __ch, size_t __n);
++DEFINE_IFUNC_FOR(memchr) {
++    __builtin_cpu_init();
++    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memchr_func, memchr_avx2);
++    RETURN_FUNC(memchr_func, memchr_openbsd);
++}
++
++typedef void* memrchr_func(const void* __s, int __ch, size_t __n);
++DEFINE_IFUNC_FOR(memrchr) {
++    __builtin_cpu_init();
++    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memrchr_func, memrchr_avx2);
++    RETURN_FUNC(memrchr_func, memrchr_openbsd);
++}
++
++typedef int wmemset_func(const wchar_t* __lhs, const wchar_t* __rhs, size_t __n);
++DEFINE_IFUNC_FOR(wmemset) {
++    __builtin_cpu_init();
++    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(wmemset_func, wmemset_avx2);
++    RETURN_FUNC(wmemset_func, wmemset_freebsd);
++}
++
++}  // extern "C"
+diff --git a/libc/arch-x86_64/generic/string/memchr.c b/libc/arch-x86_64/generic/string/memchr.c
+new file mode 100644
+index 000000000..f530eaca8
+--- /dev/null
++++ b/libc/arch-x86_64/generic/string/memchr.c
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2019 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++*/
++
++#define memchr memchr_openbsd
++
++#include <upstream-openbsd/lib/libc/string/memchr.c>
+diff --git a/libc/arch-x86_64/generic/string/memrchr.c b/libc/arch-x86_64/generic/string/memrchr.c
+new file mode 100644
+index 000000000..44262f2d1
+--- /dev/null
++++ b/libc/arch-x86_64/generic/string/memrchr.c
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2019 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++*/
++
++#define memrchr memrchr_openbsd
++
++#include <upstream-openbsd/lib/libc/string/memrchr.c>
+diff --git a/libc/arch-x86_64/generic/string/wmemset.c b/libc/arch-x86_64/generic/string/wmemset.c
+new file mode 100644
+index 000000000..35d489f44
+--- /dev/null
++++ b/libc/arch-x86_64/generic/string/wmemset.c
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2019 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++*/
++
++#define wmemset wmemset_freebsd
++
++#include <upstream-freebsd/lib/libc/string/wmemset.c>
+diff --git a/libc/arch-x86_64/string/cache.h b/libc/arch-x86_64/include/cache.h
+similarity index 100%
+rename from libc/arch-x86_64/string/cache.h
+rename to libc/arch-x86_64/include/cache.h
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memchr-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memchr-kbl.S
+new file mode 100644
+index 000000000..da667c9b3
+--- /dev/null
++++ b/libc/arch-x86_64/kabylake/string/avx2-memchr-kbl.S
+@@ -0,0 +1,371 @@
++#ifndef L
++# define L(label)	.L##label
++#endif
++
++#ifndef cfi_startproc
++# define cfi_startproc	.cfi_startproc
++#endif
++
++#ifndef cfi_endproc
++# define cfi_endproc	.cfi_endproc
++#endif
++
++#ifndef cfi_rel_offset
++# define cfi_rel_offset(reg, off)	.cfi_rel_offset reg, off
++#endif
++
++#ifndef cfi_restore
++# define cfi_restore(reg)	.cfi_restore reg
++#endif
++
++#ifndef cfi_adjust_cfa_offset
++# define cfi_adjust_cfa_offset(off)	.cfi_adjust_cfa_offset off
++#endif
++
++#ifndef ENTRY
++# define ENTRY(name)		\
++	.type name,  @function;		\
++	.globl name;		\
++	.p2align 4;		\
++name:		\
++	cfi_startproc
++#endif
++
++#ifndef END
++# define END(name)		\
++	cfi_endproc;		\
++	.size name, .-name
++#endif
++
++#define CFI_PUSH(REG)		\
++	cfi_adjust_cfa_offset (4);		\
++	cfi_rel_offset (REG, 0)
++
++#define CFI_POP(REG)		\
++	cfi_adjust_cfa_offset (-4);		\
++	cfi_restore (REG)
++
++#define PUSH(REG)	push REG;
++#define POP(REG)	pop REG;
++
++#define ENTRANCE	PUSH (%rbx);
++#define RETURN_END	POP (%rbx); ret
++#define RETURN		RETURN_END;
++
++# ifndef MEMCHR
++#  define MEMCHR          memchr_avx2
++# endif
++
++# ifdef USE_AS_WMEMCHR
++#  define VPCMPEQ         vpcmpeqd
++# else
++#  define VPCMPEQ         vpcmpeqb
++# endif
++
++# ifndef VZEROUPPER
++#  define VZEROUPPER  vzeroupper
++# endif
++
++# define VEC_SIZE 32
++
++                .section .text.avx,"ax",@progbits
++ENTRY (MEMCHR)
++# ifndef USE_AS_RAWMEMCHR
++                /* Check for zero length.  */
++                testq      %rdx, %rdx
++                jz             L(null)
++# endif
++                movl      %edi, %ecx
++                /* Broadcast CHAR to YMM0.  */
++                vmovd  %esi, %xmm0
++# ifdef USE_AS_WMEMCHR
++                shl          $2, %rdx
++                vpbroadcastd %xmm0, %ymm0
++# else
++                vpbroadcastb %xmm0, %ymm0
++# endif
++                /* Check if we may cross page boundary with one vector load.  */
++                andl       $(2 * VEC_SIZE - 1), %ecx
++                cmpl      $VEC_SIZE, %ecx
++                ja             L(cros_page_boundary)
++
++                /* Check the first VEC_SIZE bytes.  */
++                VPCMPEQ (%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++
++# ifndef USE_AS_RAWMEMCHR
++                jnz          L(first_vec_x0_check)
++                /* Adjust length and check the end of data.  */
++                subq      $VEC_SIZE, %rdx
++                jbe          L(zero)
++# else
++                jnz          L(first_vec_x0)
++# endif
++
++                /* Align data for aligned loads in the loop.  */
++                addq      $VEC_SIZE, %rdi
++                andl       $(VEC_SIZE - 1), %ecx
++                andq      $-VEC_SIZE, %rdi
++
++# ifndef USE_AS_RAWMEMCHR
++                /* Adjust length.  */
++                addq      %rcx, %rdx
++
++                subq      $(VEC_SIZE * 4), %rdx
++                jbe          L(last_4x_vec_or_less)
++# endif
++                jmp         L(more_4x_vec)
++
++                .p2align 4
++L(cros_page_boundary):
++                andl       $(VEC_SIZE - 1), %ecx
++                andq      $-VEC_SIZE, %rdi
++                VPCMPEQ (%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                /* Remove the leading bytes.  */
++                sarl         %cl, %eax
++                testl       %eax, %eax
++                jz             L(aligned_more)
++                tzcntl     %eax, %eax
++# ifndef USE_AS_RAWMEMCHR
++                /* Check the end of data.  */
++                cmpq     %rax, %rdx
++                jbe          L(zero)
++# endif
++                addq      %rdi, %rax
++                addq      %rcx, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(aligned_more):
++# ifndef USE_AS_RAWMEMCHR
++        /* Calculate "rdx + rcx - VEC_SIZE" with "rdx - (VEC_SIZE - rcx)"
++                  instead of "(rdx + rcx) - VEC_SIZE" to void possible addition
++                   overflow.  */
++                negq      %rcx
++                addq      $VEC_SIZE, %rcx
++
++                /* Check the end of data.  */
++                subq      %rcx, %rdx
++                jbe          L(zero)
++# endif
++
++                addq      $VEC_SIZE, %rdi
++
++# ifndef USE_AS_RAWMEMCHR
++                subq      $(VEC_SIZE * 4), %rdx
++                jbe          L(last_4x_vec_or_less)
++# endif
++
++L(more_4x_vec):
++                /* Check the first 4 * VEC_SIZE.  Only one VEC_SIZE at a time
++                   since data is only aligned to VEC_SIZE.  */
++                VPCMPEQ (%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x0)
++
++                VPCMPEQ VEC_SIZE(%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x1)
++
++                VPCMPEQ (VEC_SIZE * 2)(%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x2)
++
++                VPCMPEQ (VEC_SIZE * 3)(%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x3)
++
++                addq      $(VEC_SIZE * 4), %rdi
++
++# ifndef USE_AS_RAWMEMCHR
++                subq      $(VEC_SIZE * 4), %rdx
++                jbe          L(last_4x_vec_or_less)
++# endif
++
++                /* Align data to 4 * VEC_SIZE.  */
++                movq     %rdi, %rcx
++                andl       $(4 * VEC_SIZE - 1), %ecx
++                andq      $-(4 * VEC_SIZE), %rdi
++
++# ifndef USE_AS_RAWMEMCHR
++                /* Adjust length.  */
++                addq      %rcx, %rdx
++# endif
++
++                .p2align 4
++L(loop_4x_vec):
++                /* Compare 4 * VEC at a time forward.  */
++                VPCMPEQ (%rdi), %ymm0, %ymm1
++                VPCMPEQ VEC_SIZE(%rdi), %ymm0, %ymm2
++                VPCMPEQ (VEC_SIZE * 2)(%rdi), %ymm0, %ymm3
++                VPCMPEQ (VEC_SIZE * 3)(%rdi), %ymm0, %ymm4
++
++                vpor       %ymm1, %ymm2, %ymm5
++                vpor       %ymm3, %ymm4, %ymm6
++                vpor       %ymm5, %ymm6, %ymm5
++
++                vpmovmskb %ymm5, %eax
++                testl       %eax, %eax
++                jnz          L(4x_vec_end)
++
++                addq      $(VEC_SIZE * 4), %rdi
++
++# ifdef USE_AS_RAWMEMCHR
++                jmp         L(loop_4x_vec)
++# else
++                subq      $(VEC_SIZE * 4), %rdx
++                ja             L(loop_4x_vec)
++
++L(last_4x_vec_or_less):
++                /* Less than 4 * VEC and aligned to VEC_SIZE.  */
++                addl       $(VEC_SIZE * 2), %edx
++                jle           L(last_2x_vec)
++
++                VPCMPEQ (%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x0)
++
++                VPCMPEQ VEC_SIZE(%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x1)
++
++                VPCMPEQ (VEC_SIZE * 2)(%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++
++                jnz          L(first_vec_x2_check)
++                subl       $VEC_SIZE, %edx
++                jle           L(zero)
++
++                VPCMPEQ (VEC_SIZE * 3)(%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++
++                jnz          L(first_vec_x3_check)
++                xorl        %eax, %eax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(last_2x_vec):
++                addl       $(VEC_SIZE * 2), %edx
++                VPCMPEQ (%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++
++                jnz          L(first_vec_x0_check)
++                subl       $VEC_SIZE, %edx
++                jle           L(zero)
++
++                VPCMPEQ VEC_SIZE(%rdi), %ymm0, %ymm1
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x1_check)
++                xorl        %eax, %eax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(first_vec_x0_check):
++                tzcntl     %eax, %eax
++                /* Check the end of data.  */
++                cmpq     %rax, %rdx
++                jbe          L(zero)
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(first_vec_x1_check):
++                tzcntl     %eax, %eax
++                /* Check the end of data.  */
++                cmpq     %rax, %rdx
++                jbe          L(zero)
++                addq      $VEC_SIZE, %rax
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(first_vec_x2_check):
++                tzcntl     %eax, %eax
++                /* Check the end of data.  */
++                cmpq     %rax, %rdx
++                jbe          L(zero)
++                addq      $(VEC_SIZE * 2), %rax
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(first_vec_x3_check):
++                tzcntl     %eax, %eax
++                /* Check the end of data.  */
++                cmpq     %rax, %rdx
++                jbe          L(zero)
++                addq      $(VEC_SIZE * 3), %rax
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(zero):
++                VZEROUPPER
++L(null):
++                xorl        %eax, %eax
++                ret
++# endif
++
++                .p2align 4
++L(first_vec_x0):
++                tzcntl     %eax, %eax
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(first_vec_x1):
++                tzcntl     %eax, %eax
++                addq      $VEC_SIZE, %rax
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(first_vec_x2):
++                tzcntl     %eax, %eax
++                addq      $(VEC_SIZE * 2), %rax
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++                .p2align 4
++L(4x_vec_end):
++                vpmovmskb %ymm1, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x0)
++                vpmovmskb %ymm2, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x1)
++                vpmovmskb %ymm3, %eax
++                testl       %eax, %eax
++                jnz          L(first_vec_x2)
++                vpmovmskb %ymm4, %eax
++                testl       %eax, %eax
++L(first_vec_x3):
++                tzcntl     %eax, %eax
++                addq      $(VEC_SIZE * 3), %rax
++                addq      %rdi, %rax
++                VZEROUPPER
++                ret
++
++END (MEMCHR)
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memcmp-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memcmp-kbl.S
+new file mode 100644
+index 000000000..e9778ca5a
+--- /dev/null
++++ b/libc/arch-x86_64/kabylake/string/avx2-memcmp-kbl.S
+@@ -0,0 +1,428 @@
++/* Copyright (C) 2017-2019 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++/* memcmp/wmemcmp is implemented as:
++   1. For size from 2 to 7 bytes, load as big endian with movbe and bswap
++      to avoid branches.
++   2. Use overlapping compare to avoid branch.
++   3. Use vector compare when size >= 4 bytes for memcmp or size >= 8
++      bytes for wmemcmp.
++   4. If size is 8 * VEC_SIZE or less, unroll the loop.
++   5. Compare 4 * VEC_SIZE at a time with the aligned first memory
++      area.
++   6. Use 2 vector compares when size is 2 * VEC_SIZE or less.
++   7. Use 4 vector compares when size is 4 * VEC_SIZE or less.
++   8. Use 8 vector compares when size is 8 * VEC_SIZE or less.  */
++
++
++#ifndef MEMCMP
++# define MEMCMP		memcmp_avx2
++#endif
++
++#ifndef L
++# define L(label)	.L##label
++#endif
++
++#ifndef ALIGN
++# define ALIGN(n)	.p2align n
++#endif
++
++#ifndef cfi_startproc
++# define cfi_startproc			.cfi_startproc
++#endif
++
++#ifndef cfi_endproc
++# define cfi_endproc			.cfi_endproc
++#endif
++
++#ifndef ENTRY
++# define ENTRY(name)			\
++	.type name,  @function; 	\
++	.globl name;			\
++	.p2align 4;			\
++name:					\
++	cfi_startproc
++#endif
++
++#ifndef END
++# define END(name)			\
++	cfi_endproc;			\
++	.size name, .-name
++#endif
++
++#ifndef ALIGN
++# define ALIGN(n)	.p2align n
++#endif
++
++# ifdef USE_AS_WMEMCMP
++#  define VPCMPEQ        vpcmpeqd
++# else
++#  define VPCMPEQ        vpcmpeqb
++# endif
++# ifndef VZEROUPPER
++#  define VZEROUPPER        vzeroupper
++# endif
++# define VEC_SIZE 32
++# define VEC_MASK ((1 << VEC_SIZE) - 1)
++        .section .text.avx,"ax",@progbits
++ENTRY (MEMCMP)
++# ifdef USE_AS_WMEMCMP
++        shl        $2, %RDX_LP
++# elif defined __ILP32__
++        /* Clear the upper 32 bits.  */
++        movl        %edx, %edx
++# endif
++        cmp        $VEC_SIZE, %rdx
++        jb        L(less_vec)
++        /* From VEC to 2 * VEC.  No branch when size == VEC_SIZE.  */
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++        cmpq        $(VEC_SIZE * 2), %rdx
++        jbe        L(last_vec)
++        VPCMPEQ        %ymm0, %ymm0, %ymm0
++        /* More than 2 * VEC.  */
++        cmpq        $(VEC_SIZE * 8), %rdx
++        ja        L(more_8x_vec)
++        cmpq        $(VEC_SIZE * 4), %rdx
++        jb        L(last_4x_vec)
++        /* From 4 * VEC to 8 * VEC, inclusively. */
++        vmovdqu        (%rsi), %ymm1
++        VPCMPEQ (%rdi), %ymm1, %ymm1
++        vmovdqu        VEC_SIZE(%rsi), %ymm2
++        VPCMPEQ VEC_SIZE(%rdi), %ymm2, %ymm2
++        vmovdqu        (VEC_SIZE * 2)(%rsi), %ymm3
++        VPCMPEQ (VEC_SIZE * 2)(%rdi), %ymm3, %ymm3
++        vmovdqu        (VEC_SIZE * 3)(%rsi), %ymm4
++        VPCMPEQ (VEC_SIZE * 3)(%rdi), %ymm4, %ymm4
++        vpand        %ymm1, %ymm2, %ymm5
++        vpand        %ymm3, %ymm4, %ymm6
++        vpand        %ymm5, %ymm6, %ymm5
++        vptest        %ymm0, %ymm5
++        jnc        L(4x_vec_end)
++        leaq        -(4 * VEC_SIZE)(%rdi, %rdx), %rdi
++        leaq        -(4 * VEC_SIZE)(%rsi, %rdx), %rsi
++        vmovdqu        (%rsi), %ymm1
++        VPCMPEQ (%rdi), %ymm1, %ymm1
++        vmovdqu        VEC_SIZE(%rsi), %ymm2
++        VPCMPEQ VEC_SIZE(%rdi), %ymm2, %ymm2
++        vpand        %ymm2, %ymm1, %ymm5
++        vmovdqu        (VEC_SIZE * 2)(%rsi), %ymm3
++        VPCMPEQ (VEC_SIZE * 2)(%rdi), %ymm3, %ymm3
++        vpand        %ymm3, %ymm5, %ymm5
++        vmovdqu        (VEC_SIZE * 3)(%rsi), %ymm4
++        VPCMPEQ (VEC_SIZE * 3)(%rdi), %ymm4, %ymm4
++        vpand        %ymm4, %ymm5, %ymm5
++        vptest        %ymm0, %ymm5
++        jnc        L(4x_vec_end)
++        xorl        %eax, %eax
++        VZEROUPPER
++        ret
++        .p2align 4
++L(last_2x_vec):
++        /* From VEC to 2 * VEC.  No branch when size == VEC_SIZE.  */
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++L(last_vec):
++        /* Use overlapping loads to avoid branches.  */
++        leaq        -VEC_SIZE(%rdi, %rdx), %rdi
++        leaq        -VEC_SIZE(%rsi, %rdx), %rsi
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++        VZEROUPPER
++        ret
++        .p2align 4
++L(first_vec):
++        /* A byte or int32 is different within 16 or 32 bytes.  */
++        tzcntl        %eax, %ecx
++# ifdef USE_AS_WMEMCMP
++        xorl        %eax, %eax
++        movl        (%rdi, %rcx), %edx
++        cmpl        (%rsi, %rcx), %edx
++L(wmemcmp_return):
++        setl        %al
++        negl        %eax
++        orl        $1, %eax
++# else
++        movzbl        (%rdi, %rcx), %eax
++        movzbl        (%rsi, %rcx), %edx
++        sub        %edx, %eax
++# endif
++        VZEROUPPER
++        ret
++# ifdef USE_AS_WMEMCMP
++        .p2align 4
++L(4):
++        xorl        %eax, %eax
++        movl        (%rdi), %edx
++        cmpl        (%rsi), %edx
++        jne        L(wmemcmp_return)
++        ret
++# else
++
++L(between_4_7):
++        /* Load as big endian with overlapping movbe to avoid branches.  */
++        movbe        (%rdi), %eax
++        movbe        (%rsi), %ecx
++        shlq        $32, %rax
++        shlq        $32, %rcx
++        movbe        -4(%rdi, %rdx), %edi
++        movbe        -4(%rsi, %rdx), %esi
++        orq        %rdi, %rax
++        orq        %rsi, %rcx
++        subq        %rcx, %rax
++        je        L(exit)
++        sbbl        %eax, %eax
++        orl        $1, %eax
++        ret
++        .p2align 4
++/*L(8):
++	giving two failures 
++	movl (%rdi), %eax
++	subl (%rsi), %eax
++	je L(between_4_7)
++        retq */
++
++L(exit):
++        ret
++        .p2align 4
++L(between_2_3):
++        /* Load as big endian to avoid branches.  */
++        movzwl        (%rdi), %eax
++        movzwl        (%rsi), %ecx
++        shll        $8, %eax
++        shll        $8, %ecx
++        bswap        %eax
++        bswap        %ecx
++        movb        -1(%rdi, %rdx), %al
++        movb        -1(%rsi, %rdx), %cl
++        /* Subtraction is okay because the upper 8 bits are zero.  */
++        subl        %ecx, %eax
++        ret
++        .p2align 4
++L(1):
++        movzbl        (%rdi), %eax
++        movzbl        (%rsi), %ecx
++        sub        %ecx, %eax
++        ret
++# endif
++        .p2align 4
++L(zero):
++        xorl        %eax, %eax
++        ret
++        .p2align 4
++L(less_vec):
++# ifdef USE_AS_WMEMCMP
++        /* It can only be 0, 4, 8, 12, 16, 20, 24, 28 bytes.  */
++        cmpb        $4, %dl
++        je        L(4)
++        jb        L(zero)
++# else
++/*	cmpb $8, %dl
++        jne L(tmp)
++        movl (%rdi), %eax
++        subl (%rsi), %eax
++        jne L(exit)
++L(temp):
++	movl    %edx, %edx
++	//jmp L(tmp) 
++L(tmp):*/ 
++
++        cmpb        $1, %dl
++        je        L(1)
++        jb        L(zero)
++
++        cmpb        $4, %dl
++        jb        L(between_2_3)
++        cmpb       $8, %dl
++        //je        L(8)
++        jb        L(between_4_7)
++# endif
++        cmpb        $16, %dl
++        jae        L(between_16_31)
++        /* It is between 8 and 15 bytes.  */
++        vmovq        (%rdi), %xmm1
++        vmovq        (%rsi), %xmm2
++        VPCMPEQ %xmm1, %xmm2, %xmm2
++        vpmovmskb %xmm2, %eax
++        subl    $0xffff, %eax
++        jnz        L(first_vec)
++        /* Use overlapping loads to avoid branches.  */
++        leaq        -8(%rdi, %rdx), %rdi
++        leaq        -8(%rsi, %rdx), %rsi
++        vmovq        (%rdi), %xmm1
++        vmovq        (%rsi), %xmm2
++        VPCMPEQ %xmm1, %xmm2, %xmm2
++        vpmovmskb %xmm2, %eax
++        subl    $0xffff, %eax
++        jnz        L(first_vec)
++        ret
++        .p2align 4
++L(between_16_31):
++        /* From 16 to 31 bytes.  No branch when size == 16.  */
++        vmovdqu        (%rsi), %xmm2
++        VPCMPEQ (%rdi), %xmm2, %xmm2
++        vpmovmskb %xmm2, %eax
++        subl    $0xffff, %eax
++        jnz        L(first_vec)
++        /* Use overlapping loads to avoid branches.  */
++        leaq        -16(%rdi, %rdx), %rdi
++        leaq        -16(%rsi, %rdx), %rsi
++        vmovdqu        (%rsi), %xmm2
++        VPCMPEQ (%rdi), %xmm2, %xmm2
++        vpmovmskb %xmm2, %eax
++        subl    $0xffff, %eax
++        jnz        L(first_vec)
++        ret
++        .p2align 4
++L(more_8x_vec):
++        /* More than 8 * VEC.  Check the first VEC.  */
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++        /* Align the first memory area for aligned loads in the loop.
++           Compute how much the first memory area is misaligned.  */
++        movq        %rdi, %rcx
++        andl        $(VEC_SIZE - 1), %ecx
++        /* Get the negative of offset for alignment.  */
++        subq        $VEC_SIZE, %rcx
++        /* Adjust the second memory area.  */
++        subq        %rcx, %rsi
++        /* Adjust the first memory area which should be aligned now.  */
++        subq        %rcx, %rdi
++        /* Adjust length.  */
++        addq        %rcx, %rdx
++L(loop_4x_vec):
++        /* Compare 4 * VEC at a time forward.  */
++        vmovdqu        (%rsi), %ymm1
++        VPCMPEQ (%rdi), %ymm1, %ymm1
++        vmovdqu        VEC_SIZE(%rsi), %ymm2
++        VPCMPEQ VEC_SIZE(%rdi), %ymm2, %ymm2
++        vpand        %ymm2, %ymm1, %ymm5
++        vmovdqu        (VEC_SIZE * 2)(%rsi), %ymm3
++        VPCMPEQ (VEC_SIZE * 2)(%rdi), %ymm3, %ymm3
++        vpand        %ymm3, %ymm5, %ymm5
++        vmovdqu        (VEC_SIZE * 3)(%rsi), %ymm4
++        VPCMPEQ (VEC_SIZE * 3)(%rdi), %ymm4, %ymm4
++        vpand        %ymm4, %ymm5, %ymm5
++        vptest        %ymm0, %ymm5
++        jnc        L(4x_vec_end)
++        addq        $(VEC_SIZE * 4), %rdi
++        addq        $(VEC_SIZE * 4), %rsi
++        subq        $(VEC_SIZE * 4), %rdx
++        cmpq        $(VEC_SIZE * 4), %rdx
++        jae        L(loop_4x_vec)
++        /* Less than 4 * VEC.  */
++        cmpq        $VEC_SIZE, %rdx
++        jbe        L(last_vec)
++        cmpq        $(VEC_SIZE * 2), %rdx
++        jbe        L(last_2x_vec)
++L(last_4x_vec):
++        /* From 2 * VEC to 4 * VEC. */
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++        addq        $VEC_SIZE, %rdi
++        addq        $VEC_SIZE, %rsi
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++        /* Use overlapping loads to avoid branches.  */
++        leaq        -(3 * VEC_SIZE)(%rdi, %rdx), %rdi
++        leaq        -(3 * VEC_SIZE)(%rsi, %rdx), %rsi
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++        addq        $VEC_SIZE, %rdi
++        addq        $VEC_SIZE, %rsi
++        vmovdqu        (%rsi), %ymm2
++        VPCMPEQ (%rdi), %ymm2, %ymm2
++        vpmovmskb %ymm2, %eax
++        subl    $VEC_MASK, %eax
++        jnz        L(first_vec)
++        VZEROUPPER
++        ret
++        .p2align 4
++L(4x_vec_end):
++        vpmovmskb %ymm1, %eax
++        subl        $VEC_MASK, %eax
++        jnz        L(first_vec)
++        vpmovmskb %ymm2, %eax
++        subl        $VEC_MASK, %eax
++        jnz        L(first_vec_x1)
++        vpmovmskb %ymm3, %eax
++        subl        $VEC_MASK, %eax
++        jnz        L(first_vec_x2)
++        vpmovmskb %ymm4, %eax
++        subl        $VEC_MASK, %eax
++        tzcntl        %eax, %ecx
++# ifdef USE_AS_WMEMCMP
++        xorl        %eax, %eax
++        movl        (VEC_SIZE * 3)(%rdi, %rcx), %edx
++        cmpl        (VEC_SIZE * 3)(%rsi, %rcx), %edx
++        jmp        L(wmemcmp_return)
++# else
++        movzbl        (VEC_SIZE * 3)(%rdi, %rcx), %eax
++        movzbl        (VEC_SIZE * 3)(%rsi, %rcx), %edx
++        sub        %edx, %eax
++# endif
++        VZEROUPPER
++        ret
++        .p2align 4
++L(first_vec_x1):
++        tzcntl        %eax, %ecx
++# ifdef USE_AS_WMEMCMP
++        xorl        %eax, %eax
++        movl        VEC_SIZE(%rdi, %rcx), %edx
++        cmpl        VEC_SIZE(%rsi, %rcx), %edx
++        jmp        L(wmemcmp_return)
++# else
++        movzbl        VEC_SIZE(%rdi, %rcx), %eax
++        movzbl        VEC_SIZE(%rsi, %rcx), %edx
++        sub        %edx, %eax
++# endif
++        VZEROUPPER
++        ret
++        .p2align 4
++L(first_vec_x2):
++        tzcntl        %eax, %ecx
++# ifdef USE_AS_WMEMCMP
++        xorl        %eax, %eax
++        movl        (VEC_SIZE * 2)(%rdi, %rcx), %edx
++        cmpl        (VEC_SIZE * 2)(%rsi, %rcx), %edx
++        jmp        L(wmemcmp_return)
++# else
++        movzbl        (VEC_SIZE * 2)(%rdi, %rcx), %eax
++        movzbl        (VEC_SIZE * 2)(%rsi, %rcx), %edx
++        sub        %edx, %eax
++# endif
++        VZEROUPPER
++        ret
++END (MEMCMP)
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memrchr-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memrchr-kbl.S
+new file mode 100644
+index 000000000..a958fb56d
+--- /dev/null
++++ b/libc/arch-x86_64/kabylake/string/avx2-memrchr-kbl.S
+@@ -0,0 +1,408 @@
++/* memrchr optimized with AVX2.
++   Copyright (C) 2017-2019 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef L
++# define L(label)       .L##label
++#endif
++
++#ifndef cfi_startproc
++# define cfi_startproc  .cfi_startproc
++#endif
++
++#ifndef cfi_endproc
++# define cfi_endproc    .cfi_endproc
++#endif
++
++#ifndef cfi_rel_offset
++# define cfi_rel_offset(reg, off)       .cfi_rel_offset reg, off
++#endif
++
++#ifndef cfi_restore
++# define cfi_restore(reg)       .cfi_restore reg
++#endif
++
++#ifndef cfi_adjust_cfa_offset
++# define cfi_adjust_cfa_offset(off)     .cfi_adjust_cfa_offset off
++#endif
++
++#ifndef ENTRY
++# define ENTRY(name)    \
++        .type name,  @function; \
++        .globl name;    \
++        .p2align 4;     \
++name:   \
++        cfi_startproc
++#endif
++
++#ifndef END
++# define END(name)      \
++        cfi_endproc;    \
++        .size name,     .-name
++#endif
++
++#define CFI_PUSH(REG)   \
++        cfi_adjust_cfa_offset (4);      \
++        cfi_rel_offset (REG, 0)
++
++#define CFI_POP(REG)    \
++        cfi_adjust_cfa_offset (-4);     \
++        cfi_restore (REG)
++
++#define PUSH(REG) pushl REG; CFI_PUSH (REG)
++#define POP(REG) popl REG; CFI_POP (REG)
++
++# ifndef MEMRCHR
++#  define MEMRCHR          memrchr_avx2
++# endif
++
++#ifndef VZEROUPPER
++#  define VZEROUPPER	vzeroupper
++# endif
++
++# define VEC_SIZE 32
++
++	.section .text.avx,"ax",@progbits
++ENTRY (MEMRCHR)
++	/* Broadcast CHAR to YMM0.  */
++	vmovd	%esi, %xmm0
++	vpbroadcastb %xmm0, %ymm0
++
++	sub	$VEC_SIZE, %rdx
++	jbe	L(last_vec_or_less)
++
++	add	%rdx, %rdi
++
++	/* Check the last VEC_SIZE bytes.  */
++	vpcmpeqb (%rdi), %ymm0, %ymm1
++	vpmovmskb %ymm1, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x0)
++
++	subq	$(VEC_SIZE * 4), %rdi
++	movl	%edi, %ecx
++	andl	$(VEC_SIZE - 1), %ecx
++	jz	L(aligned_more)
++
++	/* Align data for aligned loads in the loop.  */
++	addq	$VEC_SIZE, %rdi
++	addq	$VEC_SIZE, %rdx
++	andq	$-VEC_SIZE, %rdi
++	subq	%rcx, %rdx
++
++	.p2align 4
++L(aligned_more):
++	subq	$(VEC_SIZE * 4), %rdx
++	jbe	L(last_4x_vec_or_less)
++
++	/* Check the last 4 * VEC_SIZE.  Only one VEC_SIZE at a time
++	   since data is only aligned to VEC_SIZE.  */
++	vpcmpeqb (VEC_SIZE * 3)(%rdi), %ymm0, %ymm1
++	vpmovmskb %ymm1, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x3)
++
++	vpcmpeqb (VEC_SIZE * 2)(%rdi), %ymm0, %ymm2
++	vpmovmskb %ymm2, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x2)
++
++	vpcmpeqb VEC_SIZE(%rdi), %ymm0, %ymm3
++	vpmovmskb %ymm3, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x1)
++
++	vpcmpeqb (%rdi), %ymm0, %ymm4
++	vpmovmskb %ymm4, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x0)
++
++	/* Align data to 4 * VEC_SIZE for loop with fewer branches.
++	   There are some overlaps with above if data isn't aligned
++	   to 4 * VEC_SIZE.  */
++	movl	%edi, %ecx
++	andl	$(VEC_SIZE * 4 - 1), %ecx
++	jz	L(loop_4x_vec)
++
++	addq	$(VEC_SIZE * 4), %rdi
++	addq	$(VEC_SIZE * 4), %rdx
++	andq	$-(VEC_SIZE * 4), %rdi
++	subq	%rcx, %rdx
++
++	.p2align 4
++L(loop_4x_vec):
++	/* Compare 4 * VEC at a time forward.  */
++	subq	$(VEC_SIZE * 4), %rdi
++	subq	$(VEC_SIZE * 4), %rdx
++	jbe	L(last_4x_vec_or_less)
++
++	vmovdqa	(%rdi), %ymm1
++	vmovdqa	VEC_SIZE(%rdi), %ymm2
++	vmovdqa	(VEC_SIZE * 2)(%rdi), %ymm3
++	vmovdqa	(VEC_SIZE * 3)(%rdi), %ymm4
++
++	vpcmpeqb %ymm1, %ymm0, %ymm1
++	vpcmpeqb %ymm2, %ymm0, %ymm2
++	vpcmpeqb %ymm3, %ymm0, %ymm3
++	vpcmpeqb %ymm4, %ymm0, %ymm4
++
++	vpor	%ymm1, %ymm2, %ymm5
++	vpor	%ymm3, %ymm4, %ymm6
++	vpor	%ymm5, %ymm6, %ymm5
++
++	vpmovmskb %ymm5, %eax
++	testl	%eax, %eax
++	jz	L(loop_4x_vec)
++
++	/* There is a match.  */
++	vpmovmskb %ymm4, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x3)
++
++	vpmovmskb %ymm3, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x2)
++
++	vpmovmskb %ymm2, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x1)
++
++	vpmovmskb %ymm1, %eax
++	bsrl	%eax, %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_4x_vec_or_less):
++	addl	$(VEC_SIZE * 4), %edx
++	cmpl	$(VEC_SIZE * 2), %edx
++	jbe	L(last_2x_vec)
++
++	vpcmpeqb (VEC_SIZE * 3)(%rdi), %ymm0, %ymm1
++	vpmovmskb %ymm1, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x3)
++
++	vpcmpeqb (VEC_SIZE * 2)(%rdi), %ymm0, %ymm2
++	vpmovmskb %ymm2, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x2)
++
++	vpcmpeqb VEC_SIZE(%rdi), %ymm0, %ymm3
++	vpmovmskb %ymm3, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x1_check)
++	cmpl	$(VEC_SIZE * 3), %edx
++	jbe	L(zero)
++
++	vpcmpeqb (%rdi), %ymm0, %ymm4
++	vpmovmskb %ymm4, %eax
++	testl	%eax, %eax
++	jz	L(zero)
++	bsrl	%eax, %eax
++	subq	$(VEC_SIZE * 4), %rdx
++	addq	%rax, %rdx
++	jl	L(zero)
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_2x_vec):
++	vpcmpeqb (VEC_SIZE * 3)(%rdi), %ymm0, %ymm1
++	vpmovmskb %ymm1, %eax
++	testl	%eax, %eax
++	jnz	L(last_vec_x3_check)
++	cmpl	$VEC_SIZE, %edx
++	jbe	L(zero)
++
++	vpcmpeqb (VEC_SIZE * 2)(%rdi), %ymm0, %ymm1
++	vpmovmskb %ymm1, %eax
++	testl	%eax, %eax
++	jz	L(zero)
++	bsrl	%eax, %eax
++	subq	$(VEC_SIZE * 2), %rdx
++	addq	%rax, %rdx
++	jl	L(zero)
++	addl	$(VEC_SIZE * 2), %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_vec_x0):
++	bsrl	%eax, %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_vec_x1):
++	bsrl	%eax, %eax
++	addl	$VEC_SIZE, %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_vec_x2):
++	bsrl	%eax, %eax
++	addl	$(VEC_SIZE * 2), %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_vec_x3):
++	bsrl	%eax, %eax
++	addl	$(VEC_SIZE * 3), %eax
++	addq	%rdi, %rax
++	ret
++
++	.p2align 4
++L(last_vec_x1_check):
++	bsrl	%eax, %eax
++	subq	$(VEC_SIZE * 3), %rdx
++	addq	%rax, %rdx
++	jl	L(zero)
++	addl	$VEC_SIZE, %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_vec_x3_check):
++	bsrl	%eax, %eax
++	subq	$VEC_SIZE, %rdx
++	addq	%rax, %rdx
++	jl	L(zero)
++	addl	$(VEC_SIZE * 3), %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(zero):
++	VZEROUPPER
++L(null):
++	xorl	%eax, %eax
++	ret
++
++	.p2align 4
++L(last_vec_or_less_aligned):
++	movl	%edx, %ecx
++
++	vpcmpeqb (%rdi), %ymm0, %ymm1
++
++	movl	$1, %edx
++	/* Support rdx << 32.  */
++	salq	%cl, %rdx
++	subq	$1, %rdx
++
++	vpmovmskb %ymm1, %eax
++
++	/* Remove the trailing bytes.  */
++	andl	%edx, %eax
++	testl	%eax, %eax
++	jz	L(zero)
++
++	bsrl	%eax, %eax
++	addq	%rdi, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_vec_or_less):
++	addl	$VEC_SIZE, %edx
++
++	/* Check for zero length.  */
++	testl	%edx, %edx
++	jz	L(null)
++
++	movl	%edi, %ecx
++	andl	$(VEC_SIZE - 1), %ecx
++	jz	L(last_vec_or_less_aligned)
++
++	movl	%ecx, %esi
++	movl	%ecx, %r8d
++	addl	%edx, %esi
++	andq	$-VEC_SIZE, %rdi
++
++	subl	$VEC_SIZE, %esi
++	ja	L(last_vec_2x_aligned)
++
++	/* Check the last VEC.  */
++	vpcmpeqb (%rdi), %ymm0, %ymm1
++	vpmovmskb %ymm1, %eax
++
++	/* Remove the leading and trailing bytes.  */
++	sarl	%cl, %eax
++	movl	%edx, %ecx
++
++	movl	$1, %edx
++	sall	%cl, %edx
++	subl	$1, %edx
++
++	andl	%edx, %eax
++	testl	%eax, %eax
++	jz	L(zero)
++
++	bsrl	%eax, %eax
++	addq	%rdi, %rax
++	addq	%r8, %rax
++	VZEROUPPER
++	ret
++
++	.p2align 4
++L(last_vec_2x_aligned):
++	movl	%esi, %ecx
++
++	/* Check the last VEC.  */
++	vpcmpeqb VEC_SIZE(%rdi), %ymm0, %ymm1
++
++	movl	$1, %edx
++	sall	%cl, %edx
++	subl	$1, %edx
++
++	vpmovmskb %ymm1, %eax
++
++	/* Remove the trailing bytes.  */
++	andl	%edx, %eax
++
++	testl	%eax, %eax
++	jnz	L(last_vec_x1)
++
++	/* Check the second last VEC.  */
++	vpcmpeqb (%rdi), %ymm0, %ymm1
++
++	movl	%r8d, %ecx
++
++	vpmovmskb %ymm1, %eax
++
++	/* Remove the leading bytes.  Must use unsigned right shift for
++	   bsrl below.  */
++	shrl	%cl, %eax
++	testl	%eax, %eax
++	jz	L(zero)
++
++	bsrl	%eax, %eax
++	addq	%rdi, %rax
++	addq	%r8, %rax
++	VZEROUPPER
++	ret
++END (MEMRCHR)
+diff --git a/libc/arch-x86_64/string/avx2-wmemset-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-wmemset-kbl.S
+similarity index 100%
+rename from libc/arch-x86_64/string/avx2-wmemset-kbl.S
+rename to libc/arch-x86_64/kabylake/string/avx2-wmemset-kbl.S
+diff --git a/libc/arch-x86_64/string/sse2-memmove-slm.S b/libc/arch-x86_64/silvermont/string/sse2-memmove-slm.S
+similarity index 99%
+rename from libc/arch-x86_64/string/sse2-memmove-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-memmove-slm.S
+index 739502888..7024f4950 100644
+--- a/libc/arch-x86_64/string/sse2-memmove-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse2-memmove-slm.S
+@@ -31,7 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include "cache.h"
+ 
+ #ifndef MEMMOVE
+-# define MEMMOVE		memmove
++# define MEMMOVE		memmove_generic
+ #endif
+ 
+ #ifndef L
+@@ -515,4 +515,4 @@ L(mm_large_page_loop_backward):
+ 
+ END (MEMMOVE)
+ 
+-ALIAS_SYMBOL(memcpy, MEMMOVE)
++//ALIAS_SYMBOL(memcpy, MEMMOVE)
+diff --git a/libc/arch-x86_64/string/sse2-memset-slm.S b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+similarity index 97%
+rename from libc/arch-x86_64/string/sse2-memset-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+index fc502c021..3999cefa4 100644
+--- a/libc/arch-x86_64/string/sse2-memset-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+@@ -40,6 +40,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ # define ALIGN(n)	.p2align n
+ #endif
+ 
++#ifndef MEMSET
++# define MEMSET        memset
++#endif
+ 
+ ENTRY(__memset_chk)
+   # %rdi = dst, %rsi = byte, %rdx = n, %rcx = dst_len
+@@ -50,7 +53,7 @@ END(__memset_chk)
+ 
+ 
+ 	.section .text.sse2,"ax",@progbits
+-ENTRY(memset)
++ENTRY(MEMSET)
+ 	movq	%rdi, %rax
+ 	and	$0xff, %rsi
+ 	mov	$0x0101010101010101, %rcx
+@@ -146,4 +149,4 @@ L(128bytesmore_nt):
+ 	sfence
+ 	ret
+ 
+-END(memset)
++END(MEMSET)
+diff --git a/libc/arch-x86_64/string/sse2-stpcpy-slm.S b/libc/arch-x86_64/silvermont/string/sse2-stpcpy-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/sse2-stpcpy-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-stpcpy-slm.S
+diff --git a/libc/arch-x86_64/string/sse2-stpncpy-slm.S b/libc/arch-x86_64/silvermont/string/sse2-stpncpy-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/sse2-stpncpy-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-stpncpy-slm.S
+diff --git a/libc/arch-x86_64/string/sse2-strcat-slm.S b/libc/arch-x86_64/silvermont/string/sse2-strcat-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/sse2-strcat-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-strcat-slm.S
+diff --git a/libc/arch-x86_64/string/sse2-strcpy-slm.S b/libc/arch-x86_64/silvermont/string/sse2-strcpy-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/sse2-strcpy-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-strcpy-slm.S
+diff --git a/libc/arch-x86_64/string/sse2-strlen-slm.S b/libc/arch-x86_64/silvermont/string/sse2-strlen-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/sse2-strlen-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-strlen-slm.S
+diff --git a/libc/arch-x86_64/string/sse2-strncat-slm.S b/libc/arch-x86_64/silvermont/string/sse2-strncat-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/sse2-strncat-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-strncat-slm.S
+diff --git a/libc/arch-x86_64/string/sse2-strncpy-slm.S b/libc/arch-x86_64/silvermont/string/sse2-strncpy-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/sse2-strncpy-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse2-strncpy-slm.S
+diff --git a/libc/arch-x86_64/string/sse4-memcmp-slm.S b/libc/arch-x86_64/silvermont/string/sse4-memcmp-slm.S
+similarity index 99%
+rename from libc/arch-x86_64/string/sse4-memcmp-slm.S
+rename to libc/arch-x86_64/silvermont/string/sse4-memcmp-slm.S
+index 8a8b180a2..6cfcd767f 100644
+--- a/libc/arch-x86_64/string/sse4-memcmp-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse4-memcmp-slm.S
+@@ -31,7 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include "cache.h"
+ 
+ #ifndef MEMCMP
+-# define MEMCMP		memcmp
++# define MEMCMP		memcmp_generic
+ #endif
+ 
+ #ifndef L
+diff --git a/libc/arch-x86_64/string/ssse3-strcmp-slm.S b/libc/arch-x86_64/silvermont/string/ssse3-strcmp-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/ssse3-strcmp-slm.S
+rename to libc/arch-x86_64/silvermont/string/ssse3-strcmp-slm.S
+diff --git a/libc/arch-x86_64/string/ssse3-strncmp-slm.S b/libc/arch-x86_64/silvermont/string/ssse3-strncmp-slm.S
+similarity index 100%
+rename from libc/arch-x86_64/string/ssse3-strncmp-slm.S
+rename to libc/arch-x86_64/silvermont/string/ssse3-strncmp-slm.S
+diff --git a/libc/arch-x86_64/static_function_dispatch.S b/libc/arch-x86_64/static_function_dispatch.S
+new file mode 100644
+index 000000000..a30bb3649
+--- /dev/null
++++ b/libc/arch-x86_64/static_function_dispatch.S
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (C) 2018 The Android Open Source Project
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include <private/bionic_asm.h>
++
++#define FUNCTION_DELEGATE(name, impl) \
++ENTRY(name); \
++    jmp impl; \
++END(name)
++
++FUNCTION_DELEGATE(memcmp, memcmp_generic)
++FUNCTION_DELEGATE(memcpy, memmove_generic)
++FUNCTION_DELEGATE(memmove, memmove_generic)
++FUNCTION_DELEGATE(memchr, memchr_openbsd)
++FUNCTION_DELEGATE(memrchr, memrchr_openbsd)
++FUNCTION_DELEGATE(wmemset, wmemset_freebsd)
+-- 
+2.17.1
+
