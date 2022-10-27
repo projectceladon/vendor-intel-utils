@@ -1,0 +1,277 @@
+From 335af8b598b3d94c537045d8207b773a56faeeae Mon Sep 17 00:00:00 2001
+From: Ivan Chiang <chiangi@google.com>
+Date: Mon, 18 Jul 2022 15:28:46 +0800
+Subject: [PATCH] [RESTRICT AUTOMERGE] Check permission for VoiceInteraction
+
+The service must have the CAPTURE_AUDIO_HOTWORD permission to access
+AlwaysOnHotwordDetector. If it doesn't have the permission, return
+STATE_HARDWARE_UNAVAILABLE state. If it is not granted the
+RECORD_AUDIO permisison, it also can't start to recognize the audio.
+
+Test: manual
+Test: atest CtsVoiceInteractionTestCases
+Test: atest CtsAssistTestCases
+Bug: 229793943
+Change-Id: I7d0f8d2f6af4bc4210060f0a44469db2afc7a1bb
+(cherry picked from commit 525690ce16c1c7a48b7880897a4349e2dda0ca09)
+Merged-In: I7d0f8d2f6af4bc4210060f0a44469db2afc7a1bb
+---
+ .../voice/AlwaysOnHotwordDetector.java        | 57 ++++++++++++++++++-
+ .../voice/VoiceInteractionService.java        |  2 +-
+ .../VoiceInteractionManagerService.java       | 23 ++++++++
+ 3 files changed, 78 insertions(+), 4 deletions(-)
+
+diff --git a/core/java/android/service/voice/AlwaysOnHotwordDetector.java b/core/java/android/service/voice/AlwaysOnHotwordDetector.java
+index 6f941121771e..b956d1918f7e 100644
+--- a/core/java/android/service/voice/AlwaysOnHotwordDetector.java
++++ b/core/java/android/service/voice/AlwaysOnHotwordDetector.java
+@@ -16,12 +16,14 @@
+ 
+ package android.service.voice;
+ 
++import android.Manifest;
+ import android.annotation.IntDef;
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.pm.PackageManager;
+ import android.hardware.soundtrigger.IRecognitionStatusCallback;
+ import android.hardware.soundtrigger.KeyphraseEnrollmentInfo;
+ import android.hardware.soundtrigger.KeyphraseMetadata;
+@@ -232,8 +234,10 @@ public class AlwaysOnHotwordDetector {
+     private final Callback mExternalCallback;
+     private final Object mLock = new Object();
+     private final Handler mHandler;
++    private final Context mContext;
+ 
+     private int mAvailability = STATE_NOT_READY;
++    private boolean mIsGrantedHotwordPermission;
+ 
+     /**
+      *  A ModelParamRange is a representation of supported parameter range for a
+@@ -408,23 +412,37 @@ public class AlwaysOnHotwordDetector {
+         public abstract void onRecognitionResumed();
+     }
+ 
++    private static boolean hasHotwordPermission(Context context) {
++        return context.checkSelfPermission(Manifest.permission.CAPTURE_AUDIO_HOTWORD)
++                == PackageManager.PERMISSION_GRANTED;
++    }
++
++    private static boolean hasRecordAudioPermission(Context context) {
++        return context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
++                == PackageManager.PERMISSION_GRANTED;
++    }
++
+     /**
++     * @param context The context to check permission
+      * @param text The keyphrase text to get the detector for.
+      * @param locale The java locale for the detector.
+      * @param callback A non-null Callback for receiving the recognition events.
++     * @param keyphraseEnrollmentInfo The Enrollment info of key phrase
+      * @param modelManagementService A service that allows management of sound models.
+      * @hide
+      */
+-    public AlwaysOnHotwordDetector(String text, Locale locale, Callback callback,
++    public AlwaysOnHotwordDetector(Context context, String text, Locale locale, Callback callback,
+             KeyphraseEnrollmentInfo keyphraseEnrollmentInfo,
+             IVoiceInteractionManagerService modelManagementService) {
+         mText = text;
++        mContext = context;
+         mLocale = locale;
+         mKeyphraseEnrollmentInfo = keyphraseEnrollmentInfo;
+         mExternalCallback = callback;
+         mHandler = new MyHandler();
+         mInternalCallback = new SoundTriggerListener(mHandler);
+         mModelManagementService = modelManagementService;
++        mIsGrantedHotwordPermission = hasHotwordPermission(mContext);
+         new RefreshAvailabiltyTask().execute();
+     }
+ 
+@@ -477,6 +495,11 @@ public class AlwaysOnHotwordDetector {
+     @AudioCapabilities
+     public int getSupportedAudioCapabilities() {
+         if (DBG) Slog.d(TAG, "getSupportedAudioCapabilities()");
++
++        if (!mIsGrantedHotwordPermission) {
++            return 0;
++        }
++
+         synchronized (mLock) {
+             return getSupportedAudioCapabilitiesLocked();
+         }
+@@ -515,6 +538,12 @@ public class AlwaysOnHotwordDetector {
+      */
+     public boolean startRecognition(@RecognitionFlags int recognitionFlags) {
+         if (DBG) Slog.d(TAG, "startRecognition(" + recognitionFlags + ")");
++
++        if (!mIsGrantedHotwordPermission || !hasRecordAudioPermission(mContext)) {
++            throw new IllegalStateException("Must have the RECORD_AUDIO and CAPTURE_AUDIO_HOTWORD "
++                    + "permissions to access the detector.");
++        }
++
+         synchronized (mLock) {
+             if (mAvailability == STATE_INVALID) {
+                 throw new IllegalStateException("startRecognition called on an invalid detector");
+@@ -545,6 +574,12 @@ public class AlwaysOnHotwordDetector {
+      */
+     public boolean stopRecognition() {
+         if (DBG) Slog.d(TAG, "stopRecognition()");
++
++        if (!mIsGrantedHotwordPermission || !hasRecordAudioPermission(mContext)) {
++            throw new IllegalStateException("Must have the RECORD_AUDIO and CAPTURE_AUDIO_HOTWORD "
++                    + "permissions to access the detector.");
++        }
++
+         synchronized (mLock) {
+             if (mAvailability == STATE_INVALID) {
+                 throw new IllegalStateException("stopRecognition called on an invalid detector");
+@@ -582,6 +617,10 @@ public class AlwaysOnHotwordDetector {
+             Slog.d(TAG, "setParameter(" + modelParam + ", " + value + ")");
+         }
+ 
++        if (!mIsGrantedHotwordPermission || !hasRecordAudioPermission(mContext)) {
++            return SoundTrigger.STATUS_INVALID_OPERATION;
++        }
++
+         synchronized (mLock) {
+             if (mAvailability == STATE_INVALID) {
+                 throw new IllegalStateException("setParameter called on an invalid detector");
+@@ -609,6 +648,10 @@ public class AlwaysOnHotwordDetector {
+             Slog.d(TAG, "getParameter(" + modelParam + ")");
+         }
+ 
++        if (!mIsGrantedHotwordPermission || !hasRecordAudioPermission(mContext)) {
++            return MODEL_PARAM_THRESHOLD_FACTOR;
++        }
++
+         synchronized (mLock) {
+             if (mAvailability == STATE_INVALID) {
+                 throw new IllegalStateException("getParameter called on an invalid detector");
+@@ -634,6 +677,10 @@ public class AlwaysOnHotwordDetector {
+             Slog.d(TAG, "queryParameter(" + modelParam + ")");
+         }
+ 
++        if (!mIsGrantedHotwordPermission || !hasRecordAudioPermission(mContext)) {
++            return null;
++        }
++
+         synchronized (mLock) {
+             if (mAvailability == STATE_INVALID) {
+                 throw new IllegalStateException("queryParameter called on an invalid detector");
+@@ -742,8 +789,8 @@ public class AlwaysOnHotwordDetector {
+      */
+     void onSoundModelsChanged() {
+         synchronized (mLock) {
+-            if (mAvailability == STATE_INVALID
+-                    || mAvailability == STATE_HARDWARE_UNAVAILABLE) {
++            if (mAvailability == STATE_INVALID || mAvailability == STATE_HARDWARE_UNAVAILABLE
++                    || !hasRecordAudioPermission(mContext)) {
+                 Slog.w(TAG, "Received onSoundModelsChanged for an unsupported keyphrase/config");
+                 return;
+             }
+@@ -962,6 +1009,10 @@ public class AlwaysOnHotwordDetector {
+          * @return The initial availability without checking the enrollment status.
+          */
+         private int internalGetInitialAvailability() {
++            if (!mIsGrantedHotwordPermission) {
++                return STATE_HARDWARE_UNAVAILABLE;
++            }
++
+             synchronized (mLock) {
+                 // This detector has already been invalidated.
+                 if (mAvailability == STATE_INVALID) {
+diff --git a/core/java/android/service/voice/VoiceInteractionService.java b/core/java/android/service/voice/VoiceInteractionService.java
+index 45d3465fdae8..a56d40790dbf 100644
+--- a/core/java/android/service/voice/VoiceInteractionService.java
++++ b/core/java/android/service/voice/VoiceInteractionService.java
+@@ -318,7 +318,7 @@ public class VoiceInteractionService extends Service {
+         synchronized (mLock) {
+             // Allow only one concurrent recognition via the APIs.
+             safelyShutdownHotwordDetector();
+-            mHotwordDetector = new AlwaysOnHotwordDetector(keyphrase, locale, callback,
++            mHotwordDetector = new AlwaysOnHotwordDetector(this, keyphrase, locale, callback,
+                     mKeyphraseEnrollmentInfo, mSystemService);
+         }
+         return mHotwordDetector;
+diff --git a/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerService.java b/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerService.java
+index 9621f68f9d6c..56835f88690d 100644
+--- a/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerService.java
++++ b/services/voiceinteraction/java/com/android/server/voiceinteraction/VoiceInteractionManagerService.java
+@@ -1093,6 +1093,9 @@ public class VoiceInteractionManagerService extends SystemService {
+ 
+         @Override
+         public ModuleProperties getDspModuleProperties() {
++            // Allow the call if it is granted CAPTURE_AUDIO_HOTWORD.
++            enforceCallingPermission(Manifest.permission.CAPTURE_AUDIO_HOTWORD);
++
+             // Allow the call if this is the current voice interaction service.
+             synchronized (this) {
+                 enforceIsCurrentVoiceInteractionService();
+@@ -1109,6 +1112,9 @@ public class VoiceInteractionManagerService extends SystemService {
+         @Override
+         public int startRecognition(int keyphraseId, String bcp47Locale,
+                 IRecognitionStatusCallback callback, RecognitionConfig recognitionConfig) {
++            // Allow the call if it is granted RECORD_AUDIO and CAPTURE_AUDIO_HOTWORD.
++            enforceAlwaysOnHotwordPermissions();
++
+             // Allow the call if this is the current voice interaction service.
+             synchronized (this) {
+                 enforceIsCurrentVoiceInteractionService();
+@@ -1144,6 +1150,9 @@ public class VoiceInteractionManagerService extends SystemService {
+ 
+         @Override
+         public int stopRecognition(int keyphraseId, IRecognitionStatusCallback callback) {
++            // Allow the call if it is granted RECORD_AUDIO and CAPTURE_AUDIO_HOTWORD.
++            enforceAlwaysOnHotwordPermissions();
++
+             // Allow the call if this is the current voice interaction service.
+             synchronized (this) {
+                 enforceIsCurrentVoiceInteractionService();
+@@ -1159,6 +1168,9 @@ public class VoiceInteractionManagerService extends SystemService {
+ 
+         @Override
+         public int setParameter(int keyphraseId, @ModelParams int modelParam, int value) {
++            // Allow the call if it is granted RECORD_AUDIO and CAPTURE_AUDIO_HOTWORD.
++            enforceAlwaysOnHotwordPermissions();
++
+             // Allow the call if this is the current voice interaction service.
+             synchronized (this) {
+                 enforceIsCurrentVoiceInteractionService();
+@@ -1174,6 +1186,9 @@ public class VoiceInteractionManagerService extends SystemService {
+ 
+         @Override
+         public int getParameter(int keyphraseId, @ModelParams int modelParam) {
++            // Allow the call if it is granted RECORD_AUDIO and CAPTURE_AUDIO_HOTWORD.
++            enforceAlwaysOnHotwordPermissions();
++
+             // Allow the call if this is the current voice interaction service.
+             synchronized (this) {
+                 enforceIsCurrentVoiceInteractionService();
+@@ -1190,6 +1205,9 @@ public class VoiceInteractionManagerService extends SystemService {
+         @Override
+         @Nullable
+         public ModelParamRange queryParameter(int keyphraseId, @ModelParams int modelParam) {
++            // Allow the call if it is granted RECORD_AUDIO and CAPTURE_AUDIO_HOTWORD.
++            enforceAlwaysOnHotwordPermissions();
++
+             // Allow the call if this is the current voice interaction service.
+             synchronized (this) {
+                 enforceIsCurrentVoiceInteractionService();
+@@ -1453,6 +1471,11 @@ public class VoiceInteractionManagerService extends SystemService {
+                     == PackageManager.PERMISSION_GRANTED;
+         }
+ 
++        private void enforceAlwaysOnHotwordPermissions() {
++            enforceCallingPermission(Manifest.permission.RECORD_AUDIO);
++            enforceCallingPermission(Manifest.permission.CAPTURE_AUDIO_HOTWORD);
++        }
++
+         private void enforceCallingPermission(String permission) {
+             if (!isCallerHoldingPermission(permission)) {
+                 throw new SecurityException("Caller does not hold the permission " + permission);
+-- 
+2.38.0.413.g74048e4d9e-goog
+
