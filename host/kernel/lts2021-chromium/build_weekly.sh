@@ -3,20 +3,23 @@
 rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
+
 git clone https://github.com/projectceladon/vendor-intel-utils.git
 cd vendor-intel-utils
-git checkout 7d246edc3370d823194d2306ca2a484568dea75e
+git checkout 1dbe7c9f53dd09e89318a566b32897091d8285da
 cd ../
-git clone https://github.com/projectceladon/linux-intel-lts2021-chromium.git
+
+tag="lts-v5.15.74-20221108-r1"
+git clone -b $tag https://github.com/projectceladon/linux-intel-lts2021-chromium.git
 cd linux-intel-lts2021-chromium
-git checkout 94ca6268827aa5389b6e560dbed0b79f537b8f59
+
 cp ../vendor-intel-utils/host/kernel/lts2021-chromium/x86_64_defconfig .config
 patch_list=`find  ../vendor-intel-utils/host/kernel/lts2021-chromium -iname "*.patch" | sort -u`
 for i in $patch_list
 do
   a=`grep "Date: " $i`
   b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD | grep "$b"`
+  c=`git log --pretty=format:%aD -100 | grep "$b"`
   if [[ "$c" == "" ]] ; then
     git am -3 --keep-cr --whitespace=nowarn $i >& /dev/null
     if [[ $? == 0 ]]; then
