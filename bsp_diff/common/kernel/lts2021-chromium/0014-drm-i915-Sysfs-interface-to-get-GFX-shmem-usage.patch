@@ -1,4 +1,4 @@
-From e1d8be3c31e3d3dc5c92c43c8c34cf8812c2cd03 Mon Sep 17 00:00:00 2001
+From 0009c88d3141acf9cc90137a8e9b95207a23eb99 Mon Sep 17 00:00:00 2001
 From: HeYue <yue.he@intel.com>
 Date: Mon, 6 Sep 2021 13:42:44 +0800
 Subject: [PATCH] drm/i915: Sysfs interface to get GFX shmem usage
@@ -43,6 +43,8 @@ Rebased for kernel v5.4 (He, Yue) (Wan, Shuang)
 
 Rebased for kernel v5.10 (He, Yue)
 
+Rebased for kernel v5.15.74 (rajucm)
+
 Tracked-On: OAM-99250
 Change-Id: Ib89cd2eaf6e1fc61311b43ebe54dbdc78554821b
 Signed-off-by: Sourab Gupta sourab.gupta@intel.com
@@ -54,6 +56,7 @@ Signed-off-by: Jeremy Compostella jeremy.compostella@intel.com
 Signed-off-by: Yugang Fan yugang.fan@intel.com
 Signed-off-by: Wan Shuang <shuang.wan@intel.com>
 Signed-off-by: HeYue <yue.he@intel.com>
+Signed-off-by: rajucm <raju.mallikarjun.chegaraddi@intel.com>
 ---
  drivers/gpu/drm/drm_file.c                    |   4 +
  drivers/gpu/drm/drm_internal.h                |   8 +
@@ -64,13 +67,14 @@ Signed-off-by: HeYue <yue.he@intel.com>
  .../gpu/drm/i915/gem/i915_gem_object_types.h  |   6 +
  drivers/gpu/drm/i915/gem/i915_gem_shmem.c     |  21 +
  drivers/gpu/drm/i915/i915_driver.c            |  13 +
- drivers/gpu/drm/i915/i915_drv.h               | 213 +++++
- drivers/gpu/drm/i915/i915_gem.c               | 882 +++++++++++++++++-
+ drivers/gpu/drm/i915/i915_drv.h               |  22 +
+ drivers/gpu/drm/i915/i915_file_private.h      |   8 +-
+ drivers/gpu/drm/i915/i915_gem.c               | 883 +++++++++++++++++-
  drivers/gpu/drm/i915/i915_gpu_error.c         |  37 +-
  drivers/gpu/drm/i915/i915_gpu_error.h         |  10 +
- drivers/gpu/drm/i915/i915_sysfs.c             | 328 ++++++-
+ drivers/gpu/drm/i915/i915_sysfs.c             | 325 ++++++-
  drivers/gpu/drm/i915/i915_sysfs.h             |   7 +
- 15 files changed, 1586 insertions(+), 12 deletions(-)
+ 16 files changed, 1399 insertions(+), 14 deletions(-)
 
 diff --git a/drivers/gpu/drm/drm_file.c b/drivers/gpu/drm/drm_file.c
 index ed25168619fc..a38034269886 100644
@@ -351,137 +355,10 @@ index 6bf99c8b60a7..d5931005170f 100644
  
  	/* Catch up with all the deferred frees from "this" client */
 diff --git a/drivers/gpu/drm/i915/i915_drv.h b/drivers/gpu/drm/i915/i915_drv.h
-index 16c335a0d070..1a669939d3d3 100644
+index 16c335a0d070..781f6a1777dc 100644
 --- a/drivers/gpu/drm/i915/i915_drv.h
 +++ b/drivers/gpu/drm/i915/i915_drv.h
-@@ -143,6 +143,126 @@ struct i915_hotplug {
- 	 I915_GEM_DOMAIN_INSTRUCTION | \
- 	 I915_GEM_DOMAIN_VERTEX)
- 
-+struct drm_i915_private;
-+
-+struct drm_i915_file_private {
-+	struct drm_i915_private *dev_priv;
-+
-+	union {
-+		struct drm_file *file;
-+		struct rcu_head rcu;
-+	};
-+
-+#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
-+	char *process_name;
-+	struct pid *tgid;
-+#endif
-+
-+	/** @proto_context_lock: Guards all struct i915_gem_proto_context
-+	 * operations
-+	 *
-+	 * This not only guards @proto_context_xa, but is always held
-+	 * whenever we manipulate any struct i915_gem_proto_context,
-+	 * including finalizing it on first actual use of the GEM context.
-+	 *
-+	 * See i915_gem_proto_context.
-+	 */
-+	struct mutex proto_context_lock;
-+
-+	/** @proto_context_xa: xarray of struct i915_gem_proto_context
-+	 *
-+	 * Historically, the context uAPI allowed for two methods of
-+	 * setting context parameters: SET_CONTEXT_PARAM and
-+	 * CONTEXT_CREATE_EXT_SETPARAM.  The former is allowed to be called
-+	 * at any time while the later happens as part of
-+	 * GEM_CONTEXT_CREATE.  Everything settable via one was settable
-+	 * via the other.  While some params are fairly simple and setting
-+	 * them on a live context is harmless such as the context priority,
-+	 * others are far trickier such as the VM or the set of engines.
-+	 * In order to swap out the VM, for instance, we have to delay
-+	 * until all current in-flight work is complete, swap in the new
-+	 * VM, and then continue.  This leads to a plethora of potential
-+	 * race conditions we'd really rather avoid.
-+	 *
-+	 * We have since disallowed setting these more complex parameters
-+	 * on active contexts.  This works by delaying the creation of the
-+	 * actual context until after the client is done configuring it
-+	 * with SET_CONTEXT_PARAM.  From the perspective of the client, it
-+	 * has the same u32 context ID the whole time.  From the
-+	 * perspective of i915, however, it's a struct i915_gem_proto_context
-+	 * right up until the point where we attempt to do something which
-+	 * the proto-context can't handle.  Then the struct i915_gem_context
-+	 * gets created.
-+	 *
-+	 * This is accomplished via a little xarray dance.  When
-+	 * GEM_CONTEXT_CREATE is called, we create a struct
-+	 * i915_gem_proto_context, reserve a slot in @context_xa but leave
-+	 * it NULL, and place the proto-context in the corresponding slot
-+	 * in @proto_context_xa.  Then, in i915_gem_context_lookup(), we
-+	 * first check @context_xa.  If it's there, we return the struct
-+	 * i915_gem_context and we're done.  If it's not, we look in
-+	 * @proto_context_xa and, if we find it there, we create the actual
-+	 * context and kill the proto-context.
-+	 *
-+	 * In order for this dance to work properly, everything which ever
-+	 * touches a struct i915_gem_proto_context is guarded by
-+	 * @proto_context_lock, including context creation.  Yes, this
-+	 * means context creation now takes a giant global lock but it
-+	 * can't really be helped and that should never be on any driver's
-+	 * fast-path anyway.
-+	 */
-+	struct xarray proto_context_xa;
-+
-+	/** @context_xa: xarray of fully created i915_gem_context
-+	 *
-+	 * Write access to this xarray is guarded by @proto_context_lock.
-+	 * Otherwise, writers may race with finalize_create_context_locked().
-+	 *
-+	 * See @proto_context_xa.
-+	 */
-+	struct xarray context_xa;
-+	struct xarray vm_xa;
-+
-+	unsigned int bsd_engine;
-+
-+#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
-+	struct bin_attribute *obj_attr;
-+#endif
-+
-+/*
-+ * Every context ban increments per client ban score. Also
-+ * hangs in short succession increments ban score. If ban threshold
-+ * is reached, client is considered banned and submitting more work
-+ * will fail. This is a stop gap measure to limit the badly behaving
-+ * clients access to gpu. Note that unbannable contexts never increment
-+ * the client ban score.
-+ */
-+#define I915_CLIENT_SCORE_HANG_FAST	1
-+#define   I915_CLIENT_FAST_HANG_JIFFIES (60 * HZ)
-+#define I915_CLIENT_SCORE_CONTEXT_BAN   3
-+#define I915_CLIENT_SCORE_BANNED	9
-+	/** ban_score: Accumulated score of all ctx bans and fast hangs. */
-+	atomic_t ban_score;
-+	unsigned long hang_timestamp;
-+};
-+
-+/* Interface history:
-+ *
-+ * 1.1: Original.
-+ * 1.2: Add Power Management
-+ * 1.3: Add vblank support
-+ * 1.4: Fix cmdbuffer path, add heap destroy
-+ * 1.5: Add vblank pipe configuration
-+ * 1.6: - New ioctl for scheduling buffer swaps on vertical blank
-+ *      - Support vertical blank on secondary display pipe
-+ */
-+#define DRIVER_MAJOR		1
-+#define DRIVER_MINOR		6
-+#define DRIVER_PATCHLEVEL	0
-+
-+struct intel_overlay;
-+struct intel_overlay_error_state;
-+
- struct sdvo_device_mapping {
- 	u8 initialized;
- 	u8 dvo_port;
-@@ -237,6 +357,10 @@ struct i915_gem_mm {
+@@ -237,6 +237,10 @@ struct i915_gem_mm {
  	/* shrinker accounting, also useful for userland debugging */
  	u64 shrink_memory;
  	u32 shrink_count;
@@ -492,7 +369,7 @@ index 16c335a0d070..1a669939d3d3 100644
  };
  
  #define I915_IDLE_ENGINES_TIMEOUT (200) /* in ms */
-@@ -431,6 +555,11 @@ struct drm_i915_private {
+@@ -431,6 +435,11 @@ struct drm_i915_private {
  
  	bool preserve_bios_swizzle;
  
@@ -504,64 +381,10 @@ index 16c335a0d070..1a669939d3d3 100644
  	/* overlay */
  	struct intel_overlay *overlay;
  
-@@ -1362,6 +1491,90 @@ void i915_gem_driver_release(struct drm_i915_private *dev_priv);
+@@ -1362,6 +1371,19 @@ void i915_gem_driver_release(struct drm_i915_private *dev_priv);
  
  int i915_gem_open(struct drm_i915_private *i915, struct drm_file *file);
  
-+int i915_gem_object_set_cache_level(struct drm_i915_gem_object *obj,
-+				    enum i915_cache_level cache_level);
-+
-+struct drm_gem_object *i915_gem_prime_import(struct drm_device *dev,
-+				struct dma_buf *dma_buf);
-+
-+struct dma_buf *i915_gem_prime_export(struct drm_gem_object *gem_obj, int flags);
-+
-+static inline struct i915_address_space *
-+i915_gem_vm_lookup(struct drm_i915_file_private *file_priv, u32 id)
-+{
-+	struct i915_address_space *vm;
-+
-+	xa_lock(&file_priv->vm_xa);
-+	vm = xa_load(&file_priv->vm_xa, id);
-+	if (vm)
-+		kref_get(&vm->ref);
-+	xa_unlock(&file_priv->vm_xa);
-+
-+	return vm;
-+}
-+
-+/* i915_gem_evict.c */
-+int __must_check i915_gem_evict_something(struct i915_address_space *vm,
-+					  u64 min_size, u64 alignment,
-+					  unsigned long color,
-+					  u64 start, u64 end,
-+					  unsigned flags);
-+int __must_check i915_gem_evict_for_node(struct i915_address_space *vm,
-+					 struct drm_mm_node *node,
-+					 unsigned int flags);
-+int i915_gem_evict_vm(struct i915_address_space *vm);
-+
-+/* i915_gem_internal.c */
-+struct drm_i915_gem_object *
-+i915_gem_object_create_internal(struct drm_i915_private *dev_priv,
-+				phys_addr_t size);
-+struct drm_i915_gem_object *
-+__i915_gem_object_create_internal(struct drm_i915_private *dev_priv,
-+				  const struct drm_i915_gem_object_ops *ops,
-+				  phys_addr_t size);
-+
-+/* i915_gem_tiling.c */
-+static inline bool i915_gem_object_needs_bit17_swizzle(struct drm_i915_gem_object *obj)
-+{
-+	struct drm_i915_private *i915 = to_i915(obj->base.dev);
-+
-+	return i915->ggtt.bit_6_swizzle_x == I915_BIT_6_SWIZZLE_9_10_17 &&
-+		i915_gem_object_is_tiled(obj);
-+}
-+
-+u32 i915_gem_fence_size(struct drm_i915_private *dev_priv, u32 size,
-+			unsigned int tiling, unsigned int stride);
-+
 +#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
 +int i915_get_pid_cmdline(struct task_struct *task, char *buffer);
 +int i915_gem_obj_insert_pid(struct drm_i915_gem_object *obj);
@@ -575,44 +398,54 @@ index 16c335a0d070..1a669939d3d3 100644
 +			  struct drm_device *dev, struct pid *tgid);
 +#endif
 +
-+u32 i915_gem_fence_alignment(struct drm_i915_private *dev_priv, u32 size,
-+			     unsigned int tiling, unsigned int stride);
-+
-+const char *i915_cache_level_str(struct drm_i915_private *i915, int type);
-+
-+/* i915_cmd_parser.c */
-+int i915_cmd_parser_get_version(struct drm_i915_private *dev_priv);
-+int intel_engine_init_cmd_parser(struct intel_engine_cs *engine);
-+void intel_engine_cleanup_cmd_parser(struct intel_engine_cs *engine);
-+int intel_engine_cmd_parser(struct intel_engine_cs *engine,
-+			    struct i915_vma *batch,
-+			    unsigned long batch_offset,
-+			    unsigned long batch_length,
-+			    struct i915_vma *shadow,
-+			    bool trampoline);
-+#define I915_CMD_PARSER_TRAMPOLINE_SIZE 8
-+
  /* intel_device_info.c */
  static inline struct intel_device_info *
  mkwrite_device_info(struct drm_i915_private *dev_priv)
+diff --git a/drivers/gpu/drm/i915/i915_file_private.h b/drivers/gpu/drm/i915/i915_file_private.h
+index f42877869692..2c5010c7ae26 100644
+--- a/drivers/gpu/drm/i915/i915_file_private.h
++++ b/drivers/gpu/drm/i915/i915_file_private.h
+@@ -22,6 +22,10 @@ struct drm_i915_file_private {
+ 		struct rcu_head rcu;
+ 	};
+ 
++#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
++	char *process_name;
++	struct pid *tgid;
++#endif
+ 	/** @proto_context_lock: Guards all struct i915_gem_proto_context
+ 	 * operations
+ 	 *
+@@ -88,7 +92,9 @@ struct drm_i915_file_private {
+ 	struct xarray vm_xa;
+ 
+ 	unsigned int bsd_engine;
+-
++#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
++	struct bin_attribute *obj_attr;
++#endif
+ /*
+  * Every context ban increments per client ban score. Also
+  * hangs in short succession increments ban score. If ban threshold
 diff --git a/drivers/gpu/drm/i915/i915_gem.c b/drivers/gpu/drm/i915/i915_gem.c
-index b605d0ceaefa..9bf6272f42e0 100644
+index b605d0ceaefa..fd87d20d7213 100644
 --- a/drivers/gpu/drm/i915/i915_gem.c
 +++ b/drivers/gpu/drm/i915/i915_gem.c
-@@ -38,6 +38,12 @@
- 
+@@ -39,6 +39,13 @@
  #include <drm/drm_cache.h>
  #include <drm/drm_vma_manager.h>
+ 
 +#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
 +#include <linux/pid.h>
 +#include <linux/async.h>
 +#include <linux/sched/mm.h>
 +#include "../drm_internal.h"
 +#endif
- 
++
  #include "display/intel_display.h"
  #include "display/intel_frontbuffer.h"
-@@ -58,10 +64,830 @@
+ 
+@@ -58,10 +65,830 @@
  #include "i915_file_private.h"
  #include "i915_trace.h"
  #include "i915_vgpu.h"
@@ -1445,7 +1278,7 @@ index b605d0ceaefa..9bf6272f42e0 100644
  {
  	int err;
  
-@@ -80,8 +906,8 @@ insert_mappable_node(struct i915_ggtt *ggtt, struct drm_mm_node *node, u32 size)
+@@ -80,8 +907,8 @@ insert_mappable_node(struct i915_ggtt *ggtt, struct drm_mm_node *node, u32 size)
  	return err;
  }
  
@@ -1456,7 +1289,7 @@ index b605d0ceaefa..9bf6272f42e0 100644
  {
  	mutex_lock(&ggtt->vm.mutex);
  	drm_mm_remove_node(node);
-@@ -1248,15 +2074,63 @@ int i915_gem_open(struct drm_i915_private *i915, struct drm_file *file)
+@@ -1248,15 +2075,61 @@ int i915_gem_open(struct drm_i915_private *i915, struct drm_file *file)
  	file_priv->file = file;
  	file_priv->client = client;
  
@@ -1484,10 +1317,7 @@ index b605d0ceaefa..9bf6272f42e0 100644
 +#endif
 +
  	ret = i915_gem_context_open(i915, file);
- 	if (ret)
- 		goto err_context;
- 
-+
+-	if (ret)
 +#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
 +	if (ret) {
 +		//intel_runtime_pm_put(i915);
@@ -1502,19 +1332,21 @@ index b605d0ceaefa..9bf6272f42e0 100644
 +		goto out_free_name;
 +	}
 +
++#else
++	if (ret) {
+ 		goto err_context;
++	}
++
++#endif
+ 
  	return 0;
  
++#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
 +out_free_name:
 +	kfree(file_priv->process_name);
 +out_free_file:
 +	put_pid(file_priv->tgid);
 +	kfree(file_priv);
-+#else
-+	if (ret) {
-+		i915_drm_client_close(client);
-+		kfree(file_priv);
-+	}
-+
 +#endif
 +
  err_context:
@@ -1604,20 +1436,21 @@ index 55a143b92d10..0f8b67f208ff 100644
  __printf(2, 3)
  void i915_error_printf(struct drm_i915_error_state_buf *e, const char *f, ...);
 diff --git a/drivers/gpu/drm/i915/i915_sysfs.c b/drivers/gpu/drm/i915/i915_sysfs.c
-index 1e2750210831..4c5495813ade 100644
+index 1e2750210831..ae6dbcb50f80 100644
 --- a/drivers/gpu/drm/i915/i915_sysfs.c
 +++ b/drivers/gpu/drm/i915/i915_sysfs.c
-@@ -38,6 +38,9 @@
+@@ -38,6 +38,10 @@
  #include "i915_drv.h"
  #include "i915_sysfs.h"
  #include "intel_pm.h"
 +#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
 +#include "../drm_internal.h"
++#include "i915_file_private.h"
 +#endif
  
  struct drm_i915_private *kdev_minor_to_i915(struct device *kdev)
  {
-@@ -225,9 +228,299 @@ static void i915_teardown_error_capture(struct device *kdev)
+@@ -225,9 +229,299 @@ static void i915_teardown_error_capture(struct device *kdev)
  {
  	sysfs_remove_bin_file(&kdev->kobj, &error_state_attr);
  }
@@ -1919,7 +1752,7 @@ index 1e2750210831..4c5495813ade 100644
  #endif
  
  void i915_setup_sysfs(struct drm_i915_private *dev_priv)
-@@ -257,6 +550,26 @@ void i915_setup_sysfs(struct drm_i915_private *dev_priv)
+@@ -257,6 +551,26 @@ void i915_setup_sysfs(struct drm_i915_private *dev_priv)
  
  	i915_setup_error_capture(kdev);
  
@@ -1946,14 +1779,10 @@ index 1e2750210831..4c5495813ade 100644
  	intel_engines_add_sysfs(dev_priv);
  }
  
-@@ -270,4 +583,15 @@ void i915_teardown_sysfs(struct drm_i915_private *dev_priv)
+@@ -270,4 +584,11 @@ void i915_teardown_sysfs(struct drm_i915_private *dev_priv)
  	device_remove_bin_file(kdev,  &dpf_attrs);
  
  	kobject_put(dev_priv->sysfs_gt);
-+#ifdef CONFIG_PM
-+	sysfs_unmerge_group(&kdev->kobj, &rc6_attr_group);
-+	sysfs_unmerge_group(&kdev->kobj, &rc6p_attr_group);
-+#endif
 +
 +#if IS_ENABLED(CONFIG_DRM_I915_MEMTRACK)
 +	sysfs_remove_bin_file(&dev_priv->memtrack_kobj,
