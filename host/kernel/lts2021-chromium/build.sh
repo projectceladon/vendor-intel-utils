@@ -15,7 +15,7 @@ for i in $patch_list
 do
   a=`grep "Date: " $i`
   b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD | grep "$b"`
+  c=`git log --pretty=format:%aD -100| grep "$b"`
   if [[ "$c" == "" ]] ; then
     git am -3 --keep-cr --whitespace=nowarn $i >& /dev/null
     if [[ $? == 0 ]]; then
