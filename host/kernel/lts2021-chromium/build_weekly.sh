@@ -6,7 +6,7 @@ cd host_kernel
 
 git clone https://github.com/projectceladon/vendor-intel-utils.git
 cd vendor-intel-utils
-git checkout 1dbe7c9f53dd09e89318a566b32897091d8285da
+git checkout e4b94fc4f53b1ddb9bc7c3a0ef0e306a393bfd63
 cd ../
 
 tag="lts-v5.15.74-20221108-r1"
