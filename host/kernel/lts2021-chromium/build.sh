@@ -5,7 +5,7 @@ mkdir -p host_kernel
 cd host_kernel
 git clone https://github.com/projectceladon/vendor-intel-utils
 
-tag="lts-v5.15.74-20221108-r1"
+tag="lts-v5.15.74-20221122-r3"
 git clone -b $tag https://github.com/projectceladon/linux-intel-lts2021-chromium.git
 cd linux-intel-lts2021-chromium
 
