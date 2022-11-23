@@ -3,7 +3,7 @@
 rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
-git clone -b lts-v5.10.118-20221118-r2 https://github.com/projectceladon/linux-intel-lts2020-chromium.git
+git clone -b lts-v5.10.118-20221123-r3 https://github.com/projectceladon/linux-intel-lts2020-chromium.git
 cd linux-intel-lts2020-chromium
 
 cp ../../x86_64_defconfig .config
