@@ -6,7 +6,7 @@ cd host_kernel
 git clone https://github.com/projectceladon/vendor-intel-utils
 git clone https://github.com/intel/linux-intel-lts.git -b 5.10/yocto
 cd linux-intel-lts
-git checkout refs/tags/lts-v5.10.100-civ-android-220303T165800Z
+git checkout refs/tags/lts-v5.10.145-civ-android-221027T031053Z
 cp ../vendor-intel-utils/host/kernel/lts2020-yocto/x86_64_defconfig .config
 
 patch_list=`find ../vendor-intel-utils/host/kernel/lts2020-yocto -iname "*.patch" | sort -u`
