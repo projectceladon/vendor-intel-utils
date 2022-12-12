@@ -1,0 +1,114 @@
+From 25bc7852321b1fda3eba7971ec4dfdf8f29827f8 Mon Sep 17 00:00:00 2001
+From: Rajani Ranjan <rajani.ranjan@intel.com>
+Date: Thu, 8 Dec 2022 16:22:45 +0530
+Subject: [PATCH] Support QEMU virtual USB tablet (absolute mouse)
+
+Add support for input devices with absolute axis which only
+have mouse button(s). Such devices are treated as single-touch
+stylus devices and handle BTN_MOUSE events as BTN_TOUCH events.
+
+QEMU tablet emulates as digitizing tablet intended to always
+have a direct correspondance between device coordinates
+(ABS_X,ABS_Y) and position.
+
+Tracked-On: OAM-105231
+Signed-off-by: Rajani Ranjan <rajani.ranjan@intel.com>
+---
+ services/inputflinger/reader/EventHub.cpp     |  5 ++--
+ .../accumulator/TouchButtonAccumulator.cpp    | 24 ++++++++++++++++++-
+ .../accumulator/TouchButtonAccumulator.h      |  2 ++
+ 3 files changed, 27 insertions(+), 4 deletions(-)
+
+diff --git a/services/inputflinger/reader/EventHub.cpp b/services/inputflinger/reader/EventHub.cpp
+index b19b4195d1..1d86c8faaf 100644
+--- a/services/inputflinger/reader/EventHub.cpp
++++ b/services/inputflinger/reader/EventHub.cpp
+@@ -2013,8 +2013,8 @@ void EventHub::openDeviceLocked(const std::string& devicePath) {
+             device->classes |= (InputDeviceClass::TOUCH | InputDeviceClass::TOUCH_MT);
+         }
+         // Is this an old style single-touch driver?
+-    } else if (device->keyBitmask.test(BTN_TOUCH) && device->absBitmask.test(ABS_X) &&
+-               device->absBitmask.test(ABS_Y)) {
++     } else if (device->keyBitmask.test(BTN_MOUSE) || (device->keyBitmask.test(BTN_TOUCH) && device->absBitmask.test(ABS_X) &&
++                device->absBitmask.test(ABS_Y))) {
+         device->classes |= InputDeviceClass::TOUCH;
+         // Is this a BT stylus?
+     } else if ((device->absBitmask.test(ABS_PRESSURE) || device->keyBitmask.test(BTN_TOUCH)) &&
+@@ -2025,7 +2025,6 @@ void EventHub::openDeviceLocked(const std::string& devicePath) {
+         // external stylus cannot also be a keyboard device.
+         device->classes &= ~InputDeviceClass::KEYBOARD;
+     }
+-
+     // See if this device is a joystick.
+     // Assumes that joysticks always have gamepad buttons in order to distinguish them
+     // from other devices such as accelerometers that also have absolute axes.
+diff --git a/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.cpp b/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.cpp
+index 86153d3f5e..cf21e331b2 100644
+--- a/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.cpp
++++ b/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.cpp
+@@ -21,12 +21,23 @@
+ 
+ namespace android {
+ 
+-TouchButtonAccumulator::TouchButtonAccumulator() : mHaveBtnTouch(false), mHaveStylus(false) {
++TouchButtonAccumulator::TouchButtonAccumulator() : mHaveBtnTouch(false), mHaveStylus(false), mHaveBtnMouse(false), mHaveBtnTools(false)  {
+     clearButtons();
+ }
+ 
+ void TouchButtonAccumulator::configure(InputDeviceContext& deviceContext) {
+     mHaveBtnTouch = deviceContext.hasScanCode(BTN_TOUCH);
++    mHaveBtnMouse = deviceContext.hasScanCode(BTN_MOUSE);
++    mHaveBtnTools = deviceContext.hasScanCode(BTN_TOOL_FINGER)
++                    || deviceContext.hasScanCode(BTN_TOOL_PEN)
++                    || deviceContext.hasScanCode(BTN_TOOL_RUBBER)
++                    || deviceContext.hasScanCode(BTN_TOOL_BRUSH)
++                    || deviceContext.hasScanCode(BTN_TOOL_PENCIL)
++                    || deviceContext.hasScanCode(BTN_TOOL_AIRBRUSH)
++                    || deviceContext.hasScanCode(BTN_TOOL_LENS)
++                    || deviceContext.hasScanCode(BTN_TOOL_DOUBLETAP)
++                    || deviceContext.hasScanCode(BTN_TOOL_TRIPLETAP)
++                    || deviceContext.hasScanCode(BTN_TOOL_QUADTAP);
+     mHaveStylus = deviceContext.hasScanCode(BTN_TOOL_PEN) ||
+             deviceContext.hasScanCode(BTN_TOOL_RUBBER) ||
+             deviceContext.hasScanCode(BTN_TOOL_BRUSH) ||
+@@ -50,6 +61,14 @@ void TouchButtonAccumulator::reset(InputDeviceContext& deviceContext) {
+     mBtnToolDoubleTap = deviceContext.isKeyPressed(BTN_TOOL_DOUBLETAP);
+     mBtnToolTripleTap = deviceContext.isKeyPressed(BTN_TOOL_TRIPLETAP);
+     mBtnToolQuadTap = deviceContext.isKeyPressed(BTN_TOOL_QUADTAP);
++    // If this is a touch device with no tool buttons, no true
++    // touch button, and a mouse button, assume it's a mouse-
++    // driven virtual stylus tablet and use BTN_MOUSE as BTN_TOUCH
++    if (!mHaveBtnTools && !mHaveBtnTouch && mHaveBtnMouse) {
++        mBtnToolPen = true;
++        mHaveBtnTouch = true;
++        mBtnTouch = deviceContext.isKeyPressed(BTN_MOUSE);
++    }
+ }
+ 
+ void TouchButtonAccumulator::clearButtons() {
+@@ -72,6 +91,9 @@ void TouchButtonAccumulator::clearButtons() {
+ void TouchButtonAccumulator::process(const RawEvent* rawEvent) {
+     if (rawEvent->type == EV_KEY) {
+         switch (rawEvent->code) {
++            case BTN_MOUSE:
++                mBtnTouch = rawEvent->value;
++                break;
+             case BTN_TOUCH:
+                 mBtnTouch = rawEvent->value;
+                 break;
+diff --git a/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.h b/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.h
+index 22ebb720d5..f3e9b6a6b3 100644
+--- a/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.h
++++ b/services/inputflinger/reader/mapper/accumulator/TouchButtonAccumulator.h
+@@ -42,6 +42,8 @@ public:
+ private:
+     bool mHaveBtnTouch;
+     bool mHaveStylus;
++    bool mHaveBtnMouse;
++    bool mHaveBtnTools;
+ 
+     bool mBtnTouch;
+     bool mBtnStylus;
+-- 
+2.34.1
+
