@@ -1,0 +1,228 @@
+From d8aaa65b74b5d0d7acd190291c4088e6049f1737 Mon Sep 17 00:00:00 2001
+From: "Mao, Marc" <marc.mao@intel.com>
+Date: Tue, 20 Jul 2021 11:29:13 +0800
+Subject: [PATCH] Use LowPower encoding config for DG2
+
+There is no VME pipeline in DG2 h/w and we should force it to use VDENC.
+Also add "OMX.Intel.force_cqp" to force encoding bitrate control to CQP
+before HuC loading issue fixed.
+
+Change-Id: I42c79b37bfa5658230ebb42846dc0651fba31aa4
+Tracked-On: OAM-97086
+Signed-off-by: Mao, Marc <marc.mao@intel.com>
+---
+ omx_components/src/mfx_omx_component.cpp      |  6 ++
+ omx_components/src/mfx_omx_venc_component.cpp |  8 +-
+ omx_utils/include/mfx_omx_types.h             |  3 +-
+ omx_utils/include/mfx_omx_utils.h             |  1 +
+ .../src/mfx_omx_color_aspects_wrapper.cpp     |  2 +
+ omx_utils/src/mfx_omx_dev_android.cpp         | 81 +++++++++++++++++++
+ omx_utils/src/mfx_omx_structures.cpp          |  4 +
+ omx_utils/src/mfx_omx_utils.cpp               |  2 +
+ 8 files changed, 104 insertions(+), 3 deletions(-)
+
+diff --git a/omx_components/src/mfx_omx_component.cpp b/omx_components/src/mfx_omx_component.cpp
+index 38cfca0..b8f9dc8 100644
+--- a/omx_components/src/mfx_omx_component.cpp
++++ b/omx_components/src/mfx_omx_component.cpp
+@@ -213,6 +213,12 @@ MfxOmxComponent::MfxOmxComponent(OMX_ERRORTYPE &error,
+     }
+     MFX_OMX_LOG_INFO_IF(g_OmxLogLevel, "Debug logs are enabled");
+ 
++    if (property_get("OMX.Intel.force_cqp", value, 0))
++    {
++        g_OmxForceCQP = atoi(value);
++    }
++    MFX_OMX_LOG_INFO_IF(g_OmxForceCQP, "Force encode BRC to CQP mode");
++
+     MFX_OMX_AUTO_TRACE_U32(error);
+ }
+ 
+diff --git a/omx_components/src/mfx_omx_venc_component.cpp b/omx_components/src/mfx_omx_venc_component.cpp
+index 5b81eab..2df1c30 100755
+--- a/omx_components/src/mfx_omx_venc_component.cpp
++++ b/omx_components/src/mfx_omx_venc_component.cpp
+@@ -229,8 +229,8 @@ OMX_ERRORTYPE MfxOmxVencComponent::Init(void)
+     }
+     if ((OMX_ErrorNone == error) && (MFX_IMPL_SOFTWARE != m_Implementation))
+     {
+-        if ((MFX_HW_BXT == m_pDevice->GetPlatformType()) &&
+-            (MFX_CODEC_AVC == m_MfxVideoParams.mfx.CodecId))
++        if (((MFX_HW_BXT == m_pDevice->GetPlatformType()) || (MFX_HW_DG2 == m_pDevice->GetPlatformType())) &&
++            ((MFX_CODEC_AVC == m_MfxVideoParams.mfx.CodecId) || (MFX_CODEC_HEVC == m_MfxVideoParams.mfx.CodecId)))
+             m_MfxVideoParams.mfx.LowPower = MFX_CODINGOPTION_ON;
+     }
+     if (OMX_ErrorNone == error)
+@@ -380,6 +380,10 @@ OMX_ERRORTYPE MfxOmxVencComponent::PortsParams_2_MfxVideoParams(void)
+     else m_MfxVideoParams.mfx.FrameInfo.FrameRateExtD = 0;
+ 
+     m_MfxVideoParams.mfx.RateControlMethod = MFX_RATECONTROL_CBR;
++    if (g_OmxForceCQP) {
++        MFX_OMX_LOG_INFO("Force default BRC mode CQP");
++        m_MfxVideoParams.mfx.RateControlMethod = MFX_RATECONTROL_CQP;
++    }
+     m_MfxVideoParams.mfx.TargetKbps = (mfxU16)(m_pOutPortDef->format.video.nBitrate*0.001); // convert to Kbps
+ 
+     int idx;
+diff --git a/omx_utils/include/mfx_omx_types.h b/omx_utils/include/mfx_omx_types.h
+index 6667f5b..4d1b867 100644
+--- a/omx_utils/include/mfx_omx_types.h
++++ b/omx_utils/include/mfx_omx_types.h
+@@ -549,7 +549,8 @@ enum eMfxOmxHwType
+ {
+     MFX_HW_UNKNOWN = 0,
+     MFX_HW_BXT,
+-    MFX_HW_TGL_LP
++    MFX_HW_TGL_LP,
++    MFX_HW_DG2
+ };
+ 
+ /*------------------------------------------------------------------------------*/
+diff --git a/omx_utils/include/mfx_omx_utils.h b/omx_utils/include/mfx_omx_utils.h
+index 9e8d62c..b7c0a16 100644
+--- a/omx_utils/include/mfx_omx_utils.h
++++ b/omx_utils/include/mfx_omx_utils.h
+@@ -158,6 +158,7 @@ extern "C" {
+ extern mfxVersion g_MfxVersion;
+ extern mfxSyncPoint* g_NilSyncPoint;
+ extern mfxU32 g_OmxLogLevel;
++extern mfxU32 g_OmxForceCQP;
+ 
+ /*------------------------------------------------------------------------------*/
+ 
+diff --git a/omx_utils/src/mfx_omx_color_aspects_wrapper.cpp b/omx_utils/src/mfx_omx_color_aspects_wrapper.cpp
+index bd5ce91..0c66fef 100644
+--- a/omx_utils/src/mfx_omx_color_aspects_wrapper.cpp
++++ b/omx_utils/src/mfx_omx_color_aspects_wrapper.cpp
+@@ -143,6 +143,8 @@ void MfxOmxColorAspectsWrapper::GetOutputColorAspects(android::ColorAspects &out
+ 
+ void MfxOmxColorAspectsWrapper::GetColorAspectsFromVideoSignal(const mfxExtVideoSignalInfo &signalInfo, android::ColorAspects &outColorAspects)
+ {
++    MFX_OMX_AUTO_TRACE_FUNC();
++
+     bool video_signal_type_present_flag = signalInfo.VideoFormat != 5 ||
+                                             signalInfo.VideoFullRange != 0 ||
+ 					                        signalInfo.ColourDescriptionPresent != 0;
+diff --git a/omx_utils/src/mfx_omx_dev_android.cpp b/omx_utils/src/mfx_omx_dev_android.cpp
+index 7de2a77..1ec2590 100644
+--- a/omx_utils/src/mfx_omx_dev_android.cpp
++++ b/omx_utils/src/mfx_omx_dev_android.cpp
+@@ -69,6 +69,87 @@ const mfx_device_item listLegalDevIDs[] = {
+     { 0x9AC9, MFX_HW_TGL_LP},
+     { 0x9AD9, MFX_HW_TGL_LP},
+     { 0x9AF8, MFX_HW_TGL_LP},
++
++    /* DG2 Val-Only Super-SKU: 4F80 - 4F87 */
++    { 0x4F80, MFX_HW_DG2 },
++    { 0x4F81, MFX_HW_DG2 },
++    { 0x4F82, MFX_HW_DG2 },
++    { 0x4F83, MFX_HW_DG2 },
++    { 0x4F84, MFX_HW_DG2 },
++    { 0x4F85, MFX_HW_DG2 },
++    { 0x4F86, MFX_HW_DG2 },
++    { 0x4F87, MFX_HW_DG2 },
++    { 0x4F88, MFX_HW_DG2 },
++
++    /* DG2 Notebook Reserved: 5690 - 569F */
++    { 0x5690, MFX_HW_DG2 },
++    { 0x5691, MFX_HW_DG2 },
++    { 0x5692, MFX_HW_DG2 },
++    { 0x5695, MFX_HW_DG2 },
++    { 0x5696, MFX_HW_DG2 },
++    { 0x5697, MFX_HW_DG2 },
++    { 0x5698, MFX_HW_DG2 },
++    { 0x5699, MFX_HW_DG2 },
++    { 0x569A, MFX_HW_DG2 },
++    { 0x569B, MFX_HW_DG2 },
++    { 0x569C, MFX_HW_DG2 },
++    { 0x569D, MFX_HW_DG2 },
++    { 0x569E, MFX_HW_DG2 },
++    { 0x569E, MFX_HW_DG2 },
++
++    /* DG2 Desktop Reserved: 56A0 - 56AF */
++    { 0x56A0, MFX_HW_DG2 },
++    { 0x56A1, MFX_HW_DG2 },
++    { 0x56A2, MFX_HW_DG2 },
++    { 0x56A3, MFX_HW_DG2 },
++    { 0x56A4, MFX_HW_DG2 },
++    { 0x56A5, MFX_HW_DG2 },
++    { 0x56A6, MFX_HW_DG2 },
++    { 0x56A7, MFX_HW_DG2 },
++    { 0x56A8, MFX_HW_DG2 },
++    { 0x56A9, MFX_HW_DG2 },
++    { 0x56AA, MFX_HW_DG2 },
++    { 0x56AB, MFX_HW_DG2 },
++    { 0x56AC, MFX_HW_DG2 },
++    { 0x56AD, MFX_HW_DG2 },
++    { 0x56AE, MFX_HW_DG2 },
++    { 0x56AF, MFX_HW_DG2 },
++
++    /*  Workstation Reserved: 56B0 - 56BF */
++    { 0x56B0, MFX_HW_DG2 },
++    { 0x56B1, MFX_HW_DG2 },
++    { 0x56B2, MFX_HW_DG2 },
++    { 0x56B3, MFX_HW_DG2 },
++    { 0x56B4, MFX_HW_DG2 },
++    { 0x56B5, MFX_HW_DG2 },
++    { 0x56B6, MFX_HW_DG2 },
++    { 0x56B7, MFX_HW_DG2 },
++    { 0x56B8, MFX_HW_DG2 },
++    { 0x56B9, MFX_HW_DG2 },
++    { 0x56BA, MFX_HW_DG2 },
++    { 0x56BB, MFX_HW_DG2 },
++    { 0x56BC, MFX_HW_DG2 },
++    { 0x56BD, MFX_HW_DG2 },
++    { 0x56BE, MFX_HW_DG2 },
++    { 0x56BF, MFX_HW_DG2 },
++
++    /* Server Reserved: 56C0 - 56CF */
++    { 0x56C0, MFX_HW_DG2 },
++    { 0x56C1, MFX_HW_DG2 },
++    { 0x56C2, MFX_HW_DG2 },
++    { 0x56C3, MFX_HW_DG2 },
++    { 0x56C4, MFX_HW_DG2 },
++    { 0x56C5, MFX_HW_DG2 },
++    { 0x56C6, MFX_HW_DG2 },
++    { 0x56C7, MFX_HW_DG2 },
++    { 0x56C8, MFX_HW_DG2 },
++    { 0x56C9, MFX_HW_DG2 },
++    { 0x56CA, MFX_HW_DG2 },
++    { 0x56CB, MFX_HW_DG2 },
++    { 0x56CC, MFX_HW_DG2 },
++    { 0x56CD, MFX_HW_DG2 },
++    { 0x56CE, MFX_HW_DG2 },
++    { 0x56CF, MFX_HW_DG2 },
+ };
+ 
+ typedef struct drm_i915_getparam {
+diff --git a/omx_utils/src/mfx_omx_structures.cpp b/omx_utils/src/mfx_omx_structures.cpp
+index f1814a7..0db2788 100755
+--- a/omx_utils/src/mfx_omx_structures.cpp
++++ b/omx_utils/src/mfx_omx_structures.cpp
+@@ -1198,6 +1198,10 @@ OMX_ERRORTYPE omx2mfx_config(
+     config.mfxparams->mfx.MaxKbps = 0;
+     config.mfxparams->mfx.RateControlMethod = omx2mfx_brc(omxparams.eControlRate);
+ 
++    if (g_OmxForceCQP) {
++        MFX_OMX_LOG_INFO("Force CQP from BRC mode %d", config.mfxparams->mfx.RateControlMethod);
++        config.mfxparams->mfx.RateControlMethod = MFX_RATECONTROL_CQP;
++    }
+     return OMX_ErrorNone;
+ }
+ 
+diff --git a/omx_utils/src/mfx_omx_utils.cpp b/omx_utils/src/mfx_omx_utils.cpp
+index e2dcfdc..87a525c 100644
+--- a/omx_utils/src/mfx_omx_utils.cpp
++++ b/omx_utils/src/mfx_omx_utils.cpp
+@@ -68,6 +68,8 @@ mfxVersion g_MfxVersion = { {MFX_VERSION_MINOR, MFX_VERSION_MAJOR} };
+ 
+ mfxU32 g_OmxLogLevel = 0;
+ 
++mfxU32 g_OmxForceCQP = 0;
++
+ /*------------------------------------------------------------------------------*/
+ 
+ size_t mfx_omx_dump(const void *ptr, size_t size, size_t nmemb, FILE *stream)
+-- 
+2.35.1
+
