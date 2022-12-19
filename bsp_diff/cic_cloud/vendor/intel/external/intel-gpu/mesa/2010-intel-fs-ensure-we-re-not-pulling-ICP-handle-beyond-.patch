@@ -1,0 +1,107 @@
+From d9c8fc3c79731f00006a767c7d91bf11d3b486e5 Mon Sep 17 00:00:00 2001
+From: Lionel Landwerlin <lionel.g.landwerlin@intel.com>
+Date: Mon, 22 Mar 2021 11:35:03 +0200
+Subject: [PATCH] intel/fs: ensure we're not pulling ICP handle beyond input
+ vertices
+
+In a tesselation control shader where an input array is accessed using
+the index gl_InvocationID, we can end up accessing elements beyond the
+number of input vertices specified in the shader key.
+
+This happens because of the lowering in nir_lower_indirect_derefs().
+This lowering will affect compact variables which happens in this
+case :
+
+  in gl_PerVertex {
+      vec4  gl_Position;
+      float gl_ClipDistance[1];
+  } gl_in[gl_MaxPatchVertices];
+
+The lowered code produced by NIR is somewhat ineffecient (implements a
+binary seach) :
+
+  if (gl_InvocationID < 16) {
+     if (gl_InvocationID < 8) {
+        if (gl_InvocationID < 4) {
+          vec4 vals = load_at_offset(0);
+          value = bcsel(vals, gl_InvocationID);
+        } else {
+          vec4 vals = load_at_offset(4);
+          value = bcsel(vals, gl_InvocationID - 4);
+        }
+     } else {
+        if (gl_InvocationID < 12) {
+          vec4 vals = load_at_offset(8);
+          value = bcsel(vals, gl_InvocationID - 8);
+        } else {
+          vec4 vals = load_at_offset(12);
+          value = bcsel(vals, gl_InvocationID - 12);
+        }
+     }
+  } else {
+     if (gl_InvocationID < 24) {
+        ...
+     } else {
+        ...
+     }
+  }
+
+By default the gl_MaxPatchVertices must be set at 32 items and that's
+what the lowering code will use to divide the access into chunks of 4.
+But when running with 3 input vertices, this means we'll pull one more
+item than what was delivered in the shader payload.
+
+This triggers issues further down the register scheduling where the
+g5UD (register for the 4th item) is overwritten by a previous SEND,
+leading the URB read to use an invalid handle.
+
+v2: Don't replace source register
+
+Change-Id: I1fa47acb071cdc4f8e3ba04218edc69e62617c13
+Signed-off-by: Lionel Landwerlin <lionel.g.landwerlin@intel.com>
+---
+ src/intel/compiler/brw_fs_nir.cpp | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/src/intel/compiler/brw_fs_nir.cpp b/src/intel/compiler/brw_fs_nir.cpp
+index 16d92d2b458..5c5fc0d4d2b 100644
+--- a/src/intel/compiler/brw_fs_nir.cpp
++++ b/src/intel/compiler/brw_fs_nir.cpp
+@@ -2754,12 +2754,20 @@ fs_visitor::get_tcs_multi_patch_icp_handle(const fs_builder &bld,
+                                            nir_intrinsic_instr *instr)
+ {
+    struct brw_tcs_prog_key *tcs_key = (struct brw_tcs_prog_key *) key;
+-   const nir_src &vertex_src = instr->src[0];
++   const nir_src &nir_vertex_src = instr->src[0];
+ 
+    const fs_reg start = tcs_payload().icp_handle_start;
+ 
+-   if (nir_src_is_const(vertex_src))
+-      return byte_offset(start, nir_src_as_uint(vertex_src) * REG_SIZE);
++   if (nir_src_is_const(nir_vertex_src)) {
++      unsigned reg_offset = MIN2(nir_src_as_uint(nir_vertex_src),
++                                 tcs_key->input_vertices - 1);
++      return byte_offset(start, reg_offset * REG_SIZE);
++   }
++
++   fs_reg vertex_src = bld.vgrf(BRW_REGISTER_TYPE_D, 1);
++   bld.emit_minmax(vertex_src,
++                   retype(get_nir_src(nir_vertex_src), BRW_REGISTER_TYPE_D),
++                   brw_imm_d(tcs_key->input_vertices - 1), BRW_CONDITIONAL_L);
+ 
+    /* The vertex index is non-constant.  We need to use indirect
+     * addressing to fetch the proper URB handle.
+@@ -2781,9 +2789,7 @@ fs_visitor::get_tcs_multi_patch_icp_handle(const fs_builder &bld,
+    /* channel_offsets = 4 * sequence = <28, 24, 20, 16, 12, 8, 4, 0> */
+    bld.SHL(channel_offsets, sequence, brw_imm_ud(2u));
+    /* Convert vertex_index to bytes (multiply by 32) */
+-   bld.SHL(vertex_offset_bytes,
+-           retype(get_nir_src(vertex_src), BRW_REGISTER_TYPE_UD),
+-           brw_imm_ud(5u));
++   bld.SHL(vertex_offset_bytes, vertex_src, brw_imm_ud(5u));
+    bld.ADD(icp_offset_bytes, vertex_offset_bytes, channel_offsets);
+ 
+    /* Use start of ICP handles as the base offset.  There is one register
+-- 
+2.25.1
+
