@@ -15,8 +15,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 include(defs.m4)dnl
-define(`ENABLE_PRODUCTION_KMD',ON)
 include(begin.m4)
+define(`ENABLE_PRODUCTION_KMD',ON)
+define(`LIBVHAL_BUILD_EMU',ON)
 include(intel-gfx.m4)
 include(media-driver.m4)
 include(libva2-utils.m4)

@@ -17,6 +17,7 @@
 include(defs.m4)dnl
 define(`INTEL_GFX_FLAVOR_NAME',flex)
 include(begin.m4)
+define(`LIBVHAL_BUILD_EMU',ON)
 include(intel-gfx.m4)
 include(ffmpeg.m4)
 include(libvhal-client.m4)

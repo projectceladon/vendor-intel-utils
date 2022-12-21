@@ -87,6 +87,7 @@ RUN apt-get update && \
     gcc \
     g++ \
     git \
+    libyaml-cpp-dev \
     make \
     pkg-config \
     xz-utils && \
@@ -99,7 +100,7 @@ RUN git clone $LIBVHAL_CLIENT_REPO /opt/build/libvhal-client && \
   cmake -DCMAKE_INSTALL_PREFIX=/opt \
         -DCMAKE_INSTALL_LIBDIR=/opt/lib \
         -DBUILD_EXAMPLES=OFF \
-        -DBUILD_EMULATOR_APP=OFF \
+        -DBUILD_EMULATOR_APP=ON \
         .. && \
   make -j$(nproc) && \
   make install DESTDIR=/opt/dist && \
@@ -154,6 +155,7 @@ RUN apt-get update && \
     libmfxgen1 \
     libvpl2 \
     libva-drm2 \
+    libyaml-cpp0.7 \
     libva2 \
     iproute2 \
     sudo \
