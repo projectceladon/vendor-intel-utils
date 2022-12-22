@@ -199,3 +199,6 @@ ENTRYPOINT ["/usr/bin/demo-bash"]
 
 USER user
 WORKDIR /home/user
+
+COPY entry/streamer-entry /
+ENTRYPOINT ["/streamer-entry"]

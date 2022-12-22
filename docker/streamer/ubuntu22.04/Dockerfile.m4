@@ -40,3 +40,6 @@ INSTALL_ALL(runtime,build)
 
 USER user
 WORKDIR /home/user
+
+COPY entry/streamer-entry /
+ENTRYPOINT ["/streamer-entry"]

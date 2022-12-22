@@ -47,3 +47,6 @@ INSTALL_ALL(runtime,build)
 
 USER user
 WORKDIR /home/user
+
+COPY entry/encoder-entry /
+ENTRYPOINT ["/encoder-entry"]
