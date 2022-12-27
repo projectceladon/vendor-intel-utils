@@ -27,7 +27,7 @@
 #include "core/CTransCoder.h"
 
 
-#include "irrv/irrv_protocol.h"
+#include "irrv/irrv_impl.h"
 #include "sock_server.h"
 
 #include "ProfileLevel.h"

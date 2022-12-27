@@ -17,11 +17,7 @@
 #ifndef IRRV_PROTOCOL_H
 #define IRRV_PROTOCOL_H
 
-#include <sys/cdefs.h>
-#include <sys/types.h>
 #include <stdint.h>
-#include <map>
-#include <string>
 
 /*
     Basic communication flow :
@@ -243,19 +239,5 @@ typedef struct _irrv_message_event_t {
     irrv_message_t  msg;
 } irrv_message_event_t;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-int irrv_writeback(void *opaque, uint8_t *data, size_t size);
-int irrv_writeback2(void *opaque, uint8_t *data, size_t size, int type);
-void irrv_close(void *opaque);
-int irrv_checknewconn(void *opaque);
-bool irrv_check_authentication(irrv_uuid_t id, irrv_uuid_t key);
-int irrv_send_message(void *opaque, int msg, unsigned int value);
-
-#ifdef __cplusplus
-}
-#endif
-
 #endif // IRRV_PROTOCOL_H
+

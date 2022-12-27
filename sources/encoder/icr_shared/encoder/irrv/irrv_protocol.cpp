@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "irrv_protocol.h"
+#include "irrv_impl.h"
 #include "sock_client.h"
 #include "sock_server.h"
 
