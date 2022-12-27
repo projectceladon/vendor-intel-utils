@@ -118,12 +118,12 @@ bool irrv_have_client(sock_server_t *server) {
     return ret;
 }
 
-int irrv_wirteback(void *opaque, uint8_t *data, size_t size)
+int irrv_writeback(void *opaque, uint8_t *data, size_t size)
 {
     sock_server_t *server = static_cast<sock_server_t*> (opaque);
     bool auth_required    = irr_stream_getAuthFlag();
 
-    ATRACE_INDEX("irrv_wirteback", (int)g_wb_frame_idx, 0);
+    ATRACE_INDEX("irrv_writeback", (int)g_wb_frame_idx, 0);
     TimeLog timelog("IRRB_irrv_writeback", 0, g_wb_frame_idx++, 0); 
 
     //IrrvLog.Info("send frame size %lu\n", size);
@@ -178,7 +178,7 @@ int irrv_wirteback(void *opaque, uint8_t *data, size_t size)
     return 0;
 }
 
-int irrv_wirteback2(void *opaque, uint8_t *data, size_t size, int type)
+int irrv_writeback2(void *opaque, uint8_t *data, size_t size, int type)
 {
     sock_server_t *server = static_cast<sock_server_t*> (opaque);
     bool auth_required    = irr_stream_getAuthFlag();

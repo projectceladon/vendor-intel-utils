@@ -239,7 +239,7 @@ typedef enum {
 #ifdef __cplusplus
 extern "C" {
 #endif
-    int irrv_wirteback(void *opaque, uint8_t *data, size_t size, uint8_t *alphaData, size_t alphaDataSize, int encoder_type);
+    int irrv_writeback(void *opaque, uint8_t *data, size_t size, uint8_t *alphaData, size_t alphaDataSize, int encoder_type);
     void irrv_close(void *opaque);
     int irrv_checknewconn(void *opaque);
 

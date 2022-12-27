@@ -889,8 +889,8 @@ int irr_encoder_start(int id, encoder_info_t *encoder_info) {
 
                 info.cb_params.opaque   = irrv_server.Get();
                 info.cb_params.opaque2  = irrv_auxiliary_server.Get();
-                info.cb_params.cbWrite  = irrv_wirteback;
-                info.cb_params.cbWrite2 = irrv_wirteback2;
+                info.cb_params.cbWrite  = irrv_writeback;
+                info.cb_params.cbWrite2 = irrv_writeback2;
                 info.cb_params.cbClose  = irrv_close;
                 info.cb_params.cbCheckNewConn = irrv_checknewconn;
                 info.cb_params.cbSendMessage = irrv_send_message;

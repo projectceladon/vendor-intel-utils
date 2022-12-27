@@ -247,8 +247,8 @@ typedef struct _irrv_message_event_t {
 extern "C" {
 #endif
 
-int irrv_wirteback(void *opaque, uint8_t *data, size_t size);
-int irrv_wirteback2(void *opaque, uint8_t *data, size_t size, int type);
+int irrv_writeback(void *opaque, uint8_t *data, size_t size);
+int irrv_writeback2(void *opaque, uint8_t *data, size_t size, int type);
 void irrv_close(void *opaque);
 int irrv_checknewconn(void *opaque);
 bool irrv_check_authentication(irrv_uuid_t id, irrv_uuid_t key);
