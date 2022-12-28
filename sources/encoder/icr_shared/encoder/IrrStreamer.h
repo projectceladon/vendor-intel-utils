@@ -29,9 +29,9 @@
 #include "utils/IORuntimeWriter.h"
 #include "irrv/irrv_protocol.h"
 
-#define MIN_REROLUTION_VALUE_H264 32
-#define MIN_REROLUTION_VALUE_HEVC 128
-#define MIN_REROLUTION_VALUE_AV1 128
+#define MIN_RESOLUTION_VALUE_H264 32
+#define MIN_RESOLUTION_VALUE_HEVC 128
+#define MIN_RESOLUTION_VALUE_AV1 128
 
 class IrrStreamer : public CTransLog {
 public:

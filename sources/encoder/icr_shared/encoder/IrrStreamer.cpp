@@ -636,21 +636,21 @@ int IrrStreamer::change_resolution(int width, int height){
     }
 
     if (m_nCodecId == AV_CODEC_ID_H264) {
-        if (width < MIN_REROLUTION_VALUE_H264 || height < MIN_REROLUTION_VALUE_H264) {
+        if (width < MIN_RESOLUTION_VALUE_H264 || height < MIN_RESOLUTION_VALUE_H264) {
             Error("%s : %d : When codec is H264, min width or height is 32! width = %d, height = %d\n", __func__, __LINE__, width, height);
             return AVERROR(EINVAL);
         }
     }
 
     if (m_nCodecId == AV_CODEC_ID_HEVC) {
-        if (width < MIN_REROLUTION_VALUE_HEVC || height < MIN_REROLUTION_VALUE_HEVC) {
+        if (width < MIN_RESOLUTION_VALUE_HEVC || height < MIN_RESOLUTION_VALUE_HEVC) {
             Error("%s : %d : When codec is HEVC, min width or height is 128! width = %d, height = %d\n", __func__, __LINE__, width, height);
             return AVERROR(EINVAL);
         }
     }
 
     if (m_nCodecId == AV_CODEC_ID_AV1) {
-        if (width < MIN_REROLUTION_VALUE_AV1 || height < MIN_REROLUTION_VALUE_AV1) {
+        if (width < MIN_RESOLUTION_VALUE_AV1 || height < MIN_RESOLUTION_VALUE_AV1) {
             Error("%s : %d : When codec is AV1, min width or height is 128! width = %d, height = %d\n", __func__, __LINE__, width, height);
             return AVERROR(EINVAL);
         }
