@@ -46,6 +46,11 @@ ICR_DOCKER="docker create -u $(id -u):$(id -g) \
   --name icr0 \
   $ICR"
 
+VAINFO_DOCKER="docker run --rm \
+  -e DEVICE=$DEVICE --device $DEVICE --group-add $DEVICE_GRP \
+  --name vainfo0 \
+  $ICR"
+
 ffmpeg_cmd="ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -pix_fmt bgra -frames:v 150 -f rawvideo -y /opt/workdir/test.bgra"
 
 icr_cases=(
@@ -59,10 +64,29 @@ icr_cases=(
   "icr_encoder 0 -streaming -res 1280x720 -fr 30 -url irrv:265 -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -tcae 1 -hwc_sock /opt/workdir/hwc-sock"
   "icr_encoder 0 -streaming -res 1280x720 -fr 60 -url irrv:265 -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -tcae 0 -hwc_sock /opt/workdir/hwc-sock"
   "icr_encoder 0 -streaming -res 1280x720 -fr 60 -url irrv:265 -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -tcae 1 -hwc_sock /opt/workdir/hwc-sock"
+  # av1
+  "icr_encoder 0 -streaming -res 1280x720 -fr 30 -url irrv:av1 -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -tcae 0 -hwc_sock /opt/workdir/hwc-sock"
+  "icr_encoder 0 -streaming -res 1280x720 -fr 30 -url irrv:av1 -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -tcae 1 -hwc_sock /opt/workdir/hwc-sock"
+  "icr_encoder 0 -streaming -res 1280x720 -fr 60 -url irrv:av1 -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -tcae 0 -hwc_sock /opt/workdir/hwc-sock"
+  "icr_encoder 0 -streaming -res 1280x720 -fr 60 -url irrv:av1 -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -tcae 1 -hwc_sock /opt/workdir/hwc-sock"
   )
 
 function get_framerate() {
   echo "$1" | sed -E 's/.*fr ([0-9\.]*).*/\1/'
+}
+
+function is_av1_test() {
+  if echo $1 | grep -q av1; then
+    return 0
+  fi
+  return 1
+}
+
+function check_av1() {
+  if $VAINFO_DOCKER vainfo --display drm --device $DEVICE 2>/dev/null | grep VAEntrypointEncSliceLP | grep -q VAProfileAV1; then
+    return 0
+  fi
+  return 1
 }
 
 $FFMPEG_DOCKER $ffmpeg_cmd
@@ -73,6 +97,11 @@ for c in "${icr_cases[@]}"; do
   echo ">>> Testing with:"
   echo "$c"
   echo "<<<"
+
+  if is_av1_test "$c" && ! check_av1; then
+    echo "Skipping test since av1 encoding is not supported"
+    continue
+  fi
 
   if ! $AIC_DOCKER; then
     res=1
