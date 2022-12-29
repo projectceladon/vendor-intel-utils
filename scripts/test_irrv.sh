@@ -65,9 +65,6 @@ function get_framerate() {
   echo "$1" | sed -E 's/.*fr ([0-9\.]*).*/\1/'
 }
 
-docker pull $ESC
-docker pull $ICR
-
 $FFMPEG_DOCKER $ffmpeg_cmd
 
 count=0
@@ -95,8 +92,6 @@ for c in "${icr_cases[@]}"; do
 
   count=$((++count))
 done
-
-docker rmi $ESC $ICR
 
 exit $res
 
