@@ -120,6 +120,7 @@ fi
 
 count=0
 success=0
+skipped=0
 
 for c in "${icr_cases[@]}"; do
   echo ">>> Testing with:"
@@ -130,6 +131,7 @@ for c in "${icr_cases[@]}"; do
 
   if is_av1_test "$c" && ! check_av1; then
     echo "Skipping test since av1 encoding is not supported"
+    skipped=$((++skipped))
     continue
   fi
 
@@ -158,7 +160,7 @@ for c in "${icr_cases[@]}"; do
   count=$((++count))
 done
 
-echo $PROFILE: $success tests passed \($count run\)
+echo "${PROFILE}: ${success} tests passed (${count} run, ${skipped} skipped)"
 
 exit $res
 
