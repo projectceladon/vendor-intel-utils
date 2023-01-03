@@ -32,6 +32,7 @@ include(begin.m4)
 
 define(`ICR_INSTALL_DEPS',`dnl
   iproute2 dnl
+  ifdef(`BUILD_LIBVA2_UTILS',,vainfo) dnl
   ifdef(`DEVEL',`sudo wget')')
 
 define(`INSTALL_ICR',`dnl

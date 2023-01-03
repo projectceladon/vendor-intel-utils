@@ -158,6 +158,7 @@ RUN apt-get update && \
     libyaml-cpp0.7 \
     libva2 \
     iproute2 \
+    vainfo \
     sudo \
     wget \
      && \
