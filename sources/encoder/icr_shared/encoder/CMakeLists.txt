@@ -37,7 +37,6 @@ endif()
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../sock_util
     ${CMAKE_CURRENT_SOURCE_DIR}/../time_log
     ${CMAKE_CURRENT_SOURCE_DIR}/transcode/include
     )

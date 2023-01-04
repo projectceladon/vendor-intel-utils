@@ -17,6 +17,5 @@
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/common)
 
 add_subdirectory(encoder)
-add_subdirectory(sock_util)
 add_subdirectory(time_log)
 

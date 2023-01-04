@@ -132,7 +132,6 @@ include_directories(${ICR_SHARED_PATH}/encoder
                     ${ICR_SHARED_PATH}/encoder/transcode/include)
 
 include_directories(${ICR_SHARED_PATH}/common
-                    ${ICR_SHARED_PATH}/sock_util
                     ${ICR_SHARED_PATH}/time_log
                     ${CMAKE_CURRENT_LIST_DIR}
                     )
@@ -164,4 +163,5 @@ target_link_libraries( ${executable}
 install(TARGETS ${executable} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_subdirectory(icr_shared)
+add_subdirectory(sock_util)
 

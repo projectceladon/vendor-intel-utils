@@ -22,6 +22,7 @@ add_library(sock_util SHARED
   sock_util.cpp
 )
 
+target_include_directories(sock_util INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_options(sock_util PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/sock_util.map)
 
 install(TARGETS sock_util LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
