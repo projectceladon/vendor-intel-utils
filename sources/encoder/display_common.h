@@ -17,7 +17,7 @@
 #ifndef _DISPLAY_COMMON_H_
 #define _DISPLAY_COMMON_H_
 
-#include "../encoder/encoder.h"
+#include "encoder.h"
 
 typedef struct native_handle
 {

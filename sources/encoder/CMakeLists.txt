@@ -24,8 +24,6 @@ endif()
 
 include(GNUInstallDirs)
 
-set(ICR_SHARED_PATH ${CMAKE_CURRENT_SOURCE_DIR}/icr_shared)
-
 find_library(M_LIB m)
 
 Message(status "  " CMAKE_CURRENT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR})
@@ -128,13 +126,6 @@ Message(status "  " build icr_encoder!)
 set (executable "icr_encoder")
 
 set (renderer_src display_renderer.cpp display_video_renderer.cpp)
-include_directories(${ICR_SHARED_PATH}/encoder
-                    ${ICR_SHARED_PATH}/encoder/transcode/include)
-
-include_directories(${ICR_SHARED_PATH}/common
-                    ${ICR_SHARED_PATH}/time_log
-                    ${CMAKE_CURRENT_LIST_DIR}
-                    )
 
 add_definitions(-DBUILD_FOR_HOST=1)
 
@@ -162,6 +153,6 @@ target_link_libraries( ${executable}
 
 install(TARGETS ${executable} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-add_subdirectory(icr_shared)
+add_subdirectory(shared)
 add_subdirectory(sock_util)
 

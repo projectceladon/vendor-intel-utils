@@ -26,7 +26,7 @@
 
 #include "display_server_vhal.h"
 #include "display_video_renderer.h"
-#include "TimeLog.h"
+#include "utils/TimeLog.h"
 
 #include <stdlib.h>
 #include <fcntl.h>

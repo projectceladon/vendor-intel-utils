@@ -15,7 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "display_video_renderer.h"
-#include "TimeLog.h"
+#include "utils/TimeLog.h"
 
 #define DRV_MAX_PLANES 4
 #define TOTAL_NUM_INTS_DATA 49
