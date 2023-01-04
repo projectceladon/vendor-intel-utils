@@ -129,13 +129,11 @@ set (executable "icr_encoder")
 
 set (renderer_src display_renderer.cpp display_video_renderer.cpp)
 include_directories(${ICR_SHARED_PATH}/encoder
-                    ${ICR_SHARED_PATH}/encoder/transcode/include
-                    ${ICR_SHARED_PATH}/icr_alloc/include)
+                    ${ICR_SHARED_PATH}/encoder/transcode/include)
 
 include_directories(${ICR_SHARED_PATH}/common
                     ${ICR_SHARED_PATH}/sock_util
                     ${ICR_SHARED_PATH}/time_log
-                    ${ICR_SHARED_PATH}/icr_alloc
                     ${CMAKE_CURRENT_LIST_DIR}
                     )
 
@@ -156,7 +154,6 @@ add_executable( ${executable}
 target_link_libraries( ${executable}
     irr_encoder
     sock_util
-    icr_alloc
     dl
     ${M_LIB}
     libvhal-client-deps
