@@ -1,0 +1,438 @@
+From 6adbec5eec552c31a88fd321ff0b0e8e61fa17ba Mon Sep 17 00:00:00 2001
+From: Hongcheng Xie <hongcheng.xie@intel.com>
+Date: Thu, 22 Dec 2022 09:04:14 +0800
+Subject: [PATCH] Add entry point script for aic cloud env
+
+Signed-off-by: Hongcheng Xie <hongcheng.xie@intel.com>
+---
+ .../ubuntu22.04/selfbuild-prodkmd/Dockerfile  |   3 +
+ .../selfbuild-prodkmd/Dockerfile.m4           |   3 +
+ docker/streamer/ubuntu22.04/Dockerfile        |   3 +
+ docker/streamer/ubuntu22.04/Dockerfile.m4     |   3 +
+ entry/encoder-entry                           | 151 +++++++++++++
+ entry/streamer-entry                          | 211 ++++++++++++++++++
+ 6 files changed, 374 insertions(+)
+ create mode 100755 entry/encoder-entry
+ create mode 100755 entry/streamer-entry
+
+diff --git a/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile b/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile
+index 3ff1d8c..faed833 100644
+--- a/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile
++++ b/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile
+@@ -350,3 +350,6 @@ ENTRYPOINT ["/usr/bin/demo-bash"]
+ 
+ USER user
+ WORKDIR /home/user
++
++COPY entry/encoder-entry /
++ENTRYPOINT ["/encoder-entry"]
+diff --git a/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile.m4 b/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile.m4
+index 8087e90..fe23c56 100644
+--- a/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile.m4
++++ b/docker/encoder/ubuntu22.04/selfbuild-prodkmd/Dockerfile.m4
+@@ -47,3 +47,6 @@ INSTALL_ALL(runtime,build)
+ 
+ USER user
+ WORKDIR /home/user
++
++COPY entry/encoder-entry /
++ENTRYPOINT ["/encoder-entry"]
+diff --git a/docker/streamer/ubuntu22.04/Dockerfile b/docker/streamer/ubuntu22.04/Dockerfile
+index 9e1c240..fd60632 100644
+--- a/docker/streamer/ubuntu22.04/Dockerfile
++++ b/docker/streamer/ubuntu22.04/Dockerfile
+@@ -199,3 +199,6 @@ ENTRYPOINT ["/usr/bin/demo-bash"]
+ 
+ USER user
+ WORKDIR /home/user
++
++COPY entry/streamer-entry /
++ENTRYPOINT ["/streamer-entry"]
+diff --git a/docker/streamer/ubuntu22.04/Dockerfile.m4 b/docker/streamer/ubuntu22.04/Dockerfile.m4
+index 4be7b65..5f3b6f2 100644
+--- a/docker/streamer/ubuntu22.04/Dockerfile.m4
++++ b/docker/streamer/ubuntu22.04/Dockerfile.m4
+@@ -40,3 +40,6 @@ INSTALL_ALL(runtime,build)
+ 
+ USER user
+ WORKDIR /home/user
++
++COPY entry/streamer-entry /
++ENTRYPOINT ["/streamer-entry"]
+diff --git a/entry/encoder-entry b/entry/encoder-entry
+new file mode 100755
+index 0000000..19edf25
+--- /dev/null
++++ b/entry/encoder-entry
+@@ -0,0 +1,151 @@
++#!/bin/bash
++
++SELF=$(basename $0)
++
++function err() {
++  echo "ERR $SELF $$ ${FUNCNAME[1]}: $@" >&2
++}
++
++function dbg() {
++  echo "DBG $SELF $$ ${FUNCNAME[1]}: $@" >&2
++}
++
++function main() {
++  local uid=0
++  local gop=0
++  local user_count=${K8S_ENV_USER_COUNT_PER_ANDROID:-1}
++
++  local help=$(
++    cat <<EOF
++Usage: $SELF [-i <id>] [-u <uid>] [-h] <url>
++  Streamer provide streaming service between AIC and WebRTC client
++
++  -i <id>: instance ID, default: $id
++  -u <uid>: user id, default: 0
++  -g <gop_size>: gop size, default: $gop
++  -h:      print the usage message
++  <ip>:    ip to signaling server in format
++
++EOF
++  )
++
++  while getopts ":i:u:g:h" opt; do
++    case $opt in
++    i) id=$OPTARG ;;
++    u) uid=$OPTARG;;
++    g) gop=$OPTARG ;;
++    h) echo "$help" && exit ;;
++    *) echo "no such option: $opt" && exit 1 ;;
++    esac
++  done
++  shift $((OPTIND - 1))
++
++  if [[ -n "$1" ]]; then
++    ip="$1"
++  else
++    err "signaling server ip is required"
++    echo "$help"
++    exit 1
++  fi
++
++  dbg "id is $id, user id is $uid"
++  dbg "ip is $ip"
++
++  if [[ "$K8S_ENV" == "true" ]]; then
++    sockpath=/conn/hwc-sock
++  else
++    sockpath=/opt/workdir/ipc/hwc-sock
++  fi
++
++  local w=${K8S_ENV_DISPLAY_RESOLUTION_X:-1280}
++  local h=${K8S_ENV_DISPLAY_RESOLUTION_Y:-720}
++
++  local y=${ICR_ON:-n}
++
++  if [[ "$K8S_ENV" == "true" ]]; then
++    local resourceAllocatedPath="/conn/resourceAllocated"
++    wait_file $resourceAllocatedPath
++    node="0"
++    for LINE in `cat $resourceAllocatedPath`
++    do
++        if [[ $LINE =~ "renderNode" ]]; then
++            OLD_IFS="$IFS"
++            IFS=","
++            arr=($LINE)
++            IFS="$OLD_IFS"
++            for s in ${arr[@]}
++            do
++              if [[ $s =~ "renderNode" ]]; then
++                    str="{\"renderNode\":\""
++                    start=${#str}
++                    length=$(expr ${#s}  - 1 - $start)
++                    if [ $length -ge 1 ] 2>/dev/null ; then
++                       tmp=${s:$start:$length}
++                       if [ $tmp -ge 0 ] 2>/dev/null; then
++                           node=$tmp
++                       fi
++                    fi
++              fi
++            done
++        else
++            echo "Render node hasn't been allocated."
++        fi
++    done
++    echo "node $node"
++    local INS_ON_NODE="$(expr $node + 128)"
++    local renderDevice="/dev/dri/renderD$INS_ON_NODE"
++    export VAAPI_DEVICE=$renderDevice
++    echo "Set env VAAPI_DEVICE: "$VAAPI_DEVICE
++  fi
++
++  local renderfps_enc_enable=${ENV_RENDERFPS_ENC_ENABLE:-"false"}
++  local hevc_enable=${HEVC_ENABLE:-"false"}
++  local codec="264"
++  if [[ "$hevc_enable" == "true" ]]; then
++      codec="265"
++  fi
++
++  local opts="$id -streaming -res ${w}x${h} -fr 30 -url irrv:${codec} -plugin qsv -lowpower -quality 4 -ratectrl VBR -b 3.3M -maxrate 6.6M -hwc_sock $sockpath"
++
++  if [[ $user_count -gt 1 ]]; then
++      opts="$opts -user $uid"
++  fi
++
++  #Set TCAE disabled by default
++  opts="$opts -tcae 0"
++
++  if [[ $gop -gt 0 ]]; then
++      opts="$opts -g $gop"
++  fi
++
++  if [[ "$renderfps_enc_enable" == "true" ]]; then
++      opts="$opts -renderfps_enc 1"
++  fi
++
++  dbg "opts:$opts"
++
++  while true; do
++     DISABLE_DYNAMIC_RESOLUTION=0 /opt/bin/icr_encoder $opts
++     echo "icr encoder exit, check logs"
++     sleep 2
++  done
++}
++
++function wait_file() {
++  dbg "wait for $1"
++  while [[ ! -e "$1" ]]; do
++    sleep 2
++  done
++  dbg "done"
++}
++
++function spin {
++  dbg "wait forever"
++  while true; do
++    sleep infinity &
++    wait $!
++  done
++}
++
++# here we go
++main "$@"
+diff --git a/entry/streamer-entry b/entry/streamer-entry
+new file mode 100755
+index 0000000..69f86d9
+--- /dev/null
++++ b/entry/streamer-entry
+@@ -0,0 +1,211 @@
++#!/bin/bash
++
++SELF=$(basename $0)
++
++function err() {
++  echo "ERR $SELF $$ ${FUNCNAME[1]}: $@" >&2
++}
++
++function dbg() {
++  echo "DBG $SELF $$ ${FUNCNAME[1]}: $@" >&2
++}
++
++function main() {
++  local uid=0
++  local w=${K8S_ENV_DISPLAY_RESOLUTION_X:-1280}
++  local h=${K8S_ENV_DISPLAY_RESOLUTION_Y:-720}
++  local y=${ICR_ON:-n}
++  local user_count=${K8S_ENV_USER_COUNT_PER_ANDROID:-1}
++  local dev=${DEVICE:-/dev/dri/renderD128}
++  local cqp=${K8S_ENV_FORCE_CQP:-false}
++
++  local help=$(
++    cat <<EOF
++Usage: $SELF [-i <id>] [-u <uid>]  [-h] <url>
++  Streamer provide streaming service between AIC and WebRTC client
++
++  -i <id>: instance ID, default: $id
++  -u <uid>: user id, default: 0
++  -l:      enable measuring latency
++  -h:      print the usage message
++  <ip>:    ip to signaling server in format
++
++EOF
++  )
++  local wdir="/opt/workdir"
++  local k8s=${K8S_ENV:-"false"}
++  local k8s_stateless=${K8S_ENV_STATELESS:-"false"}
++  local dev=${DEVICE:-/dev/dri/renderD128}
++  local id="$(id)"
++  local measure_latency="false"
++  local privileged_enable=${ENABLE_ENV_PRIVILEGED:-"false"}
++  local hevc_enable=${HEVC_ENABLE:-"false"}
++  local icr_start_immediately=${ENV_ICR_START_IMMEDIATELY:-"false"}
++
++  while getopts ":i:u:lh" opt; do
++    case $opt in
++    i) id=$OPTARG ;;
++    u) uid=$OPTARG;;
++    l) measure_latency="true";;
++    h) echo "$help" && exit ;;
++    *) echo "no such option: $opt" && exit 1 ;;
++    esac
++  done
++  shift $((OPTIND - 1))
++
++  if [[ -n "$1" ]]; then
++    ip="$1"
++  else
++    err "signaling server ip is required"
++    echo "$help"
++    exit 1
++  fi
++
++  dbg "id is $id"
++  dbg "ips is $ips"
++  dbg "port is $port"
++  dbg "measure_latency is $measure_latency"
++
++  local ips=$ip
++  local peerid=$[$user_count*$id+$uid]
++  local serverid=s$peerid
++  local clientid=c$peerid
++  local coturn_ip=${COTURN_IP:-"$ip"}
++  local ice_port_begin=${ICE_PORT_BEGIN:-"50000"}
++  local ice_port_end=${ICE_PORT_END:-"50999"}
++
++  local ipc files
++  if [[ "$k8s" == "true" ]]; then
++    ipc="/conn"
++    wdir="/conn"
++    nid=0
++    ips=${K8S_ENV_OWT_SERVER_IP:-owt}
++    port=${K8S_ENV_OWT_SERVER_PORT:-8095}
++    portOpt=" -p $port"
++    k8sOpt="--k8s 1"
++    local GPU_NODES=${GPU_NODES:-$(find /dev/dri -iname "renderD*" | wc | awk '{print $1}')}
++    local INS_ON_NODE="$(expr $id % $GPU_NODES + 128)"
++    dev="/dev/dri/renderD$INS_ON_NODE"
++    if [[ "$k8s_stateless" == "true" ]]; then
++        wait_file /conn/stateless/id
++        dev="/dev/dri/renderD128"
++        IFS="," read -ra arr <<< "$(cat /conn/stateless/id)"
++        serverid=${arr[0]}
++        clientid=${arr[1]}
++        echo wait for icr container start up...
++        sleep 10
++    fi
++  else
++    ipc="/opt/workdir/ipc"
++    nid=$id
++  fi
++  if [[ $VIRTUAL_INPUT_NUM -gt 0 ]]; then
++    for ((i=0;i<$VIRTUAL_INPUT_NUM; i++)); do
++      if [[ "$k8s" == "true" ]]; then
++        files="input-pipe-$i"
++      elif [[ $user_count -gt 1 ]]; then
++        files="input-pipe${id}-$uid-$i"
++      else
++        files="input-pipe${id}-$i"
++      fi
++    done
++  fi
++  for f in $files; do
++    wait_file "${ipc}/${f}"
++  done
++
++  local opts="-s $ips  $portOpt $k8sOpt -d $dev --width $w --height $h -n $nid --server-peer-id $serverid --client-peer-id $clientid --workdir $wdir"
++
++  if [[ $user_count -gt 1 ]]; then
++      opts="$opts --enable-multi-user 1 --user $uid"
++  fi
++
++  if [ "$cqp" == "true" ]; then
++      opts="$opts --video-rc cqp"
++  fi
++
++  if [ "$y" == "y" ]; then
++      if [[ $user_count -gt 1 ]]; then
++          iIP=`cat "/opt/workdir/icr/icr"$id-$uid`
++      else
++          iIP=`cat "/opt/workdir/icr/icr"$id`
++      fi
++      opts="$opts --icr-ip $iIP"
++  fi
++
++  if [[ "$k8s" == "true" ]]; then
++      opts="$opts --icr-ip 127.0.0.1"
++  fi
++
++  if [ "$measure_latency" == "true" ]; then
++      opts="$opts --measure-latency 1"
++  fi
++
++  if [[ "$hevc_enable" == "true" ]]; then
++      opts="$opts --codec h265"
++  fi
++
++  if [[ "$icr_start_immediately" == "true" ]]; then
++      opts="$opts --icr-start-immediately 1"
++  fi
++
++  if [ -n "$coturn_ip" ]; then
++    opts="$opts --coturn-ip $coturn_ip"
++  fi
++
++  if [ $ice_port_begin -ge 1 ]; then
++    opts="$opts --ice-port-min $ice_port_begin"
++  fi
++
++  if [ $ice_port_end -ge 1 ]; then
++    opts="$opts --ice-port-max $ice_port_end"
++  fi
++
++  dbg "opts:$opts"
++  if [[ "$privileged_enable" == "true" ]]; then
++      dbg "mount /sys/kernel/debug"
++      mount -t debugfs none /sys/kernel/debug
++      chmod 0755 /sys/kernel/debug
++      chmod 0222 /sys/kernel/debug/tracing/trace_marker
++      chmod 0755 /sys/kernel/debug/tracing
++  fi
++
++  while true; do
++     DISABLE_DYNAMIC_RESOLUTION=1 /opt/bin/ga-server-periodic $opts /opt/etc/ga/server.desktop.webrtc.conf
++     echo "ga server exit, may due to AIC is not ready, try it 2s later"
++     sleep 2
++  done
++}
++
++function wait_file() {
++  dbg "wait for $1"
++  while [[ ! -e "$1" ]]; do
++    sleep 2
++  done
++  dbg "done"
++}
++
++function spin {
++  dbg "wait forever"
++  while true; do
++    sleep infinity &
++    wait $!
++  done
++}
++
++function id() {
++  dbg "start"
++  local id="0"
++  if [[ -n "$INSTANCE_ID" ]]; then
++    id="$INSTANCE_ID"
++  elif [[ "$k8s_stateless" == "true" ]]; then
++    id="0"
++  elif [[ -n "$MY_POD_NAME" ]]; then
++    id=${MY_POD_NAME#"android-"}
++  fi
++  dbg "done: id:$id"
++  echo "$id"
++}
++
++# here we go
++main "$@"
+-- 
+2.17.1
+
