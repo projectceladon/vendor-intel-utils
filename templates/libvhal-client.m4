@@ -31,7 +31,7 @@ dnl
 include(begin.m4)
 
 DECLARE(`LIBVHAL_SRC_REPO',https://github.com/projectceladon/libvhal-client.git)
-DECLARE(`LIBVHAL_CLIENT_VER',3980f24)
+DECLARE(`LIBVHAL_CLIENT_VER',1b275c4)
 DECLARE(`LIBVHAL_BUILD_EMU',OFF)
 
 define(`LIBVHAL_CLIENT_BUILD_DEPS',`ca-certificates cmake gcc g++ git dnl

@@ -50,7 +50,7 @@ RUN apt-get update && \
 ARG LIBVHAL_CLIENT_REPO=https://github.com/projectceladon/libvhal-client.git
 RUN git clone $LIBVHAL_CLIENT_REPO /opt/build/libvhal-client && \
   cd /opt/build/libvhal-client && \
-  git checkout 3980f24 && \
+  git checkout 1b275c4 && \
   mkdir -p build && cd build && \
   cmake -DCMAKE_INSTALL_PREFIX=/opt \
         -DCMAKE_INSTALL_LIBDIR=/opt/lib \
