@@ -26,6 +26,7 @@
 
 namespace aidl::android::hardware::health {
 
-void convert(const HealthInfo& info, struct ::android::BatteryProperties* out);
+void convertHealthinfoToBattery(const HealthInfo& info, struct ::android::BatteryProperties* out);
+void convertHealthinfoFromoBattery(const struct ::android::BatteryProperties* out, HealthInfo& info);
 
 }  // namespace aidl::android::hardware::health

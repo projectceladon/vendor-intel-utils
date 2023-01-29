@@ -18,7 +18,7 @@
 
 namespace aidl::android::hardware::health {
 
-void convert(const HealthInfo& info, struct ::android::BatteryProperties* p) {
+void convertHealthinfoToBattery(const HealthInfo& info, struct ::android::BatteryProperties* p) {
     p->chargerAcOnline = info.chargerAcOnline;
     p->chargerUsbOnline = info.chargerUsbOnline;
     p->chargerWirelessOnline = info.chargerWirelessOnline;
@@ -37,5 +37,23 @@ void convert(const HealthInfo& info, struct ::android::BatteryProperties* p) {
     p->batteryChargeCounter = info.batteryChargeCounterUah;
     p->batteryTechnology = ::android::String8(info.batteryTechnology.c_str());
 }
-
+void convertHealthinfoFromoBattery(const struct ::android::BatteryProperties* p, HealthInfo& info) {
+    info.chargerAcOnline = p->chargerAcOnline;
+    info.chargerUsbOnline = p->chargerUsbOnline;
+    info.chargerWirelessOnline = p->chargerWirelessOnline;
+    info.chargerDockOnline = p->chargerDockOnline;
+    info.maxChargingCurrentMicroamps = p->maxChargingCurrent;
+    info.maxChargingVoltageMicrovolts = p->maxChargingVoltage;
+    info.batteryStatus = static_cast<BatteryStatus>(p->batteryStatus);
+    info.batteryHealth = static_cast<BatteryHealth>(p->batteryHealth);
+    info.batteryPresent = p->batteryPresent;
+    info.batteryLevel = p->batteryLevel;
+    info.batteryVoltageMillivolts = p->batteryVoltage;
+    info.batteryTemperatureTenthsCelsius = p->batteryTemperature;
+    info.batteryCurrentMicroamps = p->batteryCurrent;
+    info.batteryCycleCount = p->batteryCycleCount;
+    info.batteryFullChargeUah = p->batteryFullCharge;
+    info.batteryChargeCounterUah = p->batteryChargeCounter;
+    info.batteryTechnology = p->batteryTechnology;
+}
 }  // namespace aidl::android::hardware::health

@@ -46,6 +46,7 @@ int main(int argc, char** argv) {
     // make a default health service
     auto config = std::make_unique<healthd_config>();
     ::android::hardware::health::InitHealthdConfig(config.get());
+    healthd_board_init(config.get());
     auto binder = ndk::SharedRefBase::make<Health>(gInstanceName, std::move(config));
 
     if (argc >= 2 && argv[1] == gChargerArg) {

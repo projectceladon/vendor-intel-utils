@@ -26,7 +26,19 @@
 #include "LinkedCallback.h"
 #include "health-convert.h"
 
+#include <healthd/healthd.h>
+#include <thread>
+#include <sys/socket.h>
+#include <linux/vm_sockets.h>
+#include "libhealthd/battery_notifypkt.h"
+#include <cutils/klog.h>
+#include <unistd.h>
+#include <string.h>
+
 using std::string_literals::operator""s;
+using namespace std::literals;
+
+int healthd_board_battery_update(struct android::BatteryProperties *props);
 
 namespace aidl::android::hardware::health {
 
@@ -129,7 +141,6 @@ ndk::ScopedAStatus Health::getStorageInfo(std::vector<StorageInfo>*) {
 
 ndk::ScopedAStatus Health::getHealthInfo(HealthInfo* out) {
     battery_monitor_.updateValues();
-
     *out = battery_monitor_.getHealthInfo();
 
     // Fill in storage infos; these aren't retrieved by BatteryMonitor.
@@ -164,7 +175,6 @@ ndk::ScopedAStatus Health::getHealthInfo(HealthInfo* out) {
 
 binder_status_t Health::dump(int fd, const char**, uint32_t) {
     battery_monitor_.dumpState(fd);
-
     ::android::base::WriteStringToFd("\ngetHealthInfo -> ", fd);
     HealthInfo health_info;
     auto res = getHealthInfo(&health_info);
@@ -182,7 +192,6 @@ std::optional<bool> Health::ShouldKeepScreenOn() {
     if (!healthd_config_->screen_on) {
         return std::nullopt;
     }
-
     HealthInfo health_info;
     auto res = getHealthInfo(&health_info);
     if (!res.isOk()) {
@@ -190,7 +199,7 @@ std::optional<bool> Health::ShouldKeepScreenOn() {
     }
 
     ::android::BatteryProperties props = {};
-    convert(health_info, &props);
+    convertHealthinfoToBattery(health_info, &props);
     return healthd_config_->screen_on(&props);
 }
 
@@ -207,8 +216,8 @@ bool IsDeadObjectLogged(const ndk::ScopedAStatus& ret) {
 // Subclass helpers / overrides
 //
 
-void Health::UpdateHealthInfo(HealthInfo* /* health_info */) {
-    /*
+void Health::UpdateHealthInfo(HealthInfo* health_info) {
+     /*
         // Sample code for a subclass to implement this:
         // If you need to modify values (e.g. batteryChargeTimeToFullNowSeconds), do it here.
         health_info->batteryChargeTimeToFullNowSeconds = calculate_charge_time_seconds();
@@ -217,6 +226,15 @@ void Health::UpdateHealthInfo(HealthInfo* /* health_info */) {
         // and implementation to operate on HealthInfo directly, then call:
         healthd_board_battery_update(health_info);
     */
+    struct ::android::BatteryProperties props;
+    convertHealthinfoToBattery(*health_info, &props);
+    healthd_board_battery_update(&props);
+    convertHealthinfoFromoBattery(&props, *health_info);
+    if (get_battery_mediation_present() == false) {
+        health_info->batteryCapacityLevel = ::aidl::android::hardware::health::BatteryCapacityLevel::UNKNOWN;
+        health_info->batteryChargeTimeToFullNowSeconds = 0;
+        health_info->batteryFullChargeDesignCapacityUah = 0;
+        }
 }
 
 //
@@ -234,7 +252,6 @@ ndk::ScopedAStatus Health::registerCallback(const std::shared_ptr<IHealthInfoCal
         callbacks_.emplace_back(LinkedCallback::Make(ref<Health>(), callback));
         // unlock
     }
-
     HealthInfo health_info;
     if (auto res = getHealthInfo(&health_info); !res.isOk()) {
         LOG(WARNING) << "Cannot call getHealthInfo: " << res.getDescription();
@@ -334,5 +351,4 @@ void Health::OnInit(HalHealthLoop* hal_health_loop, struct healthd_config* confi
 
 // Unlike hwbinder, for binder, there's no need to explicitly call flushCommands()
 // in PrepareToWait(). See b/139697085.
-
-}  // namespace aidl::android::hardware::health
+}  
