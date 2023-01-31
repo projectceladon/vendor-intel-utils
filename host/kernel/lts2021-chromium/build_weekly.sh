@@ -6,10 +6,10 @@ cd host_kernel
 
 git clone https://github.com/projectceladon/vendor-intel-utils.git
 cd vendor-intel-utils
-git checkout e4b94fc4f53b1ddb9bc7c3a0ef0e306a393bfd63
+git checkout e936af4e95a4cb52bd5808323f99dda832aa58b2
 cd ../
 
-tag="lts-v5.15.78-20230121-r7"
+tag="lts-v5.15.78-20230131-r8"
 git clone -b $tag https://github.com/projectceladon/linux-intel-lts2021-chromium.git
 cd linux-intel-lts2021-chromium
 
