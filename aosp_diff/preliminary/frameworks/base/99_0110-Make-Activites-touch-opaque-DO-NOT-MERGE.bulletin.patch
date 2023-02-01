@@ -1,0 +1,194 @@
+From cf56e7e2940eb4ed73169a18fa989fc813b81083 Mon Sep 17 00:00:00 2001
+From: Linus Tufvesson <lus@google.com>
+Date: Thu, 28 Apr 2022 16:35:56 +0200
+Subject: [PATCH] Make Activites touch opaque - DO NOT MERGE
+
+Block touches from passing through activities by adding a dedicated
+surface that consumes all touches that would otherwise pass through the
+bounds availble to the Activity.
+
+Bug: 194480991
+Test: atest CtsWindowManagerDeviceTestCases:ActivityRecordInputSinkTests
+Test: atest CtsWindowManagerDeviceTestCases:CrossAppDragAndDropTests
+Test: atest CtsWindowManagerDeviceTestCases:PinnedStackTests
+Test: Manually ran through go/wm-smoke (verified pip and splitscreen
+still work)
+Test: Manually verfied that freeform windows work and don't consume
+touches outside their bounds
+
+Change-Id: I01b35e34a63868dead4e728a3d359ae0942302f9
+(cherry picked from commit 22261fa6649f6ec6441646743ad98132fcf47fe0)
+Merged-In: I01b35e34a63868dead4e728a3d359ae0942302f9
+---
+ .../com/android/server/wm/ActivityRecord.java |  13 ++
+ .../server/wm/ActivityRecordInputSink.java    | 113 ++++++++++++++++++
+ 2 files changed, 126 insertions(+)
+ create mode 100644 services/core/java/com/android/server/wm/ActivityRecordInputSink.java
+
+diff --git a/services/core/java/com/android/server/wm/ActivityRecord.java b/services/core/java/com/android/server/wm/ActivityRecord.java
+index 308df2f4e9a0..43e2dee4c123 100644
+--- a/services/core/java/com/android/server/wm/ActivityRecord.java
++++ b/services/core/java/com/android/server/wm/ActivityRecord.java
+@@ -769,6 +769,13 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+ 
+     private AppSaturationInfo mLastAppSaturationInfo;
+ 
++    private final ActivityRecordInputSink mActivityRecordInputSink;
++
++    // Activities with this uid are allowed to not create an input sink while being in the same
++    // task and directly above this ActivityRecord. This field is updated whenever a new activity
++    // is launched from this ActivityRecord. Touches are always allowed within the same uid.
++    int mAllowedTouchUid;
++
+     private final ColorDisplayService.ColorTransformController mColorTransformController =
+             (matrix, translation) -> mWmService.mH.post(() -> {
+                 synchronized (mWmService.mGlobalLock) {
+@@ -1713,6 +1720,8 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+             createTime = _createTime;
+         }
+         mAtmService.mPackageConfigPersister.updateConfigIfNeeded(this, mUserId, packageName);
++
++        mActivityRecordInputSink = new ActivityRecordInputSink(this, sourceRecord);
+     }
+ 
+     /**
+@@ -3549,6 +3558,7 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+             destroyImmediately("removeImmediately");
+         }
+         onRemovedFromDisplay();
++        mActivityRecordInputSink.releaseSurfaceControl();
+         super.removeImmediately();
+     }
+ 
+@@ -6674,6 +6684,9 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+             } else if (!show && mLastSurfaceShowing) {
+                 getSyncTransaction().hide(mSurfaceControl);
+             }
++            if (show) {
++                mActivityRecordInputSink.applyChangesToSurfaceIfChanged(getSyncTransaction());
++            }
+         }
+         if (mThumbnail != null) {
+             mThumbnail.setShowing(getPendingTransaction(), show);
+diff --git a/services/core/java/com/android/server/wm/ActivityRecordInputSink.java b/services/core/java/com/android/server/wm/ActivityRecordInputSink.java
+new file mode 100644
+index 000000000000..95b5cec9a144
+--- /dev/null
++++ b/services/core/java/com/android/server/wm/ActivityRecordInputSink.java
+@@ -0,0 +1,113 @@
++/*
++ * Copyright (C) 2022 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.wm;
++
++import android.os.Process;
++import android.view.InputWindowHandle;
++import android.view.SurfaceControl;
++import android.view.WindowManager;
++
++/**
++ * Creates a InputWindowHandle that catches all touches that would otherwise pass through an
++ * Activity.
++ */
++class ActivityRecordInputSink {
++
++    private final ActivityRecord mActivityRecord;
++    private final String mName;
++
++    private InputWindowHandle mInputWindowHandle;
++    private SurfaceControl mSurfaceControl;
++
++    ActivityRecordInputSink(ActivityRecord activityRecord, ActivityRecord sourceRecord) {
++        mActivityRecord = activityRecord;
++        mName = Integer.toHexString(System.identityHashCode(this)) + " ActivityRecordInputSink "
++                + mActivityRecord.mActivityComponent.flattenToShortString();
++        if (sourceRecord != null) {
++            sourceRecord.mAllowedTouchUid = mActivityRecord.getUid();
++        }
++    }
++
++    public void applyChangesToSurfaceIfChanged(SurfaceControl.Transaction transaction) {
++        boolean windowHandleChanged = updateInputWindowHandle();
++        if (mSurfaceControl == null) {
++            mSurfaceControl = createSurface(transaction);
++        }
++        if (windowHandleChanged) {
++            transaction.setInputWindowInfo(mSurfaceControl, mInputWindowHandle);
++        }
++    }
++
++    private SurfaceControl createSurface(SurfaceControl.Transaction t) {
++        SurfaceControl surfaceControl = mActivityRecord.makeChildSurface(null)
++                .setName(mName)
++                .setHidden(false)
++                .setCallsite("ActivityRecordInputSink.createSurface")
++                .build();
++        // Put layer below all siblings (and the parent surface too)
++        t.setLayer(surfaceControl, Integer.MIN_VALUE);
++        return surfaceControl;
++    }
++
++    private boolean updateInputWindowHandle() {
++        boolean changed = false;
++        if (mInputWindowHandle == null) {
++            mInputWindowHandle = createInputWindowHandle();
++            changed = true;
++        }
++        // Don't block touches from passing through to an activity below us in the same task, if
++        // that activity is either from the same uid or if that activity has launched an activity
++        // in our uid.
++        final ActivityRecord activityBelowInTask =
++                mActivityRecord.getTask().getActivityBelow(mActivityRecord);
++        final boolean allowPassthrough = activityBelowInTask != null && (
++                activityBelowInTask.mAllowedTouchUid == mActivityRecord.getUid()
++                        || activityBelowInTask.isUid(mActivityRecord.getUid()));
++        boolean notTouchable = (mInputWindowHandle.layoutParamsFlags
++                & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0;
++        if (allowPassthrough || mActivityRecord.isAppTransitioning()) {
++            mInputWindowHandle.layoutParamsFlags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
++            changed |= !notTouchable;
++        } else {
++            mInputWindowHandle.layoutParamsFlags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
++            changed |= notTouchable;
++        }
++        return changed;
++    }
++
++    private InputWindowHandle createInputWindowHandle() {
++        InputWindowHandle inputWindowHandle = new InputWindowHandle(null,
++                mActivityRecord.getDisplayId());
++        inputWindowHandle.replaceTouchableRegionWithCrop = true;
++        inputWindowHandle.name = mName;
++        inputWindowHandle.layoutParamsType = WindowManager.LayoutParams.TYPE_INPUT_CONSUMER;
++        inputWindowHandle.ownerUid = Process.myUid();
++        inputWindowHandle.ownerPid = Process.myPid();
++        inputWindowHandle.layoutParamsFlags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
++        inputWindowHandle.inputFeatures =
++                WindowManager.LayoutParams.INPUT_FEATURE_NO_INPUT_CHANNEL;
++        return inputWindowHandle;
++    }
++
++    void releaseSurfaceControl() {
++        if (mSurfaceControl != null) {
++            mSurfaceControl.release();
++            mSurfaceControl = null;
++        }
++    }
++
++}
+-- 
+2.39.0.rc1.256.g54fd8350bd-goog
+

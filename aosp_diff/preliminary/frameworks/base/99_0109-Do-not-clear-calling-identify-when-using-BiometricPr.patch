@@ -1,0 +1,485 @@
+From 4d21a6dafa7a48d3ae09ea61d37028dc1c2969bf Mon Sep 17 00:00:00 2001
+From: Joe Bolinger <jbolinger@google.com>
+Date: Fri, 18 Mar 2022 23:56:35 +0000
+Subject: [PATCH] Do not clear calling identify when using BiometricPrompt from
+ FingerprintService.
+
+Bug: 214261879
+Test: atest AuthControllerTest
+Test: Manually verify with test apps in bug
+Change-Id: I8ae9f2b8a970bf7e5d32121dc358f7d0f0d060b8
+(cherry picked from commit ac89f8682f0558c775e360d3c5fb84702e914989)
+Merged-In: I8ae9f2b8a970bf7e5d32121dc358f7d0f0d060b8
+---
+ .../hardware/biometrics/BiometricPrompt.java  | 51 +++++++++---
+ .../biometrics/ITestSessionCallback.aidl      |  2 +-
+ .../hardware/biometrics/PromptInfo.java       | 33 +++++++-
+ .../systemui/biometrics/AuthController.java   | 10 ++-
+ .../biometrics/AuthControllerTest.java        | 32 ++++++--
+ .../sensors/AuthenticationClient.java         | 81 ++++++++++---------
+ .../fingerprint/FingerprintService.java       | 19 ++---
+ 7 files changed, 162 insertions(+), 66 deletions(-)
+
+diff --git a/core/java/android/hardware/biometrics/BiometricPrompt.java b/core/java/android/hardware/biometrics/BiometricPrompt.java
+index c8c122da4ab8..e7d7c3cdf528 100644
+--- a/core/java/android/hardware/biometrics/BiometricPrompt.java
++++ b/core/java/android/hardware/biometrics/BiometricPrompt.java
+@@ -407,6 +407,31 @@ public class BiometricPrompt implements BiometricAuthenticator, BiometricConstan
+             return this;
+         }
+ 
++        /**
++         * Flag to decide if authentication should ignore enrollment state.
++         * Defaults to false (not ignoring enrollment state)
++         * @param ignoreEnrollmentState
++         * @return This builder.
++         * @hide
++         */
++        @NonNull
++        public Builder setIgnoreEnrollmentState(boolean ignoreEnrollmentState) {
++            mPromptInfo.setIgnoreEnrollmentState(ignoreEnrollmentState);
++            return this;
++        }
++
++        /**
++         * Set if BiometricPrompt is being used by the legacy fingerprint manager API.
++         * @param sensorId sensor id
++         * @return This builder.
++         * @hide
++         */
++        @NonNull
++        public Builder setIsForLegacyFingerprintManager(int sensorId) {
++            mPromptInfo.setIsForLegacyFingerprintManager(sensorId);
++            return this;
++        }
++
+         /**
+          * Creates a {@link BiometricPrompt}.
+          *
+@@ -848,28 +873,36 @@ public class BiometricPrompt implements BiometricAuthenticator, BiometricConstan
+             @NonNull @CallbackExecutor Executor executor,
+             @NonNull AuthenticationCallback callback,
+             int userId) {
+-        authenticateUserForOperation(cancel, executor, callback, userId, 0 /* operationId */);
++        if (cancel == null) { 
++	    throw new IllegalArgumentException("Must supply a cancellation signal");
++        }
++        if (executor == null) {	
++            throw new IllegalArgumentException("Must supply an executor");
++        }
++        if (callback == null) {
++            throw new IllegalArgumentException("Must supply a callback");
++        }
++        
++        authenticateInternal(0 /* operationId */, cancel, executor, callback, userId);	
+     }
+ 
+     /**
+-     * Authenticates for the given user and keystore operation.
++     * Authenticates for the given keystore operation.
+      *
+      * @param cancel An object that can be used to cancel authentication
+      * @param executor An executor to handle callback events
+      * @param callback An object to receive authentication events
+-     * @param userId The user to authenticate
+      * @param operationId The keystore operation associated with authentication
+      *
+      * @return A requestId that can be used to cancel this operation.
+      *
+      * @hide
+      */
+-    @RequiresPermission(USE_BIOMETRIC_INTERNAL)
+-    public long authenticateUserForOperation(
++    @RequiresPermission(USE_BIOMETRIC)
++    public void authenticateForOperation(
+             @NonNull CancellationSignal cancel,
+             @NonNull @CallbackExecutor Executor executor,
+             @NonNull AuthenticationCallback callback,
+-            int userId,
+             long operationId) {
+         if (cancel == null) {
+             throw new IllegalArgumentException("Must supply a cancellation signal");
+@@ -881,7 +914,7 @@ public class BiometricPrompt implements BiometricAuthenticator, BiometricConstan
+             throw new IllegalArgumentException("Must supply a callback");
+         }
+ 
+-        return authenticateInternal(operationId, cancel, executor, callback, userId);
++        return authenticateInternal(operationId, cancel, executor, callback, mContext.getUserId());
+     }
+ 
+     /**
+@@ -1015,7 +1048,7 @@ public class BiometricPrompt implements BiometricAuthenticator, BiometricConstan
+     private void cancelAuthentication(long requestId) {
+         if (mService != null) {
+             try {
+-                mService.cancelAuthentication(mToken, mContext.getOpPackageName(), requestId);
++                mService.cancelAuthentication(mToken, mContext.getPackageName(), requestId);
+             } catch (RemoteException e) {
+                 Log.e(TAG, "Unable to cancel authentication", e);
+             }
+@@ -1074,7 +1107,7 @@ public class BiometricPrompt implements BiometricAuthenticator, BiometricConstan
+             }
+ 
+             final long authId = mService.authenticate(mToken, operationId, userId,
+-                    mBiometricServiceReceiver, mContext.getOpPackageName(), promptInfo);
++                    mBiometricServiceReceiver, mContext.getPackageName(), promptInfo);
+             cancel.setOnCancelListener(new OnAuthenticationCancelListener(authId));
+             return authId;
+         } catch (RemoteException e) {
+diff --git a/core/java/android/hardware/biometrics/ITestSessionCallback.aidl b/core/java/android/hardware/biometrics/ITestSessionCallback.aidl
+index 3d9517f29548..b336a9f21b60 100644
+--- a/core/java/android/hardware/biometrics/ITestSessionCallback.aidl
++++ b/core/java/android/hardware/biometrics/ITestSessionCallback.aidl
+@@ -19,7 +19,7 @@ package android.hardware.biometrics;
+  * ITestSession callback for FingerprintManager and BiometricManager.
+  * @hide
+  */
+-interface ITestSessionCallback {
++oneway interface ITestSessionCallback {
+     void onCleanupStarted(int userId);
+     void onCleanupFinished(int userId);
+ }
+diff --git a/core/java/android/hardware/biometrics/PromptInfo.java b/core/java/android/hardware/biometrics/PromptInfo.java
+index 339c654f4d2f..2742f0effde6 100644
+--- a/core/java/android/hardware/biometrics/PromptInfo.java
++++ b/core/java/android/hardware/biometrics/PromptInfo.java
+@@ -45,6 +45,8 @@ public class PromptInfo implements Parcelable {
+     private boolean mReceiveSystemEvents;
+     @NonNull private List<Integer> mAllowedSensorIds = new ArrayList<>();
+     private boolean mAllowBackgroundAuthentication;
++    private boolean mIgnoreEnrollmentState;
++    private boolean mIsForLegacyFingerprintManager = false;
+ 
+     public PromptInfo() {
+ 
+@@ -66,6 +68,8 @@ public class PromptInfo implements Parcelable {
+         mReceiveSystemEvents = in.readBoolean();
+         mAllowedSensorIds = in.readArrayList(Integer.class.getClassLoader());
+         mAllowBackgroundAuthentication = in.readBoolean();
++        mIgnoreEnrollmentState = in.readBoolean();
++        mIsForLegacyFingerprintManager = in.readBoolean();
+     }
+ 
+     public static final Creator<PromptInfo> CREATOR = new Creator<PromptInfo>() {
+@@ -102,10 +106,16 @@ public class PromptInfo implements Parcelable {
+         dest.writeBoolean(mReceiveSystemEvents);
+         dest.writeList(mAllowedSensorIds);
+         dest.writeBoolean(mAllowBackgroundAuthentication);
++        dest.writeBoolean(mIgnoreEnrollmentState);
++        dest.writeBoolean(mIsForLegacyFingerprintManager);
+     }
+ 
+     public boolean containsTestConfigurations() {
+-        if (!mAllowedSensorIds.isEmpty()) {
++        if (mIsForLegacyFingerprintManager
++                && mAllowedSensorIds.size() == 1
++                && !mAllowBackgroundAuthentication) {
++            return false;
++        } else if (!mAllowedSensorIds.isEmpty()) {
+             return true;
+         } else if (mAllowBackgroundAuthentication) {
+             return true;
+@@ -185,13 +195,24 @@ public class PromptInfo implements Parcelable {
+     }
+ 
+     public void setAllowedSensorIds(@NonNull List<Integer> sensorIds) {
+-        mAllowedSensorIds = sensorIds;
++        mAllowedSensorIds.clear();
++        mAllowedSensorIds.addAll(sensorIds);
+     }
+ 
+     public void setAllowBackgroundAuthentication(boolean allow) {
+         mAllowBackgroundAuthentication = allow;
+     }
+ 
++    public void setIgnoreEnrollmentState(boolean ignoreEnrollmentState) {
++        mIgnoreEnrollmentState = ignoreEnrollmentState;
++    }
++
++    public void setIsForLegacyFingerprintManager(int sensorId) {
++        mIsForLegacyFingerprintManager = true;
++        mAllowedSensorIds.clear();
++        mAllowedSensorIds.add(sensorId);
++    }
++
+     // Getters
+ 
+     public CharSequence getTitle() {
+@@ -261,4 +282,12 @@ public class PromptInfo implements Parcelable {
+     public boolean isAllowBackgroundAuthentication() {
+         return mAllowBackgroundAuthentication;
+     }
++
++    public boolean isIgnoreEnrollmentState() {
++        return mIgnoreEnrollmentState;
++    }
++
++    public boolean isForLegacyFingerprintManager() {
++        return mIsForLegacyFingerprintManager;
++    }
+ }
+diff --git a/packages/SystemUI/src/com/android/systemui/biometrics/AuthController.java b/packages/SystemUI/src/com/android/systemui/biometrics/AuthController.java
+index 0790af94f287..03cc28c41917 100644
+--- a/packages/SystemUI/src/com/android/systemui/biometrics/AuthController.java
++++ b/packages/SystemUI/src/com/android/systemui/biometrics/AuthController.java
+@@ -125,7 +125,7 @@ public class AuthController extends SystemUI implements CommandQueue.Callbacks,
+     private class BiometricTaskStackListener extends TaskStackListener {
+         @Override
+         public void onTaskStackChanged() {
+-            mHandler.post(AuthController.this::handleTaskStackChanged);
++            mHandler.post(AuthController.this::cancelIfOwnerIsNotInForeground);
+         }
+     }
+ 
+@@ -203,7 +203,7 @@ public class AuthController extends SystemUI implements CommandQueue.Callbacks,
+         }
+     };
+ 
+-    private void handleTaskStackChanged() {
++    private void cancelIfOwnerIsNotInForeground() {
+         if (mCurrentDialog != null) {
+             try {
+                 final String clientPackage = mCurrentDialog.getOpPackageName();
+@@ -214,7 +214,7 @@ public class AuthController extends SystemUI implements CommandQueue.Callbacks,
+                     final String topPackage = runningTasks.get(0).topActivity.getPackageName();
+                     if (!topPackage.contentEquals(clientPackage)
+                             && !Utils.isSystem(mContext, clientPackage)) {
+-                        Log.w(TAG, "Evicting client due to: " + topPackage);
++                        Log.e(TAG, "Evicting client due to: " + topPackage);
+                         mCurrentDialog.dismissWithoutCallback(true /* animate */);
+                         mCurrentDialog = null;
+                         mOrientationListener.disable();
+@@ -750,6 +750,10 @@ public class AuthController extends SystemUI implements CommandQueue.Callbacks,
+         mCurrentDialog = newDialog;
+         mCurrentDialog.show(mWindowManager, savedState);
+         mOrientationListener.enable();
++
++        if (!promptInfo.isAllowBackgroundAuthentication()) {
++            mHandler.post(this::cancelIfOwnerIsNotInForeground);
++        }
+     }
+ 
+     private void onDialogDismissed(@DismissedReason int reason) {
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/biometrics/AuthControllerTest.java b/packages/SystemUI/tests/src/com/android/systemui/biometrics/AuthControllerTest.java
+index 8dd5d6c01394..5caac927a9a8 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/biometrics/AuthControllerTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/biometrics/AuthControllerTest.java
+@@ -485,16 +485,26 @@ public class AuthControllerTest extends SysuiTestCase {
+                 mAuthController.mLastBiometricPromptInfo.getAuthenticators());
+     }
+ 
++    @Test
++    public void testClientNotified_whenTaskStackChangesDuringShow() throws Exception {
++        switchTask("other_package");
++        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
++
++        waitForIdleSync();
++
++        assertNull(mAuthController.mCurrentDialog);
++        assertNull(mAuthController.mReceiver);
++        verify(mDialog1).dismissWithoutCallback(true /* animate */);
++        verify(mReceiver).onDialogDismissed(
++                eq(BiometricPrompt.DISMISSED_REASON_USER_CANCEL),
++                eq(null) /* credentialAttestation */);
++    }
++
+     @Test
+     public void testClientNotified_whenTaskStackChangesDuringAuthentication() throws Exception {
+         showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+ 
+-        List<ActivityManager.RunningTaskInfo> tasks = new ArrayList<>();
+-        ActivityManager.RunningTaskInfo taskInfo = mock(ActivityManager.RunningTaskInfo.class);
+-        taskInfo.topActivity = mock(ComponentName.class);
+-        when(taskInfo.topActivity.getPackageName()).thenReturn("other_package");
+-        tasks.add(taskInfo);
+-        when(mActivityTaskManager.getTasks(anyInt())).thenReturn(tasks);
++        switchTask("other_package");
+ 
+         mAuthController.mTaskStackListener.onTaskStackChanged();
+         waitForIdleSync();
+@@ -571,6 +581,16 @@ public class AuthControllerTest extends SysuiTestCase {
+                 BIOMETRIC_MULTI_SENSOR_FACE_THEN_FINGERPRINT);
+     }
+ 
++    private void switchTask(String packageName) {
++        final List<ActivityManager.RunningTaskInfo> tasks = new ArrayList<>();
++        final ActivityManager.RunningTaskInfo taskInfo =
++                mock(ActivityManager.RunningTaskInfo.class);
++        taskInfo.topActivity = mock(ComponentName.class);
++        when(taskInfo.topActivity.getPackageName()).thenReturn(packageName);
++        tasks.add(taskInfo);
++        when(mActivityTaskManager.getTasks(anyInt())).thenReturn(tasks);
++    }
++
+     private PromptInfo createTestPromptInfo() {
+         PromptInfo promptInfo = new PromptInfo();
+ 
+diff --git a/services/core/java/com/android/server/biometrics/sensors/AuthenticationClient.java b/services/core/java/com/android/server/biometrics/sensors/AuthenticationClient.java
+index 6f38ed04cd96..f20c08fdc8fd 100644
+--- a/services/core/java/com/android/server/biometrics/sensors/AuthenticationClient.java
++++ b/services/core/java/com/android/server/biometrics/sensors/AuthenticationClient.java
+@@ -117,7 +117,7 @@ public abstract class AuthenticationClient<T> extends AcquisitionClient<T>
+         mIsStrongBiometric = isStrongBiometric;
+         mOperationId = operationId;
+         mRequireConfirmation = requireConfirmation;
+-        mActivityTaskManager = ActivityTaskManager.getInstance();
++        mActivityTaskManager = getActivityTaskManager();
+         mBiometricManager = context.getSystemService(BiometricManager.class);
+         mTaskStackListener = taskStackListener;
+         mLockoutTracker = lockoutTracker;
+@@ -145,6 +145,10 @@ public abstract class AuthenticationClient<T> extends AcquisitionClient<T>
+         return mStartTimeMs;
+     }
+ 
++    protected ActivityTaskManager getActivityTaskManager() {
++        return ActivityTaskManager.getInstance();
++    }
++
+     @Override
+     public void binderDied() {
+         final boolean clearListener = !isBiometricPrompt();
+@@ -317,45 +321,50 @@ public abstract class AuthenticationClient<T> extends AcquisitionClient<T>
+                     sendCancelOnly(listener);
+                 }
+             });
+-        } else {
+-            // Allow system-defined limit of number of attempts before giving up
+-            final @LockoutTracker.LockoutMode int lockoutMode =
+-                    handleFailedAttempt(getTargetUserId());
+-            if (lockoutMode != LockoutTracker.LOCKOUT_NONE) {
+-                mAlreadyDone = true;
+-            }
+-
+-            final CoexCoordinator coordinator = CoexCoordinator.getInstance();
+-            coordinator.onAuthenticationRejected(SystemClock.uptimeMillis(), this, lockoutMode,
+-                    new CoexCoordinator.Callback() {
+-                @Override
+-                public void sendAuthenticationResult(boolean addAuthTokenIfStrong) {
+-                    if (listener != null) {
+-                        try {
+-                            listener.onAuthenticationFailed(getSensorId());
+-                        } catch (RemoteException e) {
+-                            Slog.e(TAG, "Unable to notify listener", e);
+-                        }
+-                    }
++        } else { // not authenticated
++            if (isBackgroundAuth) {
++                Slog.e(TAG, "cancelling due to background auth");
++                cancel();
++            } else {
++                // Allow system-defined limit of number of attempts before giving up
++                final @LockoutTracker.LockoutMode int lockoutMode =
++                        handleFailedAttempt(getTargetUserId());
++                if (lockoutMode != LockoutTracker.LOCKOUT_NONE) {
++                    mAlreadyDone = true;
+                 }
+ 
+-                @Override
+-                public void sendHapticFeedback() {
+-                    if (listener != null && mShouldVibrate) {
+-                        vibrateError();
+-                    }
+-                }
++                final CoexCoordinator coordinator = CoexCoordinator.getInstance();
++                coordinator.onAuthenticationRejected(SystemClock.uptimeMillis(), this, lockoutMode,
++                        new CoexCoordinator.Callback() {
++                            @Override
++                            public void sendAuthenticationResult(boolean addAuthTokenIfStrong) {
++                                if (listener != null) {
++                                    try {
++                                        listener.onAuthenticationFailed(getSensorId());
++                                    } catch (RemoteException e) {
++                                        Slog.e(TAG, "Unable to notify listener", e);
++                                    }
++                                }
++                            }
+ 
+-                @Override
+-                public void handleLifecycleAfterAuth() {
+-                    AuthenticationClient.this.handleLifecycleAfterAuth(false /* authenticated */);
+-                }
++                            @Override
++                            public void sendHapticFeedback() {
++                                if (listener != null && mShouldVibrate) {
++                                    vibrateError();
++                                }
++                            }
+ 
+-                @Override
+-                public void sendAuthenticationCanceled() {
+-                    sendCancelOnly(listener);
+-                }
+-            });
++                            @Override
++                            public void handleLifecycleAfterAuth() {
++                                AuthenticationClient.this.handleLifecycleAfterAuth(false /* authenticated */);
++                            }
++
++                            @Override
++                            public void sendAuthenticationCanceled() {
++                                sendCancelOnly(listener);
++                            }
++                        });
++            }
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/biometrics/sensors/fingerprint/FingerprintService.java b/services/core/java/com/android/server/biometrics/sensors/fingerprint/FingerprintService.java
+index f35bb7ffd26b..5524291deeb3 100644
+--- a/services/core/java/com/android/server/biometrics/sensors/fingerprint/FingerprintService.java
++++ b/services/core/java/com/android/server/biometrics/sensors/fingerprint/FingerprintService.java
+@@ -331,11 +331,10 @@ public class FingerprintService extends SystemService {
+                     provider.second.getSensorProperties(sensorId);
+             if (!isKeyguard && !Utils.isSettings(getContext(), opPackageName)
+                     && sensorProps != null && sensorProps.isAnyUdfpsType()) {
+-                identity = Binder.clearCallingIdentity();
+                 try {
+-                    return authenticateWithPrompt(operationId, sensorProps, userId, receiver);
+-                } finally {
+-                    Binder.restoreCallingIdentity(identity);
++                    return authenticateWithPrompt(operationId, sensorProps, userId, receiver, opPackageName);
++		} catch (PackageManager.NameNotFoundException e) {
++		    Slog.e(TAG, "Invalid package", e);
+                 }
+             }
+             return provider.second.scheduleAuthenticate(provider.first, token, operationId, userId,
+@@ -347,12 +346,15 @@ public class FingerprintService extends SystemService {
+                 final long operationId,
+                 @NonNull final FingerprintSensorPropertiesInternal props,
+                 final int userId,
+-                final IFingerprintServiceReceiver receiver) {
++                final IFingerprintServiceReceiver receiver,
++                final String opPackageName) throws PackageManager.NameNotFoundException {
+ 
+             final Context context = getUiContext();
++            final Context promptContext = context.createPackageContextAsUser(
++                    opPackageName, 0 /* flags */, UserHandle.getUserHandleForUid(userId));
+             final Executor executor = context.getMainExecutor();
+ 
+-            final BiometricPrompt biometricPrompt = new BiometricPrompt.Builder(context)
++            final BiometricPrompt biometricPrompt = new BiometricPrompt.Builder(promptContext)
+                     .setTitle(context.getString(R.string.biometric_dialog_default_title))
+                     .setSubtitle(context.getString(R.string.fingerprint_dialog_default_subtitle))
+                     .setNegativeButton(
+@@ -366,8 +368,7 @@ public class FingerprintService extends SystemService {
+                                     Slog.e(TAG, "Remote exception in negative button onClick()", e);
+                                 }
+                             })
+-                    .setAllowedSensorIds(new ArrayList<>(
+-                            Collections.singletonList(props.sensorId)))
++                    .setIsForLegacyFingerprintManager(props.sensorId)
+                     .build();
+ 
+             final BiometricPrompt.AuthenticationCallback promptCallback =
+@@ -421,7 +422,7 @@ public class FingerprintService extends SystemService {
+                     };
+ 
+             return biometricPrompt.authenticateUserForOperation(
+-                    new CancellationSignal(), executor, promptCallback, userId, operationId);
++                    new CancellationSignal(), executor, promptCallback, operationId);
+         }
+ 
+         @Override
+-- 
+2.17.1
+
