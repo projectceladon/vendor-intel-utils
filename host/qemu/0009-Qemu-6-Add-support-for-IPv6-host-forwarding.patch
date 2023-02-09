@@ -1,0 +1,467 @@
+From 655eea8e5b259db6dbaec3f9aef3b3550dfc7303 Mon Sep 17 00:00:00 2001
+From: Bharat B Panda <bharat.b.panda@intel.com>
+Date: Wed, 18 Jan 2023 14:57:16 +0530
+Subject: [PATCH] [Qemu 6]Add support for IPv6 host forwarding
+
+Changes made to netslirp to add support for ipv6 packet parsing
+and forwarding from host to guest.
+
+Tracked-On: OAM-105532
+Signed-off-by: Bharat B Panda <bharat.b.panda@intel.com>
+---
+ hmp-commands.hx        |  15 +++
+ include/qemu/sockets.h |   3 +
+ net/slirp.c            | 211 +++++++++++++++++++++++++++++------------
+ util/qemu-sockets.c    |  83 ++++++++++++----
+ 4 files changed, 230 insertions(+), 82 deletions(-)
+
+diff --git a/hmp-commands.hx b/hmp-commands.hx
+index 182e639d14..dd3d901a23 100644
+--- a/hmp-commands.hx
++++ b/hmp-commands.hx
+@@ -1349,6 +1349,16 @@ ERST
+ SRST
+ ``hostfwd_add``
+   Redirect TCP or UDP connections from host to guest (requires -net user).
++  IPV6 addresses are wrapped in square brackes, IPV4 addresses are not.
++
++  Examples:
++  hostfwd_add net0 tcp:127.0.0.1:10022-:22
++  hostfwd_add net0 tcp:[::1]:10022-[fe80::1:2:3:4]:22
++
++  Note that Libslirp currently only provides a "stateless" DHCPv6 server, a
++  consequence of which is that it cannot do the "addr-any" translation to the
++  guest address that is done for IPv4. In other words, the following is
++  currently not supported: hostfwd_add net0 tcp:[::1]:10022-:22
+ ERST
+ 
+ #ifdef CONFIG_SLIRP
+@@ -1364,6 +1374,11 @@ ERST
+ SRST
+ ``hostfwd_remove``
+   Remove host-to-guest TCP or UDP redirection.
++  IPV6 addresses are wrapped in square brackes, IPV4 addresses are not.
++
++  Examples:
++  hostfwd_remove net0 tcp:127.0.0.1:10022
++  hostfwd_remove net0 tcp:[::1]:10022
+ ERST
+ 
+     {
+diff --git a/include/qemu/sockets.h b/include/qemu/sockets.h
+index 038faa157f..f616f4a0f9 100644
+--- a/include/qemu/sockets.h
++++ b/include/qemu/sockets.h
+@@ -31,6 +31,9 @@ int socket_set_fast_reuse(int fd);
+ 
+ int inet_ai_family_from_address(InetSocketAddress *addr,
+                                 Error **errp);
++const char *inet_parse_host_and_port(const char *str, int terminator,
++                                     char **hostp, char **portp, bool *is_v6,
++                                     Error **errp);
+ int inet_parse(InetSocketAddress *addr, const char *str, Error **errp);
+ int inet_connect(const char *str, Error **errp);
+ int inet_connect_saddr(InetSocketAddress *saddr, Error **errp);
+diff --git a/net/slirp.c b/net/slirp.c
+index 8679be6444..ebdc42db71 100644
+--- a/net/slirp.c
++++ b/net/slirp.c
+@@ -97,6 +97,11 @@ typedef struct SlirpState {
+     GSList *fwd;
+ } SlirpState;
+ 
++union in4or6_addr {
++    struct in_addr addr4;
++    struct in6_addr addr6;
++};
++
+ static struct slirp_config_str *slirp_configs;
+ static QTAILQ_HEAD(, SlirpState) slirp_stacks =
+     QTAILQ_HEAD_INITIALIZER(slirp_stacks);
+@@ -704,17 +709,102 @@ static SlirpState *slirp_lookup(Monitor *mon, const char *id)
+     }
+ }
+ 
++/*
++ * Parse a protocol name of the form "name<sep>".
++ * Valid protocols are "tcp" and "udp". An empty string means "tcp".
++ * Returns a pointer to the end of the parsed string on success, and stores
++ * the result in *is_udp.
++ * Otherwise returns NULL and stores the error in *errp.
++ */
++static const char *parse_protocol(const char *str, int sep, bool *is_udp,
++                                  Error **errp)
++{
++    char buf[10];
++    const char *p = str;
++
++    if (get_str_sep(buf, sizeof(buf), &p, sep) < 0) {
++        error_setg(errp, "Missing protocol name separator");
++        return NULL;
++    }
++
++    if (!strcmp(buf, "tcp") || buf[0] == '\0') {
++        *is_udp = false;
++    } else if (!strcmp(buf, "udp")) {
++        *is_udp = true;
++    } else {
++        error_setg(errp, "Bad protocol name");
++        return NULL;
++    }
++
++    return p;
++}
++
++/*
++ * Parse an ip address/port of the form "address:port<terminator>".
++ * IPv6 addresses are wrapped in [] brackets.
++ * An empty address means INADDR_ANY/in6addr_any.
++ * Returns a pointer to after the terminator, unless it was '\0' in which case
++ * the result points to the '\0'.
++ * The parsed results are stored in *addr, *port, *is_v6.
++ * On error NULL is returned and stores the error in *errp.
++ */
++static const char *parse_ip_addr_and_port(const char *str, int terminator,
++                                          union in4or6_addr *addr, int *port,
++                                          bool *is_v6, Error **errp)
++{
++    g_autofree char *addr_str = NULL;
++    g_autofree char *port_str = NULL;
++    const char *p = inet_parse_host_and_port(str, terminator, &addr_str,
++                                             &port_str, is_v6, errp);
++
++    if (p == NULL) {
++        return NULL;
++    }
++
++    if (*is_v6) {
++        if (addr_str[0] == '\0') {
++            addr->addr6 = in6addr_any;
++        } else if (!inet_pton(AF_INET6, addr_str, &addr->addr6)) {
++            error_setg(errp, "Bad address");
++            return NULL;
++        }
++    } else {
++        if (addr_str[0] == '\0') {
++            addr->addr4.s_addr = INADDR_ANY;
++        } else if (!inet_pton(AF_INET, addr_str, &addr->addr4)) {
++            error_setg(errp, "Bad address");
++            return NULL;
++        }
++    }
++
++    if (qemu_strtoi(port_str, NULL, 10, port) < 0 ||
++        *port < 0 || *port > 65535) {
++        error_setg(errp, "Bad port");
++        return NULL;
++    }
++
++    /*
++     * At this point "p" points to the terminator or trailing NUL if the
++     * terminator is not present.
++     */
++    if (*p) {
++        ++p;
++    }
++    return p;
++}
++
+ void hmp_hostfwd_remove(Monitor *mon, const QDict *qdict)
+ {
+-    struct in_addr host_addr = { .s_addr = INADDR_ANY };
++    union in4or6_addr host_addr;
+     int host_port;
+-    char buf[256];
+     const char *src_str, *p;
+     SlirpState *s;
+-    int is_udp = 0;
++    bool is_udp, is_v6;
+     int err;
++    Error *error = NULL;
+     const char *arg1 = qdict_get_str(qdict, "arg1");
+     const char *arg2 = qdict_get_try_str(qdict, "arg2");
++    struct sockaddr_in6 hsa;
+ 
+     if (arg2) {
+         s = slirp_lookup(mon, arg1);
+@@ -727,101 +817,99 @@ void hmp_hostfwd_remove(Monitor *mon, const QDict *qdict)
+         return;
+     }
+ 
++    g_assert(src_str != NULL);
+     p = src_str;
+-    if (!p || get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
++    p = parse_protocol(p, ':', &is_udp, &error);
++    if (p == NULL) {
+         goto fail_syntax;
+     }
+ 
+-    if (!strcmp(buf, "tcp") || buf[0] == '\0') {
+-        is_udp = 0;
+-    } else if (!strcmp(buf, "udp")) {
+-        is_udp = 1;
+-    } else {
++    if (parse_ip_addr_and_port(p, '\0', &host_addr, &host_port, &is_v6,
++                               &error) == NULL) {
+         goto fail_syntax;
+     }
+ 
+-    if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+-        goto fail_syntax;
+-    }
+-    if (buf[0] != '\0' && !inet_aton(buf, &host_addr)) {
+-        goto fail_syntax;
+-    }
++    if (is_v6) {
++        memset(&hsa, 0, sizeof(hsa));
++        hsa.sin6_family = AF_INET6;
++        hsa.sin6_addr = host_addr.addr6;
++        hsa.sin6_port = host_port;
+ 
+-    if (qemu_strtoi(p, NULL, 10, &host_port)) {
+-        goto fail_syntax;
++        err = slirp_remove_hostxfwd(s->slirp,
++                (const struct sockaddr *) &hsa, sizeof(hsa), is_udp);
++    } else {
++        err = slirp_remove_hostfwd(s->slirp, is_udp, host_addr.addr4,
++                                   host_port);
+     }
+ 
+-    err = slirp_remove_hostfwd(s->slirp, is_udp, host_addr, host_port);
+-
+     monitor_printf(mon, "host forwarding rule for %s %s\n", src_str,
+                    err ? "not found" : "removed");
+     return;
+ 
+  fail_syntax:
+-    monitor_printf(mon, "invalid format\n");
++    monitor_printf(mon, "Invalid format: %s\n", error_get_pretty(error));
++    error_free(error);
+ }
+ 
+ static int slirp_hostfwd(SlirpState *s, const char *redir_str, Error **errp)
+ {
+-    struct in_addr host_addr = { .s_addr = INADDR_ANY };
+-    struct in_addr guest_addr = { .s_addr = 0 };
++    union in4or6_addr host_addr, guest_addr;
+     int host_port, guest_port;
+     const char *p;
+-    char buf[256];
+-    int is_udp;
+-    char *end;
+-    const char *fail_reason = "Unknown reason";
++    bool is_udp, host_is_v6, guest_is_v6;
++    Error *error = NULL;
++    int err;
++    struct sockaddr_in6 hsa, lsa;
+ 
++    g_assert(redir_str != NULL);
+     p = redir_str;
+-    if (!p || get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+-        fail_reason = "No : separators";
+-        goto fail_syntax;
+-    }
+-    if (!strcmp(buf, "tcp") || buf[0] == '\0') {
+-        is_udp = 0;
+-    } else if (!strcmp(buf, "udp")) {
+-        is_udp = 1;
+-    } else {
+-        fail_reason = "Bad protocol name";
++    p = parse_protocol(p, ':', &is_udp, &error);
++    if (p == NULL) {
+         goto fail_syntax;
+     }
+ 
+-    if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+-        fail_reason = "Missing : separator";
+-        goto fail_syntax;
+-    }
+-    if (buf[0] != '\0' && !inet_aton(buf, &host_addr)) {
+-        fail_reason = "Bad host address";
++    p = parse_ip_addr_and_port(p, '-', &host_addr, &host_port, &host_is_v6,
++                               &error);
++    if (p == NULL) {
++        error_prepend(&error, "For host address: ");
+         goto fail_syntax;
+     }
+ 
+-    if (get_str_sep(buf, sizeof(buf), &p, '-') < 0) {
+-        fail_reason = "Bad host port separator";
+-        goto fail_syntax;
+-    }
+-    host_port = strtol(buf, &end, 0);
+-    if (*end != '\0' || host_port < 0 || host_port > 65535) {
+-        fail_reason = "Bad host port";
++    if (parse_ip_addr_and_port(p, '\0', &guest_addr, &guest_port, &guest_is_v6,
++                               &error) == NULL) {
++        error_prepend(&error, "For guest address: ");
+         goto fail_syntax;
+     }
+ 
+-    if (get_str_sep(buf, sizeof(buf), &p, ':') < 0) {
+-        fail_reason = "Missing guest address";
+-        goto fail_syntax;
+-    }
+-    if (buf[0] != '\0' && !inet_aton(buf, &guest_addr)) {
+-        fail_reason = "Bad guest address";
++    if (host_is_v6 != guest_is_v6) {
++        /* TODO: Can libslirp support this? */
++        error_setg(&error, "Both host,guest must be one of ipv4 or ipv6");
+         goto fail_syntax;
+     }
+ 
+-    guest_port = strtol(p, &end, 0);
+-    if (*end != '\0' || guest_port < 1 || guest_port > 65535) {
+-        fail_reason = "Bad guest port";
++    if (guest_port == 0) {
++        error_setg(&error, "For guest address: Bad port");
+         goto fail_syntax;
+     }
+ 
+-    if (slirp_add_hostfwd(s->slirp, is_udp, host_addr, host_port, guest_addr,
+-                          guest_port) < 0) {
++    if (host_is_v6) {
++        memset(&hsa, 0, sizeof(hsa));
++        hsa.sin6_family = AF_INET6;
++        hsa.sin6_addr = host_addr.addr6;
++        hsa.sin6_port = host_port;
++
++        memset(&lsa, 0, sizeof(lsa));
++        lsa.sin6_family = AF_INET6;
++        lsa.sin6_addr = guest_addr.addr6;
++        lsa.sin6_port = guest_port;
++
++        err = slirp_add_hostxfwd(s->slirp, (const struct sockaddr *) &hsa, sizeof(hsa),
++                                    (const struct sockaddr *) &lsa, sizeof(lsa), is_udp);
++    } else {
++        err = slirp_add_hostfwd(s->slirp, is_udp, host_addr.addr4, host_port,
++                                guest_addr.addr4, guest_port);
++    }
++    if (err < 0) {
+         error_setg(errp, "Could not set up host forwarding rule '%s'",
+                    redir_str);
+         return -1;
+@@ -830,7 +918,8 @@ static int slirp_hostfwd(SlirpState *s, const char *redir_str, Error **errp)
+ 
+  fail_syntax:
+     error_setg(errp, "Invalid host forwarding rule '%s' (%s)", redir_str,
+-               fail_reason);
++               error_get_pretty(error));
++    error_free(error);
+     return -1;
+ }
+ 
+diff --git a/util/qemu-sockets.c b/util/qemu-sockets.c
+index 0e2298278f..5e5025eb09 100644
+--- a/util/qemu-sockets.c
++++ b/util/qemu-sockets.c
+@@ -626,44 +626,85 @@ static int inet_parse_flag(const char *flagname, const char *optstr, bool *val,
+     return 0;
+ }
+ 
+-int inet_parse(InetSocketAddress *addr, const char *str, Error **errp)
++/*
++ * Parse an inet host and port as "host:port<terminator>".
++ * Terminator may be '\0'.
++ * The syntax for IPv4 addresses is: address:port. "address" is optional,
++ * and may be empty (i.e., str is ":port").
++ * The syntax for IPv6 addresses is: [address]:port. "address" is optional,
++ * and may be empty (i.e., str is "[]:port"). Upon return the wrapping
++ * [] brackets are removed.
++ * Host names are also supported as hostname:port. It is up to the caller to
++ * distinguish host names from numeric IPv4 addresses.
++ * On success, returns a pointer to the terminator. Space for the address and
++ * port is malloced and stored in *host, *port, the caller must free.
++ * If is_v6 is non-NULL, then it is set to true if the address is an IPv6
++ * address (i.e., [address]), otherwise it is set to false.
++ * On failure NULL is returned with the error stored in *errp.
++ */
++const char *inet_parse_host_and_port(const char *str, int terminator,
++                                     char **hostp, char **portp, bool *is_v6,
++                                     Error **errp)
+ {
+-    const char *optstr, *h;
++    const char *terminator_ptr = strchr(str, terminator);
++    g_autofree char *buf = NULL;
+     char host[65];
+     char port[33];
+-    int to;
+-    int pos;
+-    char *begin;
+ 
+-    memset(addr, 0, sizeof(*addr));
++    if (terminator_ptr == NULL) {
++        /* If the terminator isn't found then use the entire string. */
++        terminator_ptr = str + strlen(str);
++    }
+ 
+-    /* parse address */
+-    if (str[0] == ':') {
++    buf = g_strndup(str, terminator_ptr - str);
++    if (buf[0] == ':') {
+         /* no host given */
+         host[0] = '\0';
+-        if (sscanf(str, ":%32[^,]%n", port, &pos) != 1) {
+-            error_setg(errp, "error parsing port in address '%s'", str);
+-            return -1;
++        if (sscanf(buf, ":%32s", port) != 1) {
++            error_setg(errp, "error parsing port in address '%s'", buf);
++            return NULL;
+         }
+-    } else if (str[0] == '[') {
++    } else if (buf[0] == '[') {
+         /* IPv6 addr */
+-        if (sscanf(str, "[%64[^]]]:%32[^,]%n", host, port, &pos) != 2) {
+-            error_setg(errp, "error parsing IPv6 address '%s'", str);
+-            return -1;
++        /* Note: sscanf %[ doesn't recognize empty contents. */
++        if (sscanf(buf, "[]:%32s", port) == 1) {
++            host[0] = '\0';
++        } else if (sscanf(buf, "[%64[^]]]:%32s", host, port) != 2) {
++            error_setg(errp, "error parsing IPv6 address '%s'", buf);
++            return NULL;
+         }
+     } else {
+         /* hostname or IPv4 addr */
+-        if (sscanf(str, "%64[^:]:%32[^,]%n", host, port, &pos) != 2) {
+-            error_setg(errp, "error parsing address '%s'", str);
+-            return -1;
++        if (sscanf(buf, "%64[^:]:%32s", host, port) != 2) {
++            error_setg(errp, "error parsing address '%s'", buf);
++            return NULL;
+         }
+     }
++    *hostp = g_strdup(host);
++    *portp = g_strdup(port);
++    if (is_v6 != NULL) {
++        *is_v6 = buf[0] == '[';
++    }
+ 
+-    addr->host = g_strdup(host);
+-    addr->port = g_strdup(port);
++    return terminator_ptr;
++}
++
++int inet_parse(InetSocketAddress *addr, const char *str, Error **errp)
++{
++    const char *optstr, *h;
++    int to;
++    int pos;
++    char *begin;
++
++    memset(addr, 0, sizeof(*addr));
++
++    optstr = inet_parse_host_and_port(str, ',', &addr->host, &addr->port,
++                                      NULL, errp);
++    if (optstr == NULL) {
++        return -1;
++    }
+ 
+     /* parse options */
+-    optstr = str + pos;
+     h = strstr(optstr, ",to=");
+     if (h) {
+         h += 4;
+-- 
+2.39.0
+
