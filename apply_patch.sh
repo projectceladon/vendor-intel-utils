@@ -32,7 +32,13 @@ function apply()
         for name in $(ls "${root}/${proj}"); do
             echo "Applying ${name}"
             patch=${root}/${proj}/${name}
-            change_id=`grep -w "^Change-Id:" ${patch} | awk '{print $2}'`
+	    change_id=`grep -w "^Change-Id:" ${patch} | awk '{print $2}'`
+	    # adding the condition to check if change id is missing.
+			if [ -z "${change_id}" ]
+			then
+				echo "Error! change_id is missing in the patch"
+				exit
+			fi
             # we limit the log to 200 commits, or it can be very slow
             applied=`git log -200 | grep -w "^    Change-Id: ${change_id}" 2>/dev/null`
             if [[ -z "${applied}" ]]; then
