@@ -943,10 +943,6 @@ static int read_each_attr(struct iio_device *dev, enum iio_attr_type type,
             ret = (int) iio_device_buffer_attr_read(dev,
                     NULL, buf, 0x100000);
             break;
-        default:
-            ret = -EINVAL;
-            count = 0;
-            break;
     }
 
     if (ret < 0)
@@ -1035,9 +1031,6 @@ static int write_each_attr(struct iio_device *dev, enum iio_attr_type type,
         case IIO_ATTR_TYPE_BUFFER:
             count = iio_device_get_buffer_attrs_count(dev);
             break;
-        default:
-            ret = -EINVAL;
-            goto err_free_buf;
     }
 
     for (i = 0; i < count; i++) {
@@ -1052,9 +1045,6 @@ static int write_each_attr(struct iio_device *dev, enum iio_attr_type type,
                 break;
             case IIO_ATTR_TYPE_BUFFER:
                 attr = iio_device_get_buffer_attr(dev, i);
-                break;
-            default:
-                attr = NULL;
                 break;
         }
 
@@ -1086,9 +1076,6 @@ static int write_each_attr(struct iio_device *dev, enum iio_attr_type type,
         case IIO_ATTR_TYPE_BUFFER:
             ret = (int) iio_device_buffer_attr_write_raw(dev,
                     NULL, buf, ptr - buf);
-            break;
-        default:
-            ret = -EINVAL;
             break;
     }
 

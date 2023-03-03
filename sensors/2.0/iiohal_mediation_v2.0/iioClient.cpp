@@ -67,12 +67,16 @@ void iioClient::iioThread(struct iioclient_device *devlist) {
      * once before use
      */
     iioClient *iioc = iioClient::get_iioClient();
+	
+    if (iioc == NULL)
+        return;
+		
     while (!iioc->is_iioc_initialized && !iioc->iioInit())
         sleep(5);
 
     /* post initialization of iio-devices to align with
      * android sensor fwk.*/
-    for (int id = 1; id <= MAX_SENSOR; id++) {
+    for (int id = 1; id < MAX_SENSOR; id++) {
         if (!devlist[id].is_initialized)
             continue;
 
@@ -88,7 +92,7 @@ void iioClient::iioThread(struct iioclient_device *devlist) {
      * this api is implemented to collect active sensor data from iiod.
      */
     while (iioc) {
-        for (int id = 1; id <= MAX_SENSOR; id++) {
+        for (int id = 1; id < MAX_SENSOR; id++) {
             if (!(devlist[id].is_initialized && devlist[id].is_enabled))
                 continue;
 
@@ -238,7 +242,7 @@ bool iioClient::iioInit(void) {
  * enabled set to 1 to enable, or 0 to disable the sensor.
  */
 int iioClient::activate(int handle, bool enabled) {
-    if ((handle < 0) || (handle > MAX_SENSOR)) {
+    if ((handle < 0) || (handle >= MAX_SENSOR)) {
         ALOGE("ERROR: activate(%d) Sensor hadle(%d) is out of range", enabled, handle);
         return 0;
     }
@@ -253,7 +257,7 @@ int iioClient::activate(int handle, bool enabled) {
         return 0;
 
     active_sensor_count = 0;
-    for (int id = 1; id <= MAX_SENSOR; id++)
+    for (int id = 1; id < MAX_SENSOR; id++)
         if (devlist[id].is_initialized && devlist[id].is_enabled)
             active_sensor_count++;
 
@@ -265,6 +269,9 @@ int iioClient::activate(int handle, bool enabled) {
         const struct iio_device *device = devlist[handle].dev;
         struct iio_channel *channel = iio_device_get_channel(device, index);
 
+        if(channel == NULL)
+            continue;
+			
         /* skip output channels */
         if (iio_channel_is_output(channel))
             continue;
@@ -287,7 +294,7 @@ int iioClient::activate(int handle, bool enabled) {
  * activated.
  */
 int iioClient::batch(int handle, int32_t sampling_period_ns) {
-    if ((handle < 0) || (handle > MAX_SENSOR)) {
+    if ((handle < 0) || (handle >= MAX_SENSOR)) {
         ALOGE("Warning: batch invalid handle sampling_time(%d) sensor hadle(%d) is out of range",
               sampling_period_ns, handle);
         return 0;

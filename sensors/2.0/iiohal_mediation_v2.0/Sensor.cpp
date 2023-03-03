@@ -104,7 +104,7 @@ Result Sensor::flush() {
     // Note: If a sensor supports batching, write all of the
     // currently batched events for the sensor to the Event
     // FMQ prior to writing the flush complete event.
-    Event ev;
+    Event ev{};
     ev.sensorHandle = mSensorInfo.sensorHandle;
     ev.sensorType = SensorType::META_DATA;
     ev.u.meta.what = MetaDataEventType::META_DATA_FLUSH_COMPLETE;

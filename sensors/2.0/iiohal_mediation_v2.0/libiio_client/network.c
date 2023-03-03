@@ -482,7 +482,6 @@ static ssize_t network_recv(struct iio_network_io_context *io_ctx,
         ret = wait_cancellable(io_ctx, true);
         if (ret < 0)
             return ret;
-
         ret = recv(io_ctx->fd, data, (int) len, flags);
         if (ret == 0)
             return -EPIPE;

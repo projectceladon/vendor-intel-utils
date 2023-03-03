@@ -75,6 +75,7 @@ class iioClient {
      */
     iioClient() {
         sensorCount = 0;
+        active_sensor_count = 0;
         ctx = NULL;
         is_iioc_initialized = false;
         static std::thread thread_object(iioThread, devlist);
@@ -102,7 +103,7 @@ class iioClient {
     bool is_iioc_initialized;
     int active_sensor_count;
     struct iio_context *ctx;
-    struct iioclient_device devlist[MAX_SENSOR];
+    struct iioclient_device devlist[MAX_SENSOR]{};
 
     /* member funcions*/
     static void iioThread(struct iioclient_device *devlist);

@@ -38,7 +38,8 @@ static ssize_t iiod_client_read_integer(struct iiod_client *client,
         void *desc, int *val)
 {
     unsigned int i;
-    char buf[1024], *ptr = NULL, *end;
+    char  *ptr = NULL, *end;
+    char buf[1024] = "";
     ssize_t ret;
     int value;
 
@@ -187,7 +188,8 @@ int iiod_client_get_version(struct iiod_client *client, void *desc,
 {
     struct iio_context_pdata *pdata = client->pdata;
     const struct iiod_client_ops *ops = client->ops;
-    char buf[256], *ptr = buf, *end;
+    char buf[256] = "";
+    char *ptr = buf, *end;
     long maj, min;
     int ret;
 
@@ -266,6 +268,8 @@ int iiod_client_get_trigger(struct iiod_client *client, void *desc,
     for (i = 0; i < nb_devices; i++) {
         struct iio_device *cur = iio_context_get_device(ctx, i);
 
+        if (cur == NULL)
+            continue;
         if (iio_device_is_trigger(cur)) {
             const char *name = iio_device_get_name(cur);
 
@@ -543,8 +547,10 @@ struct iio_context * iiod_client_create_context(
         goto out_free_xml;
 
     ctx = iio_create_xml_context_mem(xml, xml_len);
-    if (!ctx)
+    if (!ctx) {
         ret = -errno;
+        goto out_free_xml;
+    }
     if (client_id >= 0)
         ctx->client_id = client_id;
 
