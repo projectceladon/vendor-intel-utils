@@ -162,7 +162,13 @@ void HealthLoop::UeventInit(void) {
         return;
     }
 
-    fcntl(uevent_fd_, F_SETFL, O_NONBLOCK);
+    int ret = fcntl(uevent_fd_, F_SETFL, O_NONBLOCK);
+    //For a successful call, the return value depends on the operation: On error, -1 is returned
+    if (ret == -1) {
+        KLOG_ERROR(LOG_TAG, "uevent_init: uevent_open_socket failed\n");
+        return;
+    }
+
     if (RegisterEvent(uevent_fd_, &HealthLoop::UeventEvent, EVENT_WAKEUP_FD))
         KLOG_ERROR(LOG_TAG, "register for uevent events failed\n");
 }

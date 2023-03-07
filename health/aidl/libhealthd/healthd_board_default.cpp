@@ -30,6 +30,7 @@ static std::thread vsock_thread;
 static struct android::BatteryProperties s_props;
 static bool is_vsock_present = false;
 int healthd_board_battery_update(struct android::BatteryProperties *props);
+int vsock_fd = -1;
 
 static void parse_battery_status(uint8_t *status)
 {
@@ -98,12 +99,11 @@ static void parse_battery_properties(struct monitor_pkt *mpkt)
     s_props.batteryFullCharge = mpkt->charge_full;
     s_props.batteryChargeCounter = mpkt->charge_now;
     parse_battery_status(mpkt->status);
-    if (strlen((const char*)mpkt->health) == 0 ) {
-	    update_battery_health(mpkt);
-    }
-    else {
-	    parse_battery_health(mpkt->health);
-    }
+
+    if (strcmp((const char*)mpkt->health,"\0") == 0)
+        update_battery_health(mpkt);
+    else
+        parse_battery_health(mpkt->health);
 }
 
 static int connect_vsock(int *vsock_fd) {
@@ -128,7 +128,6 @@ static int connect_vsock(int *vsock_fd) {
 
 static void recv_vsock() {
     char msgbuf[1024];
-    int vsock_fd;
     struct header *head;
     struct monitor_pkt *mpkt;
     struct initial_pkt *ipkt;

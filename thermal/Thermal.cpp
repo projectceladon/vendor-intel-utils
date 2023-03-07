@@ -436,7 +436,7 @@ void Thermal::CheckThermalServerity() {
                     kTemp_2_0.throttlingStatus = (ThrottlingSeverity)i;
                     {
                         std::lock_guard<std::mutex> _lock(thermal_callback_mutex_);
-                        for (auto cb : callbacks_) {
+                        for (auto& cb : callbacks_) {
                             cb.callback->notifyThrottling(kTemp_2_0);
                         }
                     }
@@ -449,7 +449,7 @@ void Thermal::CheckThermalServerity() {
                     kTemp_2_0_1.throttlingStatus = (ThrottlingSeverity)i;
                     {
                         std::lock_guard<std::mutex> _lock(thermal_callback_mutex_);
-                        for (auto cb : callbacks_) {
+                        for (auto& cb : callbacks_) {
                             cb.callback->notifyThrottling(kTemp_2_0_1);
                         }
                     }

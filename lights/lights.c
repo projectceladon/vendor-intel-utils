@@ -98,6 +98,9 @@ static int get_max_brightness() {
   value = atoi(&tmp_s[0]);
 
 fail:
+  if (fd < 0) {
+    return -1;
+  }
   close(fd);
 
   return value;
@@ -123,6 +126,10 @@ static int set_light_backlight(struct light_device_t *dev,
 
   if (!cur_backlight_dev) {
     return -ENXIO;
+  }
+
+  if (max_brightness == -1) {
+    return -EINVAL;
   }
 
   if (max_brightness <= cur_backlight_dev->brightness_min_visible) {
