@@ -472,6 +472,7 @@ err_free_poll:
 }
 #endif /* HAVE_AVAHI */
 
+// coverity[ -taint_source : arg-1 ]
 static ssize_t network_recv(struct iio_network_io_context *io_ctx,
         void *data, size_t len, int flags)
 {
