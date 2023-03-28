@@ -61,6 +61,9 @@ class Health : public BnHealth, public HalHealthLoopCallback {
     ndk::ScopedAStatus getCurrentAverageMicroamps(int32_t* out) override;
     ndk::ScopedAStatus getCapacity(int32_t* out) override;
     ndk::ScopedAStatus getChargeStatus(BatteryStatus* out) override;
+    ndk::ScopedAStatus setChargingPolicy(BatteryChargingPolicy out) override;
+    ndk::ScopedAStatus getChargingPolicy(BatteryChargingPolicy* out) override;
+    ndk::ScopedAStatus getBatteryHealthData(BatteryHealthData* out) override;
 
     // A subclass may either override these or provide function pointers in
     // in healthd_config in the constructor.

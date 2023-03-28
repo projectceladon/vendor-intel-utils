@@ -127,6 +127,18 @@ ndk::ScopedAStatus Health::getChargeStatus(BatteryStatus* out) {
                        BatteryStatus::UNKNOWN, out);
 }
 
+ndk::ScopedAStatus Health::setChargingPolicy(BatteryChargingPolicy out) {
+    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+}
+
+ndk::ScopedAStatus Health::getChargingPolicy(BatteryChargingPolicy* out) {
+    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+}
+
+ndk::ScopedAStatus Health::getBatteryHealthData(BatteryHealthData* out) {
+    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+}
+
 ndk::ScopedAStatus Health::getDiskStats(std::vector<DiskStats>*) {
     // This implementation does not support DiskStats. An implementation may extend this
     // class and override this function to support disk stats.
