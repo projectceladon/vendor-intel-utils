@@ -9,7 +9,7 @@ cd vendor-intel-utils
 git checkout e936af4e95a4cb52bd5808323f99dda832aa58b2
 cd ../
 
-tag="lts-v5.15.78-20230405-r13"
+tag="lts-v5.15.78-20230413-r14"
 git clone -b $tag https://github.com/projectceladon/linux-intel-lts2021-chromium.git
 cd linux-intel-lts2021-chromium
 
