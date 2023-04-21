@@ -1,0 +1,391 @@
+From a8c28d81a28dd272a140fa401ec1285e9d1ab953 Mon Sep 17 00:00:00 2001
+From: Ankit Agrawal <ankit.agarwal@intel.com>
+Date: Mon, 24 Apr 2023 15:18:51 +0530
+Subject: [PATCH] EventHub: Prevent duplicate descriptors
+
+This updates EventHub to handle some cases that were causing
+multiple physical devices to be assigned the same descriptor:
+
+* If multiple input devices had the same vendor, product, and version
+  it was assumed that the unique_id between the devices could be used
+  to differentiate them if a unique_id was reported. However some
+  input devices (in particular TSTP MTouch devices) are reporting the
+  same unique_id across devices. Physical devices that report multiple
+  inputs (for example a keyboard with a touchpad) were expected to
+  use the same descriptor and the unique id field check is what was
+  being used to detect a single physical device with multiple inputs.
+  This updates EventHub to ensure that a unique descriptor is created
+  for all devices and moves the logic for determining whether a
+  separate InputDevice should be created for the EventHub device into
+  InputDeviceReader. InputReader will update an existing InputDevice
+  if one the InputDeviceIdentifiers has the same product, vendor,
+  revision, bus, uniqueId, and location of an existing InputDevice.
+  Otherwise, InputReader will create a new InputDevice for the
+  InputDescriptor.
+* When checking for duplicate descriptors it was only checking mDevices
+  for duplicates. However at startup mOpeningDevices is populated
+  on the initial read of input devices and later mDevices is populated
+  when getEvents processes the devices in mOpeningDevices. This adds
+  a new method hasDeviceByDescriptorLocked which can check for an
+  existing device with the descriptor passed in either mDevice or
+  mOpeningDevices. It then updates the check in assignDescriptorLocked
+  to check both mDevices and mOpeningDevices for duplicate descriptors.
+
+This also adds a new test:
+EventHubTest.DevicesWithMatchingUniqueIdsAreUnique
+This test validates that 2 devices which contain the same vendor,
+product, and unique id get unique descriptors generated for them
+by EventHub.
+
+This is an example of some touchpanels that enumerate with the same
+vendor, product, version and unique_id:
+
+cat /proc/bus/input/devices
+I: Bus=0003 Vendor=eeef Product=2828 Version=0111
+N: Name="TSTP MTouch"
+P: Phys=usb-xhci-hcd.1.auto-1.2/input0
+S: Sysfs=/devices/platform/soc/a400000.ssusb/a400000.dwc3/
+   xhci-hcd.1.auto/usb4/4-1/4-1.2/4-1.2:1.0/
+   0003:EEEF:2828.0001/input/input2
+U: Uniq=CMTP_1.0
+H: Handlers=event2 cpufreq
+B: PROP=2
+B: EV=1b
+B: KEY=400 0 0 0 0 0
+B: ABS=260800000000003
+B: MSC=20
+
+I: Bus=0003 Vendor=eeef Product=2828 Version=0111
+N: Name="TSTP MTouch"
+P: Phys=usb-xhci-hcd.1.auto-1.3/input0
+S: Sysfs=/devices/platform/soc/a400000.ssusb/a400000.dwc3/
+   xhci-hcd.1.auto/usb4/4-1/4-1.3/4-1.3:1.0/0003:EEEF:2828.0003/
+   input/input7
+U: Uniq=CMTP_1.0
+H: Handlers=event6 cpufreq
+B: PROP=2
+B: EV=1b
+B: KEY=400 0 0 0 0 0
+B: ABS=260800000000003
+B: MSC=20
+
+I: Bus=0003 Vendor=0eef Product=c000 Version=0111
+N: Name="eGalax Inc. eGalaxTouch EXC3147-2457-08.00.00"
+P: Phys=usb-xhci-hcd.1.auto-1.1.3/input0
+S: Sysfs=/devices/platform/soc/a400000.ssusb/a400000.dwc3/
+   xhci-hcd.1.auto/usb4/4-1/4-1.1/4-1.1.3/4-1.1.3:1.0/
+   0003:0EEF:C000.0004/input/input9
+U: Uniq=
+H: Handlers=event8 cpufreq
+B: PROP=2
+B: EV=1b
+B: KEY=400 0 0 0 0 0
+B: ABS=260800000000003
+B: MSC=20
+
+I: Bus=0003 Vendor=0eef Product=c000 Version=0111
+N: Name="eGalax Inc. eGalaxTouch EXC3147-2457-08.00.00 UNKNOWN"
+P: Phys=usb-xhci-hcd.1.auto-1.1.3/input0
+S: Sysfs=/devices/platform/soc/a400000.ssusb/a400000.dwc3/
+   xhci-hcd.1.auto/usb4/4-1/4-1.1/4-1.1.3/4-1.1.3:1.0/
+   0003:0EEF:C000.0004/input/input11
+U: Uniq=
+H: Handlers=event9 cpufreq
+B: PROP=0
+B: EV=1b
+B: KEY=30000 0 0 0 0
+B: ABS=3
+B: MSC=10
+
+Prior to this patch these device will get assigned the same descriptor
+when looking at dumpsys input:
+Event Hub State:
+BuiltInKeyboardId: -2
+Devices:
+2: eGalax Inc. eGalaxTouch EXC3147-2457-08.00.00
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event8
+  Enabled: true
+  Descriptor: 6454aac13d04c4bd9de46924db31b8fa756c858e
+  Location: usb-xhci-hcd.1.auto-1.1.3/input0
+  ControllerNumber: 0
+  UniqueId:
+  Identifier: bus=0x0003, vendor=0x0eef, product=0xc000, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile:
+      /vendor/usr/idc/usb-xhci-hcd_1_auto-1_1_3_input0.idc
+  VideoDevice: <none>
+4: eGalax Inc. eGalaxTouch EXC3147-2457-08.00.00
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event6
+  Enabled: true
+  Descriptor: 6454aac13d04c4bd9de46924db31b8fa756c858e
+  Location: usb-xhci-hcd.1.auto-1.1.2/input0
+  ControllerNumber: 0
+  UniqueId:
+  Identifier: bus=0x0003, vendor=0x0eef, product=0xc000, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile:
+      /vendor/usr/idc/usb-xhci-hcd_1_auto-1_1_2_input0.idc
+  VideoDevice: <none>
+6: TSTP MTouch
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event4
+  Enabled: true
+  Descriptor: 25cf0d1204ceeb06804068d960e10f80d22f0edd
+  Location: usb-xhci-hcd.1.auto-1.3/input0
+  ControllerNumber: 0
+  UniqueId: CMTP_1.0
+  Identifier: bus=0x0003, vendor=0xeeef, product=0x2828, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile: /vendor/usr/idc/usb-xhci-hcd_1_auto-1_3_input0.idc
+  VideoDevice: <none>
+8: TSTP MTouch
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event2
+  Enabled: true
+  Descriptor: 25cf0d1204ceeb06804068d960e10f80d22f0edd
+  Location: usb-xhci-hcd.1.auto-1.2/input0
+  ControllerNumber: 0
+  UniqueId: CMTP_1.0
+  Identifier: bus=0x0003, vendor=0xeeef, product=0x2828, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile: /vendor/usr/idc/usb-xhci-hcd_1_auto-1_2_input0.idc
+  VideoDevice: <none>
+
+After this patch all devices get assigned unique descriptors when
+looking at dumpsys input:
+Event Hub State:
+BuiltInKeyboardId: -2
+Devices:
+2: eGalax Inc. eGalaxTouch EXC3147-2457-08.00.00
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event8
+  Enabled: true
+  Descriptor: 6454aac13d04c4bd9de46924db31b8fa756c858e
+  Location: usb-xhci-hcd.1.auto-1.1.3/input0
+  ControllerNumber: 0
+  UniqueId:
+  Identifier: bus=0x0003, vendor=0x0eef, product=0xc000, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile:
+      /vendor/usr/idc/usb-xhci-hcd_1_auto-1_1_3_input0.idc
+  VideoDevice: <none>
+4: TSTP MTouch
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event6
+  Enabled: true
+  Descriptor: 25cf0d1204ceeb06804068d960e10f80d22f0edd
+  Location: usb-xhci-hcd.1.auto-1.3/input0
+  ControllerNumber: 0
+  UniqueId: CMTP_1.0
+  Identifier: bus=0x0003, vendor=0xeeef, product=0x2828, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile: /vendor/usr/idc/usb-xhci-hcd_1_auto-1_3_input0.idc
+  VideoDevice: <none>
+6: eGalax Inc. eGalaxTouch EXC3147-2457-08.00.00
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event4
+  Enabled: true
+  Descriptor: 14d833ecd51ba30d9446febf10673051405230f2
+  Location: usb-xhci-hcd.1.auto-1.1.2/input0
+  ControllerNumber: 0
+  UniqueId:
+  Identifier: bus=0x0003, vendor=0x0eef, product=0xc000, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile:
+      /vendor/usr/idc/usb-xhci-hcd_1_auto-1_1_2_input0.idc
+  VideoDevice: <none>
+8: TSTP MTouch
+  Classes: TOUCH | TOUCH_MT | EXTERNAL
+  Path: /dev/input/event2
+  Enabled: true
+  Descriptor: 276553dce9a3e55b90fccfcffd56b233cd3741ab
+  Location: usb-xhci-hcd.1.auto-1.2/input0
+  ControllerNumber: 0
+  UniqueId: CMTP_1.0
+  Identifier: bus=0x0003, vendor=0xeeef, product=0x2828, version=0x0111
+  KeyLayoutFile:
+  KeyCharacterMapFile:
+  ConfigurationFile: /vendor/usr/idc/usb-xhci-hcd_1_auto-1_2_input0.idc
+  VideoDevice: <none>
+
+Test: atest inputflinger_tests
+Type: Bug Fix
+Tracked-On: OAM-108947
+Signed-off-by: Ankit Agrawal <ankit.agarwal@intel.com>
+---
+ services/inputflinger/reader/EventHub.cpp     | 36 +++++++++++++------
+ services/inputflinger/reader/InputReader.cpp  | 25 +++++++++++--
+ .../inputflinger/reader/include/EventHub.h    |  4 ++-
+ services/inputflinger/tests/EventHub_test.cpp | 14 ++++++++
+ 4 files changed, 65 insertions(+), 14 deletions(-)
+
+diff --git a/services/inputflinger/reader/EventHub.cpp b/services/inputflinger/reader/EventHub.cpp
+index b19b4195d1..de036d6162 100644
+--- a/services/inputflinger/reader/EventHub.cpp
++++ b/services/inputflinger/reader/EventHub.cpp
+@@ -1242,7 +1242,8 @@ static std::string generateDescriptor(InputDeviceIdentifier& identifier) {
+     if (!identifier.uniqueId.empty()) {
+         rawDescriptor += "uniqueId:";
+         rawDescriptor += identifier.uniqueId;
+-    } else if (identifier.nonce != 0) {
++    }
++    if (identifier.nonce != 0) {
+         rawDescriptor += StringPrintf("nonce:%04x", identifier.nonce);
+     }
+ 
+@@ -1270,16 +1271,20 @@ void EventHub::assignDescriptorLocked(InputDeviceIdentifier& identifier) {
+     // of Android. In practice we sometimes get devices that cannot be uniquely
+     // identified. In this case we enforce uniqueness between connected devices.
+     // Ideally, we also want the descriptor to be short and relatively opaque.
++    // Note that we explicitly do not use the path or location for external devices
++    // as their path or location will change as they are plugged/unplugged or moved
++    // to different ports. We do fallback to using name and location in the case of
++    // internal devices which are detected by the vendor and product being 0 in
++    // generateDescriptor. If two identical descriptors are detected we will fallback
++    // to using a 'nonce' and incrementing it until the new descriptor no longer has
++    // a match with any existing descriptors.
+ 
+     identifier.nonce = 0;
+     std::string rawDescriptor = generateDescriptor(identifier);
+-    if (identifier.uniqueId.empty()) {
+-        // If it didn't have a unique id check for conflicts and enforce
+-        // uniqueness if necessary.
+-        while (getDeviceByDescriptorLocked(identifier.descriptor) != nullptr) {
+-            identifier.nonce++;
+-            rawDescriptor = generateDescriptor(identifier);
+-        }
++    // Enforce that the generated descriptor is unique.
++    while (hasDeviceWithDescriptorLocked(identifier.descriptor)) {
++        identifier.nonce++;
++        rawDescriptor = generateDescriptor(identifier);
+     }
+     ALOGV("Created descriptor: raw=%s, cooked=%s", rawDescriptor.c_str(),
+           identifier.descriptor.c_str());
+@@ -1354,13 +1359,22 @@ std::vector<int32_t> EventHub::getVibratorIds(int32_t deviceId) {
+     return vibrators;
+ }
+ 
+-EventHub::Device* EventHub::getDeviceByDescriptorLocked(const std::string& descriptor) const {
++/**
++ * Checks both mDevices and mOpeningDevices for a device with the descriptor passed.
++ */
++bool EventHub::hasDeviceWithDescriptorLocked(const std::string& descriptor) const {
++    for (const auto& device : mOpeningDevices) {
++        if (descriptor == device->identifier.descriptor) {
++            return true;
++        }
++    }
++
+     for (const auto& [id, device] : mDevices) {
+         if (descriptor == device->identifier.descriptor) {
+-            return device.get();
++            return true;
+         }
+     }
+-    return nullptr;
++    return false;
+ }
+ 
+ EventHub::Device* EventHub::getDeviceLocked(int32_t deviceId) const {
+diff --git a/services/inputflinger/reader/InputReader.cpp b/services/inputflinger/reader/InputReader.cpp
+index 5120860503..fc398a2513 100644
+--- a/services/inputflinger/reader/InputReader.cpp
++++ b/services/inputflinger/reader/InputReader.cpp
+@@ -38,6 +38,26 @@ using android::base::StringPrintf;
+ 
+ namespace android {
+ 
++/**
++ * Determines if the identifiers passed are a sub-devices. Sub-devices are physical devices
++ * that expose multiple input device paths such a keyboard that also has a touchpad input.
++ * These are separate devices with unique descriptors in EventHub, but InputReader should
++ * create a single InputDevice for them.
++ * Sub-devices are detected by the following criteria:
++ * 1. The vendor, product, bus, version, and unique id match
++ * 2. The location matches. The location is used to distinguish a single device with multiple
++ *    inputs versus the same device plugged into multiple ports.
++ */
++
++static bool isSubDevice(const InputDeviceIdentifier& identifier1,
++                        const InputDeviceIdentifier& identifier2) {
++    return (identifier1.vendor == identifier2.vendor &&
++            identifier1.product == identifier2.product && identifier1.bus == identifier2.bus &&
++            identifier1.version == identifier2.version &&
++            identifier1.uniqueId == identifier2.uniqueId &&
++            identifier1.location == identifier2.location);
++}
++
+ // --- InputReader ---
+ 
+ InputReader::InputReader(std::shared_ptr<EventHubInterface> eventHub,
+@@ -277,8 +297,9 @@ void InputReader::removeDeviceLocked(nsecs_t when, int32_t eventHubId) {
+ std::shared_ptr<InputDevice> InputReader::createDeviceLocked(
+         int32_t eventHubId, const InputDeviceIdentifier& identifier) {
+     auto deviceIt = std::find_if(mDevices.begin(), mDevices.end(), [identifier](auto& devicePair) {
+-        return devicePair.second->getDescriptor().size() && identifier.descriptor.size() &&
+-                devicePair.second->getDescriptor() == identifier.descriptor;
++        const InputDeviceIdentifier identifier2 =
++                devicePair.second->getDeviceInfo().getIdentifier();
++        return isSubDevice(identifier, identifier2);
+     });
+ 
+     std::shared_ptr<InputDevice> device;
+diff --git a/services/inputflinger/reader/include/EventHub.h b/services/inputflinger/reader/include/EventHub.h
+index 410a7063ea..33070e07f5 100644
+--- a/services/inputflinger/reader/include/EventHub.h
++++ b/services/inputflinger/reader/include/EventHub.h
+@@ -643,7 +643,6 @@ private:
+     void scanDevicesLocked() REQUIRES(mLock);
+     status_t readNotifyLocked() REQUIRES(mLock);
+ 
+-    Device* getDeviceByDescriptorLocked(const std::string& descriptor) const REQUIRES(mLock);
+     Device* getDeviceLocked(int32_t deviceId) const REQUIRES(mLock);
+     Device* getDeviceByPathLocked(const std::string& devicePath) const REQUIRES(mLock);
+     /**
+@@ -653,6 +652,9 @@ private:
+     Device* getDeviceByFdLocked(int fd) const REQUIRES(mLock);
+ 
+     int32_t getNextControllerNumberLocked(const std::string& name) REQUIRES(mLock);
++
++    bool hasDeviceWithDescriptorLocked(const std::string& descriptor) const REQUIRES(mLock);
++
+     void releaseControllerNumberLocked(int32_t num) REQUIRES(mLock);
+     void reportDeviceAddedForStatisticsLocked(const InputDeviceIdentifier& identifier,
+                                               Flags<InputDeviceClass> classes) REQUIRES(mLock);
+diff --git a/services/inputflinger/tests/EventHub_test.cpp b/services/inputflinger/tests/EventHub_test.cpp
+index ef68a84fdb..6ef6e4498c 100644
+--- a/services/inputflinger/tests/EventHub_test.cpp
++++ b/services/inputflinger/tests/EventHub_test.cpp
+@@ -179,6 +179,20 @@ void EventHubTest::assertNoMoreEvents() {
+     ASSERT_TRUE(events.empty());
+ }
+ 
++/**
++ * Ensure that two identical devices get assigned unique descriptors from EventHub.
++ */
++TEST_F(EventHubTest, DevicesWithMatchingUniqueIdsAreUnique) {
++    std::unique_ptr<UinputHomeKey> keyboard2 = createUinputDevice<UinputHomeKey>();
++    int32_t deviceId2;
++    ASSERT_NO_FATAL_FAILURE(deviceId2 = waitForDeviceCreation());
++
++    ASSERT_NE(mEventHub->getDeviceIdentifier(mDeviceId).descriptor,
++              mEventHub->getDeviceIdentifier(deviceId2).descriptor);
++    keyboard2.reset();
++    waitForDeviceClose(deviceId2);
++}
++
+ /**
+  * Ensure that input_events are generated with monotonic clock.
+  * That means input_event should receive a timestamp that is in the future of the time
+-- 
+2.17.1
+
