@@ -1,0 +1,914 @@
+From 764c0ebe5160d448b8a5f235750f3e036830dc97 Mon Sep 17 00:00:00 2001
+From: Deepa K G <g.k.deepa@intel.com>
+Date: Sat, 22 Apr 2023 21:06:31 +0530
+Subject: [PATCH] IVI changes for audio HAL
+
+Bus based HAL
+Device version moved to 3.0
+Multizone configuration 3 zones (2 used)
+AVS RTL5640
+Hw Volume control
+
+Tracked-On:
+---
+ primary/audio_hw.c | 558 +++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 434 insertions(+), 124 deletions(-)
+
+diff --git a/primary/audio_hw.c b/primary/audio_hw.c
+index 0c539a5..c94062e 100755
+--- a/primary/audio_hw.c
++++ b/primary/audio_hw.c
+@@ -15,7 +15,7 @@
+  */
+ 
+ #define LOG_TAG "audio_hw_primary"
+-/*#define LOG_NDEBUG 0*/
++//#define LOG_NDEBUG 0
+ 
+ #include <dirent.h>
+ #include <errno.h>
+@@ -25,10 +25,11 @@
+ #include <stdlib.h>
+ #include <sys/time.h>
+ #include <unistd.h>
+-
++#include <math.h>
+ #include <log/log.h>
+ #include <cutils/properties.h>
+ #include <cutils/str_parms.h>
++#include <cutils/hashmap.h>
+ 
+ #include <safe_mem_lib.h>
+ #include <safe_str_lib.h>
+@@ -46,14 +47,12 @@
+ #include <audio_utils/resampler.h>
+ #include <audio_route/audio_route.h>
+ 
+-#define GET_PCM_CARD_NUMBER(temp_card)  (((temp_card = get_pcm_card("PCH"))!=-1? temp_card:\
+-    ((temp_card = get_pcm_card("Intel"))!=-1? temp_card:\
+-    (temp_card = get_pcm_card("sofhdadsp")))))
+-
+ #define PCM_CARD 0
+ #define PCM_CARD_DEFAULT 0
+-#define PCM_DEVICE 0
+ 
++#define PCM_DEVICE 0
++#define PCM_DEVICE_AVS 1
++/*Note:Original HAL configuration in celadon for primary device*/
+ #define OUT_PERIOD_SIZE 1024
+ #define OUT_PERIOD_COUNT 4
+ #define OUT_SAMPLING_RATE 48000
+@@ -68,15 +67,17 @@
+ #define AUDIO_BT_DRIVER_NAME         "btaudiosource"
+ #define SAMPLE_SIZE_IN_BYTES          2
+ #define SAMPLE_SIZE_IN_BYTES_STEREO   4
+-
+ #define NANOS_PER_MICROSECOND  ((int64_t)1000)
+ #define NANOS_PER_MILLISECOND  (NANOS_PER_MICROSECOND * 1000)
+ #define MICROS_PER_MILLISECOND 1000
+ #define MILLIS_PER_SECOND      1000
+ #define NANOS_PER_SECOND       (NANOS_PER_MILLISECOND * MILLIS_PER_SECOND)
+ 
+-//#define DEBUG_PCM_DUMP
++#define GET_PCM_CARD_NUMBER(temp_card)  (((temp_card = get_pcm_card("PCH"))!=-1? temp_card:\
++    ((temp_card = get_pcm_card("Intel"))!=-1? temp_card:\
++    (temp_card = get_pcm_card("sofhdadsp")))))
+ 
++//#define DEBUG_PCM_DUMP
+ #ifdef DEBUG_PCM_DUMP
+ // To enable dumps, explicitly create "/vendor/dump/" folder and reboot device
+ FILE *sco_call_write = NULL;
+@@ -88,7 +89,21 @@ FILE *sco_call_read_bt = NULL;
+ FILE *out_write_dump = NULL;
+ FILE *in_read_dump = NULL;
+ #endif
+-
++typedef struct pcm pcm_data_t;
++typedef enum out_bus_addresses{ 
++    bus0_audio_zone_0, 
++    bus0_media_out_zone0,  
++    bus1_navigation_out_zone0,
++    bus2_voice_command_out_zone0,
++    bus3_call_ring_out_zone0,
++    bus4_call_out_zone0,
++    bus5_alarm_out_zone0,
++    bus6_notification_out_zone0,
++    bus7_system_sound_out_zone0,
++    bus100_audio_zone_1,
++    bus200_audio_zone_2
++}bus_addresses_t;
++  
+ struct pcm_config pcm_config_out = {
+     .channels = 2,
+     .rate = OUT_SAMPLING_RATE,
+@@ -108,6 +123,12 @@ struct pcm_config pcm_config_in = {
+     .stop_threshold = (IN_PERIOD_SIZE * IN_PERIOD_COUNT),
+ };
+ 
++struct aec_info {
++    struct timespec timestamp;
++    uint64_t timestamp_usec;
++    unsigned int available;
++    size_t bytes;
++};
+ //[ BT ALSA Card config
+ struct pcm_config bt_out_config = {
+     .channels = 1,
+@@ -144,7 +165,11 @@ struct audio_device {
+     struct audio_route *ar;
+     
+     int card;
++    int device;
+     int cardc;
++
++    int audio_zone;
++
+     struct stream_out *active_out;
+     struct stream_in *active_in;
+ 
+@@ -155,6 +180,9 @@ struct audio_device {
+     bool in_needs_standby;
+     bool out_needs_standby;
+ 
++    char *bus_nodes;
++    unsigned int last_patch_id;   // Protected by this->lock
++    Hashmap *out_bus_stream_map;  // Extended field. Constant after init
+ //[BT SCO VoIP Call
+     bool in_sco_voip_call;
+     int bt_card;
+@@ -174,6 +202,11 @@ struct stream_out {
+     bool standby;
+     uint64_t written;
+     struct audio_device *dev;
++    char *bus_address;
++    struct audio_gain gain_stage;      // Constant after init
++    float amplitude_ratio;             // Protected by this->lock
++    bool is_ducked;                    // Protected by this->lock
++    bool is_muted;                     // Protected by this->lock
+ };
+ 
+ struct stream_in {
+@@ -185,22 +218,10 @@ struct stream_in {
+     struct audio_config req_config;
+     bool unavailable;
+     bool standby;
+-    unsigned int frames_read;
++    char *bus_address;
+     uint64_t timestamp_nsec;
+     struct audio_device *dev;
+-};
+-
+-/* 'bytes' are the number of bytes written to audio FIFO, for which 'timestamp' is valid.
+- * 'available' is the number of frames available to read (for input) or yet to be played
+- * (for output) frames in the PCM buffer.
+- * timestamp and available are updated by pcm_get_htimestamp(), so they use the same
+- * datatypes as the corresponding arguments to that function. */
+-
+-struct aec_info {
+-    struct timespec timestamp;
+-    uint64_t timestamp_usec;
+-    unsigned int available;
+-    size_t bytes;
++    unsigned int frames_read;
+ };
+ 
+ static uint32_t out_get_sample_rate(const struct audio_stream *stream);
+@@ -209,6 +230,7 @@ static audio_format_t out_get_format(const struct audio_stream *stream);
+ static uint32_t in_get_sample_rate(const struct audio_stream *stream);
+ static size_t in_get_buffer_size(const struct audio_stream *stream);
+ static audio_format_t in_get_format(const struct audio_stream *stream);
++static pcm_data_t *route_out_pcm(struct stream_out *out,bus_addresses_t bus_to_device);
+ static int getCapturePosition(const struct audio_stream_in *stream, int64_t* frames, int64_t* time1);
+ static inline int64_t audio_utils_ns_from_timespec(const struct timespec *ts);
+ static int get_pcm_timestamp(struct pcm* pcm, uint32_t sample_rate, struct aec_info* info, bool isOutput);
+@@ -218,12 +240,14 @@ static void select_devices(struct audio_device *adev)
+     int headphone_on;
+     int speaker_on;
+     int main_mic_on;
++    int main_mic_bus;
+     int headset_mic_on;
+ 
+     headphone_on = adev->out_device & (AUDIO_DEVICE_OUT_WIRED_HEADSET |
+                                     AUDIO_DEVICE_OUT_WIRED_HEADPHONE);
+     speaker_on = adev->out_device & AUDIO_DEVICE_OUT_SPEAKER;
+     main_mic_on = adev->in_device & AUDIO_DEVICE_IN_BUILTIN_MIC;
++    main_mic_bus = adev->in_device & AUDIO_DEVICE_IN_BUS;
+     headset_mic_on = adev->in_device & AUDIO_DEVICE_IN_WIRED_HEADSET;
+ 
+     audio_route_reset(adev->ar);
+@@ -233,15 +257,16 @@ static void select_devices(struct audio_device *adev)
+     if (headphone_on)
+         audio_route_apply_path(adev->ar, "headphone");
+     if (main_mic_on)
++    {
+         audio_route_apply_path(adev->ar, "main-mic");
++    }
+     if (headset_mic_on)
+         audio_route_apply_path(adev->ar, "headset-mic");
+ 
+     audio_route_update_mixer(adev->ar);
+     
+-    ALOGV("%s : hp=%c speaker=%c main-mic=%c headset-mic=%c",__func__,
+-      headphone_on ? 'y' : 'n', speaker_on ? 'y' : 'n',
+-      main_mic_on ? 'y' : 'n', headset_mic_on ? 'y' : 'n' );
++    ALOGV("%s : hp=%c speaker=%c main-mic0-bus=%c main-mic=%c headset-mic=%c",__func__,
++      headphone_on ? 'y' : 'n', speaker_on ? 'y' : 'n', main_mic_bus ? 'y' : 'n', main_mic_on ? 'y' : 'n', headset_mic_on ? 'y' : 'n' );
+ }
+ 
+ /* must be called with hw device and output stream mutexes locked */
+@@ -278,13 +303,13 @@ static int get_pcm_card(const char* name)
+ 
+         written = readlink(id_filepath, number_filepath, sizeof(number_filepath));
+         if (written < 0) {
+-            ALOGE("Sound card %s does not exist\n", name);
+-            return -1;
++            ALOGE("Sound card %s does not exist - setting default", name);
++                return -1;
+         } else if (written >= (ssize_t)sizeof(id_filepath)) {
+-            ALOGE("Sound card %s name is too long - setting default \n", name);
++            ALOGE("Sound card %s name is too long - setting default", name);
+             return -1;
+         }
+-        ALOGI("Sound card %s exists\n", name);
++
+         return atoi(number_filepath + 4);
+ }
+ 
+@@ -297,19 +322,90 @@ static unsigned int round_to_16_mult(unsigned int size)
+     return (size + 15) & ~15;   /* 0xFFFFFFF0; */
+ }
+ 
++pcm_data_t *route_out_pcm(struct stream_out *out,bus_addresses_t bus_to_device)
++{
++    struct audio_device *adev = out->dev;
++    switch(bus_to_device)
++    {
++        case bus100_audio_zone_1:
++            /*TODO:Need to change to inbuilt device, audio primary zone currently with usb device*/
++            adev->card = get_pcm_card("avsrt56402");
++            adev->device  = PCM_DEVICE_AVS;
++            adev->audio_zone = 1; 
++            out->pcm_config->rate = OUT_SAMPLING_RATE;
++            out->pcm_config->channels = 2;
++            ALOGV("bus100_audio_zone_1 is asked adev->card %d\n",adev->card);
++            if(adev->card < 0) {
++                adev->card = get_pcm_card("Dummy");
++                adev->device  = PCM_DEVICE;
++                out->pcm_config->channels = 2;
++                out->pcm_config->rate = OUT_SAMPLING_RATE;
++                ALOGV("default Audio primary cards asked  1\n");
++            } 
++        break; 
++        case bus0_audio_zone_0:
++            /*audio zone 0*/ 
++            adev->card = get_pcm_card("avsrt56401");
++            adev->audio_zone = 0; 
++            adev->device  = PCM_DEVICE_AVS;
++            out->pcm_config->rate = OUT_SAMPLING_RATE;
++            out->pcm_config->channels = 2;
++            ALOGV("bus0_audio_zone_0 is audio zone 1 asked \n");
++            if(adev->card < 0) {
++                adev->card = get_pcm_card("Dummy");
++                adev->device  = PCM_DEVICE;
++                out->pcm_config->channels = 2;
++                out->pcm_config->rate = OUT_SAMPLING_RATE;
++                ALOGV("default Audio primary cards asked \n");
++            } 
++        break;
++        case bus1_navigation_out_zone0:
++            /*primary user with Navigation alone on different device*/     
++            adev->card = PCM_CARD_DEFAULT;
++            adev->device  = PCM_DEVICE;
++            out->pcm_config->channels = 2;
++            out->pcm_config->rate = OUT_SAMPLING_RATE;
++            ALOGV("bus1_navigation_out_zone0  is asked \n");
++        break;  
++        case bus200_audio_zone_2:
++            /*audio zone bus200_audio_zone_2 currently assign it to second zone device as we are not using third codec */
++            adev->card = get_pcm_card("avsrt56402");
++            adev->device  = PCM_DEVICE_AVS;
++            adev->audio_zone = 1; 
++            out->pcm_config->rate = OUT_SAMPLING_RATE;
++            out->pcm_config->channels = 2;
++            ALOGV("bus200_audio_zone_1 is asked adev->card %d\n",adev->card);
++            if(adev->card < 0) {
++                adev->card = get_pcm_card("Dummy");
++                adev->device  = PCM_DEVICE;
++                out->pcm_config->channels = 2;
++                out->pcm_config->rate = OUT_SAMPLING_RATE;
++                ALOGV("default Audio primary cards asked  1\n");
++            } 
++        break;
++        default:
++            adev->card = PCM_CARD_DEFAULT;
++            adev->device  = PCM_DEVICE;
++            out->pcm_config->rate = OUT_SAMPLING_RATE;
++            ALOGV("default Audio primary cards asked \n");
++        break;
++    }
++    ALOGV("%s : pcm open called with card %d device %d \n",__func__,adev->card,adev->device);
++    out->pcm = pcm_open(adev->card, adev->device, PCM_OUT | PCM_NORESTART | PCM_MONOTONIC, out->pcm_config);
++    return out->pcm;
++}
++
+ /* must be called with hw device and output stream mutexes locked */
+ static int start_output_stream(struct stream_out *out)
+ {
+     struct audio_device *adev = out->dev;
+-
+     ALOGV("%s : config : [rate %d format %d channels %d]",__func__,
+             out->pcm_config->rate, out->pcm_config->format, out->pcm_config->channels);
+-
+-    if (out->unavailable) {
++   /*TODO: check for all the available devices */ 
++/*    if (out->unavailable) {
+         ALOGV("start_output_stream: output not available");
+         return -ENODEV;
+-    }
+-
++    }*/
+ //[BT SCO VoIP Call
+     if(adev->in_sco_voip_call) {
+         ALOGD("%s : sco voip call active", __func__);
+@@ -320,8 +416,27 @@ static int start_output_stream(struct stream_out *out)
+         out->pcm = pcm_open(adev->bt_card, PCM_DEVICE /*0*/, PCM_OUT, &bt_out_config);
+ //BT SCO VoIP Call]
+     } else {
+-        ALOGI("PCM playback card selected = %d, \n", adev->card);
+-        out->pcm = pcm_open(adev->card, PCM_DEVICE, PCM_OUT | PCM_NORESTART | PCM_MONOTONIC, out->pcm_config);
++        bus_addresses_t bus_type = bus0_audio_zone_0;
++        if((!strcmp(out->bus_address,"bus0_media_out")) ||
++           (!strcmp(out->bus_address,"bus5_alarm_out")) ||
++           (!strcmp(out->bus_address,"bus6_notification_out")) ||
++           (!strcmp(out->bus_address,"bus4_call_out")) ||
++           (!strcmp(out->bus_address,"bus3_call_ring_out")) ||
++           (!strcmp(out->bus_address,"bus1_navigation_out_zone0")) ||
++           (!strcmp(out->bus_address,"bus2_voice_command_out"))){
++           ALOGV("%s : bus address is primary zone \n",__func__);
++           bus_type = bus0_audio_zone_0;
++        }
++        else if(!strcmp(out->bus_address,"bus100_audio_zone_1")){
++           ALOGV("%s : bus address is bus100_audio_zone_1 \n",__func__);
++           bus_type = bus100_audio_zone_1;
++        }
++        else if(!strcmp(out->bus_address,"bus200_audio_zone_2")){
++           bus_type = bus200_audio_zone_2;
++           ALOGV("%s : bus address is bus200_audio_zone_2 \n",__func__);
++        }
++	//Route to zone based on the bustype
++        out->pcm = route_out_pcm(out,bus_type);
+     }
+ 
+     if (!out->pcm) {
+@@ -346,7 +461,18 @@ static int start_output_stream(struct stream_out *out)
+ static int start_input_stream(struct stream_in *in)
+ {
+     struct audio_device *adev = in->dev;
+-
++    if(!strcmp(in->bus_address,"bus_1000_input_zone_0")){
++	    ALOGV("the input is in zone 0 bus_1000_input_zone_0");
++        adev->cardc = get_pcm_card("avsrt56401");
++        if( adev->cardc< 0)
++            adev->cardc = get_pcm_card("Dummy");
++    }
++    else if( !strcmp(in->bus_address,"bus_2000_input_zone_1")){   
++	    ALOGV("the input is in zone 1 bus_2000_input_zone_1");
++        adev->cardc = get_pcm_card("avsrt56402");
++        if( adev->cardc< 0)
++            adev->cardc = get_pcm_card("Dummy");
++    }
+ //[BT SCO VoIP Call
+     if(adev->in_sco_voip_call) {
+         ALOGD("%s : sco voip call active", __func__);
+@@ -357,12 +483,12 @@ static int start_input_stream(struct stream_in *in)
+         in->pcm = pcm_open(adev->bt_card, PCM_DEVICE, PCM_IN, &bt_in_config);
+ //BT SCO VoIP Call]
+     } else {
+-        ALOGI("PCM record card selected = %d, \n", adev->card);
++        ALOGI("PCM record card selected = %d, \n", adev->cardc);
+ 
+         ALOGV("%s : config : [rate %d format %d channels %d]",__func__,
+             in->pcm_config->rate, in->pcm_config->format, in->pcm_config->channels);
+ 
+-        in->pcm = pcm_open(adev->cardc, PCM_DEVICE, PCM_IN, in->pcm_config);
++        in->pcm = pcm_open(adev->cardc, PCM_DEVICE_AVS, PCM_IN, in->pcm_config);
+     }
+ 
+     if (!in->pcm) {
+@@ -398,7 +524,7 @@ static int out_set_sample_rate(struct audio_stream *stream __unused, uint32_t ra
+ 
+ static size_t out_get_buffer_size(const struct audio_stream *stream)
+ {
+-    ALOGV("out_get_buffer_size");
++    ALOGV("audio_stream_out_frame_size %u pcm_config_out.period_size %zu",pcm_config_out.period_size, audio_stream_out_frame_size((struct audio_stream_out *)stream));
+     return pcm_config_out.period_size *
+                audio_stream_out_frame_size((struct audio_stream_out *)stream);
+ }
+@@ -454,10 +580,8 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
+     unsigned int val;
+ 
+     parms = str_parms_create_str(kvpairs);
+-
+     ret = str_parms_get_str(parms, AUDIO_PARAMETER_STREAM_ROUTING,
+                             value, sizeof(value));
+-
+     pthread_mutex_lock(&adev->lock);
+     if (ret >= 0) {
+         val = atoi(value);
+@@ -554,7 +678,7 @@ static ssize_t out_write(struct audio_stream_out *stream, const void* buffer,
+     size_t frame_size = audio_stream_out_frame_size(stream);
+     int16_t *out_buffer = (int16_t *)buffer;
+     unsigned int out_frames = bytes / frame_size;
+-
++    static int check_var;
+     ALOGV("out_write: bytes: %zu", bytes);
+ 
+     /*
+@@ -732,7 +856,6 @@ static int out_get_presentation_position(const struct audio_stream_out *stream,
+ 
+     return ret;
+ }
+-
+ static int getCapturePosition(const struct audio_stream_in *stream, int64_t* frames, int64_t* time1){
+     if (stream == NULL || frames == NULL || time1 == NULL) {
+         return -EINVAL;
+@@ -748,9 +871,44 @@ static int getCapturePosition(const struct audio_stream_in *stream, int64_t* fra
+ 
+ static inline int64_t audio_utils_ns_from_timespec(const struct timespec *ts)
+ {
+-	    return ts->tv_sec * 1000000000LL + ts->tv_nsec;
++           return ts->tv_sec * 1000000000LL + ts->tv_nsec;
++}
++
++static void timestamp_adjust(struct timespec* ts, ssize_t frames, uint32_t sampling_rate) {
++    /* This function assumes the adjustment (in nsec) is less than the max value of long,
++     * which for 32-bit long this is 2^31 * 1e-9 seconds, slightly over 2 seconds.
++     * For 64-bit long it is  9e+9 seconds. */
++    long adj_nsec = (frames / (float) sampling_rate) * 1E9L;
++    ts->tv_nsec += adj_nsec;
++    while (ts->tv_nsec > 1E9L) {
++       ts->tv_sec++;
++       ts->tv_nsec -= 1E9L;
++    }
++    if (ts->tv_nsec < 0) {
++        ts->tv_sec--;
++        ts->tv_nsec += 1E9L;
++    }
+ }
+ 
++static int get_pcm_timestamp(struct pcm* pcm, uint32_t sample_rate, struct aec_info* info, bool isOutput) {
++    int ret = 0;
++    if (pcm_get_htimestamp(pcm, &info->available, &info->timestamp) < 0) {
++        ALOGE("Error getting PCM timestamp!");
++        info->timestamp.tv_sec = 0;
++        info->timestamp.tv_nsec = 0;
++        return -EINVAL;
++    }
++    ssize_t frames;
++    if (isOutput) {
++       frames = pcm_get_buffer_size(pcm) - info->available;
++    } else {
++       frames = -info->available; /* rewind timestamp */
++    }
++    timestamp_adjust(&info->timestamp, frames, sample_rate);
++    return ret;
++}
++
++
+ static int out_add_audio_effect(const struct audio_stream *stream __unused, effect_handle_t effect __unused)
+ {
+     ALOGV("out_add_audio_effect: %p", effect);
+@@ -925,40 +1083,6 @@ static int in_set_gain(struct audio_stream_in *stream __unused, float gain __unu
+     return 0;
+ }
+ 
+-static void timestamp_adjust(struct timespec* ts, ssize_t frames, uint32_t sampling_rate) {
+-    /* This function assumes the adjustment (in nsec) is less than the max value of long,
+-     * which for 32-bit long this is 2^31 * 1e-9 seconds, slightly over 2 seconds.
+-     * For 64-bit long it is  9e+9 seconds. */
+-    long adj_nsec = (frames / (float) sampling_rate) * 1E9L;
+-    ts->tv_nsec += adj_nsec;
+-    while (ts->tv_nsec > 1E9L) {
+-       ts->tv_sec++;
+-       ts->tv_nsec -= 1E9L;
+-    }
+-    if (ts->tv_nsec < 0) {
+-        ts->tv_sec--;
+-        ts->tv_nsec += 1E9L;
+-    }
+-}
+-
+-static int get_pcm_timestamp(struct pcm* pcm, uint32_t sample_rate, struct aec_info* info, bool isOutput) {
+-    int ret = 0;
+-    if (pcm_get_htimestamp(pcm, &info->available, &info->timestamp) < 0) {
+-        ALOGE("Error getting PCM timestamp!");
+-        info->timestamp.tv_sec = 0;
+-        info->timestamp.tv_nsec = 0;
+-        return -EINVAL;
+-    }
+-    ssize_t frames;
+-    if (isOutput) {
+-       frames = pcm_get_buffer_size(pcm) - info->available;
+-    } else {
+-       frames = -info->available; /* rewind timestamp */
+-    }
+-    timestamp_adjust(&info->timestamp, frames, sample_rate);
+-    return ret;
+-}
+-
+ static ssize_t in_read(struct audio_stream_in *stream, void* buffer,
+                        size_t bytes)
+ {
+@@ -1007,11 +1131,11 @@ static ssize_t in_read(struct audio_stream_in *stream, void* buffer,
+         int16_t *buf_out = (int16_t *) malloc (buf_size_out);
+         int16_t *buf_in = (int16_t *) malloc (buf_size_in);
+         int16_t *buf_remapped = (int16_t *) malloc (buf_size_remapped);
+-	const uint64_t time_increment_nsec = (uint64_t)bytes * NANOS_PER_SECOND /
+-		audio_stream_in_frame_size(stream) /
+-		in_get_sample_rate(&stream->common);
++        const uint64_t time_increment_nsec = (uint64_t)bytes * NANOS_PER_SECOND /
++               audio_stream_in_frame_size(stream) /
++               in_get_sample_rate(&stream->common);
+ 
+-	if (in->timestamp_nsec == 0) {
++       if (in->timestamp_nsec == 0) {
+                   struct timespec now;
+                   clock_gettime(CLOCK_MONOTONIC, &now);
+                   const uint64_t timestamp_nsec = audio_utils_ns_from_timespec(&now);
+@@ -1046,6 +1170,10 @@ static ssize_t in_read(struct audio_stream_in *stream, void* buffer,
+ 
+         ret = pcm_read(in->pcm, buf_in, buf_size_in);
+         in->frames_read += frames_in;
++        struct aec_info info;
++        get_pcm_timestamp(in->pcm, in->pcm_config->rate, &info, false /*isOutput*/);
++        in->timestamp_nsec = audio_utils_ns_from_timespec(&info.timestamp);
++
+ #ifdef DEBUG_PCM_DUMP
+         if(sco_call_read != NULL) {
+             fwrite(buf_in, 1, buf_size_in, sco_call_read);
+@@ -1093,11 +1221,7 @@ static ssize_t in_read(struct audio_stream_in *stream, void* buffer,
+     } else {
+         /* pcm read for primary card */
+         ret = pcm_read(in->pcm, buffer, bytes);
+-        in->frames_read += in->pcm_config->period_size;
+ 
+-       struct aec_info info;
+-       get_pcm_timestamp(in->pcm, in->pcm_config->rate, &info, false /*isOutput*/);
+-       in->timestamp_nsec = audio_utils_ns_from_timespec(&info.timestamp);
+ #ifdef DEBUG_PCM_DUMP
+         if(in_read_dump != NULL) {
+             fwrite(buffer, 1, bytes, in_read_dump);
+@@ -1141,15 +1265,25 @@ static int in_remove_audio_effect(const struct audio_stream *stream __unused,
+ {
+     return 0;
+ }
+-
+-
++/* copied from libcutils/str_parms.c */
++static bool str_eq(void *key_a, void *key_b) {
++     return !strcmp((const char *)key_a, (const char *)key_b);
++}
++static int str_hash_fn(void *str) {
++    uint32_t hash = 5381;
++    char *p;
++    for (p = str; p && *p; p++) {
++         hash = ((hash << 5) + hash) + *p;
++     }
++   return (int)hash;
++}
+ static int adev_open_output_stream(struct audio_hw_device *dev,
+                                    audio_io_handle_t handle __unused,
+                                    audio_devices_t devices __unused,
+                                    audio_output_flags_t flags,
+                                    struct audio_config *config,
+                                    struct audio_stream_out **stream_out,
+-                                   const char *address __unused)
++                                   const char *address)
+ {
+     ALOGD("%s : requested config : [rate %d format %d channels %d flags %#x]",__func__,
+         config->sample_rate, config->format, popcount(config->channel_mask), flags);
+@@ -1159,15 +1293,14 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
+     struct pcm_params *params;
+ 
+     int ret;
+-    int temp_card = 0;
+-
+-    adev->card = GET_PCM_CARD_NUMBER(temp_card);
+-    if (adev->card != -1)
+-        params = pcm_params_get(adev->card, PCM_DEVICE, PCM_OUT);
+-    else {
+-	adev->card = get_pcm_card("Dummy");
++    params = pcm_params_get(PCM_CARD_DEFAULT, PCM_DEVICE, PCM_OUT);
++    if(params != NULL) {
++       adev->card = PCM_CARD_DEFAULT;
++    } else {
++        adev->card = get_pcm_card("Dummy");
+         params = pcm_params_get(adev->card, PCM_DEVICE, PCM_OUT);
+     }
++
+     ALOGI("PCM playback card selected = %d, \n", adev->card);
+ 
+     if (!params)
+@@ -1206,13 +1339,27 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
+ //       make a copy of requested config to feed it back if requested.
+     memcpy(&out->req_config, config, sizeof(struct audio_config));
+ 
++    // Initialize the bus address to output stream map
++    adev->out_bus_stream_map = hashmapCreate(5, str_hash_fn, str_eq);
+     out->dev = adev;
+     out->standby = true;
+     out->unavailable = false;
+-
++    if (address) {
++        out->bus_address = calloc(strlen(address) + 1, sizeof(char));
++        strncpy(out->bus_address, address, strlen(address));
++	 hashmapPut(adev->out_bus_stream_map, out->bus_address, out);
++          /* TODO: read struct audio_gain from audio_policy_configuration */
++          out->gain_stage = (struct audio_gain) {
++              .min_value = -3200,
++              .max_value = 600,
++             .step_value = 100,
++          };
++          out->amplitude_ratio = 1.0;
++    }
+     config->format = out_get_format(&out->stream.common);
+     config->channel_mask = out_get_channels(&out->stream.common);
+     config->sample_rate = out_get_sample_rate(&out->stream.common);
++    
+ 
+     *stream_out = &out->stream;
+ 
+@@ -1224,6 +1371,7 @@ static int adev_open_output_stream(struct audio_hw_device *dev,
+ static void adev_close_output_stream(struct audio_hw_device *dev __unused,
+                                      struct audio_stream_out *stream)
+ {
++    ALOGE("close output stream called \n");	
+     out_standby(&stream->common);
+     free(stream);
+ }
+@@ -1409,27 +1557,25 @@ static int adev_open_input_stream(struct audio_hw_device *dev,
+                                   struct audio_config *config,
+                                   struct audio_stream_in **stream_in,
+                                   audio_input_flags_t flags __unused,
+-                                  const char *address __unused,
++                                  const char *address,
+                                   audio_source_t source __unused)
+ 
+ {
+-    ALOGD("%s : requested config : [rate %d format %d channels %d flags %#x]",__func__,
+-        config->sample_rate, config->format, popcount(config->channel_mask), flags);
++    ALOGD("%s : requested config : [rate %d format %d channels %d flags %#x address %s]",__func__,
++        config->sample_rate, config->format, popcount(config->channel_mask), flags,address);
+ 
+     struct audio_device *adev = (struct audio_device *)dev;
+     struct stream_in *in;
+     struct pcm_params *params;
+ 
+     *stream_in = NULL;
+-    int temp_card = 0;
+-
+-    adev->cardc = GET_PCM_CARD_NUMBER(temp_card);
+-    if (adev->card != -1)
+-        params = pcm_params_get(adev->cardc, PCM_DEVICE, PCM_IN);
+-    else {
++    /*get default AVS card 1 info*/
++    adev->cardc = get_pcm_card("avsrt56401");
++    if( adev->cardc< 0)
+         adev->cardc = get_pcm_card("Dummy");
+-        params = pcm_params_get(adev->cardc, PCM_DEVICE, PCM_IN);
+-    }
++    params = pcm_params_get(adev->cardc, PCM_DEVICE_AVS, PCM_IN);
++
++    //if(params != NULL) {
+     ALOGI("PCM capture card selected = %d, \n", adev->cardc);
+ 
+     in = (struct stream_in *)calloc(1, sizeof(struct stream_in));
+@@ -1458,6 +1604,10 @@ static int adev_open_input_stream(struct audio_hw_device *dev,
+     in->dev = adev;
+     in->standby = true;
+ 
++    if (address) {
++        in->bus_address = calloc(strlen(address) + 1, sizeof(char));
++        strncpy(in->bus_address, address, strlen(address));
++    }
+     in->pcm_config = &pcm_config_in; /* default PCM config */
+ 
+ // VTS : Device doesn't support mono channel or sample_rate other than 48000
+@@ -1533,14 +1683,151 @@ static int adev_close(hw_device_t *device)
+     free(device);
+     return 0;
+ }
++/*convert int to float*/
++int convertAmplToBel(float amplification)
++{
++    int input_min = -3200;
++    int input_max = 600;
++    int device_min = 100;
++    int device_max = 175;
++    int input_range = round(input_max - input_min);
++    int output_range = device_max - device_min;
++    
++    int volume = round((((amplification-input_min)/input_range)*output_range)+device_min);
++    return volume;
++}
++/*mixer setting for setting the volume*/
++static int mixer_setting_for_volume(float left, float right, int audio_zone)
++{
++
++    struct mixer *mixer;
++    int card = 0;
++    enum mixer_ctl_type mixer_type;
++    unsigned int num_values;
++    unsigned int i,id,j;
++    bool device_status;
++    int volume[2];
++    struct mixer_ctl *vol_ctl;
++
++    ALOGV("%s enter",__func__);
++    card = get_pcm_card("avsrt56401");
++    if(card<0)
++            card = PCM_CARD_DEFAULT;
++    if(audio_zone == 1){
++        card = get_pcm_card("avsrt56402");
++        if(card<0)
++            card = PCM_CARD_DEFAULT;
++        ALOGV("zone is 1");
++    }
++    mixer = mixer_open(card);
++    if (!mixer) {
++        ALOGE(" Failed to open mixer\n");
++        return -1;
++    }
++    vol_ctl = mixer_get_ctl_by_name(mixer, "DAC1 Playback Volume");
++    if (!vol_ctl) {
++        ALOGE(": Error opening mixerVolumecontrol ");
++        mixer_close(mixer);
++        return -1;
++    }
++    right = left;
++    volume[0] = convertAmplToBel(left);
++    volume[1] = convertAmplToBel(right);
++    ALOGV("Volume left and right %d %d \n",volume[0],volume[1]);
++    int retval1 = mixer_ctl_set_array(vol_ctl, volume, 2);
++    if (retval1 < 0) {
++        ALOGE( ": Err setting volume dB value %x",  volume[0]);
++        mixer_close(mixer);
++        return -1;
++    }
++    ALOGV( ": Successful in set volume");
++    mixer_close(mixer);
++    return 0;
++
++}
++/*audio port config info used for volume */
++static int adev_set_audio_port_config(struct audio_hw_device *dev ,
++                                    const struct audio_port_config *config)
++{
++    int card = 0;
++    char mixer_path[PATH_MAX];
++    struct audio_device *adev = (struct audio_device *)dev;
++    int audio_zone = adev->audio_zone;
++    float left = config->gain.values[0] == 1 ? 0.000001f : config->gain.values[0];
++    float right = config->gain.values[1] == 1 ? 0.000001f : config->gain.values[1];
++    ALOGV("setAudioPortConfig Vol convert: %f %f",left, right);
++    snprintf(mixer_path,PATH_MAX,"/vendor/etc/mixer_paths_%d.xml", card);
++    card = get_pcm_card("avsrt56401");
++    if(card < 0)
++        card = get_pcm_card("Dummy");
++    adev->ar = audio_route_init(card, mixer_path);
++    if (!adev->ar) {
++        ALOGE("%s: Failed to init audio route controls for card %d, aborting.",
++        __func__, card);
++    }
++    card = get_pcm_card("avsrt56402");
++    if(card<0)
++        card = get_pcm_card("Dummy");
++    adev->ar = audio_route_init(card, mixer_path);
++    if (!adev->ar) {
++       ALOGE("%s: Failed to init audio route controls for card %d, aborting.",
++       __func__, card);
++    }
++    card = get_pcm_card("avsrt56404");
++    if(card<0)
++        card = get_pcm_card("Dummy");
++    adev->ar = audio_route_init(card, mixer_path);
++    if (!adev->ar) {
++       ALOGE("%s: Failed to init audio route controls for card %d, aborting.",
++       __func__, card);
++    }
++ 
++    mixer_setting_for_volume(left,right,audio_zone);
++
++    return 0;
++}
++
++static int adev_create_audio_patch(struct audio_hw_device *dev,
++          unsigned int num_sources,
++          const struct audio_port_config *sources,
++          unsigned int num_sinks,
++          const struct audio_port_config *sinks,
++          audio_patch_handle_t *handle) {
++      struct audio_device *audio_dev = (struct audio_device *)dev;
++      for (int i = 0; i < num_sources; i++) {
++          ALOGD("%s: source[%d] type=%d address=%s", __func__, i, sources[i].type,
++                  sources[i].type == AUDIO_PORT_TYPE_DEVICE
++                  ? sources[i].ext.device.address
++                  : "");
++      }
++      for (int i = 0; i < num_sinks; i++) {
++          ALOGD("%s: sink[%d] type=%d address=%s", __func__, i, sinks[i].type,
++                  sinks[i].type == AUDIO_PORT_TYPE_DEVICE ? sinks[i].ext.device.address
++                  : "N/A");
++      }
++      if (num_sources == 1 && num_sinks == 1 &&
++              sources[0].type == AUDIO_PORT_TYPE_DEVICE &&
++              sinks[0].type == AUDIO_PORT_TYPE_DEVICE) {
++          pthread_mutex_lock(&audio_dev->lock);
++          audio_dev->last_patch_id += 1;
++          pthread_mutex_unlock(&audio_dev->lock);
++          *handle = audio_dev->last_patch_id;
++      }
++      return 0;
++}
++
++static int adev_release_audio_patch(struct audio_hw_device *dev  __unused,
++          audio_patch_handle_t handle) {
++    ALOGD("%s: handle: %d", __func__, handle);
++    return 0;
++}
+ 
+ static int adev_open(const hw_module_t* module, const char* name,
+                      hw_device_t** device)
+ {
+     ALOGV("adev_open: %s", name);
+-
+     struct audio_device *adev;
+-    int card, temp_card = 0;
++    int card = 0;
+     char mixer_path[PATH_MAX];
+ 
+     if (strcmp(name, AUDIO_HARDWARE_INTERFACE) != 0)
+@@ -1551,7 +1838,7 @@ static int adev_open(const hw_module_t* module, const char* name,
+         return -ENOMEM;
+ 
+     adev->hw_device.common.tag = HARDWARE_DEVICE_TAG;
+-    adev->hw_device.common.version = AUDIO_DEVICE_API_VERSION_2_0;
++    adev->hw_device.common.version = AUDIO_DEVICE_API_VERSION_3_0;
+     adev->hw_device.common.module = (struct hw_module_t *) module;
+     adev->hw_device.common.close = adev_close;
+     adev->hw_device.init_check = adev_init_check;
+@@ -1572,18 +1859,41 @@ static int adev_open(const hw_module_t* module, const char* name,
+     adev->hw_device.close_input_stream = adev_close_input_stream;
+     adev->hw_device.dump = adev_dump;
+     adev->hw_device.get_microphones = adev_get_microphones;
+-
+-    card = GET_PCM_CARD_NUMBER(temp_card);
+-    if ( card == -1)
+-        card = get_pcm_card("Dummy");
+-    snprintf(mixer_path,PATH_MAX,"/vendor/etc/mixer_paths_0.xml");
+-    adev->ar = audio_route_init(card, mixer_path);
+-    if (!adev->ar) {
+-        ALOGE("%s: Failed to init audio route controls for card %d, aborting.",
++    /* AudioDevice 3.0 APIs*/  
++    adev->hw_device.set_audio_port_config = adev_set_audio_port_config;
++    adev->hw_device.create_audio_patch = adev_create_audio_patch;
++    adev->hw_device.release_audio_patch = adev_release_audio_patch;
++    snprintf(mixer_path,PATH_MAX,"/vendor/etc/mixer_paths_%d.xml", card);
++    {
++        card = get_pcm_card("avsrt56401");
++        if(card < 0)
++            card = get_pcm_card("Dummy");
++        adev->ar = audio_route_init(card, mixer_path);
++        if (!adev->ar) {
++            ALOGE("%s: Failed to init audio route controls for card %d, aborting.",
++            __func__, card);
++            goto error;
++        }
++        card = get_pcm_card("avsrt56402");
++        if(card<0)
++            card = get_pcm_card("Dummy");
++        adev->ar = audio_route_init(card, mixer_path);
++        if (!adev->ar) {
++            ALOGE("%s: Failed to init audio route controls for card %d, aborting.",
+             __func__, card);
+-        goto error;
++            goto error;
++        }
++        card = get_pcm_card("avsrt56404");
++        if(card<0)
++            card = get_pcm_card("Dummy");
++        adev->ar = audio_route_init(card, mixer_path);
++        if (!adev->ar) {
++            ALOGE("%s: Failed to init audio route controls for card %d, aborting.",
++            __func__, card);
++            goto error;
++        }
++
+     }
+-    
+     adev->out_device = AUDIO_DEVICE_OUT_SPEAKER;
+     adev->in_device = AUDIO_DEVICE_IN_BUILTIN_MIC & ~AUDIO_DEVICE_BIT_IN;
+ 
+-- 
+2.17.1
+
