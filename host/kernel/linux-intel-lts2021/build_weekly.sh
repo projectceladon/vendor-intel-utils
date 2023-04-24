@@ -9,7 +9,7 @@ cd vendor-intel-utils
 git checkout f54a382089e3dcbffa4c65b1004b262895bcc1c5
 cd ../
 
-git clone -b lts-v5.15.71-20230331-r1 https://github.com/projectceladon/linux-intel-lts2021.git
+git clone -b lts-v5.15.71-20230424-r1 https://github.com/projectceladon/linux-intel-lts2021.git
 cd linux-intel-lts2021
 
 cp ../vendor-intel-utils/host/kernel/linux-intel-lts2021/x86_64_defconfig .config
