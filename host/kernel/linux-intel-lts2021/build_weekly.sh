@@ -6,7 +6,7 @@ cd host_kernel
 
 git clone https://github.com/projectceladon/vendor-intel-utils.git
 cd vendor-intel-utils
-git checkout f54a382089e3dcbffa4c65b1004b262895bcc1c5
+git checkout f127397f7ae23b6a8cc3344ab94423685115d5f8
 cd ../
 
 git clone -b lts-v5.15.71-20230424-r1 https://github.com/projectceladon/linux-intel-lts2021.git
