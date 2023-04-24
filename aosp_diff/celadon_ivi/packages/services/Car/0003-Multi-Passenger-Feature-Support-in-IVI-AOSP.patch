@@ -1,0 +1,317 @@
+From 9c5243e1f01cf0e2638b8537dcc8d43b524d9022 Mon Sep 17 00:00:00 2001
+From: Ankit Agrawal <ankit.agarwal@intel.com>
+Date: Mon, 24 Apr 2023 15:11:17 +0530
+Subject: [PATCH] Multi-Passenger Feature Support in IVI AOSP.
+
+Implemented feature to support all passengers in IVI,
+So all passengers can use apps concurrently on their
+own display connected with same device.
+
+Tested this feature with 1 driver & 2 passengers.
+
+Tracked-On: OAM-108948
+Signed-off-by: Ankit Agrawal <ankit.agarwal@intel.com>
+---
+ .../core/res/res/xml/config_user_types.xml    |   5 +
+ service/res/values/config.xml                 |   7 ++
+ .../android/car/CarOccupantZoneService.java   |  15 +++
+ .../com/android/car/user/CarUserService.java  | 114 ++++++++++++------
+ 4 files changed, 107 insertions(+), 34 deletions(-)
+
+diff --git a/car_product/overlay/frameworks/base/core/res/res/xml/config_user_types.xml b/car_product/overlay/frameworks/base/core/res/res/xml/config_user_types.xml
+index 1baae6880..b0a3c1e1d 100644
+--- a/car_product/overlay/frameworks/base/core/res/res/xml/config_user_types.xml
++++ b/car_product/overlay/frameworks/base/core/res/res/xml/config_user_types.xml
+@@ -24,4 +24,9 @@
+                   no_modify_accounts="true" no_install_apps="true" no_install_unknown_sources="true"
+                   no_uninstall_apps="true"/>
+     </full-type>
++
++    <profile-type
++        name='android.os.usertype.profile.MANAGED'
++	max-allowed-per-parent='3' >
++    </profile-type>
+ </user-types>
+diff --git a/service/res/values/config.xml b/service/res/values/config.xml
+index f0c611ce3..6c9fcd1bf 100644
+--- a/service/res/values/config.xml
++++ b/service/res/values/config.xml
+@@ -284,6 +284,9 @@
+     -->
+     <string-array translatable="false" name="config_occupant_zones">
+         <item>occupantZoneId=0,occupantType=DRIVER,seatRow=1,seatSide=driver</item>
++        <item>occupantZoneId=1,occupantType=FRONT_PASSENGER,seatRow=1,seatSide=oppositeDriver</item>
++	<item>occupantZoneId=2,occupantType=REAR_PASSENGER,seatRow=2,seatSide=left</item>
++        <item>occupantZoneId=3,occupantType=REAR_PASSENGER,seatRow=2,seatSide=right</item>
+     </string-array>
+     <!--
+         Specifies configuration of displays in system telling its usage / type and assigned
+@@ -308,6 +311,10 @@
+ 
+     -->
+     <string-array translatable="false" name="config_occupant_display_mapping">
++        <item>displayPort=0,displayType=MAIN,occupantZoneId=0</item>
++        <item>displayPort=1,displayType=MAIN,occupantZoneId=1</item>
++	<item>displayPort=2,displayType=MAIN,occupantZoneId=2</item>
++        <item>displayPort=3,displayType=MAIN,occupantZoneId=3</item>
+     </string-array>
+ 
+     <!--
+diff --git a/service/src/com/android/car/CarOccupantZoneService.java b/service/src/com/android/car/CarOccupantZoneService.java
+index 7ba69291d..bdb58c160 100644
+--- a/service/src/com/android/car/CarOccupantZoneService.java
++++ b/service/src/com/android/car/CarOccupantZoneService.java
+@@ -335,6 +335,21 @@ public final class CarOccupantZoneService extends ICarOccupantZone.Stub
+                 }
+                 return false;
+             }
++
++            @Override
++            public int getAvailablePassengerDisplay() {
++                Slogf.w(TAG, "getAvailablePassengerDisplay");
++                int count = 0;
++                for (OccupantZoneInfo ozi : getAllOccupantZones()) {
++                    if (getDisplayForOccupant(ozi.zoneId,
++                            CarOccupantZoneManager.DISPLAY_TYPE_MAIN) != Display.INVALID_DISPLAY
++                            && ozi.occupantType != CarOccupantZoneManager.OCCUPANT_TYPE_DRIVER) {
++                        Slogf.w(TAG, "getAvailablePassengerDisplay count is (%d)", count);
++                        count++;
++                    }
++                }
++                return count;
++            }
+         };
+         userService.setZoneUserBindingHelper(helper);
+     }
+diff --git a/service/src/com/android/car/user/CarUserService.java b/service/src/com/android/car/user/CarUserService.java
+index 40f8bb0c7..9b6030b46 100644
+--- a/service/src/com/android/car/user/CarUserService.java
++++ b/service/src/com/android/car/user/CarUserService.java
+@@ -173,9 +173,9 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+     private boolean mUser0Unlocked;
+     @GuardedBy("mLockUser")
+     private final ArrayList<Runnable> mUser0UnlockTasks = new ArrayList<>();
+-    // Only one passenger is supported.
++    // Supporting multiple passengers.
+     @GuardedBy("mLockUser")
+-    private @UserIdInt int mLastPassengerId;
++    private ArrayList<Integer> mRunningPassengersId = new ArrayList<>();
+     /**
+      * Background users that will be restarted in garage mode. This list can include the
+      * current foreground user but the current foreground user should not be restarted.
+@@ -284,6 +284,8 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+         boolean unassignUserFromOccupantZone(@UserIdInt int userId);
+         /** Returns whether there is a passenger display. */
+         boolean isPassengerDisplayAvailable();
++        /** Returns number of passenger display available. */
++        int getAvailablePassengerDisplay();
+     }
+ 
+     private final Object mLockHelper = new Object();
+@@ -319,7 +321,6 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+         mAm = am;
+         mMaxRunningUsers = maxRunningUsers;
+         mUserManager = userManager;
+-        mLastPassengerId = UserHandle.USER_NULL;
+         mHandler = handler == null ? new Handler(mHandlerThread.getLooper()) : handler;
+         mInitialUserSetter =
+                 initialUserSetter == null ? new InitialUserSetter(context, this,
+@@ -614,7 +615,7 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+                 Slog.w(TAG, "could not assign passenger to zone");
+                 return false;
+             }
+-            mLastPassengerId = passengerId;
++            mRunningPassengersId.add(passengerId);
+         }
+         for (PassengerCallback callback : mPassengerCallbacks) {
+             callback.onPassengerStarted(passengerId, zoneId);
+@@ -622,6 +623,15 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+         return true;
+     }
+ 
++    private void stopAllPassenger() {
++        if (!mRunningPassengersId.isEmpty()) {
++            for (int i = 0; i < mRunningPassengersId.size(); i++) {
++                stopPassengerInternal(mRunningPassengersId.get(i), true);
++            }
++            mRunningPassengersId.clear();
++        }
++    }
++
+     /**
+      * @see CarUserManager.stopPassenger
+      */
+@@ -638,7 +648,7 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+                 Slog.w(TAG, "passenger " + passengerId + " doesn't exist");
+                 return false;
+             }
+-            if (mLastPassengerId != passengerId) {
++            if (!mRunningPassengersId.contains(passengerId)) {
+                 Slog.w(TAG, "passenger " + passengerId + " hasn't been started");
+                 return true;
+             }
+@@ -658,7 +668,6 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+                 Slog.w(TAG, "could not unassign user from occupant zone");
+                 return false;
+             }
+-            mLastPassengerId = UserHandle.USER_NULL;
+         }
+         for (PassengerCallback callback : mPassengerCallbacks) {
+             callback.onPassengerStopped(passengerId);
+@@ -2075,10 +2084,20 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+         } else if (eventType == CarUserManager.USER_LIFECYCLE_EVENT_TYPE_UNLOCKED) {
+             onUserUnlocked(userId);
+ 	    if(userId == ActivityManager.getCurrentUser() && userId != UserHandle.USER_SYSTEM) {
+-		if (mLastPassengerId != UserHandle.USER_NULL && !mUserManager.isUserUnlocked(UserHandle.of(mLastPassengerId))) {
+-                    stopPassengerInternal(mLastPassengerId, false);
+-		    startFirstPassenger(userId);
+-                 }
++                if (!mRunningPassengersId.isEmpty()) {
++                    boolean passengerUserLocked = false;
++                    for (int i = 0; i < mRunningPassengersId.size(); i++) {
++                        int runningPassengerId = mRunningPassengersId.get(i);
++                        if(!mUserManager.isUserUnlocked(UserHandle.of(runningPassengerId))) {
++                            passengerUserLocked = true;
++                            break;
++                        }
++                    }
++                    if(passengerUserLocked) {
++                        stopAllPassenger();
++                        startAllPassenger(userId);
++                    }
++                }
+             }
+         }
+ 
+@@ -2190,12 +2209,26 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+ 
+         mInitialUserSetter.setLastActiveUser(toUserId);
+ 
+-        if (mLastPassengerId != UserHandle.USER_NULL) {
+-            stopPassengerInternal(mLastPassengerId, false);
+-        }
+-        if (mEnablePassengerSupport && isPassengerDisplayAvailable()) {
+-            setupPassengerUser();
+-            startFirstPassenger(toUserId);
++        if (!mRunningPassengersId.isEmpty()) {
++            for (int i = 0; i < mRunningPassengersId.size(); i++) {
++                stopPassengerInternal(mRunningPassengersId.get(i), false);
++            }
++            mRunningPassengersId.clear();
++        }
++
++        if (mEnablePassengerSupport) {
++            int availablePassengerDisplays = getAvailablePassengerDisplay();
++            int existingProfile = getNumberOfManagedProfiles(toUserId);
++            for (int i = 1; i <=  (availablePassengerDisplays - existingProfile); i++) {
++                if (1 == (existingProfile + i)) {
++                    setupPassengerUser("Front_Passenger");
++                } else if (2 == (existingProfile + i)) {
++                    setupPassengerUser("Rear_Passenger_Left");
++                } else if (3 == (existingProfile + i)) {
++                    setupPassengerUser("Rear_Passenger_Right");
++                }
++            }
++            startAllPassenger(toUserId);
+         }
+         t.traceEnd();
+     }
+@@ -2312,15 +2345,15 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+     }
+ 
+     /**
+-     * Starts the first passenger of the given driver and assigns the passenger to the front
++     * Start all available passengers of the given driver and assigns the passenger to
+      * passenger zone.
+      *
+      * @param driverId User id of the driver.
+      * @return whether it succeeds.
+      */
+-    private boolean startFirstPassenger(@UserIdInt int driverId) {
+-        int zoneId = getAvailablePassengerZone();
+-        if (zoneId == OccupantZoneInfo.INVALID_ZONE_ID) {
++    private boolean startAllPassenger(@UserIdInt int driverId) {
++        List<Integer> zoneIds = getAvailablePassengerZone();
++        if (zoneIds.isEmpty()) {
+             Slog.w(TAG, "passenger occupant zone is not found");
+             return false;
+         }
+@@ -2329,41 +2362,42 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+             Slog.w(TAG, "passenger is not found");
+             return false;
+         }
+-        // Only one passenger is supported. If there are two or more passengers, the first passenger
+-        // is chosen.
+-        int passengerId = passengers.get(0).id;
+-        if (!startPassenger(passengerId, zoneId)) {
+-            Slog.w(TAG, "cannot start passenger " + passengerId);
+-            return false;
++        for (int i = 0; i < zoneIds.size(); i++) {
++            int passengerId = passengers.get(i).id;
++            if (!startPassenger(passengerId, zoneIds.get(i))) {
++                Slog.w(TAG, "cannot start passenger " + passengerId);
++                return false;
++            }
+         }
+         return true;
+     }
+ 
+-    private int getAvailablePassengerZone() {
++    private List<Integer> getAvailablePassengerZone() {
+         int[] occupantTypes = new int[] {CarOccupantZoneManager.OCCUPANT_TYPE_FRONT_PASSENGER,
+                 CarOccupantZoneManager.OCCUPANT_TYPE_REAR_PASSENGER};
++        ArrayList<Integer> passengerZones = new ArrayList<>();
+         for (int occupantType : occupantTypes) {
+-            int zoneId = getZoneId(occupantType);
+-            if (zoneId != OccupantZoneInfo.INVALID_ZONE_ID) {
+-                return zoneId;
++            List<OccupantZoneInfo> zoneInfos = getOccupantZones(occupantType);
++            for (int i = 0; i < zoneInfos.size(); i++) {
++                passengerZones.add(zoneInfos.get(i).zoneId);
+             }
+         }
+-        return OccupantZoneInfo.INVALID_ZONE_ID;
++        return passengerZones;
+     }
+ 
+     /**
+      * Creates a new passenger user when there is no passenger user.
+      */
+-    private void setupPassengerUser() {
++    private void setupPassengerUser(String passengerName) {
+         int currentUser = ActivityManager.getCurrentUser();
+         int profileCount = getNumberOfManagedProfiles(currentUser);
+-        if (profileCount > 0) {
++        if (profileCount > 2) {
+             Slog.w(TAG, "max profile of user" + currentUser
+                     + " is exceeded: current profile count is " + profileCount);
+             return;
+         }
+         // TODO(b/140311342): Use resource string for the default passenger name.
+-        UserInfo passenger = createPassenger("Passenger", currentUser);
++        UserInfo passenger = createPassenger(passengerName, currentUser);
+         if (passenger == null) {
+             // Couldn't create user, most likely because there are too many.
+             Slog.w(TAG, "cannot create a passenger user");
+@@ -2371,6 +2405,18 @@ public final class CarUserService extends ICarUserService.Stub implements CarSer
+         }
+     }
+ 
++    private int getAvailablePassengerDisplay() {
++        ZoneUserBindingHelper helper = null;
++        synchronized (mLockHelper) {
++            if (mZoneUserBindingHelper == null) {
++                Slog.w(TAG, "implementation is not delegated");
++                return 0;
++            }
++            helper = mZoneUserBindingHelper;
++        }
++        return helper.getAvailablePassengerDisplay();
++    }
++
+     @NonNull
+     private List<OccupantZoneInfo> getOccupantZones(@OccupantTypeEnum int occupantType) {
+         ZoneUserBindingHelper helper = null;
+-- 
+2.17.1
+
