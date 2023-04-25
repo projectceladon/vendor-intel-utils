@@ -1,0 +1,190 @@
+From f947be7fa0d5e58a1f5db499996d0abe617f937b Mon Sep 17 00:00:00 2001
+From: Vishnu Nair <vishnun@google.com>
+Date: Tue, 8 Feb 2022 02:53:27 +0000
+Subject: [PATCH] SurfaceFlinger: Implement drop input modes
+
+ALL: If this mode is set on a layer, set the DROP_INPUT
+feature flag on the layer and its children if it has a valid input
+channel. This will ensure these layers will not be able to receive any
+input.
+
+Note: this backport does not include the OBSCURED option since its
+not needed for the security fix.
+
+Test: atest libgui_test InputDispatcherDropInputFeatureTest
+Bug: 197296414
+
+Merged-In: Ibce11ee7df5b5c8c226ebfab29574a99cd656f6d
+Change-Id: Ibce11ee7df5b5c8c226ebfab29574a99cd656f6d
+(cherry picked from commit cbe9c105fcdeba79f1722616e8b576c1d45c93a6)
+Merged-In: Ibce11ee7df5b5c8c226ebfab29574a99cd656f6d
+---
+ libs/gui/tests/EndToEndNativeInputTest.cpp | 49 ++++++++++++++++++++--
+ services/surfaceflinger/Layer.cpp          | 31 ++++++++++++++
+ services/surfaceflinger/Layer.h            |  2 +
+ 3 files changed, 78 insertions(+), 4 deletions(-)
+
+diff --git a/libs/gui/tests/EndToEndNativeInputTest.cpp b/libs/gui/tests/EndToEndNativeInputTest.cpp
+index b1d3ecbf3..8e42c688a 100644
+--- a/libs/gui/tests/EndToEndNativeInputTest.cpp
++++ b/libs/gui/tests/EndToEndNativeInputTest.cpp
+@@ -24,6 +24,7 @@
+ 
+ #include <memory>
+ 
++#include <android/keycodes.h>
+ #include <android/native_window.h>
+ 
+ #include <binder/Binder.h>
+@@ -113,8 +114,8 @@ public:
+         return std::make_unique<InputSurface>(surfaceControl, width, height);
+     }
+ 
+-    InputEvent* consumeEvent() {
+-        waitForEventAvailable();
++    InputEvent *consumeEvent(int timeoutMs = 3000) {
++        waitForEventAvailable(timeoutMs);
+ 
+         InputEvent *ev;
+         uint32_t seqId;
+@@ -153,6 +154,24 @@ public:
+         EXPECT_EQ(0, mev->getFlags() & VERIFIED_MOTION_EVENT_FLAGS);
+     }
+ 
++    void expectKey(uint32_t keycode) {
++        InputEvent *ev = consumeEvent();
++        ASSERT_NE(ev, nullptr);
++        ASSERT_EQ(AINPUT_EVENT_TYPE_KEY, ev->getType());
++        KeyEvent *keyEvent = static_cast<KeyEvent *>(ev);
++        EXPECT_EQ(AMOTION_EVENT_ACTION_DOWN, keyEvent->getAction());
++        EXPECT_EQ(keycode, keyEvent->getKeyCode());
++        EXPECT_EQ(0, keyEvent->getFlags() & VERIFIED_KEY_EVENT_FLAGS);
++
++        ev = consumeEvent();
++        ASSERT_NE(ev, nullptr);
++        ASSERT_EQ(AINPUT_EVENT_TYPE_KEY, ev->getType());
++        keyEvent = static_cast<KeyEvent *>(ev);
++        EXPECT_EQ(AMOTION_EVENT_ACTION_UP, keyEvent->getAction());
++        EXPECT_EQ(keycode, keyEvent->getKeyCode());
++        EXPECT_EQ(0, keyEvent->getFlags() & VERIFIED_KEY_EVENT_FLAGS);
++    }
++
+     ~InputSurface() {
+         mInputFlinger->unregisterInputChannel(mServerChannel);
+     }
+@@ -176,12 +195,12 @@ public:
+     }
+ 
+ private:
+-    void waitForEventAvailable() {
++    void waitForEventAvailable(int timeoutMs) {
+         struct pollfd fd;
+ 
+         fd.fd = mClientChannel->getFd();
+         fd.events = POLLIN;
+-        poll(&fd, 1, 3000);
++        poll(&fd, 1, timeoutMs);
+     }
+ 
+     void populateInputInfo(int width, int height) {
+@@ -277,6 +296,14 @@ void injectTap(int x, int y) {
+     }
+ }
+ 
++void injectKey(uint32_t keycode) {
++    char *buf1;
++    asprintf(&buf1, "%d", keycode);
++    if (fork() == 0) {
++        execlp("input", "input", "keyevent", buf1, NULL);
++    }
++}
++
+ TEST_F(InputSurfacesTest, can_receive_input) {
+     std::unique_ptr<InputSurface> surface = makeSurface(100, 100);
+     surface->showAt(100, 100);
+@@ -561,5 +588,19 @@ TEST_F(InputSurfacesTest, input_ignores_cursor_layer) {
+     injectTap(11, 11);
+     surface->expectTap(1, 1);
+ }
++
++TEST_F(InputSurfacesTest, drop_input_policy) {
++    std::unique_ptr<InputSurface> surface = makeSurface(100, 100);
++    surface->doTransaction(
++            [&](auto &t, auto &sc) { t.setDropInputMode(sc, gui::DropInputMode::ALL); });
++    surface->showAt(100, 100);
++    surface->assertFocusChange(true);
++
++    injectTap(101, 101);
++    EXPECT_EQ(surface->consumeEvent(100), nullptr);
++
++    injectKey(AKEYCODE_V);
++    EXPECT_EQ(surface->consumeEvent(100), nullptr);
+ }
+ }
++} // namespace android
+\ No newline at end of file
+diff --git a/services/surfaceflinger/Layer.cpp b/services/surfaceflinger/Layer.cpp
+index bae242a2c..069141852 100644
+--- a/services/surfaceflinger/Layer.cpp
++++ b/services/surfaceflinger/Layer.cpp
+@@ -2378,6 +2378,36 @@ bool Layer::isRemovedFromCurrentState() const  {
+     return mRemovedFromCurrentState;
+ }
+ 
++gui::DropInputMode Layer::getDropInputMode() const {
++    gui::DropInputMode mode = mDrawingState.dropInputMode;
++    if (mode == gui::DropInputMode::ALL) {
++        return mode;
++    }
++    sp<Layer> parent = mDrawingParent.promote();
++    if (parent) {
++        gui::DropInputMode parentMode = parent->getDropInputMode();
++        if (parentMode != gui::DropInputMode::NONE) {
++            return parentMode;
++        }
++    }
++    return mode;
++}
++
++void Layer::handleDropInputMode(InputWindowInfo& info) const {
++    if ((mDrawingState.inputInfo.inputFeatures & InputWindowInfo::INPUT_FEATURE_NO_INPUT_CHANNEL) ==
++        InputWindowInfo::INPUT_FEATURE_NO_INPUT_CHANNEL) {
++        return;
++    }
++
++    // Check if we need to drop input unconditionally
++    gui::DropInputMode dropInputMode = getDropInputMode();
++    if (dropInputMode == gui::DropInputMode::ALL) {
++        info.inputFeatures |= InputWindowInfo::INPUT_FEATURE_DROP_INPUT;
++        ALOGV("Dropping input for %s as requested by policy.", getDebugName());
++        return;
++    }
++}
++
+ InputWindowInfo Layer::fillInputInfo() {
+     if (!hasInputInfo()) {
+         mDrawingState.inputInfo.name = getName();
+@@ -2443,6 +2473,7 @@ InputWindowInfo Layer::fillInputInfo() {
+     // InputDispatcher, and obviously if they aren't visible they can't occlude
+     // anything.
+     info.visible = hasInputInfo() ? canReceiveInput() : isVisible();
++    handleDropInputMode(info);
+ 
+     auto cropLayer = mDrawingState.touchableRegionCrop.promote();
+     if (info.replaceTouchableRegionWithCrop) {
+diff --git a/services/surfaceflinger/Layer.h b/services/surfaceflinger/Layer.h
+index 30f207f73..6c5d114f8 100644
+--- a/services/surfaceflinger/Layer.h
++++ b/services/surfaceflinger/Layer.h
+@@ -1074,6 +1074,8 @@ private:
+ 
+     void updateTreeHasFrameRateVote();
+     bool isTrustedOverlay() const;
++    gui::DropInputMode getDropInputMode() const;
++    void handleDropInputMode(InputWindowInfo& info) const;
+ 
+     // Cached properties computed from drawing state
+     // Effective transform taking into account parent transforms and any parent scaling.
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+

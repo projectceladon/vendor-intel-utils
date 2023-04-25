@@ -1,0 +1,435 @@
+From 4b009801e02506c444129864badc357f2812d764 Mon Sep 17 00:00:00 2001
+From: Chris Ye <lzye@google.com>
+Date: Sun, 10 May 2020 15:07:31 -0700
+Subject: [PATCH] Change InputWindowInfo::isTrustedOverlay() to be permission
+ and flag based
+
+Add private flag to WindowManager.LayoutParams. If the flag is set,
+check if caller has INTERNAL_SYSTEM_WINDOW permission.
+
+Bug: 155781676
+Bug: 196389741
+Test: atest WindowManagerServiceTests
+Change-Id: I70151697cc01e8427129f951f0ebadc4805b2d56
+Merged-In: I70151697cc01e8427129f951f0ebadc4805b2d56
+(cherry picked from commit 716333761d4298432a3d8822df9161bba14da620)
+Merged-In: I70151697cc01e8427129f951f0ebadc4805b2d56
+---
+ core/java/android/view/IWindowSession.aidl    |  5 ++--
+ core/java/android/view/InputWindowHandle.java |  3 +++
+ core/java/android/view/WindowManager.java     | 27 +++++++++++++------
+ .../android/view/WindowlessWindowManager.java | 12 +++++----
+ ...droid_hardware_input_InputWindowHandle.cpp |  4 +++
+ .../systemui/bubbles/BubbleController.java    |  3 ++-
+ .../server/policy/WindowManagerPolicy.java    |  2 --
+ .../com/android/server/wm/DisplayPolicy.java  | 12 ++++-----
+ .../java/com/android/server/wm/Session.java   | 10 ++++---
+ .../server/wm/WindowManagerService.java       | 15 +++++++----
+ .../com/android/server/wm/WindowState.java    | 21 +++++++++++++++
+ 11 files changed, 81 insertions(+), 33 deletions(-)
+
+diff --git a/core/java/android/view/IWindowSession.aidl b/core/java/android/view/IWindowSession.aidl
+index 0410c9024dcb..819e89b67b38 100644
+--- a/core/java/android/view/IWindowSession.aidl
++++ b/core/java/android/view/IWindowSession.aidl
+@@ -336,11 +336,12 @@ interface IWindowSession {
+     * an input channel where the client can receive input.
+     */
+     void grantInputChannel(int displayId, in SurfaceControl surface, in IWindow window,
+-            in IBinder hostInputToken, int flags, int type, out InputChannel outInputChannel);
++            in IBinder hostInputToken, int flags, int privateFlags, int type,
++            out InputChannel outInputChannel);
+ 
+     /**
+      * Update the flags on an input channel associated with a particular surface.
+      */
+     void updateInputChannel(in IBinder channelToken, int displayId, in SurfaceControl surface,
+-            int flags, in Region region);
++            int flags, int privateFlags, in Region region);
+ }
+diff --git a/core/java/android/view/InputWindowHandle.java b/core/java/android/view/InputWindowHandle.java
+index 71d26b8880f7..b3cf78c5157f 100644
+--- a/core/java/android/view/InputWindowHandle.java
++++ b/core/java/android/view/InputWindowHandle.java
+@@ -82,6 +82,9 @@ public final class InputWindowHandle {
+     // Input event dispatching is paused.
+     public boolean paused;
+ 
++    // Window is trusted overlay.
++    public boolean trustedOverlay;
++
+     // Id of process and user that owns the window.
+     public int ownerPid;
+     public int ownerUid;
+diff --git a/core/java/android/view/WindowManager.java b/core/java/android/view/WindowManager.java
+index 2a711f6974f3..0baf55910339 100644
+--- a/core/java/android/view/WindowManager.java
++++ b/core/java/android/view/WindowManager.java
+@@ -1216,14 +1216,6 @@ public interface WindowManager extends ViewManager {
+          */
+         public static final int TYPE_STATUS_BAR_ADDITIONAL = FIRST_SYSTEM_WINDOW + 41;
+ 
+-        /**
+-         * Similar to TYPE_APPLICATION_OVERLAY, but trusted to overlay other windows since it is
+-         * is coming from the system.
+-         * @hide
+-         */
+-        // TODO(b/155781676): Remove and replace call points with trustedOverlay when that is ready.
+-        public static final int TYPE_TRUSTED_APPLICATION_OVERLAY = FIRST_SYSTEM_WINDOW + 42;
+-
+         /**
+          * End of types of system windows.
+          */
+@@ -2032,6 +2024,11 @@ public interface WindowManager extends ViewManager {
+          */
+         public static final int PRIVATE_FLAG_FIT_INSETS_CONTROLLED = 0x10000000;
+ 
++        /**
++         * Flag to indicate that the window is a trusted overlay.
++         * @hide
++         */
++        public static final int PRIVATE_FLAG_TRUSTED_OVERLAY = 0x20000000;
+         /**
+          * Flag to indicate that the parent frame of a window should be inset by IME.
+          * @hide
+@@ -2946,6 +2943,20 @@ public interface WindowManager extends ViewManager {
+             privateFlags |= PRIVATE_FLAG_FIT_INSETS_CONTROLLED;
+         }
+ 
++        /**
++         * Specifies that the window should be considered a trusted system overlay. Trusted system
++         * overlays are ignored when considering whether windows are obscured during input
++         * dispatch. Requires the {@link android.Manifest.permission.INTERNAL_SYSTEM_WINDOW}
++         * permission.
++         *
++         * {@see android.view.MotionEvent#FLAG_WINDOW_IS_OBSCURED}
++         * {@see android.view.MotionEvent#FLAG_WINDOW_IS_PARTIALLY_OBSCURED}
++         * @hide
++         */
++        public void setTrustedOverlay() {
++            privateFlags |= PRIVATE_FLAG_TRUSTED_OVERLAY;
++        }
++
+         /**
+          * @return the insets types that this window is avoiding overlapping.
+          */
+diff --git a/core/java/android/view/WindowlessWindowManager.java b/core/java/android/view/WindowlessWindowManager.java
+index f0006d988163..13f26f5a7fb6 100644
+--- a/core/java/android/view/WindowlessWindowManager.java
++++ b/core/java/android/view/WindowlessWindowManager.java
+@@ -115,7 +115,8 @@ public class WindowlessWindowManager implements IWindowSession {
+             if (state.mInputChannelToken != null) {
+                 try {
+                     mRealWm.updateInputChannel(state.mInputChannelToken, state.mDisplayId,
+-                            state.mSurfaceControl, state.mParams.flags, state.mInputRegion);
++                            state.mSurfaceControl, state.mParams.flags, state.mParams.privateFlags,
++                            state.mInputRegion);
+                 } catch (RemoteException e) {
+                     Log.e(TAG, "Failed to update surface input channel: ", e);
+                 }
+@@ -144,7 +145,7 @@ public class WindowlessWindowManager implements IWindowSession {
+                 WindowManager.LayoutParams.INPUT_FEATURE_NO_INPUT_CHANNEL) == 0)) {
+             try {
+                 mRealWm.grantInputChannel(displayId, sc, window, mHostInputToken, attrs.flags,
+-                        attrs.type, outInputChannel);
++                        attrs.privateFlags, attrs.type, outInputChannel);
+             } catch (RemoteException e) {
+                 Log.e(TAG, "Failed to grant input to surface: ", e);
+             }
+@@ -274,7 +275,7 @@ public class WindowlessWindowManager implements IWindowSession {
+                 && state.mInputChannelToken != null) {
+             try {
+                 mRealWm.updateInputChannel(state.mInputChannelToken, state.mDisplayId, sc,
+-                        attrs.flags, state.mInputRegion);
++                        attrs.flags, attrs.privateFlags, state.mInputRegion);
+             } catch (RemoteException e) {
+                 Log.e(TAG, "Failed to update surface input channel: ", e);
+             }
+@@ -445,12 +446,13 @@ public class WindowlessWindowManager implements IWindowSession {
+ 
+     @Override
+     public void grantInputChannel(int displayId, SurfaceControl surface, IWindow window,
+-            IBinder hostInputToken, int flags, int type, InputChannel outInputChannel) {
++            IBinder hostInputToken, int flags, int privateFlags, int type,
++            InputChannel outInputChannel) {
+     }
+ 
+     @Override
+     public void updateInputChannel(IBinder channelToken, int displayId, SurfaceControl surface,
+-            int flags, Region region) {
++            int flags, int privateFlags, Region region) {
+     }
+ 
+     @Override
+diff --git a/core/jni/android_hardware_input_InputWindowHandle.cpp b/core/jni/android_hardware_input_InputWindowHandle.cpp
+index 79f62cb19db0..81569e0f7b7a 100644
+--- a/core/jni/android_hardware_input_InputWindowHandle.cpp
++++ b/core/jni/android_hardware_input_InputWindowHandle.cpp
+@@ -59,6 +59,7 @@ static struct {
+     jfieldID hasFocus;
+     jfieldID hasWallpaper;
+     jfieldID paused;
++    jfieldID trustedOverlay;
+     jfieldID ownerPid;
+     jfieldID ownerUid;
+     jfieldID inputFeatures;
+@@ -151,6 +152,7 @@ bool NativeInputWindowHandle::updateInfo() {
+             gInputWindowHandleClassInfo.hasWallpaper);
+     mInfo.paused = env->GetBooleanField(obj,
+             gInputWindowHandleClassInfo.paused);
++    mInfo.trustedOverlay = env->GetBooleanField(obj, gInputWindowHandleClassInfo.trustedOverlay);
+     mInfo.ownerPid = env->GetIntField(obj,
+             gInputWindowHandleClassInfo.ownerPid);
+     mInfo.ownerUid = env->GetIntField(obj,
+@@ -329,6 +331,8 @@ int register_android_view_InputWindowHandle(JNIEnv* env) {
+     GET_FIELD_ID(gInputWindowHandleClassInfo.paused, clazz,
+             "paused", "Z");
+ 
++    GET_FIELD_ID(gInputWindowHandleClassInfo.trustedOverlay, clazz, "trustedOverlay", "Z");
++
+     GET_FIELD_ID(gInputWindowHandleClassInfo.ownerPid, clazz,
+             "ownerPid", "I");
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/bubbles/BubbleController.java b/packages/SystemUI/src/com/android/systemui/bubbles/BubbleController.java
+index fb819f04e0e1..e09a05da655f 100644
+--- a/packages/SystemUI/src/com/android/systemui/bubbles/BubbleController.java
++++ b/packages/SystemUI/src/com/android/systemui/bubbles/BubbleController.java
+@@ -758,13 +758,14 @@ public class BubbleController implements ConfigurationController.ConfigurationLi
+                 // themselves.
+                 ViewGroup.LayoutParams.MATCH_PARENT,
+                 ViewGroup.LayoutParams.MATCH_PARENT,
+-                WindowManager.LayoutParams.TYPE_TRUSTED_APPLICATION_OVERLAY,
++                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                 // Start not focusable - we'll become focusable when expanded so the ActivityView
+                 // can use the IME.
+                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                     | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                 PixelFormat.TRANSLUCENT);
+ 
++        mWmLayoutParams.setTrustedOverlay();
+         mWmLayoutParams.setFitInsetsTypes(0);
+         mWmLayoutParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+         mWmLayoutParams.token = new Binder();
+diff --git a/services/core/java/com/android/server/policy/WindowManagerPolicy.java b/services/core/java/com/android/server/policy/WindowManagerPolicy.java
+index cffeaf3f4767..bb5e4b14358f 100644
+--- a/services/core/java/com/android/server/policy/WindowManagerPolicy.java
++++ b/services/core/java/com/android/server/policy/WindowManagerPolicy.java
+@@ -56,7 +56,6 @@ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ERROR;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.TYPE_TOAST;
+-import static android.view.WindowManager.LayoutParams.TYPE_TRUSTED_APPLICATION_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.TYPE_VOICE_INTERACTION;
+ import static android.view.WindowManager.LayoutParams.TYPE_VOICE_INTERACTION_STARTING;
+ import static android.view.WindowManager.LayoutParams.TYPE_VOLUME_OVERLAY;
+@@ -795,7 +794,6 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
+                 // in a higher layer than TYPE_APPLICATION_OVERLAY.
+                 return  canAddInternalSystemWindow ? 13 : 10;
+             case TYPE_APPLICATION_OVERLAY:
+-            case TYPE_TRUSTED_APPLICATION_OVERLAY:
+                 return  12;
+             case TYPE_INPUT_METHOD:
+                 // on-screen keyboards and other such input method user interfaces go here.
+diff --git a/services/core/java/com/android/server/wm/DisplayPolicy.java b/services/core/java/com/android/server/wm/DisplayPolicy.java
+index 29881cc761b2..675cf54786d8 100644
+--- a/services/core/java/com/android/server/wm/DisplayPolicy.java
++++ b/services/core/java/com/android/server/wm/DisplayPolicy.java
+@@ -77,6 +77,7 @@ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_FORCE_SHOW_ST
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_INSET_PARENT_FRAME_BY_IME;
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_IS_SCREEN_DECOR;
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_STATUS_FORCE_SHOW_NAVIGATION;
++import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_TRUSTED_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
+ import static android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+ import static android.view.WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST;
+@@ -99,7 +100,6 @@ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ALERT;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_ERROR;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.TYPE_TOAST;
+-import static android.view.WindowManager.LayoutParams.TYPE_TRUSTED_APPLICATION_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.TYPE_VOICE_INTERACTION;
+ import static android.view.WindowManager.LayoutParams.TYPE_VOICE_INTERACTION_STARTING;
+ import static android.view.WindowManager.LayoutParams.TYPE_VOLUME_OVERLAY;
+@@ -997,6 +997,11 @@ public class DisplayPolicy {
+                     android.Manifest.permission.STATUS_BAR_SERVICE, callingPid, callingUid,
+                     "DisplayPolicy");
+         }
++        if ((attrs.privateFlags & PRIVATE_FLAG_TRUSTED_OVERLAY) != 0) {
++            mContext.enforcePermission(
++                    android.Manifest.permission.INTERNAL_SYSTEM_WINDOW, callingPid, callingUid,
++                    "DisplayPolicy");
++        }
+ 
+         switch (attrs.type) {
+             case TYPE_STATUS_BAR:
+@@ -1042,11 +1047,6 @@ public class DisplayPolicy {
+                         android.Manifest.permission.STATUS_BAR_SERVICE, callingPid, callingUid,
+                         "DisplayPolicy");
+                 break;
+-            case TYPE_TRUSTED_APPLICATION_OVERLAY:
+-                mContext.enforcePermission(
+-                        android.Manifest.permission.INTERNAL_SYSTEM_WINDOW, callingPid, callingUid,
+-                        "DisplayPolicy");
+-                break;
+             case TYPE_STATUS_BAR_PANEL:
+                 return WindowManagerGlobal.ADD_INVALID_TYPE;
+         }
+diff --git a/services/core/java/com/android/server/wm/Session.java b/services/core/java/com/android/server/wm/Session.java
+index e2258093dcbe..86cbf3e3afe1 100644
+--- a/services/core/java/com/android/server/wm/Session.java
++++ b/services/core/java/com/android/server/wm/Session.java
+@@ -662,7 +662,7 @@ class Session extends IWindowSession.Stub implements IBinder.DeathRecipient {
+ 
+     @Override
+     public void grantInputChannel(int displayId, SurfaceControl surface,
+-            IWindow window, IBinder hostInputToken, int flags, int type,
++            IWindow window, IBinder hostInputToken, int flags, int privateFlags, int type,
+             InputChannel outInputChannel) {
+         if (hostInputToken == null && !mCanAddInternalSystemWindow) {
+             // Callers without INTERNAL_SYSTEM_WINDOW permission cannot grant input channel to
+@@ -678,7 +678,8 @@ class Session extends IWindowSession.Stub implements IBinder.DeathRecipient {
+         final long identity = Binder.clearCallingIdentity();
+         try {
+             mService.grantInputChannel(mUid, mPid, displayId, surface, window, hostInputToken,
+-                    flags, mCanAddInternalSystemWindow ? type : 0, outInputChannel);
++                    flags, mCanAddInternalSystemWindow ? privateFlags : 0,
++                    mCanAddInternalSystemWindow ? type : 0, outInputChannel);
+         } finally {
+             Binder.restoreCallingIdentity(identity);
+         }
+@@ -686,10 +687,11 @@ class Session extends IWindowSession.Stub implements IBinder.DeathRecipient {
+ 
+     @Override
+     public void updateInputChannel(IBinder channelToken, int displayId, SurfaceControl surface,
+-            int flags, Region region) {
++            int flags, int privateFlags, Region region) {
+         final long identity = Binder.clearCallingIdentity();
+         try {
+-            mService.updateInputChannel(channelToken, displayId, surface, flags, region);
++            mService.updateInputChannel(channelToken, displayId, surface, flags,
++                    mCanAddInternalSystemWindow ? privateFlags : 0, region);
+         } finally {
+             Binder.restoreCallingIdentity(identity);
+         }
+diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
+index 744afb9bb8ab..b3c396c1b0d7 100644
+--- a/services/core/java/com/android/server/wm/WindowManagerService.java
++++ b/services/core/java/com/android/server/wm/WindowManagerService.java
+@@ -60,6 +60,7 @@ import static android.view.WindowManager.LayoutParams.INPUT_FEATURE_NO_INPUT_CHA
+ import static android.view.WindowManager.LayoutParams.LAST_APPLICATION_WINDOW;
+ import static android.view.WindowManager.LayoutParams.LAST_SUB_WINDOW;
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_IS_ROUNDED_CORNERS_OVERLAY;
++import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_TRUSTED_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+ import static android.view.WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_STARTING;
+@@ -8057,7 +8058,7 @@ public class WindowManagerService extends IWindowManager.Stub
+      * views.
+      */
+     void grantInputChannel(int callingUid, int callingPid, int displayId, SurfaceControl surface,
+-            IWindow window, IBinder hostInputToken, int flags, int type,
++            IWindow window, IBinder hostInputToken, int flags, int privateFlags, int type,
+             InputChannel outInputChannel) {
+         final InputApplicationHandle applicationHandle;
+         final String name;
+@@ -8073,7 +8074,7 @@ public class WindowManagerService extends IWindowManager.Stub
+         }
+ 
+         updateInputChannel(clientChannel.getToken(), callingUid, callingPid, displayId, surface,
+-                name, applicationHandle, flags, type, null /* region */);
++                name, applicationHandle, flags, privateFlags, type, null /* region */);
+ 
+         clientChannel.transferTo(outInputChannel);
+         clientChannel.dispose();
+@@ -8081,7 +8082,8 @@ public class WindowManagerService extends IWindowManager.Stub
+ 
+     private void updateInputChannel(IBinder channelToken, int callingUid, int callingPid,
+             int displayId, SurfaceControl surface, String name,
+-            InputApplicationHandle applicationHandle, int flags, int type, Region region) {
++            InputApplicationHandle applicationHandle, int flags, int privateFlags, int type,
++            Region region) {
+         InputWindowHandle h = new InputWindowHandle(applicationHandle, displayId);
+         h.token = channelToken;
+         h.name = name;
+@@ -8109,6 +8111,9 @@ public class WindowManagerService extends IWindowManager.Stub
+             h.setTouchableRegionCrop(surface);
+         }
+ 
++        //  Check private trusted overlay flag to set trustedOverlay field of input window handle.
++        h.trustedOverlay = (privateFlags & PRIVATE_FLAG_TRUSTED_OVERLAY) != 0;
++
+         SurfaceControl.Transaction t = mTransactionFactory.get();
+         t.setInputWindowInfo(surface, h);
+         t.apply();
+@@ -8122,7 +8127,7 @@ public class WindowManagerService extends IWindowManager.Stub
+      * is undefined.
+      */
+     void updateInputChannel(IBinder channelToken, int displayId, SurfaceControl surface,
+-            int flags, Region region) {
++            int flags, int privateFlags, Region region) {
+         final InputApplicationHandle applicationHandle;
+         final String name;
+         final EmbeddedWindowController.EmbeddedWindow win;
+@@ -8137,7 +8142,7 @@ public class WindowManagerService extends IWindowManager.Stub
+         }
+ 
+         updateInputChannel(channelToken, win.mOwnerUid, win.mOwnerPid, displayId, surface, name,
+-                applicationHandle, flags, win.mWindowType, region);
++                applicationHandle, flags, privateFlags, win.mWindowType, region);
+     }
+ 
+     /** Return whether layer tracing is enabled */
+diff --git a/services/core/java/com/android/server/wm/WindowState.java b/services/core/java/com/android/server/wm/WindowState.java
+index faa483a48ea4..b9801315c451 100644
+--- a/services/core/java/com/android/server/wm/WindowState.java
++++ b/services/core/java/com/android/server/wm/WindowState.java
+@@ -55,11 +55,14 @@ import static android.view.WindowManager.LayoutParams.MATCH_PARENT;
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_COMPATIBLE_WINDOW;
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_LAYOUT_CHILD_WINDOW_IN_PARENT_FRAME;
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_NO_MOVE_ANIMATION;
++import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_TRUSTED_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_WILL_NOT_REPLACE_ON_RELAUNCH;
+ import static android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
+ import static android.view.WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST;
+ import static android.view.WindowManager.LayoutParams.SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+ import static android.view.WindowManager.LayoutParams.SYSTEM_FLAG_SHOW_FOR_ALL_USERS;
++import static android.view.WindowManager.LayoutParams.TYPE_ACCESSIBILITY_MAGNIFICATION_OVERLAY;
++import static android.view.WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION;
+ import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_MEDIA;
+ import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_MEDIA_OVERLAY;
+@@ -84,6 +87,7 @@ import static android.view.WindowManager.LayoutParams.TYPE_PRIORITY_PHONE;
+ import static android.view.WindowManager.LayoutParams.TYPE_PRIVATE_PRESENTATION;
+ import static android.view.WindowManager.LayoutParams.TYPE_SCREENSHOT;
+ import static android.view.WindowManager.LayoutParams.TYPE_SEARCH_BAR;
++import static android.view.WindowManager.LayoutParams.TYPE_SECURE_SYSTEM_OVERLAY;
+ import static android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
+ import static android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR_ADDITIONAL;
+ import static android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR_SUB_PANEL;
+@@ -947,6 +951,23 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
+                         ? mActivityRecord.getInputApplicationHandle(false /* update */) : null,
+                     getDisplayId());
+ 
++        //  Check private trusted overlay flag and window type to set trustedOverlay variable of
++        //  input window handle.
++        mInputWindowHandle.trustedOverlay =
++                (mAttrs.privateFlags & PRIVATE_FLAG_TRUSTED_OVERLAY) != 0
++                && mOwnerCanAddInternalSystemWindow;
++        mInputWindowHandle.trustedOverlay |=
++                mAttrs.type == TYPE_ACCESSIBILITY_MAGNIFICATION_OVERLAY
++                || mAttrs.type == TYPE_INPUT_METHOD || mAttrs.type == TYPE_INPUT_METHOD_DIALOG
++                || mAttrs.type == TYPE_MAGNIFICATION_OVERLAY || mAttrs.type == TYPE_STATUS_BAR
++                || mAttrs.type == TYPE_NOTIFICATION_SHADE
++                || mAttrs.type == TYPE_NAVIGATION_BAR
++                || mAttrs.type == TYPE_NAVIGATION_BAR_PANEL
++                || mAttrs.type == TYPE_SECURE_SYSTEM_OVERLAY
++                || mAttrs.type == TYPE_DOCK_DIVIDER
++                || mAttrs.type == TYPE_ACCESSIBILITY_OVERLAY
++                || mAttrs.type == TYPE_INPUT_CONSUMER;
++
+         // Make sure we initial all fields before adding to parentWindow, to prevent exception
+         // during onDisplayChanged.
+         if (mIsChildWindow) {
+-- 
+2.17.1
+
