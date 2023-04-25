@@ -1,0 +1,166 @@
+From b8c1281e7f84392defc3a0015927f0f8054eb37a Mon Sep 17 00:00:00 2001
+From: Vishnu Nair <vishnun@google.com>
+Date: Wed, 26 Jan 2022 22:55:57 +0000
+Subject: [PATCH] InputFlinger: Add DROP_INPUT feature flags
+
+If a window has the feature DROP_INPUT set, then all touch and
+key events directed to the window will be dropped. For touch events,
+the events will not go to the window behind it.
+
+The flags are used to enable features that allow for a less trusted
+interaction model between apps. See the bug for more details.
+
+Test: atest libgui_test InputDispatcherDropInputFeatureTest
+Bug: 197296414
+
+Merged-In: I71d7cf5064c8ce4626cff09b92e15ca38b39cbbe
+Change-Id: I71d7cf5064c8ce4626cff09b92e15ca38b39cbbe
+(cherry picked from commit 0f13fe552dcca56a7597a354a6b94587981c3d12)
+Merged-In: I71d7cf5064c8ce4626cff09b92e15ca38b39cbbe
+---
+ .../dispatcher/InputDispatcher.cpp            | 29 +++++++++++++
+ .../inputflinger/dispatcher/InputDispatcher.h |  3 ++
+ .../tests/InputDispatcher_test.cpp            | 42 +++++++++++++++++++
+ 3 files changed, 74 insertions(+)
+
+diff --git a/services/inputflinger/dispatcher/InputDispatcher.cpp b/services/inputflinger/dispatcher/InputDispatcher.cpp
+index d2183c5c3..e3ab522d6 100644
+--- a/services/inputflinger/dispatcher/InputDispatcher.cpp
++++ b/services/inputflinger/dispatcher/InputDispatcher.cpp
+@@ -1465,6 +1465,11 @@ int32_t InputDispatcher::findFocusedWindowTargetsLocked(nsecs_t currentTime,
+         return INPUT_EVENT_INJECTION_FAILED;
+     }
+ 
++    // Drop key events if requested by input feature
++    if (focusedWindowHandle != nullptr && shouldDropInput(entry, focusedWindowHandle)) {
++        return INPUT_EVENT_INJECTION_FAILED;
++    }
++
+     // Compatibility behavior: raise ANR if there is a focused application, but no focused window.
+     // Only start counting when we have a focused event to dispatch. The ANR is canceled if we
+     // start interacting with another application via touch (app switch). This code can be removed
+@@ -1694,6 +1699,11 @@ int32_t InputDispatcher::findTouchedWindowTargetsLocked(nsecs_t currentTime,
+             }
+         }
+ 
++        // Drop touch events if requested by input feature
++        if (newTouchedWindowHandle != nullptr && shouldDropInput(entry, newTouchedWindowHandle)) {
++            newTouchedWindowHandle = nullptr;
++        }
++
+         // Also don't send the new touch event to unresponsive gesture monitors
+         newGestureMonitors = selectResponsiveMonitorsLocked(newGestureMonitors);
+ 
+@@ -1758,6 +1768,13 @@ int32_t InputDispatcher::findTouchedWindowTargetsLocked(nsecs_t currentTime,
+                     tempTouchState.getFirstForegroundWindowHandle();
+             sp<InputWindowHandle> newTouchedWindowHandle =
+                     findTouchedWindowAtLocked(displayId, x, y, &tempTouchState);
++
++            // Drop touch events if requested by input feature
++            if (newTouchedWindowHandle != nullptr &&
++                shouldDropInput(entry, newTouchedWindowHandle)) {
++                newTouchedWindowHandle = nullptr;
++            }
++
+             if (oldTouchedWindowHandle != newTouchedWindowHandle &&
+                 oldTouchedWindowHandle != nullptr && newTouchedWindowHandle != nullptr) {
+                 if (DEBUG_FOCUS) {
+@@ -5099,4 +5116,16 @@ bool InputDispatcher::waitForIdle() {
+     return result == std::cv_status::no_timeout;
+ }
+ 
++bool InputDispatcher::shouldDropInput(const EventEntry& entry,
++                                      const sp<InputWindowHandle>& windowHandle) const {
++    if (windowHandle->getInfo()->inputFeatures & InputWindowInfo::INPUT_FEATURE_DROP_INPUT) {
++        ALOGW("Dropping %s event targeting %s as requested by inputFeatures=0x%08x on display "
++              "%" PRId32 ".",
++              EventEntry::typeToString(entry.type), windowHandle->getName().c_str(),
++              windowHandle->getInfo()->inputFeatures, windowHandle->getInfo()->displayId);
++        return true;
++    }
++    return false;
++}
++
+ } // namespace android::inputdispatcher
+diff --git a/services/inputflinger/dispatcher/InputDispatcher.h b/services/inputflinger/dispatcher/InputDispatcher.h
+index e679c6b06..b07866287 100644
+--- a/services/inputflinger/dispatcher/InputDispatcher.h
++++ b/services/inputflinger/dispatcher/InputDispatcher.h
+@@ -420,6 +420,9 @@ private:
+     std::string getApplicationWindowLabel(const sp<InputApplicationHandle>& applicationHandle,
+                                           const sp<InputWindowHandle>& windowHandle);
+ 
++    bool shouldDropInput(const EventEntry& entry, const sp<InputWindowHandle>& windowHandle) const
++            REQUIRES(mLock);
++
+     // Manage the dispatch cycle for a single connection.
+     // These methods are deliberately not Interruptible because doing all of the work
+     // with the mutex held makes it easier to ensure that connection invariants are maintained.
+diff --git a/services/inputflinger/tests/InputDispatcher_test.cpp b/services/inputflinger/tests/InputDispatcher_test.cpp
+index 86c050366..6842e6cd3 100644
+--- a/services/inputflinger/tests/InputDispatcher_test.cpp
++++ b/services/inputflinger/tests/InputDispatcher_test.cpp
+@@ -785,6 +785,8 @@ public:
+ 
+     void setFocus(bool hasFocus) { mInfo.hasFocus = hasFocus; }
+ 
++    void setInputFeatures(int32_t inputFeatures) { mInfo.inputFeatures = inputFeatures; }
++
+     void setDispatchingTimeout(std::chrono::nanoseconds timeout) {
+         mInfo.dispatchingTimeout = timeout.count();
+     }
+@@ -903,6 +905,8 @@ public:
+         mInfo.ownerUid = ownerUid;
+     }
+ 
++    void setFlags(int32_t layoutParamsFlags) { mInfo.layoutParamsFlags = layoutParamsFlags; }
++
+ private:
+     const std::string mName;
+     std::unique_ptr<FakeInputReceiver> mInputReceiver;
+@@ -3112,4 +3116,42 @@ TEST_F(InputDispatcherMultiWindowAnr, SplitTouch_SingleWindowAnr) {
+     mFocusedWindow->assertNoEvents();
+ }
+ 
++class InputDispatcherDropInputFeatureTest : public InputDispatcherTest {};
++
++TEST_F(InputDispatcherDropInputFeatureTest, WindowDropsInput) {
++    sp<FakeApplicationHandle> application = new FakeApplicationHandle();
++    sp<FakeWindowHandle> window =
++            new FakeWindowHandle(application, mDispatcher, "Test window", ADISPLAY_ID_DEFAULT);
++    window->setInputFeatures(InputWindowInfo::INPUT_FEATURE_DROP_INPUT);
++    mDispatcher->setFocusedApplication(ADISPLAY_ID_DEFAULT, application);
++    window->setFocus(true);
++    mDispatcher->setInputWindows({{ADISPLAY_ID_DEFAULT, {window}}});
++    window->consumeFocusEvent(true /*hasFocus*/, true /*inTouchMode*/);
++
++    // With the flag set, window should not get any input
++    NotifyKeyArgs keyArgs = generateKeyArgs(AKEY_EVENT_ACTION_DOWN, ADISPLAY_ID_DEFAULT);
++    mDispatcher->notifyKey(&keyArgs);
++    window->assertNoEvents();
++
++    NotifyMotionArgs motionArgs =
++            generateMotionArgs(AMOTION_EVENT_ACTION_DOWN, AINPUT_SOURCE_TOUCHSCREEN,
++                               ADISPLAY_ID_DEFAULT);
++    mDispatcher->notifyMotion(&motionArgs);
++    window->assertNoEvents();
++
++    // With the flag cleared, the window should get input
++    window->setInputFeatures(0);
++    mDispatcher->setInputWindows({{ADISPLAY_ID_DEFAULT, {window}}});
++
++    keyArgs = generateKeyArgs(AKEY_EVENT_ACTION_UP, ADISPLAY_ID_DEFAULT);
++    mDispatcher->notifyKey(&keyArgs);
++    window->consumeKeyUp(ADISPLAY_ID_DEFAULT);
++
++    motionArgs = generateMotionArgs(AMOTION_EVENT_ACTION_DOWN, AINPUT_SOURCE_TOUCHSCREEN,
++                                    ADISPLAY_ID_DEFAULT);
++    mDispatcher->notifyMotion(&motionArgs);
++    window->consumeMotionDown(ADISPLAY_ID_DEFAULT);
++    window->assertNoEvents();
++}
++
+ } // namespace android::inputdispatcher
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+

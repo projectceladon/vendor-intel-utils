@@ -1,0 +1,321 @@
+From 5be28bb5a71c51737f32e85372b5d95ec62c6edc Mon Sep 17 00:00:00 2001
+From: Vishnu Nair <vishnun@google.com>
+Date: Thu, 27 Jan 2022 16:20:46 +0000
+Subject: [PATCH] SurfaceControl: Add setDropInputMode api
+
+Introduces an API to drop input events on this SurfaceControl. This
+policy will be inherited by its children. The caller must hold the
+ACCESS_SURFACE_FLINGER permission.
+
+Options include:
+ALL: SurfaceControl and its children will not receive any
+input regardless of whether it has a valid input channel.
+
+These policies are used to enable features that allow for a less trusted
+interaction model between apps. See the bug for more details.
+
+Note: this backport does not include the OBSCURED option since its
+not needed for the security fix.
+
+Test: atest libgui_test InputDispatcherDropInputFeatureTest
+Bug: 197296414
+
+Merged-In: I443741d5ab51a45d37fb865f11c433c436d96c1e
+Change-Id: I443741d5ab51a45d37fb865f11c433c436d96c1e
+(cherry picked from commit 122c4d2da0405be75ae8c249e19ba692722c6e13)
+Merged-In: I443741d5ab51a45d37fb865f11c433c436d96c1e
+---
+ include/input/InputWindow.h                  |  1 +
+ libs/gui/Android.bp                          |  9 +++++
+ libs/gui/LayerState.cpp                      |  9 ++++-
+ libs/gui/SurfaceComposerClient.cpp           | 15 ++++++++
+ libs/gui/android/gui/DropInputMode.aidl      | 40 ++++++++++++++++++++
+ libs/gui/include/gui/LayerState.h            |  8 +++-
+ libs/gui/include/gui/SurfaceComposerClient.h |  3 +-
+ services/surfaceflinger/Layer.cpp            | 11 ++++++
+ services/surfaceflinger/Layer.h              |  5 +++
+ services/surfaceflinger/SurfaceFlinger.cpp   |  9 +++++
+ 10 files changed, 107 insertions(+), 3 deletions(-)
+ create mode 100644 libs/gui/android/gui/DropInputMode.aidl
+
+diff --git a/include/input/InputWindow.h b/include/input/InputWindow.h
+index 271fdb3a2..bbf793e62 100644
+--- a/include/input/InputWindow.h
++++ b/include/input/InputWindow.h
+@@ -115,6 +115,7 @@ struct InputWindowInfo {
+         INPUT_FEATURE_DISABLE_TOUCH_PAD_GESTURES = 0x00000001,
+         INPUT_FEATURE_NO_INPUT_CHANNEL = 0x00000002,
+         INPUT_FEATURE_DISABLE_USER_ACTIVITY = 0x00000004,
++        INPUT_FEATURE_DROP_INPUT = 0x00000008,
+     };
+ 
+     /* These values are filled in by the WM and passed through SurfaceFlinger
+diff --git a/libs/gui/Android.bp b/libs/gui/Android.bp
+index 4a4510e04..6ec1f471c 100644
+--- a/libs/gui/Android.bp
++++ b/libs/gui/Android.bp
+@@ -30,6 +30,14 @@ cc_library_headers {
+     min_sdk_version: "29",
+ }
+ 
++// AIDL files that should be exposed to java
++filegroup {
++    name: "guiconstants_aidl",
++    srcs: [
++        "android/gui/DropInputMode.aidl",
++    ],
++}
++
+ cc_library_shared {
+     name: "libgui",
+     vendor_available: false,
+@@ -41,6 +49,7 @@ cc_library_shared {
+     defaults: ["libgui_bufferqueue-defaults"],
+ 
+     srcs: [
++        ":guiconstants_aidl",
+         ":framework_native_aidl",
+         ":libgui_bufferqueue_sources",
+ 
+diff --git a/libs/gui/LayerState.cpp b/libs/gui/LayerState.cpp
+index a897d1025..dfcef8fe7 100644
+--- a/libs/gui/LayerState.cpp
++++ b/libs/gui/LayerState.cpp
+@@ -118,7 +118,7 @@ status_t layer_state_t::write(Parcel& output) const
+     output.writeByte(frameRateCompatibility);
+     output.writeUint32(fixedTransformHint);
+     output.writeBool(isTrustedOverlay);
+-
++    output.writeUint32(static_cast<uint32_t>(dropInputMode));
+     return NO_ERROR;
+ }
+ 
+@@ -204,6 +204,9 @@ status_t layer_state_t::read(const Parcel& input)
+     fixedTransformHint = static_cast<ui::Transform::RotationFlags>(input.readUint32());
+     isTrustedOverlay = input.readBool();
+ 
++    uint32_t mode;
++    mode = input.readUint32();
++    dropInputMode = static_cast<gui::DropInputMode>(mode);
+     return NO_ERROR;
+ }
+ 
+@@ -447,6 +450,10 @@ void layer_state_t::merge(const layer_state_t& other) {
+         what |= eTrustedOverlayChanged;
+         isTrustedOverlay = other.isTrustedOverlay;
+     }
++    if (other.what & eDropInputModeChanged) {
++        what |= eDropInputModeChanged;
++        dropInputMode = other.dropInputMode;
++    }
+     if ((other.what & what) != other.what) {
+         ALOGE("Unmerged SurfaceComposer Transaction properties. LayerState::merge needs updating? "
+               "other.what=0x%" PRIu64 " what=0x%" PRIu64,
+diff --git a/libs/gui/SurfaceComposerClient.cpp b/libs/gui/SurfaceComposerClient.cpp
+index 78d932cc8..d2c96218f 100644
+--- a/libs/gui/SurfaceComposerClient.cpp
++++ b/libs/gui/SurfaceComposerClient.cpp
+@@ -1497,6 +1497,21 @@ SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setTrust
+     return *this;
+ }
+ 
++SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setDropInputMode(
++        const sp<SurfaceControl>& sc, gui::DropInputMode mode) {
++    layer_state_t* s = getLayerState(sc);
++    if (!s) {
++        mStatus = BAD_INDEX;
++        return *this;
++    }
++
++    s->what |= layer_state_t::eDropInputModeChanged;
++    s->dropInputMode = mode;
++
++    registerSurfaceControlForCallback(sc);
++    return *this;
++}
++
+ // ---------------------------------------------------------------------------
+ 
+ DisplayState& SurfaceComposerClient::Transaction::getDisplayState(const sp<IBinder>& token) {
+diff --git a/libs/gui/android/gui/DropInputMode.aidl b/libs/gui/android/gui/DropInputMode.aidl
+new file mode 100644
+index 000000000..248a0318b
+--- /dev/null
++++ b/libs/gui/android/gui/DropInputMode.aidl
+@@ -0,0 +1,40 @@
++/**
++ * Copyright (c) 2022, The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.gui;
++
++
++/**
++  * Input event drop modes: Input event drop options for windows and its children.
++  *
++  * @hide
++  */
++@Backing(type="int")
++enum DropInputMode {
++    /**
++      * Default mode, input events are sent to the target as usual.
++      */
++    NONE,
++
++    /**
++      * Window and its children will not receive any input even if it has a valid input channel.
++      * Touches and keys will be dropped. If a window is focused, it will remain focused but will
++      * not receive any keys. If the window has a touchable region and is the target of an input
++      * event, the event will be dropped and will not go to the window behind. ref: b/197296414
++      */
++    ALL,
++}
++
+diff --git a/libs/gui/include/gui/LayerState.h b/libs/gui/include/gui/LayerState.h
+index a77e4b046..39dbe9e03 100644
+--- a/libs/gui/include/gui/LayerState.h
++++ b/libs/gui/include/gui/LayerState.h
+@@ -25,6 +25,7 @@
+ #include <gui/ITransactionCompletedListener.h>
+ #include <math/mat4.h>
+ 
++#include <android/gui/DropInputMode.h>
+ #ifndef NO_INPUT
+ #include <input/InputWindow.h>
+ #endif
+@@ -106,6 +107,7 @@ struct layer_state_t {
+         eProducerDisconnect = 0x100'00000000,
+         eFixedTransformHintChanged = 0x200'00000000,
+         eTrustedOverlayChanged = 0x400'00000000,
++        eDropInputModeChanged = 0x8000'00000000,
+     };
+ 
+     layer_state_t()
+@@ -141,7 +143,8 @@ struct layer_state_t {
+             frameRate(0.0f),
+             frameRateCompatibility(ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT),
+             fixedTransformHint(ui::Transform::ROT_INVALID),
+-            isTrustedOverlay(false) {
++            isTrustedOverlay(false),
++            dropInputMode(gui::DropInputMode::NONE) {
+         matrix.dsdx = matrix.dtdy = 1.0f;
+         matrix.dsdy = matrix.dtdx = 0.0f;
+         hdrMetadata.validTypes = 0;
+@@ -243,6 +246,9 @@ struct layer_state_t {
+     // An inherited state that indicates that this surface control and its children
+     // should be trusted for input occlusion detection purposes
+     bool isTrustedOverlay;
++
++    // Force inputflinger to drop all input events for the layer and its children.
++    gui::DropInputMode dropInputMode;
+ };
+ 
+ struct ComposerState {
+diff --git a/libs/gui/include/gui/SurfaceComposerClient.h b/libs/gui/include/gui/SurfaceComposerClient.h
+index eebd9ca77..2e189e5d8 100644
+--- a/libs/gui/include/gui/SurfaceComposerClient.h
++++ b/libs/gui/include/gui/SurfaceComposerClient.h
+@@ -531,7 +531,8 @@ public:
+ 
+         // Sets that this surface control and its children are trusted overlays for input
+         Transaction& setTrustedOverlay(const sp<SurfaceControl>& sc, bool isTrustedOverlay);
+-        
++
++        Transaction& setDropInputMode(const sp<SurfaceControl>& sc, gui::DropInputMode mode);
+         status_t setDisplaySurface(const sp<IBinder>& token,
+                 const sp<IGraphicBufferProducer>& bufferProducer);
+ 
+diff --git a/services/surfaceflinger/Layer.cpp b/services/surfaceflinger/Layer.cpp
+index 4e3ef2468..bae242a2c 100644
+--- a/services/surfaceflinger/Layer.cpp
++++ b/services/surfaceflinger/Layer.cpp
+@@ -119,6 +119,7 @@ Layer::Layer(const LayerCreationArgs& args)
+     mCurrentState.treeHasFrameRateVote = false;
+     mCurrentState.fixedTransformHint = ui::Transform::ROT_INVALID;
+     mCurrentState.isTrustedOverlay = false;
++    mCurrentState.dropInputMode = gui::DropInputMode::NONE;
+ 
+     if (args.flags & ISurfaceComposerClient::eNoColorFill) {
+         // Set an invalid color so there is no color fill.
+@@ -2645,6 +2646,16 @@ Layer::FrameRateCompatibility Layer::FrameRate::convertCompatibility(int8_t comp
+     }
+ }
+ 
++bool Layer::setDropInputMode(gui::DropInputMode mode) {
++    if (mCurrentState.dropInputMode == mode) {
++        return false;
++    }
++    mCurrentState.dropInputMode = mode;
++    mCurrentState.modified = true;
++    mCurrentState.inputInfoChanged = true;
++    setTransactionFlags(eTransactionNeeded);
++    return true;
++}
+ // ---------------------------------------------------------------------------
+ 
+ }; // namespace android
+diff --git a/services/surfaceflinger/Layer.h b/services/surfaceflinger/Layer.h
+index a12bae42f..30f207f73 100644
+--- a/services/surfaceflinger/Layer.h
++++ b/services/surfaceflinger/Layer.h
+@@ -16,6 +16,7 @@
+ 
+ #pragma once
+ 
++#include <android/gui/DropInputMode.h>
+ #include <compositionengine/LayerFE.h>
+ #include <gui/BufferQueue.h>
+ #include <gui/ISurfaceComposerClient.h>
+@@ -282,6 +283,8 @@ public:
+ 
+         // Whether or not this layer is a trusted overlay for input
+         bool isTrustedOverlay;
++
++        gui::DropInputMode dropInputMode;
+     };
+ 
+     explicit Layer(const LayerCreationArgs& args);
+@@ -410,6 +413,8 @@ public:
+     bool setShadowRadius(float shadowRadius);
+     virtual bool setFrameRateSelectionPriority(int32_t priority);
+     virtual bool setFixedTransformHint(ui::Transform::RotationFlags fixedTransformHint);
++    bool setDropInputMode(gui::DropInputMode);
++
+     //  If the variable is not set on the layer, it traverses up the tree to inherit the frame
+     //  rate priority from its parent.
+     virtual int32_t getFrameRateSelectionPriority() const;
+diff --git a/services/surfaceflinger/SurfaceFlinger.cpp b/services/surfaceflinger/SurfaceFlinger.cpp
+index 494721092..4165df9ae 100644
+--- a/services/surfaceflinger/SurfaceFlinger.cpp
++++ b/services/surfaceflinger/SurfaceFlinger.cpp
+@@ -3867,6 +3867,15 @@ uint32_t SurfaceFlinger::setClientStateLocked(
+             ALOGE("Attempt to set trusted overlay without permission ACCESS_SURFACE_FLINGER");
+         }
+     }
++    if (what & layer_state_t::eDropInputModeChanged) {
++        if (privileged) {
++            if (layer->setDropInputMode(s.dropInputMode)) {
++                flags |= eTraversalNeeded;
++            }
++        } else {
++            ALOGE("Attempt to update InputPolicyFlags without permission ACCESS_SURFACE_FLINGER");
++        }
++    }
+     // This has to happen after we reparent children because when we reparent to null we remove
+     // child layers from current state and remove its relative z. If the children are reparented in
+     // the same transaction, then we have to make sure we reparent the children first so we do not
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+
