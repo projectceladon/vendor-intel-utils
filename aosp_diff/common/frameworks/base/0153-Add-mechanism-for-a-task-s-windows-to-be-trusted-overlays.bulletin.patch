@@ -1,0 +1,170 @@
+From a8541d6dc2b1c16159843beca78c8b3597e33dd7 Mon Sep 17 00:00:00 2001
+From: Winson Chung <winsonc@google.com>
+Date: Thu, 15 Jul 2021 10:35:46 -0700
+Subject: [PATCH] Add mechanism for a task's windows to be trusted overlays
+
+- Exposes a method to set that a certain part of the SF hierarchy is
+  trusted, and sets this state for tasks in PIP.
+
+Bug: 191529039
+Bug: 196389741
+Test: Manual, try using permission dialog while PIP is active
+
+Change-Id: I170cb5a7d22ef569eb36de21cc0bcbef60dd385e
+Merged-In: I170cb5a7d22ef569eb36de21cc0bcbef60dd385e
+(cherry picked from commit 47fb132ef2c4ca2896e9b82c4f004542139b6ad1)
+Merged-In: I170cb5a7d22ef569eb36de21cc0bcbef60dd385e
+---
+ core/java/android/view/SurfaceControl.java    | 13 +++++++++++
+ core/jni/android_view_SurfaceControl.cpp      | 13 ++++++++++-
+ .../com/android/server/wm/ActivityStack.java  |  2 +-
+ .../server/wm/RootWindowContainer.java        | 22 ++++++++++++++++++-
+ .../core/java/com/android/server/wm/Task.java |  3 +--
+ .../android/server/wm/StubTransaction.java    |  6 +++++
+ 6 files changed, 54 insertions(+), 5 deletions(-)
+
+diff --git a/core/java/android/view/SurfaceControl.java b/core/java/android/view/SurfaceControl.java
+index 87b2f4b46df7..1a4b303bd267 100644
+--- a/core/java/android/view/SurfaceControl.java
++++ b/core/java/android/view/SurfaceControl.java
+@@ -139,6 +139,8 @@ public final class SurfaceControl implements Parcelable {
+             int blurRadius);
+     private static native void nativeSetLayerStack(long transactionObj, long nativeObject,
+             int layerStack);
++    private static native void nativeSetTrustedOverlay(long transactionObj, long nativeObject,
++            boolean isTrustedOverlay);
+ 
+     private static native boolean nativeClearContentFrameStats(long nativeObject);
+     private static native boolean nativeGetContentFrameStats(long nativeObject, WindowContentFrameStats outStats);
+@@ -3037,6 +3039,17 @@ public final class SurfaceControl implements Parcelable {
+             return this;
+         }
+ 
++        /**
++         * Sets the trusted overlay state on this SurfaceControl and it is inherited to all the
++         * children. The caller must hold the ACCESS_SURFACE_FLINGER permission.
++         * @hide
++         */
++        public Transaction setTrustedOverlay(SurfaceControl sc, boolean isTrustedOverlay) {
++            checkPreconditions(sc);
++            nativeSetTrustedOverlay(mNativeObject, sc.mNativeObject, isTrustedOverlay);
++            return this;
++        }
++
+         /**
+          * Merge the other transaction into this transaction, clearing the
+          * other transaction as if it had been applied.
+diff --git a/core/jni/android_view_SurfaceControl.cpp b/core/jni/android_view_SurfaceControl.cpp
+index ae36f8a7b30b..fd2ccbe50b8d 100644
+--- a/core/jni/android_view_SurfaceControl.cpp
++++ b/core/jni/android_view_SurfaceControl.cpp
+@@ -627,6 +627,14 @@ static void nativeSetShadowRadius(JNIEnv* env, jclass clazz, jlong transactionOb
+     transaction->setShadowRadius(ctrl, shadowRadius);
+ }
+ 
++static void nativeSetTrustedOverlay(JNIEnv* env, jclass clazz, jlong transactionObj,
++                                    jlong nativeObject, jboolean isTrustedOverlay) {
++    auto transaction = reinterpret_cast<SurfaceComposerClient::Transaction*>(transactionObj);
++
++    SurfaceControl* const ctrl = reinterpret_cast<SurfaceControl *>(nativeObject);
++    transaction->setTrustedOverlay(ctrl, isTrustedOverlay);
++}
++
+ static void nativeSetFrameRate(JNIEnv* env, jclass clazz, jlong transactionObj, jlong nativeObject,
+                                jfloat frameRate, jint compatibility) {
+     auto transaction = reinterpret_cast<SurfaceComposerClient::Transaction*>(transactionObj);
+@@ -1666,7 +1674,10 @@ static const JNINativeMethod sSurfaceControlMethods[] = {
+             (void*)nativeSetGlobalShadowSettings },
+     {"nativeGetHandle", "(J)J",
+             (void*)nativeGetHandle },
+-    {"nativeSetFixedTransformHint", "(JJI)V", (void*)nativeSetFixedTransformHint},
++    {"nativeSetFixedTransformHint", "(JJI)V", 
++            (void*)nativeSetFixedTransformHint},
++    {"nativeSetTrustedOverlay", "(JJZ)V",
++            (void*)nativeSetTrustedOverlay },
+ };
+ 
+ int register_android_view_SurfaceControl(JNIEnv* env)
+diff --git a/services/core/java/com/android/server/wm/ActivityStack.java b/services/core/java/com/android/server/wm/ActivityStack.java
+index 372ca1d3e271..c8de81ba383f 100644
+--- a/services/core/java/com/android/server/wm/ActivityStack.java
++++ b/services/core/java/com/android/server/wm/ActivityStack.java
+@@ -716,7 +716,7 @@ class ActivityStack extends Task {
+                     : WINDOWING_MODE_FULLSCREEN;
+         }
+         if (currentMode == WINDOWING_MODE_PINNED) {
+-            mAtmService.getTaskChangeNotificationController().notifyActivityUnpinned();
++            mRootWindowContainer.notifyActivityPipModeChanged(this, null);
+         }
+         if (likelyResolvedMode == WINDOWING_MODE_PINNED
+                 && taskDisplayArea.getRootPinnedTask() != null) {
+diff --git a/services/core/java/com/android/server/wm/RootWindowContainer.java b/services/core/java/com/android/server/wm/RootWindowContainer.java
+index 19ff791f65d3..d768d339cbc6 100644
+--- a/services/core/java/com/android/server/wm/RootWindowContainer.java
++++ b/services/core/java/com/android/server/wm/RootWindowContainer.java
+@@ -2214,7 +2214,27 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
+         ensureActivitiesVisible(null, 0, false /* preserveWindows */);
+         resumeFocusedStacksTopActivities();
+ 
+-        mService.getTaskChangeNotificationController().notifyActivityPinned(r);
++        notifyActivityPipModeChanged(r.getTask(), r);
++    }
++
++    /**
++     * Notifies when an activity enters or leaves PIP mode.
++     *
++     * @param task the task of {@param r}
++     * @param r indicates the activity currently in PIP, can be null to indicate no activity is
++     *          currently in PIP mode.
++     */
++    void notifyActivityPipModeChanged(@NonNull Task task, @Nullable ActivityRecord r) {
++        final boolean inPip = r != null;
++        if (inPip) {
++            mService.getTaskChangeNotificationController().notifyActivityPinned(r);
++        } else {
++            mService.getTaskChangeNotificationController().notifyActivityUnpinned();
++        }
++        mWindowManager.mPolicy.setPipVisibilityLw(inPip);
++        mWmService.mTransactionFactory.get()
++                .setTrustedOverlay(task.getSurfaceControl(), inPip)
++                .apply();
+     }
+ 
+     void executeAppTransitionForAllDisplay() {
+diff --git a/services/core/java/com/android/server/wm/Task.java b/services/core/java/com/android/server/wm/Task.java
+index 22b59f4a5149..4b4e936c73c1 100644
+--- a/services/core/java/com/android/server/wm/Task.java
++++ b/services/core/java/com/android/server/wm/Task.java
+@@ -1152,7 +1152,7 @@ class Task extends WindowContainer<WindowContainer> {
+                     && (newParent == null || !newParent.inPinnedWindowingMode())) {
+                 // Notify if a task from the pinned stack is being removed
+                 // (or moved depending on the mode).
+-                mAtmService.getTaskChangeNotificationController().notifyActivityUnpinned();
++                mRootWindowContainer.notifyActivityPipModeChanged(this, null);
+             }
+         }
+ 
+@@ -4615,5 +4615,4 @@ class Task extends WindowContainer<WindowContainer> {
+     long getProtoFieldId() {
+         return TASK;
+     }
+-
+ }
+diff --git a/services/tests/wmtests/src/com/android/server/wm/StubTransaction.java b/services/tests/wmtests/src/com/android/server/wm/StubTransaction.java
+index d7eedd990f04..4b7e4ec5809a 100644
+--- a/services/tests/wmtests/src/com/android/server/wm/StubTransaction.java
++++ b/services/tests/wmtests/src/com/android/server/wm/StubTransaction.java
+@@ -277,4 +277,10 @@ public class StubTransaction extends SurfaceControl.Transaction {
+     public SurfaceControl.Transaction unsetFixedTransformHint(@NonNull SurfaceControl sc) {
+         return this;
+     }
++
++    @Override
++    public SurfaceControl.Transaction setTrustedOverlay(SurfaceControl sc,
++            boolean isTrustedOverlay) {
++        return this;
++    }
+ }
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+

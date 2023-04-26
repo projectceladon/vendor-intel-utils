@@ -1,0 +1,435 @@
+From 2495fc8c2eacc60e61b81f014e546adeab6c9bf2 Mon Sep 17 00:00:00 2001
+From: Winson Chung <winsonc@google.com>
+Date: Tue, 29 Jun 2021 15:42:56 -0700
+Subject: [PATCH] Add mechanism for a task's windows to be trusted overlays
+ (SF)
+
+- Add a layer state to indicate that this layer and its children
+  in the hierarchy are trusted. This can only be set by callers
+  holding ACCESS_SURFACE_FLINGER, and will be used for the PIP
+  task layer to indicate that activities in PIP are trusted (as
+  they are controlled only by the user and SystemUI)
+
+Bug: 191529039
+Bug: 196389741
+Test: TBD
+
+Change-Id: Id92ccb087bd0d8dbaeeef3ba50b67fe015e53db8
+Merged-In: Id92ccb087bd0d8dbaeeef3ba50b67fe015e53db8
+(cherry picked from commit 7605fb4273cfdf922a041f201dbcc1e10fae1fe2)
+Merged-In: Id92ccb087bd0d8dbaeeef3ba50b67fe015e53db8
+---
+ cmds/surfacereplayer/proto/src/trace.proto    |  5 ++++
+ libs/gui/LayerState.cpp                       |  8 ++++++
+ libs/gui/SurfaceComposerClient.cpp            | 13 ++++++++++
+ libs/gui/include/gui/LayerState.h             |  8 +++++-
+ libs/gui/include/gui/SurfaceComposerClient.h  |  3 +++
+ services/surfaceflinger/Layer.cpp             | 22 ++++++++++++++++
+ services/surfaceflinger/Layer.h               |  5 ++++
+ services/surfaceflinger/SurfaceFlinger.cpp    |  9 +++++++
+ .../surfaceflinger/SurfaceInterceptor.cpp     | 11 ++++++++
+ services/surfaceflinger/SurfaceInterceptor.h  |  1 +
+ .../layerproto/LayerProtoParser.cpp           |  2 ++
+ .../include/layerproto/LayerProtoParser.h     |  1 +
+ .../surfaceflinger/layerproto/layers.proto    |  2 ++
+ .../tests/SurfaceInterceptor_test.cpp         | 26 +++++++++++++++++++
+ 14 files changed, 115 insertions(+), 1 deletion(-)
+
+diff --git a/cmds/surfacereplayer/proto/src/trace.proto b/cmds/surfacereplayer/proto/src/trace.proto
+index b57409867..372cecd63 100644
+--- a/cmds/surfacereplayer/proto/src/trace.proto
++++ b/cmds/surfacereplayer/proto/src/trace.proto
+@@ -53,6 +53,7 @@ message SurfaceChange {
+         ReparentChildrenChange      reparent_children       = 20;
+         BackgroundBlurRadiusChange  background_blur_radius  = 21;
+         ShadowRadiusChange          shadow_radius           = 22;
++        TrustedOverlayChange        trusted_overlay         = 23;
+     }
+ }
+ 
+@@ -208,4 +209,8 @@ message DetachChildrenChange {
+ 
+ message ShadowRadiusChange {
+     required float radius = 1;
++}
++
++message TrustedOverlayChange {
++    required float is_trusted_overlay = 1;
+ }
+\ No newline at end of file
+diff --git a/libs/gui/LayerState.cpp b/libs/gui/LayerState.cpp
+index e43446ac8..a897d1025 100644
+--- a/libs/gui/LayerState.cpp
++++ b/libs/gui/LayerState.cpp
+@@ -117,6 +117,8 @@ status_t layer_state_t::write(Parcel& output) const
+     output.writeFloat(frameRate);
+     output.writeByte(frameRateCompatibility);
+     output.writeUint32(fixedTransformHint);
++    output.writeBool(isTrustedOverlay);
++
+     return NO_ERROR;
+ }
+ 
+@@ -200,6 +202,8 @@ status_t layer_state_t::read(const Parcel& input)
+     frameRate = input.readFloat();
+     frameRateCompatibility = input.readByte();
+     fixedTransformHint = static_cast<ui::Transform::RotationFlags>(input.readUint32());
++    isTrustedOverlay = input.readBool();
++
+     return NO_ERROR;
+ }
+ 
+@@ -439,6 +443,10 @@ void layer_state_t::merge(const layer_state_t& other) {
+         what |= eFixedTransformHintChanged;
+         fixedTransformHint = other.fixedTransformHint;
+     }
++    if (other.what & eTrustedOverlayChanged) {
++        what |= eTrustedOverlayChanged;
++        isTrustedOverlay = other.isTrustedOverlay;
++    }
+     if ((other.what & what) != other.what) {
+         ALOGE("Unmerged SurfaceComposer Transaction properties. LayerState::merge needs updating? "
+               "other.what=0x%" PRIu64 " what=0x%" PRIu64,
+diff --git a/libs/gui/SurfaceComposerClient.cpp b/libs/gui/SurfaceComposerClient.cpp
+index 83bc06997..78d932cc8 100644
+--- a/libs/gui/SurfaceComposerClient.cpp
++++ b/libs/gui/SurfaceComposerClient.cpp
+@@ -1484,6 +1484,19 @@ SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setFixed
+     return *this;
+ }
+ 
++SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setTrustedOverlay(
++        const sp<SurfaceControl>& sc, bool isTrustedOverlay) {
++    layer_state_t* s = getLayerState(sc);
++    if (!s) {
++        mStatus = BAD_INDEX;
++        return *this;
++    }
++
++    s->what |= layer_state_t::eTrustedOverlayChanged;
++    s->isTrustedOverlay = isTrustedOverlay;
++    return *this;
++}
++
+ // ---------------------------------------------------------------------------
+ 
+ DisplayState& SurfaceComposerClient::Transaction::getDisplayState(const sp<IBinder>& token) {
+diff --git a/libs/gui/include/gui/LayerState.h b/libs/gui/include/gui/LayerState.h
+index e60f6777a..a77e4b046 100644
+--- a/libs/gui/include/gui/LayerState.h
++++ b/libs/gui/include/gui/LayerState.h
+@@ -105,6 +105,7 @@ struct layer_state_t {
+         eBackgroundBlurRadiusChanged = 0x80'00000000,
+         eProducerDisconnect = 0x100'00000000,
+         eFixedTransformHintChanged = 0x200'00000000,
++        eTrustedOverlayChanged = 0x400'00000000,
+     };
+ 
+     layer_state_t()
+@@ -139,7 +140,8 @@ struct layer_state_t {
+             frameRateSelectionPriority(-1),
+             frameRate(0.0f),
+             frameRateCompatibility(ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT),
+-            fixedTransformHint(ui::Transform::ROT_INVALID) {
++            fixedTransformHint(ui::Transform::ROT_INVALID),
++            isTrustedOverlay(false) {
+         matrix.dsdx = matrix.dtdy = 1.0f;
+         matrix.dsdy = matrix.dtdx = 0.0f;
+         hdrMetadata.validTypes = 0;
+@@ -237,6 +239,10 @@ struct layer_state_t {
+     // a buffer of a different size. -1 means the transform hint is not set,
+     // otherwise the value will be a valid ui::Rotation.
+     ui::Transform::RotationFlags fixedTransformHint;
++
++    // An inherited state that indicates that this surface control and its children
++    // should be trusted for input occlusion detection purposes
++    bool isTrustedOverlay;
+ };
+ 
+ struct ComposerState {
+diff --git a/libs/gui/include/gui/SurfaceComposerClient.h b/libs/gui/include/gui/SurfaceComposerClient.h
+index adcb8982a..eebd9ca77 100644
+--- a/libs/gui/include/gui/SurfaceComposerClient.h
++++ b/libs/gui/include/gui/SurfaceComposerClient.h
+@@ -529,6 +529,9 @@ public:
+         // a buffer of a different size.
+         Transaction& setFixedTransformHint(const sp<SurfaceControl>& sc, int32_t transformHint);
+ 
++        // Sets that this surface control and its children are trusted overlays for input
++        Transaction& setTrustedOverlay(const sp<SurfaceControl>& sc, bool isTrustedOverlay);
++        
+         status_t setDisplaySurface(const sp<IBinder>& token,
+                 const sp<IGraphicBufferProducer>& bufferProducer);
+ 
+diff --git a/services/surfaceflinger/Layer.cpp b/services/surfaceflinger/Layer.cpp
+index 03903f6d0..ceea79f98 100644
+--- a/services/surfaceflinger/Layer.cpp
++++ b/services/surfaceflinger/Layer.cpp
+@@ -1142,6 +1142,23 @@ bool Layer::setRelativeLayer(const sp<IBinder>& relativeToHandle, int32_t relati
+     return true;
+ }
+ 
++bool Layer::setTrustedOverlay(bool isTrustedOverlay) {
++    if (mCurrentState.isTrustedOverlay == isTrustedOverlay) return false;
++    mCurrentState.isTrustedOverlay = isTrustedOverlay;
++    mCurrentState.modified = true;
++    mCurrentState.inputInfoChanged = true;
++    setTransactionFlags(eTransactionNeeded);
++    return true;
++}
++
++bool Layer::isTrustedOverlay() const {
++    if (getDrawingState().isTrustedOverlay) {
++        return true;
++    }
++    const auto& p = mDrawingParent.promote();
++    return (p != nullptr) && p->isTrustedOverlay();
++}
++
+ bool Layer::setSize(uint32_t w, uint32_t h) {
+     if (mCurrentState.requested_legacy.w == w && mCurrentState.requested_legacy.h == h)
+         return false;
+@@ -2245,6 +2262,7 @@ void Layer::writeToProtoDrawingState(LayerProto* layerInfo, uint32_t traceFlags,
+         layerInfo->set_effective_scaling_mode(getEffectiveScalingMode());
+ 
+         layerInfo->set_corner_radius(getRoundedCornerState().radius);
++        layerInfo->set_is_trusted_overlay(isTrustedOverlay());
+         LayerProtoHelper::writeToProto(transform, layerInfo->mutable_transform());
+         LayerProtoHelper::writePositionToProto(transform.tx(), transform.ty(),
+                                                [&]() { return layerInfo->mutable_position(); });
+@@ -2435,6 +2453,10 @@ InputWindowInfo Layer::fillInputInfo() {
+         info.touchableRegion = info.touchableRegion.intersect(Rect{cropLayer->mScreenBounds});
+     }
+ 
++    // Inherit the trusted state from the parent hierarchy, but don't clobber the trusted state
++    // if it was set by WM for a known system overlay
++    info.trustedOverlay = info.trustedOverlay || isTrustedOverlay();
++
+     // If the layer is a clone, we need to crop the input region to cloned root to prevent
+     // touches from going outside the cloned area.
+     if (isClone()) {
+diff --git a/services/surfaceflinger/Layer.h b/services/surfaceflinger/Layer.h
+index 2c90c92f6..a12bae42f 100644
+--- a/services/surfaceflinger/Layer.h
++++ b/services/surfaceflinger/Layer.h
+@@ -279,6 +279,9 @@ public:
+         // a buffer of a different size. ui::Transform::ROT_INVALID means the
+         // a fixed transform hint is not set.
+         ui::Transform::RotationFlags fixedTransformHint;
++
++        // Whether or not this layer is a trusted overlay for input
++        bool isTrustedOverlay;
+     };
+ 
+     explicit Layer(const LayerCreationArgs& args);
+@@ -356,6 +359,7 @@ public:
+     // is specified in pixels.
+     virtual bool setBackgroundBlurRadius(int backgroundBlurRadius);
+     virtual bool setTransparentRegionHint(const Region& transparent);
++    virtual bool setTrustedOverlay(bool);
+     virtual bool setFlags(uint8_t flags, uint8_t mask);
+     virtual bool setLayerStack(uint32_t layerStack);
+     virtual uint32_t getLayerStack() const;
+@@ -1064,6 +1068,7 @@ private:
+                                           const std::vector<Layer*>& layersInTree);
+ 
+     void updateTreeHasFrameRateVote();
++    bool isTrustedOverlay() const;
+ 
+     // Cached properties computed from drawing state
+     // Effective transform taking into account parent transforms and any parent scaling.
+diff --git a/services/surfaceflinger/SurfaceFlinger.cpp b/services/surfaceflinger/SurfaceFlinger.cpp
+index 4a60d5c6f..494721092 100644
+--- a/services/surfaceflinger/SurfaceFlinger.cpp
++++ b/services/surfaceflinger/SurfaceFlinger.cpp
+@@ -3858,6 +3858,15 @@ uint32_t SurfaceFlinger::setClientStateLocked(
+             flags |= eTraversalNeeded | eTransformHintUpdateNeeded;
+         }
+     }
++    if (what & layer_state_t::eTrustedOverlayChanged) {
++        if (privileged) {
++            if (layer->setTrustedOverlay(s.isTrustedOverlay)) {
++                flags |= eTraversalNeeded;
++            }
++        } else {
++            ALOGE("Attempt to set trusted overlay without permission ACCESS_SURFACE_FLINGER");
++        }
++    }
+     // This has to happen after we reparent children because when we reparent to null we remove
+     // child layers from current state and remove its relative z. If the children are reparented in
+     // the same transaction, then we have to make sure we reparent the children first so we do not
+diff --git a/services/surfaceflinger/SurfaceInterceptor.cpp b/services/surfaceflinger/SurfaceInterceptor.cpp
+index 80102bdbb..0555acff4 100644
+--- a/services/surfaceflinger/SurfaceInterceptor.cpp
++++ b/services/surfaceflinger/SurfaceInterceptor.cpp
+@@ -130,6 +130,7 @@ void SurfaceInterceptor::addInitialSurfaceStateLocked(Increment* increment,
+                             getLayerIdFromWeakRef(layer->mCurrentState.zOrderRelativeOf),
+                             layer->mCurrentState.z);
+     addShadowRadiusLocked(transaction, layerId, layer->mCurrentState.shadowRadius);
++    addTrustedOverlayLocked(transaction, layerId, layer->mDrawingState.isTrustedOverlay);
+ }
+ 
+ void SurfaceInterceptor::addInitialDisplayStateLocked(Increment* increment,
+@@ -388,6 +389,13 @@ void SurfaceInterceptor::addShadowRadiusLocked(Transaction* transaction, int32_t
+     overrideChange->set_radius(shadowRadius);
+ }
+ 
++void SurfaceInterceptor::addTrustedOverlayLocked(Transaction* transaction, int32_t layerId,
++                                                 bool isTrustedOverlay) {
++    SurfaceChange* change(createSurfaceChangeLocked(transaction, layerId));
++    TrustedOverlayChange* overrideChange(change->mutable_trusted_overlay());
++    overrideChange->set_is_trusted_overlay(isTrustedOverlay);
++}
++
+ void SurfaceInterceptor::addSurfaceChangesLocked(Transaction* transaction,
+         const layer_state_t& state)
+ {
+@@ -467,6 +475,9 @@ void SurfaceInterceptor::addSurfaceChangesLocked(Transaction* transaction,
+     if (state.what & layer_state_t::eShadowRadiusChanged) {
+         addShadowRadiusLocked(transaction, layerId, state.shadowRadius);
+     }
++    if (state.what & layer_state_t::eTrustedOverlayChanged) {
++        addTrustedOverlayLocked(transaction, layerId, state.isTrustedOverlay);
++    }
+ }
+ 
+ void SurfaceInterceptor::addDisplayChangesLocked(Transaction* transaction,
+diff --git a/services/surfaceflinger/SurfaceInterceptor.h b/services/surfaceflinger/SurfaceInterceptor.h
+index 896bdcc25..6b98b4442 100644
+--- a/services/surfaceflinger/SurfaceInterceptor.h
++++ b/services/surfaceflinger/SurfaceInterceptor.h
+@@ -168,6 +168,7 @@ private:
+     void addRelativeParentLocked(Transaction* transaction, int32_t layerId, int32_t parentId,
+                                  int z);
+     void addShadowRadiusLocked(Transaction* transaction, int32_t layerId, float shadowRadius);
++    void addTrustedOverlayLocked(Transaction* transaction, int32_t layerId, bool isTrustedOverlay);
+ 
+     // Add display transactions to the trace
+     DisplayChange* createDisplayChangeLocked(Transaction* transaction, int32_t sequenceId);
+diff --git a/services/surfaceflinger/layerproto/LayerProtoParser.cpp b/services/surfaceflinger/layerproto/LayerProtoParser.cpp
+index 8fce0c9bf..2eceba848 100644
+--- a/services/surfaceflinger/layerproto/LayerProtoParser.cpp
++++ b/services/surfaceflinger/layerproto/LayerProtoParser.cpp
+@@ -105,6 +105,7 @@ LayerProtoParser::Layer LayerProtoParser::generateLayer(const LayerProto& layerP
+     layer.queuedFrames = layerProto.queued_frames();
+     layer.refreshPending = layerProto.refresh_pending();
+     layer.isProtected = layerProto.is_protected();
++    layer.isTrustedOverlay = layerProto.is_trusted_overlay();
+     layer.cornerRadius = layerProto.corner_radius();
+     layer.backgroundBlurRadius = layerProto.background_blur_radius();
+     for (const auto& entry : layerProto.metadata()) {
+@@ -288,6 +289,7 @@ std::string LayerProtoParser::Layer::to_string() const {
+     StringAppendF(&result, "crop=%s, ", crop.to_string().c_str());
+     StringAppendF(&result, "cornerRadius=%f, ", cornerRadius);
+     StringAppendF(&result, "isProtected=%1d, ", isProtected);
++    StringAppendF(&result, "isTrustedOverlay=%1d, ", isTrustedOverlay);
+     StringAppendF(&result, "isOpaque=%1d, invalidate=%1d, ", isOpaque, invalidate);
+     StringAppendF(&result, "dataspace=%s, ", dataspace.c_str());
+     StringAppendF(&result, "defaultPixelFormat=%s, ", pixelFormat.c_str());
+diff --git a/services/surfaceflinger/layerproto/include/layerproto/LayerProtoParser.h b/services/surfaceflinger/layerproto/include/layerproto/LayerProtoParser.h
+index 52b916555..67bbd7693 100644
+--- a/services/surfaceflinger/layerproto/include/layerproto/LayerProtoParser.h
++++ b/services/surfaceflinger/layerproto/include/layerproto/LayerProtoParser.h
+@@ -109,6 +109,7 @@ public:
+         int32_t queuedFrames;
+         bool refreshPending;
+         bool isProtected;
++        bool isTrustedOverlay;
+         float cornerRadius;
+         int backgroundBlurRadius;
+         LayerMetadata metadata;
+diff --git a/services/surfaceflinger/layerproto/layers.proto b/services/surfaceflinger/layerproto/layers.proto
+index 7f1f542e4..780b06600 100644
+--- a/services/surfaceflinger/layerproto/layers.proto
++++ b/services/surfaceflinger/layerproto/layers.proto
+@@ -123,6 +123,8 @@ message LayerProto {
+   bool is_relative_of = 51;
+   // Layer's background blur radius in pixels.
+   int32 background_blur_radius = 52;
++
++  bool is_trusted_overlay = 53;
+ }
+ 
+ message PositionProto {
+diff --git a/services/surfaceflinger/tests/SurfaceInterceptor_test.cpp b/services/surfaceflinger/tests/SurfaceInterceptor_test.cpp
+index 8d97f275b..5bafbd897 100644
+--- a/services/surfaceflinger/tests/SurfaceInterceptor_test.cpp
++++ b/services/surfaceflinger/tests/SurfaceInterceptor_test.cpp
+@@ -195,6 +195,7 @@ public:
+     bool detachChildrenUpdateFound(const SurfaceChange& change, bool found);
+     bool reparentChildrenUpdateFound(const SurfaceChange& change, bool found);
+     bool shadowRadiusUpdateFound(const SurfaceChange& change, bool found);
++    bool trustedOverlayUpdateFound(const SurfaceChange& change, bool found);
+     bool surfaceUpdateFound(const Trace& trace, SurfaceChange::SurfaceChangeCase changeCase);
+ 
+     // Find all of the updates in the single trace
+@@ -233,6 +234,7 @@ public:
+     void detachChildrenUpdate(Transaction&);
+     void reparentChildrenUpdate(Transaction&);
+     void shadowRadiusUpdate(Transaction&);
++    void trustedOverlayUpdate(Transaction&);
+     void surfaceCreation(Transaction&);
+     void displayCreation(Transaction&);
+     void displayDeletion(Transaction&);
+@@ -421,6 +423,10 @@ void SurfaceInterceptorTest::shadowRadiusUpdate(Transaction& t) {
+     t.setShadowRadius(mBGSurfaceControl, SHADOW_RADIUS_UPDATE);
+ }
+ 
++void SurfaceInterceptorTest::trustedOverlayUpdate(Transaction& t) {
++    t.setTrustedOverlay(mBGSurfaceControl, true);
++}
++
+ void SurfaceInterceptorTest::displayCreation(Transaction&) {
+     sp<IBinder> testDisplay = SurfaceComposerClient::createDisplay(DISPLAY_NAME, true);
+     SurfaceComposerClient::destroyDisplay(testDisplay);
+@@ -452,6 +458,7 @@ void SurfaceInterceptorTest::runAllUpdates() {
+     runInTransaction(&SurfaceInterceptorTest::detachChildrenUpdate);
+     runInTransaction(&SurfaceInterceptorTest::relativeParentUpdate);
+     runInTransaction(&SurfaceInterceptorTest::shadowRadiusUpdate);
++    runInTransaction(&SurfaceInterceptorTest::trustedOverlayUpdate);
+ }
+ 
+ void SurfaceInterceptorTest::surfaceCreation(Transaction&) {
+@@ -695,6 +702,17 @@ bool SurfaceInterceptorTest::shadowRadiusUpdateFound(const SurfaceChange& change
+     return foundShadowRadius;
+ }
+ 
++bool SurfaceInterceptorTest::trustedOverlayUpdateFound(const SurfaceChange& change,
++                                                       bool foundTrustedOverlay) {
++    bool hasTrustedOverlay(change.trusted_overlay().is_trusted_overlay());
++    if (hasTrustedOverlay && !foundTrustedOverlay) {
++        foundTrustedOverlay = true;
++    } else if (hasTrustedOverlay && foundTrustedOverlay) {
++        []() { FAIL(); }();
++    }
++    return foundTrustedOverlay;
++}
++
+ bool SurfaceInterceptorTest::surfaceUpdateFound(const Trace& trace,
+         SurfaceChange::SurfaceChangeCase changeCase) {
+     bool foundUpdate = false;
+@@ -764,6 +782,9 @@ bool SurfaceInterceptorTest::surfaceUpdateFound(const Trace& trace,
+                         case SurfaceChange::SurfaceChangeCase::kShadowRadius:
+                             foundUpdate = shadowRadiusUpdateFound(change, foundUpdate);
+                             break;
++                        case SurfaceChange::SurfaceChangeCase::kTrustedOverlay:
++                            foundUpdate = trustedOverlayUpdateFound(change, foundUpdate);
++                            break;
+                         case SurfaceChange::SurfaceChangeCase::SURFACECHANGE_NOT_SET:
+                             break;
+                     }
+@@ -976,6 +997,11 @@ TEST_F(SurfaceInterceptorTest, InterceptShadowRadiusUpdateWorks) {
+                 SurfaceChange::SurfaceChangeCase::kShadowRadius);
+ }
+ 
++TEST_F(SurfaceInterceptorTest, InterceptTrustedOverlayUpdateWorks) {
++    captureTest(&SurfaceInterceptorTest::trustedOverlayUpdate,
++                SurfaceChange::SurfaceChangeCase::kTrustedOverlay);
++}
++
+ TEST_F(SurfaceInterceptorTest, InterceptAllUpdatesWorks) {
+     captureTest(&SurfaceInterceptorTest::runAllUpdates,
+                 &SurfaceInterceptorTest::assertAllUpdatesFound);
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+
