@@ -185,7 +185,7 @@ int healthd_board_battery_update(struct android::BatteryProperties *props)
 {
     // When batterylevel is 0, host OS would have shutdown.
     // When batterylevel is more than 100, host OS is corrupted.
-    if (0 <= s_props.batteryLevel && s_props.batteryLevel <= 100) {
+    if (0 < s_props.batteryLevel && s_props.batteryLevel <= 100) {
         memcpy(props, &s_props, sizeof(struct android::BatteryProperties));
     } else {
 	props->batteryStatus = android::BATTERY_STATUS_UNKNOWN;
