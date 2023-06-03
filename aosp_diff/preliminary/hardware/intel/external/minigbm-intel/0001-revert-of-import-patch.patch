@@ -1,0 +1,177 @@
+From ae4fd57c7866ca21ebbe25ae5386f98b729adc1d Mon Sep 17 00:00:00 2001
+From: shivasku82 <shiva.kumara.rudrappa@intel.com>
+Date: Mon, 21 Jun 2021 20:46:02 +0530
+Subject: [PATCH] revert of import patch
+
+Signed-off-by: shivasku82 <shiva.kumara.rudrappa@intel.com>
+---
+ cros_gralloc/cros_gralloc_driver.cc           |  4 --
+ cros_gralloc/gralloc1/cros_gralloc1_module.cc | 62 +++++++++++++++----
+ cros_gralloc/gralloc1/cros_gralloc1_module.h  |  7 +++
+ cros_gralloc/i915_private_android_types.h     |  5 ++
+ 4 files changed, 62 insertions(+), 16 deletions(-)
+
+diff --git a/cros_gralloc/cros_gralloc_driver.cc b/cros_gralloc/cros_gralloc_driver.cc
+index fd8d7b3..271347a 100644
+--- a/cros_gralloc/cros_gralloc_driver.cc
++++ b/cros_gralloc/cros_gralloc_driver.cc
+@@ -483,9 +483,6 @@ int32_t cros_gralloc_driver::get_backing_store(buffer_handle_t handle, uint64_t
+ 		return -EINVAL;
+ 	}
+ 
+-#ifdef USE_GRALLOC1
+-	*out_store = static_cast<uint64_t>(hnd->id);
+-#else
+ 	auto buffer = get_buffer(hnd);
+ 	if (!buffer) {
+ 		drv_log("Invalid Reference.\n");
+@@ -493,7 +490,6 @@ int32_t cros_gralloc_driver::get_backing_store(buffer_handle_t handle, uint64_t
+ 	}
+ 
+ 	*out_store = static_cast<uint64_t>(buffer->get_id());
+-#endif
+ 	return 0;
+ }
+ 
+diff --git a/cros_gralloc/gralloc1/cros_gralloc1_module.cc b/cros_gralloc/gralloc1/cros_gralloc1_module.cc
+index 2365c70..30f41cb 100644
+--- a/cros_gralloc/gralloc1/cros_gralloc1_module.cc
++++ b/cros_gralloc/gralloc1/cros_gralloc1_module.cc
+@@ -231,6 +231,8 @@ gralloc1_function_pointer_t CrosGralloc1::doGetFunction(int32_t intDescriptor)
+ 		return asFP<GRALLOC1_PFN_GET_TRANSPORT_SIZE>(getTransportSizeHook);
+ 	case GRALLOC1_FUNCTION_IMPORT_BUFFER:
+ 		return asFP<GRALLOC1_PFN_IMPORT_BUFFER>(importBufferHook);
++	case GRALLOC1_FUNCTION_FREE_BUFFER:
++		return asFP<GRALLOC1_PFN_FREE_BUFFER>(freeBufferHook);
+ 	case GRALLOC1_FUNCTION_INVALID:
+ 		drv_log("Invalid function descriptor");
+ 		return nullptr;
+@@ -364,16 +366,59 @@ int32_t CrosGralloc1::importBuffer(const buffer_handle_t rawHandle, buffer_handl
+ 		*outBuffer = NULL;
+ 		return GRALLOC1_ERROR_BAD_HANDLE;
+ 	}
+-	auto error = driver->retain(rawHandle);
++
++	buffer_handle_t buffer_handle = native_handle_clone(rawHandle);
++	if (!buffer_handle) {
++	   *outBuffer = NULL;
++	   return GRALLOC1_ERROR_NO_RESOURCES;
++	}
++	auto error = retain(buffer_handle);
++
+ 	if (error != GRALLOC1_ERROR_NONE) {
++		native_handle_close(buffer_handle);
++		native_handle_delete((native_handle_t*)buffer_handle);
++
+ 		*outBuffer = NULL;
+ 		return error;
+ 	}
+ 
+-	*outBuffer = rawHandle;
++	*outBuffer = buffer_handle;
++
+ 	return GRALLOC1_ERROR_NONE;
+ }
+ 
++
++int32_t CrosGralloc1::freeBuffer(void *freeBuffer)
++{
++	if (!freeBuffer) {
++		drv_log("Failed to freeBuffer, empty handle.\n");
++		return GRALLOC1_ERROR_BAD_HANDLE;
++	}
++
++	native_handle_t *bufferHandle = reinterpret_cast<native_handle_t*>(freeBuffer);
++	
++	int ret = driver->release(bufferHandle);
++	if (ret) {
++		drv_log("Failed to release handle, bad handle.\n");
++		return GRALLOC1_ERROR_BAD_HANDLE;
++	}
++
++	ret = native_handle_close(bufferHandle);
++	if (ret) {
++		drv_log("Failed to close handle, bad handle.\n");
++		return GRALLOC1_ERROR_BAD_HANDLE;
++	}
++	
++	ret = native_handle_delete(bufferHandle);
++	if (ret) {
++		drv_log("Failed to delete handle, bad handle.\n");
++		return GRALLOC1_ERROR_BAD_HANDLE;
++	}
++
++	return GRALLOC1_ERROR_NONE;
++}
++
++
+ int32_t CrosGralloc1::allocate(struct cros_gralloc_buffer_descriptor *descriptor,
+ 			       buffer_handle_t *outBufferHandle)
+ {
+@@ -435,19 +480,12 @@ int32_t CrosGralloc1::retain(buffer_handle_t bufferHandle)
+ 
+ int32_t CrosGralloc1::release(buffer_handle_t bufferHandle)
+ {
+-	if (!bufferHandle) {
+-		drv_log("Failed to freeBuffer, empty handle.\n");
+-		return GRALLOC1_ERROR_BAD_HANDLE;
+-	}
+ 
+-	int ret = driver->release(bufferHandle);
+-	if (ret) {
+-		drv_log("Failed to release handle, bad handle.\n");
+-		return GRALLOC1_ERROR_BAD_HANDLE;
+-	}
++	if (driver->release(bufferHandle))
++			return CROS_GRALLOC_ERROR_BAD_HANDLE;
+ 
++	return CROS_GRALLOC_ERROR_NONE;
+ 
+-	return GRALLOC1_ERROR_NONE;
+ }
+ 
+ int32_t CrosGralloc1::lock(buffer_handle_t bufferHandle, gralloc1_producer_usage_t producerUsage,
+diff --git a/cros_gralloc/gralloc1/cros_gralloc1_module.h b/cros_gralloc/gralloc1/cros_gralloc1_module.h
+index 247b456..491914b 100644
+--- a/cros_gralloc/gralloc1/cros_gralloc1_module.h
++++ b/cros_gralloc/gralloc1/cros_gralloc1_module.h
+@@ -216,6 +216,13 @@ class CrosGralloc1 : public gralloc1_device_t
+ 		return getAdapter(device)->importBuffer(rawHandle, outBuffer);
+ 	}
+ 
++	int32_t freeBuffer(void *freeBuffer);
++	static int32_t freeBufferHook(gralloc1_device_t *device, void *freeBuffer)
++	{
++            return getAdapter(device)->freeBuffer(freeBuffer);
++	}
++
++
+ 	int32_t getProducerUsage(buffer_handle_t buffer,
+ 				 uint64_t * /*gralloc1_producer_usage_t*/ outUsage);
+ 	static int32_t getProducerUsageHook(gralloc1_device_t *device, buffer_handle_t buffer,
+diff --git a/cros_gralloc/i915_private_android_types.h b/cros_gralloc/i915_private_android_types.h
+index a7072d0..0a80d83 100644
+--- a/cros_gralloc/i915_private_android_types.h
++++ b/cros_gralloc/i915_private_android_types.h
+@@ -64,6 +64,8 @@ enum { GRALLOC1_FUNCTION_SET_MODIFIER = 101,
+        GRALLOC1_FUNCTION_GET_PRIME = 103,
+        GRALLOC1_FUNCTION_SET_INTERLACE = 104,
+        GRALLOC1_FUNCTION_SET_PROTECTIONINFO = 105,
++             GRALLOC1_FUNCTION_FREE_BUFFER = 106,
++
+        GRALLOC1_LAST_CUSTOM = 500 };
+ 
+ typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_SET_MODIFIER)(
+@@ -81,6 +83,9 @@ typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_SET_INTERLACE)(
+ typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_SET_PROTECTIONINFO)(
+         gralloc1_device_t *device, buffer_handle_t buffer, uint32_t protection_info);
+ 
++typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_FREE_BUFFER)(
++			gralloc1_device_t *device, void *freeBuffer);
++
+ typedef union intel_protection_info_type_t {
+        uint32_t value;
+        struct {
+-- 
+2.32.0
+
