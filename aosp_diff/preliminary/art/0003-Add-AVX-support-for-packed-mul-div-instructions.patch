@@ -1,0 +1,1524 @@
+From 62b2b9faf06b7444fe8b4e3e4b7d668814aafff7 Mon Sep 17 00:00:00 2001
+From: Shalini Salomi Bodapati <shalini.salomi.bodapati@intel.com>
+Date: Wed, 10 Jul 2019 16:09:41 +0530
+Subject: [PATCH 3/4] Add AVX support for packed mul/div instructions.
+
+This is a follow up for the below patch:
+https://android-review.googlesource.com/c/platform/build/+/830841
+
+Test: ./test.py --host --64, test-art-host-gtest
+Change-Id: Id2aa473035556ee230e66addeb69707df8530e75
+Signed-off-by: Shalini Salomi Bodapati <shalini.salomi.bodapati@intel.com>
+---
+ compiler/optimizing/code_generator_vector_x86.cc   | 166 +++++++--------------
+ .../optimizing/code_generator_vector_x86_64.cc     | 160 +++++++-------------
+ compiler/optimizing/code_generator_x86.cc          |  13 ++
+ compiler/optimizing/code_generator_x86.h           |   4 +
+ compiler/optimizing/code_generator_x86_64.cc       |  16 ++
+ compiler/optimizing/code_generator_x86_64.h        |   5 +
+ compiler/optimizing/loop_optimization.cc           |  27 ----
+ compiler/optimizing/nodes.h                        |   5 +-
+ compiler/optimizing/nodes_vector_x86.h             |  84 -----------
+ compiler/utils/x86/assembler_x86.cc                |  92 ++++++++++++
+ compiler/utils/x86/assembler_x86.h                 |   8 +
+ compiler/utils/x86/assembler_x86_test.cc           |  48 ++++--
+ compiler/utils/x86_64/assembler_x86_64.cc          | 160 ++++++++++++++++++++
+ compiler/utils/x86_64/assembler_x86_64.h           |   7 +
+ compiler/utils/x86_64/assembler_x86_64_test.cc     |  31 +++-
+ compiler/utils/x86_64/constants_x86_64.h           |   3 +
+ 16 files changed, 477 insertions(+), 352 deletions(-)
+ delete mode 100644 compiler/optimizing/nodes_vector_x86.h
+
+diff --git a/compiler/optimizing/code_generator_vector_x86.cc b/compiler/optimizing/code_generator_vector_x86.cc
+index c8964dd..29a1354 100644
+--- a/compiler/optimizing/code_generator_vector_x86.cc
++++ b/compiler/optimizing/code_generator_vector_x86.cc
+@@ -431,48 +431,6 @@ static void CreateVecBinOpLocations(ArenaAllocator* allocator, HVecBinaryOperati
+   }
+ }
+ 
+-void LocationsBuilderX86::VisitVecAdd(HVecAdd* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
+-}
+-
+-void InstructionCodeGeneratorX86::VisitVecAdd(HVecAdd* instruction) {
+-  LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+-  XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+-  XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+-  switch (instruction->GetPackedType()) {
+-    case DataType::Type::kUint8:
+-    case DataType::Type::kInt8:
+-      DCHECK_EQ(16u, instruction->GetVectorLength());
+-      __ paddb(dst, src);
+-      break;
+-    case DataType::Type::kUint16:
+-    case DataType::Type::kInt16:
+-      DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ paddw(dst, src);
+-      break;
+-    case DataType::Type::kInt32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ paddd(dst, src);
+-      break;
+-    case DataType::Type::kInt64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ paddq(dst, src);
+-      break;
+-    case DataType::Type::kFloat32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ addps(dst, src);
+-      break;
+-    case DataType::Type::kFloat64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ addpd(dst, src);
+-      break;
+-    default:
+-      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+-      UNREACHABLE();
+-  }
+-}
+-
+ static void CreateVecTerOpLocations(ArenaAllocator* allocator, HVecOperation* instruction) {
+   LocationSummary* locations = new (allocator) LocationSummary(instruction);
+   switch (instruction->GetPackedType()) {
+@@ -495,44 +453,50 @@ static void CreateVecTerOpLocations(ArenaAllocator* allocator, HVecOperation* in
+   }
+ }
+ 
+-void LocationsBuilderX86::VisitVecAvxAdd(HVecAvxAdd* instruction) {
++void LocationsBuilderX86::VisitVecAdd(HVecAdd* instruction) {
++  if (CpuHasAvxFeatureFlag()) {
+     CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+-void InstructionCodeGeneratorX86::VisitVecAvxAdd(HVecAvxAdd* instruction) {
++void InstructionCodeGeneratorX86::VisitVecAdd(HVecAdd* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  XmmRegister src1 = locations->InAt(0).AsFpuRegister<XmmRegister>();
+-  XmmRegister src2 = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kUint8:
+     case DataType::Type::kInt8:
+       DCHECK_EQ(16u, instruction->GetVectorLength());
+-        __ vpaddb(dst, src1, src2);
++      cpu_has_avx ? __ vpaddb(dst, other_src, src) : __ paddb(dst, src);
+       break;
+     case DataType::Type::kUint16:
+     case DataType::Type::kInt16:
+       DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ vpaddw(dst, src1, src2);
++      cpu_has_avx ? __ vpaddw(dst, other_src, src) : __ paddw(dst, src);
+       break;
+     case DataType::Type::kInt32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vpaddd(dst, src1, src2);
++      cpu_has_avx ?  __ vpaddd(dst, other_src, src) : __ paddd(dst, src);
+       break;
+     case DataType::Type::kInt64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vpaddq(dst, src1, src2);
++      cpu_has_avx ? __ vpaddq(dst, other_src, src) : __ paddq(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vaddps(dst, src1, src2);
++      cpu_has_avx ? __ vaddps(dst, other_src, src) : __ addps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vaddpd(dst, src1, src2);
++      cpu_has_avx ? __ vaddpd(dst, other_src, src) : __ addpd(dst, src);
+       break;
+     default:
+-      LOG(FATAL) << "Unsupported SIMD type";
++      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+       UNREACHABLE();
+   }
+ }
+@@ -597,40 +561,46 @@ void InstructionCodeGeneratorX86::VisitVecHalvingAdd(HVecHalvingAdd* instruction
+ }
+ 
+ void LocationsBuilderX86::VisitVecSub(HVecSub* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecSub(HVecSub* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kUint8:
+     case DataType::Type::kInt8:
+       DCHECK_EQ(16u, instruction->GetVectorLength());
+-      __ psubb(dst, src);
++      cpu_has_avx ? __ vpsubb(dst, other_src, src) : __ psubb(dst, src);
+       break;
+     case DataType::Type::kUint16:
+     case DataType::Type::kInt16:
+       DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ psubw(dst, src);
++      cpu_has_avx ? __ vpsubw(dst, other_src, src) : __ psubw(dst, src);
+       break;
+     case DataType::Type::kInt32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ psubd(dst, src);
++      cpu_has_avx ?  __ vpsubd(dst, other_src, src) : __ psubd(dst, src);
+       break;
+     case DataType::Type::kInt64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ psubq(dst, src);
++      cpu_has_avx ? __ vpsubq(dst, other_src, src) : __ psubq(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ subps(dst, src);
++      cpu_has_avx ? __ vsubps(dst, other_src, src) : __ subps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ subpd(dst, src);
++      cpu_has_avx ? __ vsubpd(dst, other_src, src) : __ subpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -638,48 +608,6 @@ void InstructionCodeGeneratorX86::VisitVecSub(HVecSub* instruction) {
+   }
+ }
+ 
+-void LocationsBuilderX86::VisitVecAvxSub(HVecAvxSub* instruction) {
+-  CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
+-}
+-
+-void InstructionCodeGeneratorX86::VisitVecAvxSub(HVecAvxSub* instruction) {
+-  LocationSummary* locations = instruction->GetLocations();
+-  XmmRegister src1 = locations->InAt(0).AsFpuRegister<XmmRegister>();
+-  XmmRegister src2 = locations->InAt(1).AsFpuRegister<XmmRegister>();
+-  XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+-  switch (instruction->GetPackedType()) {
+-    case DataType::Type::kUint8:
+-    case DataType::Type::kInt8:
+-      DCHECK_EQ(16u, instruction->GetVectorLength());
+-      __ vpsubb(dst, src1, src2);
+-      break;
+-    case DataType::Type::kUint16:
+-    case DataType::Type::kInt16:
+-      DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ vpsubw(dst, src1, src2);
+-      break;
+-    case DataType::Type::kInt32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vpsubd(dst, src1, src2);
+-      break;
+-    case DataType::Type::kInt64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vpsubq(dst, src1, src2);
+-      break;
+-    case DataType::Type::kFloat32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vsubps(dst, src1, src2);
+-      break;
+-    case DataType::Type::kFloat64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vsubpd(dst, src1, src2);
+-      break;
+-    default:
+-      LOG(FATAL) << "Unsupported SIMD type";
+-      UNREACHABLE();
+-  }
+-}
+-
+ void LocationsBuilderX86::VisitVecSaturationSub(HVecSaturationSub* instruction) {
+   CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
+ }
+@@ -713,31 +641,37 @@ void InstructionCodeGeneratorX86::VisitVecSaturationSub(HVecSaturationSub* instr
+ }
+ 
+ void LocationsBuilderX86::VisitVecMul(HVecMul* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecMul(HVecMul* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kUint16:
+     case DataType::Type::kInt16:
+       DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ pmullw(dst, src);
++      cpu_has_avx ? __ vpmullw(dst, other_src, src) : __ pmullw(dst, src);
+       break;
+     case DataType::Type::kInt32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ pmulld(dst, src);
++      cpu_has_avx ? __ vpmulld(dst, other_src, src) : __ pmulld(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ mulps(dst, src);
++      cpu_has_avx ? __ vmulps(dst, other_src, src) : __ mulps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ mulpd(dst, src);
++      cpu_has_avx ? __ vmulpd(dst, other_src, src) : __ mulpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -746,22 +680,28 @@ void InstructionCodeGeneratorX86::VisitVecMul(HVecMul* instruction) {
+ }
+ 
+ void LocationsBuilderX86::VisitVecDiv(HVecDiv* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecDiv(HVecDiv* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ divps(dst, src);
++      cpu_has_avx ? __ vdivps(dst, other_src, src) : __ divps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ divpd(dst, src);
++      cpu_has_avx ?  __ vdivpd(dst, other_src, src) : __ divpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+diff --git a/compiler/optimizing/code_generator_vector_x86_64.cc b/compiler/optimizing/code_generator_vector_x86_64.cc
+index c147659..f28268b 100644
+--- a/compiler/optimizing/code_generator_vector_x86_64.cc
++++ b/compiler/optimizing/code_generator_vector_x86_64.cc
+@@ -437,40 +437,46 @@ static void CreateVecTerOpLocations(ArenaAllocator* allocator, HVecOperation* in
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecAdd(HVecAdd* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecAdd(HVecAdd* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kUint8:
+     case DataType::Type::kInt8:
+       DCHECK_EQ(16u, instruction->GetVectorLength());
+-      __ paddb(dst, src);
++      cpu_has_avx ? __ vpaddb(dst, other_src, src) : __ paddb(dst, src);
+       break;
+     case DataType::Type::kUint16:
+     case DataType::Type::kInt16:
+       DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ paddw(dst, src);
++      cpu_has_avx ? __ vpaddw(dst, other_src, src) : __ paddw(dst, src);
+       break;
+     case DataType::Type::kInt32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ paddd(dst, src);
++      cpu_has_avx ? __ vpaddd(dst, other_src, src) : __ paddd(dst, src);
+       break;
+     case DataType::Type::kInt64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ paddq(dst, src);
++      cpu_has_avx ? __ vpaddq(dst, other_src, src) : __ paddq(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ addps(dst, src);
++      cpu_has_avx ? __ vaddps(dst, other_src, src) : __ addps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ addpd(dst, src);
++      cpu_has_avx ? __ vaddpd(dst, other_src, src) : __ addpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -478,48 +484,6 @@ void InstructionCodeGeneratorX86_64::VisitVecAdd(HVecAdd* instruction) {
+   }
+ }
+ 
+-void LocationsBuilderX86_64::VisitVecAvxAdd(HVecAvxAdd* instruction) {
+-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
+-}
+-
+-void InstructionCodeGeneratorX86_64::VisitVecAvxAdd(HVecAvxAdd* instruction) {
+-  LocationSummary* locations = instruction->GetLocations();
+-  XmmRegister src1 = locations->InAt(0).AsFpuRegister<XmmRegister>();
+-  XmmRegister src2 = locations->InAt(1).AsFpuRegister<XmmRegister>();
+-  XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+-  switch (instruction->GetPackedType()) {
+-    case DataType::Type::kUint8:
+-    case DataType::Type::kInt8:
+-      DCHECK_EQ(16u, instruction->GetVectorLength());
+-        __ vpaddb(dst, src1, src2);
+-      break;
+-    case DataType::Type::kUint16:
+-    case DataType::Type::kInt16:
+-      DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ vpaddw(dst, src1, src2);
+-      break;
+-    case DataType::Type::kInt32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vpaddd(dst, src1, src2);
+-      break;
+-    case DataType::Type::kInt64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vpaddq(dst, src1, src2);
+-      break;
+-    case DataType::Type::kFloat32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vaddps(dst, src1, src2);
+-      break;
+-    case DataType::Type::kFloat64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vaddpd(dst, src1, src2);
+-      break;
+-    default:
+-      LOG(FATAL) << "Unsupported SIMD type";
+-      UNREACHABLE();
+-  }
+-}
+-
+ void LocationsBuilderX86_64::VisitVecSaturationAdd(HVecSaturationAdd* instruction) {
+   CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
+ }
+@@ -580,40 +544,46 @@ void InstructionCodeGeneratorX86_64::VisitVecHalvingAdd(HVecHalvingAdd* instruct
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecSub(HVecSub* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecSub(HVecSub* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kUint8:
+     case DataType::Type::kInt8:
+       DCHECK_EQ(16u, instruction->GetVectorLength());
+-      __ psubb(dst, src);
++      cpu_has_avx ? __ vpsubb(dst, other_src, src) : __ psubb(dst, src);
+       break;
+     case DataType::Type::kUint16:
+     case DataType::Type::kInt16:
+       DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ psubw(dst, src);
++      cpu_has_avx ? __ vpsubw(dst, other_src, src) : __ psubw(dst, src);
+       break;
+     case DataType::Type::kInt32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ psubd(dst, src);
++      cpu_has_avx ? __ vpsubd(dst, other_src, src) : __ psubd(dst, src);
+       break;
+     case DataType::Type::kInt64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ psubq(dst, src);
++      cpu_has_avx ? __ vpsubq(dst, other_src, src) : __ psubq(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ subps(dst, src);
++      cpu_has_avx ? __ vsubps(dst, other_src, src) : __ subps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ subpd(dst, src);
++      cpu_has_avx ? __ vsubpd(dst, other_src, src) : __ subpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -621,48 +591,6 @@ void InstructionCodeGeneratorX86_64::VisitVecSub(HVecSub* instruction) {
+   }
+ }
+ 
+-void LocationsBuilderX86_64::VisitVecAvxSub(HVecAvxSub* instruction) {
+-  CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
+-}
+-
+-void InstructionCodeGeneratorX86_64::VisitVecAvxSub(HVecAvxSub* instruction) {
+-  LocationSummary* locations = instruction->GetLocations();
+-  XmmRegister src1 = locations->InAt(0).AsFpuRegister<XmmRegister>();
+-  XmmRegister src2 = locations->InAt(1).AsFpuRegister<XmmRegister>();
+-  XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+-  switch (instruction->GetPackedType()) {
+-    case DataType::Type::kUint8:
+-    case DataType::Type::kInt8:
+-      DCHECK_EQ(16u, instruction->GetVectorLength());
+-      __ vpsubb(dst, src1, src2);
+-      break;
+-    case DataType::Type::kUint16:
+-    case DataType::Type::kInt16:
+-      DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ vpsubw(dst, src1, src2);
+-      break;
+-    case DataType::Type::kInt32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vpsubd(dst, src1, src2);
+-      break;
+-    case DataType::Type::kInt64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vpsubq(dst, src1, src2);
+-      break;
+-    case DataType::Type::kFloat32:
+-      DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ vsubps(dst, src1, src2);
+-      break;
+-    case DataType::Type::kFloat64:
+-      DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ vsubpd(dst, src1, src2);
+-      break;
+-    default:
+-      LOG(FATAL) << "Unsupported SIMD type";
+-      UNREACHABLE();
+-  }
+-}
+-
+ void LocationsBuilderX86_64::VisitVecSaturationSub(HVecSaturationSub* instruction) {
+   CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
+ }
+@@ -696,31 +624,37 @@ void InstructionCodeGeneratorX86_64::VisitVecSaturationSub(HVecSaturationSub* in
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecMul(HVecMul* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecMul(HVecMul* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kUint16:
+     case DataType::Type::kInt16:
+       DCHECK_EQ(8u, instruction->GetVectorLength());
+-      __ pmullw(dst, src);
++      cpu_has_avx ? __ vpmullw(dst, other_src, src) : __ pmullw(dst, src);
+       break;
+     case DataType::Type::kInt32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ pmulld(dst, src);
++      cpu_has_avx ? __ vpmulld(dst, other_src, src): __ pmulld(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ mulps(dst, src);
++      cpu_has_avx ? __ vmulps(dst, other_src, src) : __ mulps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ mulpd(dst, src);
++      cpu_has_avx ? __ vmulpd(dst, other_src, src) : __ mulpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -729,22 +663,28 @@ void InstructionCodeGeneratorX86_64::VisitVecMul(HVecMul* instruction) {
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecDiv(HVecDiv* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecDiv(HVecDiv* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ divps(dst, src);
++      cpu_has_avx ? __ vdivps(dst, other_src, src) : __ divps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ divpd(dst, src);
++      cpu_has_avx ? __ vdivpd(dst, other_src, src) : __ divpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+diff --git a/compiler/optimizing/code_generator_x86.cc b/compiler/optimizing/code_generator_x86.cc
+index ca1723b..c868ecf 100644
+--- a/compiler/optimizing/code_generator_x86.cc
++++ b/compiler/optimizing/code_generator_x86.cc
+@@ -8408,6 +8408,19 @@ void InstructionCodeGeneratorX86::VisitIntermediateAddress(HIntermediateAddress*
+   LOG(FATAL) << "Unreachable";
+ }
+ 
++bool LocationsBuilderX86::CpuHasAvxFeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX();
++}
++bool LocationsBuilderX86::CpuHasAvx2FeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX2();
++}
++bool InstructionCodeGeneratorX86::CpuHasAvxFeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX();
++}
++bool InstructionCodeGeneratorX86::CpuHasAvx2FeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX2();
++}
++
+ #undef __
+ 
+ }  // namespace x86
+diff --git a/compiler/optimizing/code_generator_x86.h b/compiler/optimizing/code_generator_x86.h
+index deeef88..2789b25 100644
+--- a/compiler/optimizing/code_generator_x86.h
++++ b/compiler/optimizing/code_generator_x86.h
+@@ -175,6 +175,8 @@ class LocationsBuilderX86 : public HGraphVisitor {
+   void HandleShift(HBinaryOperation* instruction);
+   void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info);
+   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
++  bool CpuHasAvxFeatureFlag();
++  bool CpuHasAvx2FeatureFlag();
+ 
+   CodeGeneratorX86* const codegen_;
+   InvokeDexCallingConventionVisitorX86 parameter_visitor_;
+@@ -307,6 +309,8 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
+                                    HBasicBlock* default_block);
+ 
+   void GenerateFPCompare(Location lhs, Location rhs, HInstruction* insn, bool is_double);
++  bool CpuHasAvxFeatureFlag();
++  bool CpuHasAvx2FeatureFlag();
+ 
+   X86Assembler* const assembler_;
+   CodeGeneratorX86* const codegen_;
+diff --git a/compiler/optimizing/code_generator_x86_64.cc b/compiler/optimizing/code_generator_x86_64.cc
+index 7c293b8..ecc22d8 100644
+--- a/compiler/optimizing/code_generator_x86_64.cc
++++ b/compiler/optimizing/code_generator_x86_64.cc
+@@ -7650,6 +7650,22 @@ void CodeGeneratorX86_64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots
+   }
+ }
+ 
++bool LocationsBuilderX86_64::CpuHasAvxFeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX();
++}
++
++bool LocationsBuilderX86_64::CpuHasAvx2FeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX2();
++}
++
++bool InstructionCodeGeneratorX86_64::CpuHasAvxFeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX();
++}
++
++bool InstructionCodeGeneratorX86_64::CpuHasAvx2FeatureFlag() {
++  return codegen_->GetInstructionSetFeatures().HasAVX2();
++}
++
+ #undef __
+ 
+ }  // namespace x86_64
+diff --git a/compiler/optimizing/code_generator_x86_64.h b/compiler/optimizing/code_generator_x86_64.h
+index f74e130..be9aea6 100644
+--- a/compiler/optimizing/code_generator_x86_64.h
++++ b/compiler/optimizing/code_generator_x86_64.h
+@@ -177,6 +177,8 @@ class LocationsBuilderX86_64 : public HGraphVisitor {
+   void HandleShift(HBinaryOperation* operation);
+   void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info);
+   void HandleFieldGet(HInstruction* instruction);
++  bool CpuHasAvxFeatureFlag();
++  bool CpuHasAvx2FeatureFlag();
+ 
+   CodeGeneratorX86_64* const codegen_;
+   InvokeDexCallingConventionVisitorX86_64 parameter_visitor_;
+@@ -287,6 +289,9 @@ class InstructionCodeGeneratorX86_64 : public InstructionCodeGenerator {
+ 
+   void HandleGoto(HInstruction* got, HBasicBlock* successor);
+ 
++  bool CpuHasAvxFeatureFlag();
++  bool CpuHasAvx2FeatureFlag();
++
+   X86_64Assembler* const assembler_;
+   CodeGeneratorX86_64* const codegen_;
+ 
+diff --git a/compiler/optimizing/loop_optimization.cc b/compiler/optimizing/loop_optimization.cc
+index c6e7560..9914127 100644
+--- a/compiler/optimizing/loop_optimization.cc
++++ b/compiler/optimizing/loop_optimization.cc
+@@ -353,9 +353,6 @@ static bool HasReductionFormat(HInstruction* reduction, HInstruction* phi) {
+ static HVecReduce::ReductionKind GetReductionKind(HVecOperation* reduction) {
+   if (reduction->IsVecAdd()  ||
+       reduction->IsVecSub() ||
+-      #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
+-      reduction->IsVecAvxSub() || reduction->IsVecAvxAdd() ||
+-      #endif
+       reduction->IsVecSADAccumulate() ||
+       reduction->IsVecDotProd()) {
+     return HVecReduce::kSum;
+@@ -1943,34 +1940,10 @@ void HLoopOptimization::GenerateVecOp(HInstruction* org,
+         new (global_allocator_) HVecCnv(global_allocator_, opa, type, vector_length_, dex_pc),
+         new (global_allocator_) HTypeConversion(org_type, opa, dex_pc));
+     case HInstruction::kAdd:
+-      #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
+-      if ((compiler_options_->GetInstructionSet() == InstructionSet::kX86 ||
+-           compiler_options_->GetInstructionSet() == InstructionSet::kX86_64) &&
+-           compiler_options_->GetInstructionSetFeatures()->AsX86InstructionSetFeatures()
+-               ->HasAVX2()) {
+-        GENERATE_VEC(
+-          new (global_allocator_) HVecAvxAdd(
+-                                      global_allocator_, opa, opb, type, vector_length_, dex_pc),
+-          new (global_allocator_) HAdd(org_type, opa, opb, dex_pc));
+-        UNREACHABLE();  // GENERATE_VEC ends with a "break".
+-      }
+-      #endif
+       GENERATE_VEC(
+         new (global_allocator_) HVecAdd(global_allocator_, opa, opb, type, vector_length_, dex_pc),
+         new (global_allocator_) HAdd(org_type, opa, opb, dex_pc));
+     case HInstruction::kSub:
+-      #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
+-      if ((compiler_options_->GetInstructionSet() == InstructionSet::kX86 ||
+-           compiler_options_->GetInstructionSet() == InstructionSet::kX86_64) &&
+-           compiler_options_->GetInstructionSetFeatures()->AsX86InstructionSetFeatures()
+-               ->HasAVX2()) {
+-        GENERATE_VEC(
+-          new (global_allocator_) HVecAvxSub(
+-                                      global_allocator_, opa, opb, type, vector_length_, dex_pc),
+-          new (global_allocator_) HSub(org_type, opa, opb, dex_pc));
+-        UNREACHABLE();  // GENERATE_VEC ends with a "break".
+-      }
+-      #endif
+       GENERATE_VEC(
+         new (global_allocator_) HVecSub(global_allocator_, opa, opb, type, vector_length_, dex_pc),
+         new (global_allocator_) HSub(org_type, opa, opb, dex_pc));
+diff --git a/compiler/optimizing/nodes.h b/compiler/optimizing/nodes.h
+index 8ae9d0b..aa090cc 100644
+--- a/compiler/optimizing/nodes.h
++++ b/compiler/optimizing/nodes.h
+@@ -1521,9 +1521,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
+ #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
+ #define FOR_EACH_CONCRETE_INSTRUCTION_X86_COMMON(M)                     \
+   M(X86AndNot, Instruction)                                             \
+-  M(X86MaskOrResetLeastSetBit, Instruction)                             \
+-  M(VecAvxSub, VecOperation)                                            \
+-  M(VecAvxAdd, VecOperation)
++  M(X86MaskOrResetLeastSetBit, Instruction)
+ #else
+ #define FOR_EACH_CONCRETE_INSTRUCTION_X86_COMMON(M)
+ #endif
+@@ -7796,7 +7794,6 @@ class HIntermediateAddress final : public HExpression<2> {
+ #endif
+ #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
+ #include "nodes_x86.h"
+-#include "nodes_vector_x86.h"
+ #endif
+ 
+ namespace art {
+diff --git a/compiler/optimizing/nodes_vector_x86.h b/compiler/optimizing/nodes_vector_x86.h
+deleted file mode 100644
+index a8f576f..0000000
+--- a/compiler/optimizing/nodes_vector_x86.h
++++ /dev/null
+@@ -1,84 +0,0 @@
+-/*
+- * Copyright (C) 2018 The Android Open Source Project
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-#ifndef ART_COMPILER_OPTIMIZING_NODES_VECTOR_X86_H_
+-#define ART_COMPILER_OPTIMIZING_NODES_VECTOR_X86_H_
+-
+-#include "nodes_vector.h"
+-
+-namespace art {
+-
+-class HVecAvxAdd final : public HVecOperation {
+- public:
+-  HVecAvxAdd(ArenaAllocator* allocator,
+-             HInstruction* src1,
+-             HInstruction* src2,
+-             DataType::Type packed_type,
+-             size_t vector_length,
+-             uint32_t dex_pc)
+-      : HVecOperation(kVecAvxAdd,
+-                      allocator,
+-                      packed_type,
+-                      SideEffects::None(),
+-                      /* number_of_inputs */ 2,
+-                      vector_length,
+-                      dex_pc) {
+-    DCHECK(HasConsistentPackedTypes(src1, packed_type));
+-    DCHECK(HasConsistentPackedTypes(src2, packed_type));
+-    SetRawInputAt(0, src1);
+-    SetRawInputAt(1, src2);
+-  }
+-
+-  bool CanBeMoved() const override { return true; }
+-
+-  DECLARE_INSTRUCTION(VecAvxAdd);
+-
+- protected:
+-  DEFAULT_COPY_CONSTRUCTOR(VecAvxAdd);
+-};
+-
+-class HVecAvxSub final : public HVecOperation {
+- public:
+-  HVecAvxSub(ArenaAllocator* allocator,
+-             HInstruction* src1,
+-             HInstruction* src2,
+-             DataType::Type packed_type,
+-             size_t vector_length,
+-             uint32_t dex_pc)
+-      : HVecOperation(kVecAvxSub,
+-                      allocator,
+-                      packed_type,
+-                      SideEffects::None(),
+-                      /* number_of_inputs */ 2,
+-                      vector_length,
+-                      dex_pc) {
+-    DCHECK(HasConsistentPackedTypes(src1, packed_type));
+-    DCHECK(HasConsistentPackedTypes(src2, packed_type));
+-    SetRawInputAt(0, src1);
+-    SetRawInputAt(1, src2);
+-  }
+-
+-  bool CanBeMoved() const override { return true; }
+-
+-  DECLARE_INSTRUCTION(VecAvxSub);
+-
+- protected:
+-  DEFAULT_COPY_CONSTRUCTOR(VecAvxSub);
+-};
+-
+-}  // namespace art
+-
+-#endif  // ART_COMPILER_OPTIMIZING_NODES_VECTOR_X86_H_
+diff --git a/compiler/utils/x86/assembler_x86.cc b/compiler/utils/x86/assembler_x86.cc
+index 0a91381..cd38ac0 100644
+--- a/compiler/utils/x86/assembler_x86.cc
++++ b/compiler/utils/x86/assembler_x86.cc
+@@ -745,6 +745,20 @@ void X86Assembler::mulps(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++void X86Assembler::vmulps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_NONE);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(0x59);
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::divps(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -754,6 +768,22 @@ void X86Assembler::divps(XmmRegister dst, XmmRegister src) {
+ }
+ 
+ 
++void X86Assembler::vdivps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_NONE);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(0x5E);
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++
+ void X86Assembler::movapd(XmmRegister dst, XmmRegister src) {
+   if (CpuHasAVXorAVX2FeatureFlag()) {
+     vmovapd(dst, src);
+@@ -1113,6 +1143,20 @@ void X86Assembler::mulpd(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++void X86Assembler::vmulpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(0x59);
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::divpd(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -1122,6 +1166,20 @@ void X86Assembler::divpd(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++void X86Assembler::vdivpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(0x5E);
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::movdqa(XmmRegister dst, XmmRegister src) {
+   if (CpuHasAVXorAVX2FeatureFlag()) {
+@@ -1425,6 +1483,40 @@ void X86Assembler::pmulld(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++void X86Assembler::vpmulld(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ false);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 /*X=*/ false,
++                                 /*B=*/ false,
++                                 SET_VEX_M_0F_38);
++  ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(ByteTwo);
++  EmitUint8(0x40);
++  EmitRegisterOperand(dst, src2);
++}
++
++void X86Assembler::vpmullw(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(0xD5);
++  EmitRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::paddq(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+diff --git a/compiler/utils/x86/assembler_x86.h b/compiler/utils/x86/assembler_x86.h
+index 17039f0..dce546e 100644
+--- a/compiler/utils/x86/assembler_x86.h
++++ b/compiler/utils/x86/assembler_x86.h
+@@ -417,6 +417,11 @@ class X86Assembler final : public Assembler {
+   void mulps(XmmRegister dst, XmmRegister src);
+   void divps(XmmRegister dst, XmmRegister src);
+ 
++  void vmulps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vmulpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vdivps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vdivpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++
+   void vaddps(XmmRegister dst, XmmRegister add_left, XmmRegister add_right);
+   void vsubps(XmmRegister dst, XmmRegister add_left, XmmRegister add_right);
+   void vsubpd(XmmRegister dst, XmmRegister add_left, XmmRegister add_right);
+@@ -476,6 +481,7 @@ class X86Assembler final : public Assembler {
+   void paddw(XmmRegister dst, XmmRegister src);
+   void psubw(XmmRegister dst, XmmRegister src);
+   void pmullw(XmmRegister dst, XmmRegister src);
++  void vpmullw(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void vpsubb(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+   void vpsubw(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+@@ -485,6 +491,8 @@ class X86Assembler final : public Assembler {
+   void psubd(XmmRegister dst, XmmRegister src);
+   void pmulld(XmmRegister dst, XmmRegister src);
+ 
++  void vpmulld(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++
+   void vpaddd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void paddq(XmmRegister dst, XmmRegister src);
+diff --git a/compiler/utils/x86/assembler_x86_test.cc b/compiler/utils/x86/assembler_x86_test.cc
+index 703e468..23c67e1 100644
+--- a/compiler/utils/x86/assembler_x86_test.cc
++++ b/compiler/utils/x86/assembler_x86_test.cc
+@@ -617,7 +617,7 @@ TEST_F(AssemblerX86Test, AddPS) {
+   DriverStr(RepeatFF(&x86::X86Assembler::addps, "addps %{reg2}, %{reg1}"), "addps");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VAddps) {
++TEST_F(AssemblerX86AVXTest, VAddPS) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vaddps, "vaddps %{reg3}, %{reg2}, %{reg1}"), "vaddps");
+ }
+ 
+@@ -633,41 +633,55 @@ TEST_F(AssemblerX86Test, SubPS) {
+   DriverStr(RepeatFF(&x86::X86Assembler::subps, "subps %{reg2}, %{reg1}"), "subps");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VSubps) {
++TEST_F(AssemblerX86AVXTest, VSubPS) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vsubps, "vsubps %{reg3},%{reg2}, %{reg1}"), "vsubps");
+ }
+ 
+-
+ TEST_F(AssemblerX86Test, SubPD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::subpd, "subpd %{reg2}, %{reg1}"), "subpd");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VSubpd) {
++TEST_F(AssemblerX86AVXTest, VSubPD) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vsubpd, "vsubpd %{reg3}, %{reg2}, %{reg1}"), "vsubpd");
+ }
+ 
+-
+ TEST_F(AssemblerX86Test, MulPS) {
+   DriverStr(RepeatFF(&x86::X86Assembler::mulps, "mulps %{reg2}, %{reg1}"), "mulps");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VMulPS) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vmulps, "vmulps %{reg3}, %{reg2}, %{reg1}"), "vmulps");
++}
++
+ TEST_F(AssemblerX86Test, MulPD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::mulpd, "mulpd %{reg2}, %{reg1}"), "mulpd");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VMulPD) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vmulpd, "vmulpd %{reg3}, %{reg2}, %{reg1}"), "vmulpd");
++}
++
+ TEST_F(AssemblerX86Test, DivPS) {
+   DriverStr(RepeatFF(&x86::X86Assembler::divps, "divps %{reg2}, %{reg1}"), "divps");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VDivPS) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vdivps, "vdivps %{reg3}, %{reg2}, %{reg1}"), "vdivps");
++}
++
+ TEST_F(AssemblerX86Test, DivPD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::divpd, "divpd %{reg2}, %{reg1}"), "divpd");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VDivPD) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vdivpd, "vdivpd %{reg3}, %{reg2}, %{reg1}"), "vdivpd");
++}
++
+ TEST_F(AssemblerX86Test, PAddB) {
+   DriverStr(RepeatFF(&x86::X86Assembler::paddb, "paddb %{reg2}, %{reg1}"), "paddb");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPaddb) {
++TEST_F(AssemblerX86AVXTest, VPaddB) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpaddb, "vpaddb %{reg3}, %{reg2}, %{reg1}"), "vpaddb");
+ }
+ 
+@@ -675,7 +689,7 @@ TEST_F(AssemblerX86Test, PSubB) {
+   DriverStr(RepeatFF(&x86::X86Assembler::psubb, "psubb %{reg2}, %{reg1}"), "psubb");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPsubb) {
++TEST_F(AssemblerX86AVXTest, VPsubB) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpsubb, "vpsubb %{reg3},%{reg2}, %{reg1}"), "vpsubb");
+ }
+ 
+@@ -683,7 +697,7 @@ TEST_F(AssemblerX86Test, PAddW) {
+   DriverStr(RepeatFF(&x86::X86Assembler::paddw, "paddw %{reg2}, %{reg1}"), "paddw");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPaddw) {
++TEST_F(AssemblerX86AVXTest, VPaddW) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpaddw, "vpaddw %{reg3}, %{reg2}, %{reg1}"), "vpaddw");
+ }
+ 
+@@ -691,7 +705,7 @@ TEST_F(AssemblerX86Test, PSubW) {
+   DriverStr(RepeatFF(&x86::X86Assembler::psubw, "psubw %{reg2}, %{reg1}"), "psubw");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPsubw) {
++TEST_F(AssemblerX86AVXTest, VPsubW) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpsubw, "vpsubw %{reg3}, %{reg2}, %{reg1}"), "vpsubw");
+ }
+ 
+@@ -699,11 +713,15 @@ TEST_F(AssemblerX86Test, PMullW) {
+   DriverStr(RepeatFF(&x86::X86Assembler::pmullw, "pmullw %{reg2}, %{reg1}"), "pmullw");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VPMullW) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vpmullw, "vpmullw %{reg3}, %{reg2}, %{reg1}"), "vpmullw");
++}
++
+ TEST_F(AssemblerX86Test, PAddD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::paddd, "paddd %{reg2}, %{reg1}"), "paddd");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPaddd) {
++TEST_F(AssemblerX86AVXTest, VPaddD) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpaddd, "vpaddd %{reg3}, %{reg2}, %{reg1}"), "vpaddd");
+ }
+ 
+@@ -711,7 +729,7 @@ TEST_F(AssemblerX86Test, PSubD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::psubd, "psubd %{reg2}, %{reg1}"), "psubd");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPsubd) {
++TEST_F(AssemblerX86AVXTest, VPsubD) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpsubd, "vpsubd %{reg3}, %{reg2}, %{reg1}"), "vpsubd");
+ }
+ 
+@@ -719,11 +737,15 @@ TEST_F(AssemblerX86Test, PMullD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::pmulld, "pmulld %{reg2}, %{reg1}"), "pmulld");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VPMullD) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vpmulld, "vpmulld %{reg3}, %{reg2}, %{reg1}"), "vpmulld");
++}
++
+ TEST_F(AssemblerX86Test, PAddQ) {
+   DriverStr(RepeatFF(&x86::X86Assembler::paddq, "paddq %{reg2}, %{reg1}"), "paddq");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPaddq) {
++TEST_F(AssemblerX86AVXTest, VPaddQ) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpaddq, "vpaddq %{reg3}, %{reg2}, %{reg1}"), "vpaddq");
+ }
+ 
+@@ -731,7 +753,7 @@ TEST_F(AssemblerX86Test, PSubQ) {
+   DriverStr(RepeatFF(&x86::X86Assembler::psubq, "psubq %{reg2}, %{reg1}"), "psubq");
+ }
+ 
+-TEST_F(AssemblerX86AVXTest, VPsubq) {
++TEST_F(AssemblerX86AVXTest, VPsubQ) {
+   DriverStr(RepeatFFF(&x86::X86Assembler::vpsubq, "vpsubq %{reg3}, %{reg2}, %{reg1}"), "vpsubq");
+ }
+ 
+diff --git a/compiler/utils/x86_64/assembler_x86_64.cc b/compiler/utils/x86_64/assembler_x86_64.cc
+index 19f1eb6..1cdb959 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.cc
++++ b/compiler/utils/x86_64/assembler_x86_64.cc
+@@ -919,6 +919,34 @@ void X86_64Assembler::mulps(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++void X86_64Assembler::vmulps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x59);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
+ 
+ void X86_64Assembler::divps(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -928,6 +956,34 @@ void X86_64Assembler::divps(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++void X86_64Assembler::vdivps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x5E);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
+ 
+ void X86_64Assembler::flds(const Address& src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -1423,6 +1479,34 @@ void X86_64Assembler::mulpd(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++void X86_64Assembler::vmulpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x59);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
+ 
+ void X86_64Assembler::divpd(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -1434,6 +1518,36 @@ void X86_64Assembler::divpd(XmmRegister dst, XmmRegister src) {
+ }
+ 
+ 
++void X86_64Assembler::vdivpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x5E);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++
+ void X86_64Assembler::movdqa(XmmRegister dst, XmmRegister src) {
+   if (CpuHasAVXorAVX2FeatureFlag()) {
+     vmovdqa(dst, src);
+@@ -1878,6 +1992,34 @@ void X86_64Assembler::pmullw(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++void X86_64Assembler::vpmullw(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0xD5);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
+ 
+ void X86_64Assembler::paddd(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -1937,6 +2079,24 @@ void X86_64Assembler::pmulld(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++void X86_64Assembler::vpmulld(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form*/ false);
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F_38);
++  ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  EmitUint8(ByteTwo);
++  EmitUint8(0x40);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
+ 
+ void X86_64Assembler::paddq(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+diff --git a/compiler/utils/x86_64/assembler_x86_64.h b/compiler/utils/x86_64/assembler_x86_64.h
+index 8fc69f6..100707a 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.h
++++ b/compiler/utils/x86_64/assembler_x86_64.h
+@@ -452,6 +452,11 @@ class X86_64Assembler final : public Assembler {
+   void mulps(XmmRegister dst, XmmRegister src);
+   void divps(XmmRegister dst, XmmRegister src);
+ 
++  void vmulps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vmulpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vdivps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vdivpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++
+   void vaddps(XmmRegister dst, XmmRegister add_left, XmmRegister add_right);
+   void vsubps(XmmRegister dst, XmmRegister add_left, XmmRegister add_right);
+   void vsubpd(XmmRegister dst, XmmRegister add_left, XmmRegister add_right);
+@@ -508,6 +513,7 @@ class X86_64Assembler final : public Assembler {
+   void paddw(XmmRegister dst, XmmRegister src);
+   void psubw(XmmRegister dst, XmmRegister src);
+   void pmullw(XmmRegister dst, XmmRegister src);
++  void vpmullw(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void vpsubb(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+   void vpsubw(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+@@ -516,6 +522,7 @@ class X86_64Assembler final : public Assembler {
+   void paddd(XmmRegister dst, XmmRegister src);
+   void psubd(XmmRegister dst, XmmRegister src);
+   void pmulld(XmmRegister dst, XmmRegister src);
++  void vpmulld(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void vpaddd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+diff --git a/compiler/utils/x86_64/assembler_x86_64_test.cc b/compiler/utils/x86_64/assembler_x86_64_test.cc
+index 947abab..4c70853 100644
+--- a/compiler/utils/x86_64/assembler_x86_64_test.cc
++++ b/compiler/utils/x86_64/assembler_x86_64_test.cc
+@@ -1316,10 +1316,20 @@ TEST_F(AssemblerX86_64Test, Mulps) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::mulps, "mulps %{reg2}, %{reg1}"), "mulps");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VMulps) {
++  DriverStr(
++      RepeatFFF(&x86_64::X86_64Assembler::vmulps, "vmulps %{reg3}, %{reg2}, %{reg1}"), "vmulps");
++}
++
+ TEST_F(AssemblerX86_64Test, Mulpd) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::mulpd, "mulpd %{reg2}, %{reg1}"), "mulpd");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VMulpd) {
++  DriverStr(
++      RepeatFFF(&x86_64::X86_64Assembler::vmulpd, "vmulpd %{reg3}, %{reg2}, %{reg1}"), "vmulpd");
++}
++
+ TEST_F(AssemblerX86_64Test, Divss) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::divss, "divss %{reg2}, %{reg1}"), "divss");
+ }
+@@ -1332,10 +1342,20 @@ TEST_F(AssemblerX86_64Test, Divps) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::divps, "divps %{reg2}, %{reg1}"), "divps");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VDivps) {
++  DriverStr(
++      RepeatFFF(&x86_64::X86_64Assembler::vdivps, "vdivps %{reg3}, %{reg2}, %{reg1}"), "vdivps");
++}
++
+ TEST_F(AssemblerX86_64Test, Divpd) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::divpd, "divpd %{reg2}, %{reg1}"), "divpd");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VDivpd) {
++  DriverStr(
++      RepeatFFF(&x86_64::X86_64Assembler::vdivpd, "vdivpd %{reg3}, %{reg2}, %{reg1}"), "vdivpd");
++}
++
+ TEST_F(AssemblerX86_64Test, Paddb) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::paddb, "paddb %{reg2}, %{reg1}"), "paddb");
+ }
+@@ -1368,7 +1388,6 @@ TEST_F(AssemblerX86_64AVXTest, VPaddw) {
+       RepeatFFF(&x86_64::X86_64Assembler::vpaddw, "vpaddw %{reg3}, %{reg2}, %{reg1}"), "vpaddw");
+ }
+ 
+-
+ TEST_F(AssemblerX86_64Test, Psubw) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::psubw, "psubw %{reg2}, %{reg1}"), "psubw");
+ }
+@@ -1377,6 +1396,11 @@ TEST_F(AssemblerX86_64Test, Pmullw) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pmullw, "pmullw %{reg2}, %{reg1}"), "pmullw");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VPmullw) {
++  DriverStr(
++      RepeatFFF(&x86_64::X86_64Assembler::vpmullw, "vpmullw %{reg3}, %{reg2}, %{reg1}"), "vpmullw");
++}
++
+ TEST_F(AssemblerX86_64Test, Paddd) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::paddd, "paddd %{reg2}, %{reg1}"), "paddd");
+ }
+@@ -1399,6 +1423,11 @@ TEST_F(AssemblerX86_64Test, Pmulld) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pmulld, "pmulld %{reg2}, %{reg1}"), "pmulld");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VPmulld) {
++  DriverStr(
++      RepeatFFF(&x86_64::X86_64Assembler::vpmulld, "vpmulld %{reg3}, %{reg2}, %{reg1}"), "vpmulld");
++}
++
+ TEST_F(AssemblerX86_64Test, Paddq) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::paddq, "paddq %{reg2}, %{reg1}"), "paddq");
+ }
+diff --git a/compiler/utils/x86_64/constants_x86_64.h b/compiler/utils/x86_64/constants_x86_64.h
+index b02e246..5335398 100644
+--- a/compiler/utils/x86_64/constants_x86_64.h
++++ b/compiler/utils/x86_64/constants_x86_64.h
+@@ -59,6 +59,9 @@ class XmmRegister {
+   constexpr bool NeedsRex() const {
+     return reg_ > 7;
+   }
++  bool operator==(XmmRegister& other) {
++    return reg_ == other.reg_;
++  }
+  private:
+   const FloatRegister reg_;
+ };
+-- 
+1.9.1
+
