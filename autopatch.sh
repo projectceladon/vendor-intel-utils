@@ -21,6 +21,9 @@ private_patch_dir_bsp="$private_utils_dir/bsp_diff"
 vertical_utils_dir="$top_dir/vendor/intel/utils_vertical"
 vertical_patch_dir_aosp="$vertical_utils_dir/aosp_diff"
 vertical_patch_dir_bsp="$vertical_utils_dir/bsp_diff"
+vertical_utils_prod_dir="$top_dir/vendor/intel/utils_vertical_prod"
+vertical_prod_patch_dir_aosp="$vertical_utils_prod_dir/aosp_diff"
+vertical_prod_patch_dir_bsp="$vertical_utils_prod_dir/bsp_diff"
 private_vertical_utils_dir="$top_dir/vendor/intel/utils_vertical_priv"
 private_vertical_patch_dir_aosp="$private_vertical_utils_dir/aosp_diff"
 private_vertical_patch_dir_bsp="$private_vertical_utils_dir/bsp_diff"
@@ -123,6 +126,18 @@ if [[ $# -gt 1 || $# -lt 0 ]]; then
 	exit -1
 fi
 
+if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+    if [[ -e ${patch_dir_aosp}/caas/include_preliminary ]];then
+        echo -e "\nApply utils/aosp_diff/preliminary Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+        fpnat "$patch_dir_aosp/preliminary"
+    fi
+  
+    if [[ -e ${patch_dir_aosp}/caas ]] && [[ -d ${patch_dir_aosp}/caas ]];then
+        echo -e "\nApply utils/aosp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+        fpnat "${patch_dir_aosp}/caas"
+    fi
+fi
+
 if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
     echo -e "\nApply utils/aosp_diff/preliminary patches:"
     fpnat "$patch_dir_aosp/preliminary"
@@ -133,10 +148,23 @@ if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_aosp}/${TAR
         fpnat "${patch_dir_aosp}/${TARGET_PRODUCT}"
 fi
 
+if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+    if [[ -e ${patch_dir_bsp}/caas/include_common ]];then
+        echo -e "\nApply utils/bsp_diff/common Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+        fpnat "${patch_dir_bsp}/common"
+    fi
+	
+    if [[ -e ${patch_dir_bsp}/caas ]] && [[ -d ${patch_dir_bsp}/caas ]];then
+        echo -e "\nApply utils/bsp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+        fpnat "${patch_dir_bsp}/caas"
+    fi
+fi
+
 if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
     echo -e "\nApply utils/bsp_diff/common Patches:"
     fpnat "${patch_dir_bsp}/common"
 fi
+
 
 if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_bsp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils/bsp_diff Target ${TARGET_PRODUCT} Patches:"
@@ -164,14 +192,38 @@ if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
         echo "Embargoed Patches Found"
         echo "============================="
 
+    if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+        if [[ -e ${private_patch_dir_aosp}/caas/include_preliminary ]];then
+            echo -e "\nApply utils_priv/aosp_diff/preliminary Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${private_patch_dir_aosp}/preliminary"
+        fi
+    		
+        if [[ -e ${private_patch_dir_aosp}/caas ]] && [[ -d ${private_patch_dir_aosp}/caas ]];then
+            echo -e "\nApply utils_priv/aosp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${private_patch_dir_aosp}/caas"
+        fi
+    fi
+
     if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
         echo -e "\nApply utils_priv/aosp_diff/preliminary Patches:"
         fpnat "${private_patch_dir_aosp}/preliminary"
     fi
-
+    
     if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils_priv/aosp_diff Target ${TARGET_PRODUCT} Patches:"
         fpnat "${private_patch_dir_aosp}/${TARGET_PRODUCT}"
+    fi
+	
+    if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+        if [[ -e ${private_patch_dir_bsp}/caas/include_common ]];then
+            echo -e "\nApply utils_priv/bsp_diff/common Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${private_patch_dir_bsp}/common"
+        fi
+    
+	if [[ -e ${private_patch_dir_bsp}/caas ]] && [[ -d ${private_patch_dir_bsp}/caas ]];then
+            echo -e "\nApply utils_priv/bsp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${private_patch_dir_bsp}/caas"
+        fi
     fi
 
     if [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
@@ -206,6 +258,18 @@ if [[ -e ${vertical_utils_dir} ]] && [[ -d ${vertical_utils_dir} ]];then
         echo "Vertical Patches Found"
         echo "============================="
 
+    if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+        if [[ -e ${vertical_patch_dir_aosp}/caas/include_preliminary ]];then
+            echo -e "\nApply utils_vertical/aosp_diff/preliminary Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${vertical_patch_dir_aosp}/preliminary"
+        fi
+    
+        if [[ -e ${vertical_patch_dir_aosp}/caas ]] && [[ -d ${vertical_patch_dir_aosp}/caas ]];then
+            echo -e "\nApply utils_vertical/aosp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${vertical_patch_dir_aosp}/caas"
+        fi
+    fi
+    
     if [[ -e ${vertical_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
         echo -e "\nApply utils_vertical/aosp_diff/preliminary Patches:"
         fpnat "${vertical_patch_dir_aosp}/preliminary"
@@ -216,6 +280,18 @@ if [[ -e ${vertical_utils_dir} ]] && [[ -d ${vertical_utils_dir} ]];then
         fpnat "${vertical_patch_dir_aosp}/${TARGET_PRODUCT}"
     fi
 
+    if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+        if [[ -e ${vertical_patch_dir_bsp}/caas/include_common ]];then
+            echo -e "\nApply utils_vertical/bsp_diff/common Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${vertical_patch_dir_bsp}/common"
+        fi
+    
+        if [[ -e ${vertical_patch_dir_bsp}/caas ]] && [[ -d ${vertical_patch_dir_bsp}/caas ]];then
+             echo -e "\nApply utils_vertical/bsp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+       	     fpnat "${vertical_patch_dir_bsp}/caas"
+        fi
+    fi
+    
     if [[ -e ${vertical_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
         echo -e "\nApply utils_vertical/bsp_diff/common Patches:"
         fpnat "${vertical_patch_dir_bsp}/common"
@@ -248,6 +324,18 @@ if [[ -e ${private_vertical_utils_dir} ]] && [[ -d ${private_vertical_utils_dir}
         echo "Vertical Embargoed Patches Found"
         echo "============================="
 
+    if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+        if [[ -e ${private_vertical_patch_dir_aosp}/caas/include_preliminary ]];then
+            echo -e "\nApply private_utils_vertical/aosp_diff/preliminary Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${private_vertical_patch_dir_aosp}/preliminary"
+        fi
+    
+        if [[ -e ${private_vertical_patch_dir_aosp}/caas ]] && [[ -d ${private_vertical_patch_dir_aosp}/caas ]];then
+            echo -e "\nApply private_utils_vertical/aosp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${private_vertical_patch_dir_aosp}/caas"
+        fi
+    fi
+    
     if [[ -e ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
         echo -e "\nApply private_utils_vertical/aosp_diff/preliminary Patches:"
         fpnat "${private_vertical_patch_dir_aosp}/preliminary"
@@ -258,6 +346,18 @@ if [[ -e ${private_vertical_utils_dir} ]] && [[ -d ${private_vertical_utils_dir}
         fpnat "${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT}"
     fi
 
+    if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+        if [[ -e ${private_vertical_patch_dir_bsp}/caas/include_common ]];then
+            echo -e "\nApply private_utils_vertical/bsp_diff/common Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+            fpnat "${private_vertical_patch_dir_bsp}/common"
+        fi
+    
+        if [[ -e ${private_vertical_patch_dir_bsp}/caas ]] && [[ -d ${private_vertical_patch_dir_bsp}/caas ]];then
+            echo -e "\nApply private_utils_vertical/bsp_diff/caas Patches: for TARGET_PRODUCT: $TARGET_PRODUCT"
+       	    fpnat "${private_vertical_patch_dir_bsp}/caas"
+        fi
+    fi
+    
     if [[ -e ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
         echo -e "\nApply private_utils_vertical/bsp_diff/common Patches:"
         fpnat "${private_vertical_patch_dir_bsp}/common"
@@ -281,5 +381,49 @@ if [[ -e ${private_vertical_utils_dir} ]] && [[ -d ${private_vertical_utils_dir}
       if [ -f "$top_dir/vendor/intel/utils_vertical_priv/Android.mk" ]; then
               sed -i '/^/d' $top_dir/vendor/intel/utils_vertical_priv/Android.mk
       fi
+    fi
+fi
+
+# Apply Vertical Prod  patches if exist
+if [[ "$TARGET_PRODUCT" == "caas_tpy" ]]; then
+    if [[ -e ${vertical_utils_prod_dir} ]] && [[ -d ${vertical_utils_prod_dir} ]];then
+        echo -e "\n============================="
+        echo "Vertical Prod Patches Found"
+        echo "============================="
+
+        if [[ -e ${vertical_prod_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
+            echo -e "\nApply utils_vertical_prod/aosp_diff/preliminary Patches:"
+            fpnat "${vertical_prod_patch_dir_aosp}/preliminary"
+        fi
+
+        if [[ -e ${vertical_prod_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${vertical_prod_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
+            echo -e "\nApply utils_vertical_prod/aosp_diff Target ${TARGET_PRODUCT} Patches:"
+            fpnat "${vertical_prod_patch_dir_aosp}/${TARGET_PRODUCT}"
+        fi
+
+        if [[ -e ${vertical_prod_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
+            echo -e "\nApply utils_vertical_prod/bsp_diff/common Patches:"
+            fpnat "${vertical_prod_patch_dir_bsp}/common"
+        fi
+
+        if [[ -e ${vertical_prod_patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${vertical_prod_patch_dir_bsp}/${TARGET_PRODUCT} ]];then
+            echo -e "\nApply utils_vertical_prod/bsp_diff Target ${TARGET_PRODUCT} Patches:"
+            fpnat "${vertical_prod_patch_dir_bsp}/${TARGET_PRODUCT}"
+        fi
+
+        if [[ "$conflict" == "y" ]]; then
+            echo -e "\n\t\tALERT : Conflicts Observed while patch application !!           "
+            for i in $conflict_list ; do echo $i; done | sort -u
+            echo -e "\n\t\tError: Please resolve Conflict(s) and re-run lunch..."
+            echo '$(error "Conflicts seen while applying lunch patches !! Resolve and re-trigger")' > $top_dir/vendor/intel/utils_vertical_prod/Android.mk
+        else
+            echo -e "\n\t\tSUCCESS : All patches applied SUCCESSFULLY in `basename ${vertical_prod_patch_dir_aosp}` and `basename ${vertical_prod_patch_dir_bsp}`"
+            if [[ "$applied_already" == "y" ]]; then
+                echo -e "\n\t\tINFO : SOME PATCHES ARE APPLIED ALREADY  !!"
+            fi
+	    if [ -f "$top_dir/vendor/intel/utils_vertical_prod/Android.mk" ]; then
+                sed -i '/^/d' $top_dir/vendor/intel/utils_vertical_prod/Android.mk
+            fi
+        fi
     fi
 fi
