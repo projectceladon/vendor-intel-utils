@@ -1,0 +1,153 @@
+From 30ff53091f2e16195bb79535b1bc8a13b1fb3585 Mon Sep 17 00:00:00 2001
+From: "Chen, Yu" <yu.y.chen@intel.com>
+Date: Sun, 11 Oct 2020 10:38:22 +0800
+Subject: [PATCH] ANDROID: Incremental fs: Support xattrs
+
+---
+ fs/incfs/data_mgmt.c |  2 ++
+ fs/incfs/data_mgmt.h |  6 ++++
+ fs/incfs/vfs.c       | 79 ++++++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 85 insertions(+), 2 deletions(-)
+
+diff --git a/fs/incfs/data_mgmt.c b/fs/incfs/data_mgmt.c
+index 109329e0a180..91a81a571d51 100644
+--- a/fs/incfs/data_mgmt.c
++++ b/fs/incfs/data_mgmt.c
+@@ -68,6 +68,8 @@ void incfs_free_mount_info(struct mount_info *mi)
+ 	mutex_destroy(&mi->mi_pending_reads_mutex);
+ 	put_cred(mi->mi_owner);
+ 	kfree(mi->mi_log.rl_ring_buf);
++	kfree(mi->log_xattr);
++	kfree(mi->pending_read_xattr);
+ 	kfree(mi);
+ }
+ 
+diff --git a/fs/incfs/data_mgmt.h b/fs/incfs/data_mgmt.h
+index 82ccab3be4bb..cfc29f9c90b8 100644
+--- a/fs/incfs/data_mgmt.h
++++ b/fs/incfs/data_mgmt.h
+@@ -105,6 +105,12 @@ struct mount_info {
+ 
+ 	/* Temporary buffer for read logger. */
+ 	struct read_log mi_log;
++
++ 	void *log_xattr;
++ 	size_t log_xattr_size;
++ 
++ 	void *pending_read_xattr;
++ 	size_t pending_read_xattr_size;
+ };
+ 
+ struct data_file_block {
+diff --git a/fs/incfs/vfs.c b/fs/incfs/vfs.c
+index b79621d89375..7c6624f3e4d9 100644
+--- a/fs/incfs/vfs.c
++++ b/fs/incfs/vfs.c
+@@ -74,6 +74,10 @@ static void evict_inode(struct inode *inode);
+ 
+ static ssize_t incfs_getxattr(struct dentry *d, const char *name,
+ 			void *value, size_t size);
++
++static ssize_t incfs_setxattr(struct dentry *d, const char *name,
++			const void *value, size_t size, int flags);
++
+ static ssize_t incfs_listxattr(struct dentry *d, char *list, size_t size);
+ 
+ static int show_options(struct seq_file *, struct dentry *);
+@@ -169,9 +173,19 @@ static int incfs_handler_getxattr(const struct xattr_handler *xh,
+ 	return incfs_getxattr(d, name, buffer, size);
+ }
+ 
++static int incfs_handler_setxattr(const struct xattr_handler *xh,
++				  struct dentry *d, struct inode *inode,
++ 				  const char *name, const void *buffer,
++ 				  size_t size, int flags)
++{
++ 	return incfs_setxattr(d, name, buffer, size, flags);
++}
++ 
++
+ static const struct xattr_handler incfs_xattr_handler = {
+ 	.prefix = "",	/* AKA all attributes */
+ 	.get = incfs_handler_getxattr,
++	.set = incfs_handler_setxattr,
+ };
+ 
+ const struct xattr_handler *incfs_xattr_ops[] = {
+@@ -2019,10 +2033,71 @@ static ssize_t incfs_getxattr(struct dentry *d, const char *name,
+ {
+ 	struct dentry_info *di = get_incfs_dentry(d);
+ 
+-	if (!di || !di->backing_path.dentry)
++ 	struct mount_info *mi = get_mount_info(d->d_sb);
++ 	char *stored_value;
++ 	size_t stored_size;
++
++	if (di && di->backing_path.dentry)
++ 		return vfs_getxattr(di->backing_path.dentry, name, value, size);
++ 
++ 	if (strcmp(name, "security.selinux"))
++ 		return -ENODATA;
++ 
++ 	if (!strcmp(d->d_iname, INCFS_PENDING_READS_FILENAME)) {
++ 		stored_value = mi->pending_read_xattr;
++ 		stored_size = mi->pending_read_xattr_size;
++ 	} else if (!strcmp(d->d_iname, INCFS_LOG_FILENAME)) {
++ 		stored_value = mi->log_xattr;
++ 		stored_size = mi->log_xattr_size;
++ 	} else {
+ 		return -ENODATA;
++ 	}
++ 	if (!stored_value)
++ 		return -ENODATA;
++ 
++ 	if (stored_size > size)
++ 		return -E2BIG;
++ 
++ 	memcpy(value, stored_value, stored_size);
++ 	return stored_size;
++}
+ 
+-	return vfs_getxattr(di->backing_path.dentry, name, value, size);
++static ssize_t incfs_setxattr(struct dentry *d, const char *name,
++ 			const void *value, size_t size, int flags)
++{
++ 	struct dentry_info *di = get_incfs_dentry(d);
++ 	struct mount_info *mi = get_mount_info(d->d_sb);
++ 	void **stored_value;
++ 	size_t *stored_size;
++ 
++ 	if (di && di->backing_path.dentry)
++ 		return vfs_setxattr(di->backing_path.dentry, name, value, size,
++ 				    flags);
++ 
++ 	if (strcmp(name, "security.selinux"))
++ 		return -ENODATA;
++ 
++ 	if (size > INCFS_MAX_FILE_ATTR_SIZE)
++ 		return -E2BIG;
++ 
++ 	if (!strcmp(d->d_iname, INCFS_PENDING_READS_FILENAME)) {
++ 		stored_value = &mi->pending_read_xattr;
++ 		stored_size = &mi->pending_read_xattr_size;
++ 	} else if (!strcmp(d->d_iname, INCFS_LOG_FILENAME)) {
++ 		stored_value = &mi->log_xattr;
++ 		stored_size = &mi->log_xattr_size;
++ 	} else {
++ 		return -ENODATA;
++ 	}
++ 
++ 	kfree (*stored_value);
++ 	*stored_value = kzalloc(size, GFP_NOFS);
++ 	if (!*stored_value)
++ 		return -ENOMEM;
++ 
++ 	memcpy(*stored_value, value, size);
++ 	*stored_size = size;
++ 	return 0;
+ }
+ 
+ static ssize_t incfs_listxattr(struct dentry *d, char *list, size_t size)
+-- 
+2.28.0
+
