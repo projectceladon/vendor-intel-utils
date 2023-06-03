@@ -1,0 +1,256 @@
+From 62ea9d69849efac7f5aa2ddf64ca1ec110e198ad Mon Sep 17 00:00:00 2001
+From: "Yang, Dong" <dong.yang@intel.com>
+Date: Fri, 5 Nov 2021 15:24:03 +0800
+Subject: [PATCH] offload crop work from socket thread to main thread
+
+to improve stability
+
+Tracked-On:
+Signed-off-by: Yang, Dong <dong.yang@intel.com>
+---
+ src/CameraSocketServerThread.cpp | 71 -------------------------
+ src/fake-pipeline2/Sensor.cpp    | 89 ++++++++++++++++++++++++++++++++
+ 2 files changed, 89 insertions(+), 71 deletions(-)
+
+diff --git a/src/CameraSocketServerThread.cpp b/src/CameraSocketServerThread.cpp
+index da97a8e..c06fb22 100644
+--- a/src/CameraSocketServerThread.cpp
++++ b/src/CameraSocketServerThread.cpp
+@@ -127,70 +127,7 @@ void CameraSocketServerThread::clearBuffer(char *buffer, int width, int height)
+     memset(uv_offset, 0x80, (width * height) / 2);
+     ALOGVV(LOG_TAG " %s: Exit", __FUNCTION__);
+ }
+-#define CROP_ROTATE
+-#ifdef CROP_ROTATE
+-static void bufferCropAndRotate(unsigned char * buff, unsigned char * buff_out){
+-//
+-//   Original frame                  Cropped frame              Rotated frame                 Upscale frame    
+-// --------------------               --------                                              --------------------
+-// |     |      |     |               |      |                 ---------------              |     |      |     |
+-// |     |      |     |               |      |                 |             |              |     |      |     |
+-// |     |      |     |   =======>>   |      |     =======>>   |             |  =======>>   |     |      |     |
+-// |     |      |     |               |      |                 ---------------              |     |      |     |
+-// |     |      |     |               |      |                                              |     |      |     |
+-// --------------------               --------                                              --------------------
+-//  640x480                            360x480                   480x360                        640x480
+-    ALOGI("bufferCropAndRotate");
+-    std::unique_ptr<uint8_t[]> cropped_buffer;
+-
+-    int cropped_width = 360;
+-    int cropped_height = 480;
+-    int margin = (640-360)/2; //140
+-
+-    int rotated_height = cropped_width;
+-    int rotated_width = cropped_height;
+-
+-    int rotated_y_stride = rotated_width;
+-    int rotated_uv_stride = rotated_width / 2;
+-
+-    size_t rotated_size =
+-        rotated_y_stride * rotated_height + rotated_uv_stride * rotated_height;
+-    cropped_buffer.reset(new uint8_t[rotated_size]);
+-    uint8_t* rotated_y_plane = cropped_buffer.get();
+-    uint8_t* rotated_u_plane =
+-      rotated_y_plane + rotated_y_stride * rotated_height;
+-    uint8_t* rotated_v_plane =
+-      rotated_u_plane + rotated_uv_stride * rotated_height / 2;
+-    libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate90;
+-    //libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate270;
+-
+-    int res = libyuv::ConvertToI420(
+-      buff, 640*480*3/2, rotated_y_plane,
+-      rotated_y_stride, rotated_u_plane, rotated_uv_stride, rotated_v_plane,
+-      rotated_uv_stride, margin, 0, 640,
+-      480, cropped_width, cropped_height, rotation_mode,
+-      libyuv::FourCC::FOURCC_I420);
+-
+-    if(res){
+-        ALOGE("critical ConvertToI420 res:%d ", res);
+-        return;
+-    }
+ 
+-    res = libyuv::I420Scale(
+-      rotated_y_plane, rotated_y_stride, rotated_u_plane, rotated_uv_stride,
+-      rotated_v_plane, rotated_uv_stride, rotated_width, rotated_height,
+-      buff_out, 640,
+-      buff_out + 640*480,
+-      640 / 2,
+-      buff_out + 640*480*5/4,
+-      640/2, 640,
+-      480, libyuv::FilterMode::kFilterNone);
+-
+-      if(res){
+-        ALOGE("critical I420Scale res:%d ", res);
+-    }
+-}
+-#endif
+ bool CameraSocketServerThread::threadLoop() {
+     struct sockaddr_un addr_un;
+     memset(&addr_un, 0, sizeof(addr_un));
+@@ -359,7 +296,6 @@ bool CameraSocketServerThread::threadLoop() {
+ 
+         ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+         char *fbuffer = (char *)handle->clientBuf[handle->clientRevCount % 1].buffer;
+-        char buffer_recv[640*480*3/2];
+ 
+         clearBuffer(fbuffer, 640, 480);
+ 
+@@ -393,16 +329,9 @@ bool CameraSocketServerThread::threadLoop() {
+                     if(trans_mode == VSOCK)
+                     {
+                         while(size_update != 460800){
+-                            #ifdef CROP_ROTATE
+-                            size = recv(mClientFd, (char *)buffer_recv+size_update, 460800, 0);
+-                            #else
+                             size = recv(mClientFd, (char *)fbuffer+size_update, 460800, 0);
+-                            #endif
+                             size_update += size;
+                             if (size_update == 460800){
+-                                #ifdef CROP_ROTATE
+-                                bufferCropAndRotate((uint8_t*)buffer_recv, (uint8_t*)fbuffer);
+-                                #endif
+                                 handle->clientRevCount++;
+                                 size_update = 0;
+                                 ALOGVV(LOG_TAG
+diff --git a/src/fake-pipeline2/Sensor.cpp b/src/fake-pipeline2/Sensor.cpp
+index 577cd91..3a7d68b 100644
+--- a/src/fake-pipeline2/Sensor.cpp
++++ b/src/fake-pipeline2/Sensor.cpp
+@@ -242,6 +242,72 @@ status_t Sensor::readyToRun() {
+     return OK;
+ }
+ 
++#define CROP_ROTATE
++#ifdef CROP_ROTATE
++void bufferCropAndRotate(unsigned char * buff, unsigned char * buff_out){
++//
++//   Original frame                  Cropped frame              Rotated frame                 Upscale frame
++// --------------------               --------                                              --------------------
++// |     |      |     |               |      |                 ---------------              |     |      |     |
++// |     |      |     |               |      |                 |             |              |     |      |     |
++// |     |      |     |   =======>>   |      |     =======>>   |             |  =======>>   |     |      |     |
++// |     |      |     |               |      |                 ---------------              |     |      |     |
++// |     |      |     |               |      |                                              |     |      |     |
++// --------------------               --------                                              --------------------
++//  640x480                            360x480                   480x360                        640x480
++    ALOGI("bufferCropAndRotate");
++    std::unique_ptr<uint8_t[]> cropped_buffer;
++
++    int cropped_width = 360;
++    int cropped_height = 480;
++    int margin = (640-360)/2; //140
++
++    int rotated_height = cropped_width;
++    int rotated_width = cropped_height;
++
++    int rotated_y_stride = rotated_width;
++    int rotated_uv_stride = rotated_width / 2;
++
++    size_t rotated_size =
++        rotated_y_stride * rotated_height + rotated_uv_stride * rotated_height;
++    cropped_buffer.reset(new uint8_t[rotated_size]);
++    uint8_t* rotated_y_plane = cropped_buffer.get();
++    uint8_t* rotated_u_plane =
++      rotated_y_plane + rotated_y_stride * rotated_height;
++    uint8_t* rotated_v_plane =
++      rotated_u_plane + rotated_uv_stride * rotated_height / 2;
++    libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate90;
++    //libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate270;
++
++    int res = libyuv::ConvertToI420(
++      buff, 640*480*3/2, rotated_y_plane,
++      rotated_y_stride, rotated_u_plane, rotated_uv_stride, rotated_v_plane,
++      rotated_uv_stride, margin, 0, 640,
++      480, cropped_width, cropped_height, rotation_mode,
++      libyuv::FourCC::FOURCC_I420);
++
++    if(res){
++        ALOGE("critical ConvertToI420 res:%d ", res);
++        return;
++    }
++
++    res = libyuv::I420Scale(
++      rotated_y_plane, rotated_y_stride, rotated_u_plane, rotated_uv_stride,
++      rotated_v_plane, rotated_uv_stride, rotated_width, rotated_height,
++      buff_out, 640,
++      buff_out + 640*480,
++      640 / 2,
++      buff_out + 640*480*5/4,
++      640/2, 640,
++      480, libyuv::FilterMode::kFilterNone);
++
++      if(res){
++        ALOGE("critical I420Scale res:%d ", res);
++    }
++}
++char buffer_recv[640*480*3/2];
++#endif
++
+ bool Sensor::threadLoop() {
+     /**
+      * Sensor capture operation main loop.
+@@ -337,6 +403,10 @@ bool Sensor::threadLoop() {
+ 
+         ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+         handle->clientBuf[handle->clientRevCount % 1].decoded = false;
++        #ifdef CROP_ROTATE
++        char *fbuffer = (char *)handle->clientBuf[handle->clientRevCount % 1].buffer;
++        bufferCropAndRotate((uint8_t*)fbuffer, (uint8_t*)buffer_recv);
++        #endif
+ 
+         // Might be adding more buffers, so size isn't constant
+         for (size_t i = 0; i < mNextCapturedBuffers->size(); i++) {
+@@ -466,7 +536,11 @@ void Sensor::dump_yuv(uint8_t *img1, size_t img1_size, uint8_t *img2, size_t img
+                       const std::string &filename) {
+     static size_t count = 0;
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++    #ifdef CROP_ROTATE
++    uint8_t *bufData = (uint8_t *)buffer_recv;
++    #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #endif
+ 
+     if (++count == 120) return;
+     if (filename.empty()) {
+@@ -527,7 +601,12 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     ALOGVV("%s: E", __FUNCTION__);
+ 
+     auto *handle = ClientVideoBuffer::getClientInstance();
++    //uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #ifdef CROP_ROTATE
++    uint8_t *bufData = (uint8_t *)buffer_recv;
++    #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #endif
+     int out_size;
+ 
+     if (!gIsInFrameI420 && !gIsInFrameH264) {
+@@ -774,7 +853,12 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     ALOGVV(LOG_TAG "%s: E", __FUNCTION__);
+ 
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++    //uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #ifdef CROP_ROTATE
++    uint8_t *bufData = (uint8_t *)buffer_recv;
++    #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #endif
+ 
+     ALOGVV(LOG_TAG " %s: bufData[%p] img[%p] resolution[%d:%d]",
+            __func__, bufData, img, width, height);
+@@ -985,7 +1069,12 @@ void Sensor::captureJPEG(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     ALOGVV("%s: E", __FUNCTION__);
+ 
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++    //uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #ifdef CROP_ROTATE
++    uint8_t *bufData = (uint8_t *)buffer_recv;
++    #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #endif
+ 
+     int src_size = mSrcWidth * mSrcHeight;
+     int dstFrameSize = width * height;
+-- 
+2.27.0
+
