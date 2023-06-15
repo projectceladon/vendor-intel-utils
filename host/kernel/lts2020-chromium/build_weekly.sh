@@ -4,7 +4,7 @@ rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
 
-tag="lts-v5.10.118-20230426-r10"
+tag="lts-v5.10.118-20230615-r11"
 git clone -b $tag https://github.com/projectceladon/linux-intel-lts2020-chromium.git
 cd linux-intel-lts2020-chromium
 
