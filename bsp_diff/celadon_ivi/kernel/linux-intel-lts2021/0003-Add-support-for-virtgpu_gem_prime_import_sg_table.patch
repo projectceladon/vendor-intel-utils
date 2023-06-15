@@ -1,0 +1,233 @@
+From 0f9c4220fdfa40ff1896699d59448a96fe27fa38 Mon Sep 17 00:00:00 2001
+From: hangliu1 <hang1.liu@linux.intel.com>
+Date: Wed, 7 Jun 2023 04:25:53 -0400
+Subject: [PATCH] Add support for virtgpu_gem_prime_import_sg_table
+
+Need to modify later since do not change the static funciton
+definition in blob mode.
+
+Tracked-On: OAM-110757
+Signed-off-by: hangliu1 <hang1.liu@linux.intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_drv.h    | 16 ++++-
+ drivers/gpu/drm/virtio/virtgpu_gem.c    |  2 +-
+ drivers/gpu/drm/virtio/virtgpu_ioctl.c  |  4 +-
+ drivers/gpu/drm/virtio/virtgpu_object.c | 13 ++--
+ drivers/gpu/drm/virtio/virtgpu_prime.c  | 84 ++++++++++++++++++++++++-
+ 5 files changed, 110 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index 1520e2cd5fb5..e075f5985a9c 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -454,16 +454,30 @@ void virtio_gpu_fence_event_process(struct virtio_gpu_device *vdev,
+ void virtio_gpu_cleanup_object(struct virtio_gpu_object *bo);
+ struct drm_gem_object *virtio_gpu_create_object(struct drm_device *dev,
+ 						size_t size);
++
+ int virtio_gpu_object_create(struct virtio_gpu_device *vgdev,
+ 			     struct virtio_gpu_object_params *params,
+ 			     struct virtio_gpu_object **bo_ptr,
+-			     struct virtio_gpu_fence *fence);
++			     struct virtio_gpu_fence *fence, struct sg_table *sgt);
++
++
++int virtio_gpu_sgt_to_mem_entry(struct virtio_gpu_device *vgdev,
++				struct sg_table *table,
++				struct virtio_gpu_mem_entry **ents,
++				unsigned int *nents);
+ 
+ bool virtio_gpu_is_shmem(struct virtio_gpu_object *bo);
+ 
+ int virtio_gpu_resource_id_get(struct virtio_gpu_device *vgdev,
+ 			       uint32_t *resid);
+ 
++void virtio_gpu_resource_id_put(struct virtio_gpu_device *vgdev, uint32_t id);
++
++
++void virtio_gpu_object_save_restore_list(struct virtio_gpu_device *vgdev,
++					 struct virtio_gpu_object *bo,
++					 struct virtio_gpu_object_params *params);
++
+ int virtio_gpu_object_restore_all(struct virtio_gpu_device *vgdev);
+ 
+ /* virtgpu_prime.c */
+diff --git a/drivers/gpu/drm/virtio/virtgpu_gem.c b/drivers/gpu/drm/virtio/virtgpu_gem.c
+index 7db48d17ee3a..38a22859db31 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_gem.c
++++ b/drivers/gpu/drm/virtio/virtgpu_gem.c
+@@ -39,7 +39,7 @@ static int virtio_gpu_gem_create(struct drm_file *file,
+ 	int ret;
+ 	u32 handle;
+ 
+-	ret = virtio_gpu_object_create(vgdev, params, &obj, NULL);
++	ret = virtio_gpu_object_create(vgdev, params, &obj, NULL, NULL);
+ 	if (ret < 0)
+ 		return ret;
+ 
+diff --git a/drivers/gpu/drm/virtio/virtgpu_ioctl.c b/drivers/gpu/drm/virtio/virtgpu_ioctl.c
+index 5d05093014ac..ff0e550a5969 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_ioctl.c
++++ b/drivers/gpu/drm/virtio/virtgpu_ioctl.c
+@@ -347,7 +347,7 @@ static int virtio_gpu_resource_create_ioctl(struct drm_device *dev, void *data,
+ 	fence = virtio_gpu_fence_alloc(vgdev, vgdev->fence_drv.context, 0);
+ 	if (!fence)
+ 		return -ENOMEM;
+-	ret = virtio_gpu_object_create(vgdev, &params, &qobj, fence);
++	ret = virtio_gpu_object_create(vgdev, &params, &qobj, fence, NULL);
+ 	dma_fence_put(&fence->f);
+ 	if (ret < 0)
+ 		return ret;
+@@ -695,7 +695,7 @@ static int virtio_gpu_resource_create_blob_ioctl(struct drm_device *dev,
+ 	}
+ 
+ 	if (guest_blob)
+-		ret = virtio_gpu_object_create(vgdev, &params, &bo, NULL);
++		ret = virtio_gpu_object_create(vgdev, &params, &bo, NULL, NULL);
+ 	else if (!guest_blob && host3d_blob)
+ 		ret = virtio_gpu_vram_create(vgdev, &params, &bo);
+ 	else
+diff --git a/drivers/gpu/drm/virtio/virtgpu_object.c b/drivers/gpu/drm/virtio/virtgpu_object.c
+index 2a0fdff1c26b..dddeef0388d5 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_object.c
++++ b/drivers/gpu/drm/virtio/virtgpu_object.c
+@@ -54,14 +54,14 @@ int virtio_gpu_resource_id_get(struct virtio_gpu_device *vgdev, uint32_t *resid)
+ 	return 0;
+ }
+ 
+-static void virtio_gpu_resource_id_put(struct virtio_gpu_device *vgdev, uint32_t id)
++void virtio_gpu_resource_id_put(struct virtio_gpu_device *vgdev, uint32_t id)
+ {
+ 	if (!virtio_gpu_virglrenderer_workaround) {
+ 		ida_free(&vgdev->resource_ida, id - 1);
+ 	}
+ }
+ 
+-static void virtio_gpu_object_save_restore_list(struct virtio_gpu_device *vgdev,
++void virtio_gpu_object_save_restore_list(struct virtio_gpu_device *vgdev,
+ 						struct virtio_gpu_object *bo,
+ 						struct virtio_gpu_object_params *params)
+ {
+@@ -212,7 +212,7 @@ static int virtio_gpu_object_shmem_init(struct virtio_gpu_device *vgdev,
+ int virtio_gpu_object_create(struct virtio_gpu_device *vgdev,
+ 			     struct virtio_gpu_object_params *params,
+ 			     struct virtio_gpu_object **bo_ptr,
+-			     struct virtio_gpu_fence *fence)
++			     struct virtio_gpu_fence *fence, struct sg_table *sgt)
+ {
+ 	struct virtio_gpu_object_array *objs = NULL;
+ 	struct drm_gem_shmem_object *shmem_obj;
+@@ -235,7 +235,12 @@ int virtio_gpu_object_create(struct virtio_gpu_device *vgdev,
+ 
+ 	bo->dumb = params->dumb;
+ 
+-	ret = virtio_gpu_object_shmem_init(vgdev, bo, &ents, &nents);
++	if (!sgt) {
++		ret = virtio_gpu_object_shmem_init(vgdev, bo, &ents, &nents);
++	} else {
++		ret = virtio_gpu_sgt_to_mem_entry(vgdev, sgt, &ents, &nents);
++	}
++
+ 	if (ret != 0)
+ 		goto err_put_id;
+ 
+diff --git a/drivers/gpu/drm/virtio/virtgpu_prime.c b/drivers/gpu/drm/virtio/virtgpu_prime.c
+index 44425f20d91a..9a1a1cf98d67 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_prime.c
++++ b/drivers/gpu/drm/virtio/virtgpu_prime.c
+@@ -162,9 +162,91 @@ struct drm_gem_object *virtgpu_gem_prime_import(struct drm_device *dev,
+ 	return drm_gem_prime_import(dev, buf);
+ }
+ 
++int virtio_gpu_sgt_to_mem_entry(struct virtio_gpu_device *vgdev,
++                                 struct sg_table *table,
++                                  struct virtio_gpu_mem_entry **ents,
++                                 unsigned int *nents)
++{
++       struct scatterlist *sg;
++       int si;
++
++       bool use_dma_api = !virtio_has_dma_quirk(vgdev->vdev);
++       if (use_dma_api)
++               *nents = table->nents;
++       else
++               *nents = table->orig_nents;
++
++       *ents = kvmalloc_array(*nents,
++                              sizeof(struct virtio_gpu_mem_entry),
++                              GFP_KERNEL);
++       if (!(*ents)) {
++               DRM_ERROR("failed to allocate ent list\n");
++               return -ENOMEM;
++       }
++
++       if (use_dma_api) {
++               for_each_sgtable_dma_sg(table, sg, si) {
++                       (*ents)[si].addr = cpu_to_le64(sg_dma_address(sg));
++                       (*ents)[si].length = cpu_to_le32(sg_dma_len(sg));
++                       (*ents)[si].padding = 0;
++               }
++       } else {
++               for_each_sgtable_sg(table, sg, si) {
++                       (*ents)[si].addr = cpu_to_le64(sg_phys(sg));
++                       (*ents)[si].length = cpu_to_le32(sg->length);
++                       (*ents)[si].padding = 0;
++               }
++       }
++
++       return 0;
++}
++
+ struct drm_gem_object *virtgpu_gem_prime_import_sg_table(
+ 	struct drm_device *dev, struct dma_buf_attachment *attach,
+ 	struct sg_table *table)
+ {
+-	return ERR_PTR(-ENODEV);
++       size_t size = PAGE_ALIGN(attach->dmabuf->size);
++       struct virtio_gpu_device *vgdev = dev->dev_private;
++       struct virtio_gpu_object_params params = { 0 };
++       struct virtio_gpu_object *bo;
++       struct drm_gem_object *obj;
++       struct virtio_gpu_mem_entry *ents;
++       unsigned int nents;
++       int ret;
++
++       if (!vgdev->has_resource_blob || vgdev->has_virgl_3d) {
++               return ERR_PTR(-ENODEV);
++       }
++
++       obj = drm_gem_shmem_prime_import_sg_table(dev, attach, table);
++       if (IS_ERR(obj)) {
++               return ERR_CAST(obj);
++       }
++
++       bo = gem_to_virtio_gpu_obj(obj);
++       ret = virtio_gpu_resource_id_get(vgdev, &bo->hw_res_handle);
++       if (ret < 0) {
++               return ret;
++       }
++
++       ret = virtio_gpu_sgt_to_mem_entry(vgdev, table, &ents, &nents);
++       if (ret != 0) {
++               goto err_put_id;
++       }
++
++       bo->guest_blob = true;
++       params.blob_mem = VIRTGPU_BLOB_MEM_GUEST;
++       params.blob_flags = VIRTGPU_BLOB_FLAG_USE_SHAREABLE;
++       params.blob = true;
++       params.size = size;
++
++       virtio_gpu_cmd_resource_create_blob(vgdev, bo, &params,
++                                              ents, nents);
++       virtio_gpu_object_save_restore_list(vgdev, bo, &params);
++
++       return obj;
++
++err_put_id:
++       virtio_gpu_resource_id_put(vgdev, bo->hw_res_handle);
++       return ret;
+ }
+-- 
+2.17.1
+
