@@ -1,0 +1,243 @@
+From 669d343fd1d363348ab35bf08c23bbe7f3c61c09 Mon Sep 17 00:00:00 2001
+From: Pinyao Ting <pinyaoting@google.com>
+Date: Wed, 15 Feb 2023 15:20:25 -0800
+Subject: [PATCH] Limit the number of shortcuts per app that can be retained by
+ system
+
+This is a second attempt at fixing the issue, the previous CL
+ag/20642213 was reverted because it simply throws an exception when the
+limit is reached, which causes apps to crash since chat apps tends to be
+sending large amount of conversation shortcuts and they have no way to
+know how many of these shortcuts are still cached by the system.
+
+Instead of throwing an exception, this CL simply removes excessive
+shortcuts to avoid crashes. Currently there is a limit on the number
+of shortcuts an app can publish in respect to each launcher activity.
+This CL further implements a global maximum of total number of shortcuts
+that can be retained for an app to mitigate from any potential system
+health issue.
+
+When the global maximum is reached, ShortcutService will proactively
+removes shortcuts from system memory. Cached shortcuts are removed
+first, followed by dynamic shortcuts, using last updated time as
+tie-breaker.
+
+This CL additionally addresses an unexpected flow where re-publishing
+previously removed shortcuts that are still retained by the system could
+cause the total number of shortcuts to exceed previously set limit.
+
+Bug: 250576066 233155034
+Test: manual
+Change-Id: I001c7a87b62aefa9487bf8efaf3cd02d7cb21521
+Merged-In: I001c7a87b62aefa9487bf8efaf3cd02d7cb21521
+(cherry picked from commit on googleplex-android-review.googlesource.com host: 94437e989c0391b2dbf28d33120fdc28a4ce8d4d)
+Merged-In: I001c7a87b62aefa9487bf8efaf3cd02d7cb21521
+---
+ .../android/server/pm/ShortcutPackage.java    | 88 ++++++++++++++++++-
+ .../android/server/pm/ShortcutService.java    | 25 +++++-
+ 2 files changed, 109 insertions(+), 4 deletions(-)
+
+diff --git a/services/core/java/com/android/server/pm/ShortcutPackage.java b/services/core/java/com/android/server/pm/ShortcutPackage.java
+index 3506fd9be15d..e40075371910 100644
+--- a/services/core/java/com/android/server/pm/ShortcutPackage.java
++++ b/services/core/java/com/android/server/pm/ShortcutPackage.java
+@@ -405,6 +405,7 @@ class ShortcutPackage extends ShortcutPackageItem {
+             @NonNull List<ShortcutInfo> changedShortcuts) {
+         Preconditions.checkArgument(newShortcut.isEnabled(),
+                 "pushDynamicShortcuts() cannot publish disabled shortcuts");
++        ensureShortcutCountBeforePush();
+ 
+         newShortcut.addFlags(ShortcutInfo.FLAG_DYNAMIC);
+ 
+@@ -412,7 +413,7 @@ class ShortcutPackage extends ShortcutPackageItem {
+         final ShortcutInfo oldShortcut = findShortcutById(newShortcut.getId());
+         boolean deleted = false;
+ 
+-        if (oldShortcut == null) {
++        if (oldShortcut == null || !oldShortcut.isDynamic()) {
+             final ShortcutService service = mShortcutUser.mService;
+             final int maxShortcuts = service.getMaxActivityShortcuts();
+ 
+@@ -422,7 +423,6 @@ class ShortcutPackage extends ShortcutPackageItem {
+ 
+             if (activityShortcuts != null && activityShortcuts.size() == maxShortcuts) {
+                 // Max has reached. Delete the shortcut with lowest rank.
+-
+                 // Sort by isManifestShortcut() and getRank().
+                 Collections.sort(activityShortcuts, mShortcutTypeAndRankComparator);
+ 
+@@ -437,7 +437,8 @@ class ShortcutPackage extends ShortcutPackageItem {
+                 changedShortcuts.add(shortcut);
+                 deleted = deleteDynamicWithId(shortcut.getId(), /*ignoreInvisible=*/ true) != null;
+             }
+-        } else {
++        }
++        if (oldShortcut != null) {
+             // It's an update case.
+             // Make sure the target is updatable. (i.e. should be mutable.)
+             oldShortcut.ensureUpdatableWith(newShortcut, /*isUpdating=*/ false);
+@@ -463,6 +464,32 @@ class ShortcutPackage extends ShortcutPackageItem {
+         return deleted;
+     }
+ 
++    private void ensureShortcutCountBeforePush() {
++        final ShortcutService service = mShortcutUser.mService;
++        // Ensure the total number of shortcuts doesn't exceed the hard limit per app.
++        final int maxShortcutPerApp = service.getMaxAppShortcuts();
++        synchronized (mLock) {
++            final List<ShortcutInfo> appShortcuts = mShortcuts.values().stream().filter(si ->
++                    !si.isPinned()).collect(Collectors.toList());
++            if (appShortcuts.size() >= maxShortcutPerApp) {
++                // Max has reached. Removes shortcuts until they fall within the hard cap.
++                // Sort by isManifestShortcut(), isDynamic() and getLastChangedTimestamp().
++                Collections.sort(appShortcuts, mShortcutTypeRankAndTimeComparator);
++
++                while (appShortcuts.size() >= maxShortcutPerApp) {
++                    final ShortcutInfo shortcut = appShortcuts.remove(appShortcuts.size() - 1);
++                    if (shortcut.isDeclaredInManifest()) {
++                        // All shortcuts are manifest shortcuts and cannot be removed.
++                        throw new IllegalArgumentException(getPackageName() + " has published "
++                                + appShortcuts.size() + " manifest shortcuts across different"
++                                + " activities.");
++                    }
++                    forceDeleteShortcutInner(shortcut.getId());
++                }
++            }
++        }
++    }
++
+     /**
+      * Remove all shortcuts that aren't pinned, cached nor dynamic.
+      *
+@@ -1368,6 +1395,61 @@ class ShortcutPackage extends ShortcutPackageItem {
+         return Integer.compare(a.getRank(), b.getRank());
+     };
+ 
++    /**
++     * To sort by isManifestShortcut(), isDynamic(), getRank() and
++     * getLastChangedTimestamp(). i.e. manifest shortcuts come before non-manifest shortcuts,
++     * dynamic shortcuts come before floating shortcuts, then sort by last changed timestamp.
++     *
++     * This is used to decide which shortcuts to remove when the total number of shortcuts retained
++     * for the app exceeds the limit defined in {@link ShortcutService#getMaxAppShortcuts()}.
++     *
++     * (Note the number of manifest shortcuts is always <= the max number, because if there are
++     * more, ShortcutParser would ignore the rest.)
++     */
++    final Comparator<ShortcutInfo> mShortcutTypeRankAndTimeComparator = (ShortcutInfo a,
++            ShortcutInfo b) -> {
++        if (a.isDeclaredInManifest() && !b.isDeclaredInManifest()) {
++            return -1;
++        }
++        if (!a.isDeclaredInManifest() && b.isDeclaredInManifest()) {
++            return 1;
++        }
++        if (a.isDynamic() && b.isDynamic()) {
++            return Integer.compare(a.getRank(), b.getRank());
++        }
++        if (a.isDynamic()) {
++            return -1;
++        }
++        if (b.isDynamic()) {
++            return 1;
++        }
++        if (a.isCached() && b.isCached()) {
++            // if both shortcuts are cached, prioritize shortcuts cached by people tile,
++            if (a.hasFlags(ShortcutInfo.FLAG_CACHED_PEOPLE_TILE)
++                    && !b.hasFlags(ShortcutInfo.FLAG_CACHED_PEOPLE_TILE)) {
++                return -1;
++            } else if (!a.hasFlags(ShortcutInfo.FLAG_CACHED_PEOPLE_TILE)
++                    && b.hasFlags(ShortcutInfo.FLAG_CACHED_PEOPLE_TILE)) {
++                return 1;
++            }
++            // followed by bubbles.
++            if (a.hasFlags(ShortcutInfo.FLAG_CACHED_BUBBLES)
++                    && !b.hasFlags(ShortcutInfo.FLAG_CACHED_BUBBLES)) {
++                return -1;
++            } else if (!a.hasFlags(ShortcutInfo.FLAG_CACHED_BUBBLES)
++                    && b.hasFlags(ShortcutInfo.FLAG_CACHED_BUBBLES)) {
++                return 1;
++            }
++        }
++        if (a.isCached()) {
++            return -1;
++        }
++        if (b.isCached()) {
++            return 1;
++        }
++        return Long.compare(b.getLastChangedTimestamp(), a.getLastChangedTimestamp());
++    };
++
+     /**
+      * Build a list of shortcuts for each target activity and return as a map. The result won't
+      * contain "floating" shortcuts because they don't belong on any activities.
+diff --git a/services/core/java/com/android/server/pm/ShortcutService.java b/services/core/java/com/android/server/pm/ShortcutService.java
+index 62d6717e847a..940eb345c06d 100644
+--- a/services/core/java/com/android/server/pm/ShortcutService.java
++++ b/services/core/java/com/android/server/pm/ShortcutService.java
+@@ -179,6 +179,9 @@ public class ShortcutService extends IShortcutService.Stub {
+     @VisibleForTesting
+     static final int DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY = 15;
+ 
++    @VisibleForTesting
++    static final int DEFAULT_MAX_SHORTCUTS_PER_APP = 100;
++
+     @VisibleForTesting
+     static final int DEFAULT_MAX_ICON_DIMENSION_DP = 96;
+ 
+@@ -253,6 +256,11 @@ public class ShortcutService extends IShortcutService.Stub {
+          */
+         String KEY_MAX_SHORTCUTS = "max_shortcuts";
+ 
++        /**
++         * Key name for the max shortcuts can be retained in system ram per app. (int)
++         */
++        String KEY_MAX_SHORTCUTS_PER_APP = "max_shortcuts_per_app";
++
+         /**
+          * Key name for icon compression quality, 0-100.
+          */
+@@ -325,10 +333,15 @@ public class ShortcutService extends IShortcutService.Stub {
+             new SparseArray<>();
+ 
+     /**
+-     * Max number of dynamic + manifest shortcuts that each application can have at a time.
++     * Max number of dynamic + manifest shortcuts that each activity can have at a time.
+      */
+     private int mMaxShortcuts;
+ 
++    /**
++     * Max number of shortcuts that can exists in system ram for each application.
++     */
++    private int mMaxShortcutsPerApp;
++
+     /**
+      * Max number of updating API calls that each application can make during the interval.
+      */
+@@ -790,6 +803,9 @@ public class ShortcutService extends IShortcutService.Stub {
+         mMaxShortcuts = Math.max(0, (int) parser.getLong(
+                 ConfigConstants.KEY_MAX_SHORTCUTS, DEFAULT_MAX_SHORTCUTS_PER_ACTIVITY));
+ 
++        mMaxShortcutsPerApp = Math.max(0, (int) parser.getLong(
++                ConfigConstants.KEY_MAX_SHORTCUTS_PER_APP, DEFAULT_MAX_SHORTCUTS_PER_APP));
++
+         final int iconDimensionDp = Math.max(1, injectIsLowRamDevice()
+                 ? (int) parser.getLong(
+                 ConfigConstants.KEY_MAX_ICON_DIMENSION_DP_LOWRAM,
+@@ -1757,6 +1773,13 @@ public class ShortcutService extends IShortcutService.Stub {
+         return mMaxShortcuts;
+     }
+ 
++    /**
++     * Return the max number of shortcuts can be retaiend in system ram for each application.
++     */
++    int getMaxAppShortcuts() {
++        return mMaxShortcutsPerApp;
++    }
++
+     /**
+      * - Sends a notification to LauncherApps
+      * - Write to file
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+

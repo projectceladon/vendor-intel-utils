@@ -1,0 +1,182 @@
+From 2e0102e551eed0c9d9031ac9d8eeb53bf5d294fd Mon Sep 17 00:00:00 2001
+From: Ioana Alexandru <aioana@google.com>
+Date: Thu, 5 Jan 2023 22:45:21 +0000
+Subject: [PATCH] Trim strings added to persistent snoozed notification
+ storage.
+
+This is a backport of ag/20581190 and includes the fix in ag/20778075.
+Note that on this branch, clearData doesn't seem to actually clear persistent storage.
+
+Fix: 258422365
+Test: atest NotificationManagerServiceTest SnoozeHelperTest
+Change-Id: If7c7db6694330ffbac551d044efadb26219fe17f
+Merged-In: I5a2823f10053ea8c83c612a567d6d4f1b6af23e7
+Merged-In: Ie809cb4d648a40622618e0fb374f36b6d8dc972a
+(cherry picked from commit on googleplex-android-review.googlesource.com host: 2a01a489c10c80f96a4291b0c901ce1e65cd4c42)
+Merged-In: If7c7db6694330ffbac551d044efadb26219fe17f
+---
+ .../server/notification/SnoozeHelper.java     | 29 +++++++++----
+ .../server/notification/SnoozeHelperTest.java | 41 ++++++++++++++++++-
+ 2 files changed, 62 insertions(+), 8 deletions(-)
+
+diff --git a/services/core/java/com/android/server/notification/SnoozeHelper.java b/services/core/java/com/android/server/notification/SnoozeHelper.java
+index 2e08a9cbf844..f3b92eaf6473 100644
+--- a/services/core/java/com/android/server/notification/SnoozeHelper.java
++++ b/services/core/java/com/android/server/notification/SnoozeHelper.java
+@@ -64,6 +64,9 @@ public class SnoozeHelper {
+ 
+     static final int CONCURRENT_SNOOZE_LIMIT = 500;
+ 
++    // A safe size for strings to be put in persistent storage, to avoid breaking the XML write.
++    static final int MAX_STRING_LENGTH = 1000;
++
+     protected static final String XML_TAG_NAME = "snoozed-notifications";
+ 
+     private static final String XML_SNOOZED_NOTIFICATION = "notification";
+@@ -152,7 +155,7 @@ public class SnoozeHelper {
+            ArrayMap<String, Long> snoozed =
+                    mPersistedSnoozedNotifications.get(getPkgKey(userId, pkg));
+            if (snoozed != null) {
+-               time = snoozed.get(key);
++               time = snoozed.get(getTrimmedString(key));
+            }
+         }
+         if (time == null) {
+@@ -166,7 +169,7 @@ public class SnoozeHelper {
+             ArrayMap<String, String> snoozed =
+                     mPersistedSnoozedNotificationsWithContext.get(getPkgKey(userId, pkg));
+             if (snoozed != null) {
+-                return snoozed.get(key);
++                return snoozed.get(getTrimmedString(key));
+             }
+         }
+         return null;
+@@ -251,7 +254,8 @@ public class SnoozeHelper {
+         scheduleRepost(pkg, key, userId, duration);
+         Long activateAt = System.currentTimeMillis() + duration;
+         synchronized (mLock) {
+-            storeRecordLocked(pkg, key, userId, mPersistedSnoozedNotifications, activateAt);
++            storeRecordLocked(pkg, getTrimmedString(key), userId, mPersistedSnoozedNotifications,
++                    activateAt);
+         }
+     }
+ 
+@@ -262,8 +266,10 @@ public class SnoozeHelper {
+         int userId = record.getUser().getIdentifier();
+         if (contextId != null) {
+             synchronized (mLock) {
+-                storeRecordLocked(record.getSbn().getPackageName(), record.getKey(),
+-                        userId, mPersistedSnoozedNotificationsWithContext, contextId);
++                storeRecordLocked(record.getSbn().getPackageName(),
++                        getTrimmedString(record.getKey()),
++                        userId, mPersistedSnoozedNotificationsWithContext,
++                        getTrimmedString(contextId));
+             }
+         }
+         snooze(record);
+@@ -280,6 +286,13 @@ public class SnoozeHelper {
+         }
+     }
+ 
++    private String getTrimmedString(String key) {
++        if (key != null && key.length() > MAX_STRING_LENGTH) {
++            return key.substring(0, MAX_STRING_LENGTH);
++        }
++        return key;
++    }
++
+     private <T> void storeRecordLocked(String pkg, String key, Integer userId,
+             ArrayMap<String, ArrayMap<String, T>> targets, T object) {
+ 
+@@ -384,12 +397,14 @@ public class SnoozeHelper {
+     }
+ 
+     protected void repost(String key, int userId, boolean muteOnReturn) {
++        final String trimmedKey = getTrimmedString(key);
++
+         NotificationRecord record;
+         synchronized (mLock) {
+             final String pkg = mPackages.remove(key);
+             mUsers.remove(key);
+-            removeRecordLocked(pkg, key, userId, mPersistedSnoozedNotifications);
+-            removeRecordLocked(pkg, key, userId, mPersistedSnoozedNotificationsWithContext);
++            removeRecordLocked(pkg, trimmedKey, userId, mPersistedSnoozedNotifications);
++            removeRecordLocked(pkg, trimmedKey, userId, mPersistedSnoozedNotificationsWithContext);
+             ArrayMap<String, NotificationRecord> records =
+                     mSnoozedNotifications.get(getPkgKey(userId, pkg));
+             if (records == null) {
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/SnoozeHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/SnoozeHelperTest.java
+index 8bead5774548..883613f6a2b6 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/SnoozeHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/SnoozeHelperTest.java
+@@ -69,6 +69,7 @@ import java.io.BufferedOutputStream;
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
++import java.util.Collections;
+ 
+ @SmallTest
+ @RunWith(AndroidJUnit4.class)
+@@ -247,6 +248,37 @@ public class SnoozeHelperTest extends UiServiceTestCase {
+         assertEquals("key2", captor2.getValue().getIntent().getStringExtra(EXTRA_KEY));
+     }
+ 
++    @Test
++    public void testLongTagPersistedNotification() throws Exception {
++        String longTag = String.join("", Collections.nCopies(66000, "A"));
++        NotificationRecord r = getNotificationRecord("pkg", 1, longTag, UserHandle.SYSTEM);
++        mSnoozeHelper.snooze(r, 0);
++
++        // We store the full key in temp storage.
++        ArgumentCaptor<PendingIntent> captor = ArgumentCaptor.forClass(PendingIntent.class);
++        verify(mAm).setExactAndAllowWhileIdle(anyInt(), anyLong(), captor.capture());
++        assertEquals(66010, captor.getValue().getIntent().getStringExtra(EXTRA_KEY).length());
++
++        TypedXmlSerializer serializer = Xml.newFastSerializer();
++        ByteArrayOutputStream baos = new ByteArrayOutputStream();
++        serializer.setOutput(new BufferedOutputStream(baos), "utf-8");
++        serializer.startDocument(null, true);
++        mSnoozeHelper.writeXml(serializer);
++        serializer.endDocument();
++        serializer.flush();
++
++        TypedXmlPullParser parser = Xml.newFastPullParser();
++        parser.setInput(new BufferedInputStream(
++                new ByteArrayInputStream(baos.toByteArray())), "utf-8");
++        mSnoozeHelper.readXml(parser, 4);
++
++        mSnoozeHelper.scheduleRepostsForPersistedNotifications(5);
++
++        // We trim the key in persistent storage.
++        verify(mAm, times(2)).setExactAndAllowWhileIdle(anyInt(), anyLong(), captor.capture());
++        assertEquals(1000, captor.getValue().getIntent().getStringExtra(EXTRA_KEY).length());
++    }
++
+     @Test
+     public void testSnoozeForTime() throws Exception {
+         NotificationRecord r = getNotificationRecord("pkg", 1, "one", UserHandle.SYSTEM);
+@@ -595,13 +627,20 @@ public class SnoozeHelperTest extends UiServiceTestCase {
+     public void testClearData() {
+         // snooze 2 from same package
+         NotificationRecord r = getNotificationRecord("pkg", 1, "one", UserHandle.SYSTEM);
+-        NotificationRecord r2 = getNotificationRecord("pkg", 2, "two", UserHandle.SYSTEM);
++        NotificationRecord r2 = getNotificationRecord("pkg", 2,
++                "two" + String.join("", Collections.nCopies(66000, "2")), UserHandle.SYSTEM);
+         mSnoozeHelper.snooze(r, 1000);
+         mSnoozeHelper.snooze(r2, 1000);
+         assertTrue(mSnoozeHelper.isSnoozed(
+                 UserHandle.USER_SYSTEM, r.getSbn().getPackageName(), r.getKey()));
+         assertTrue(mSnoozeHelper.isSnoozed(
+                 UserHandle.USER_SYSTEM, r2.getSbn().getPackageName(), r2.getKey()));
++        assertFalse(0L == mSnoozeHelper.getSnoozeTimeForUnpostedNotification(
++                r.getUser().getIdentifier(), r.getSbn().getPackageName(),
++                r.getSbn().getKey()));
++        assertFalse(0L == mSnoozeHelper.getSnoozeTimeForUnpostedNotification(
++                r2.getUser().getIdentifier(), r2.getSbn().getPackageName(),
++                r2.getSbn().getKey()));
+ 
+         // clear data
+         mSnoozeHelper.clearData(UserHandle.USER_SYSTEM, "pkg");
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+

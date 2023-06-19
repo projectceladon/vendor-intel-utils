@@ -1,0 +1,191 @@
+From 67d14d17dc388db3e92c2d2db4946480ebdac6c7 Mon Sep 17 00:00:00 2001
+From: Linus Tufvesson <lus@google.com>
+Date: Fri, 4 Mar 2022 09:32:07 +0000
+Subject: [PATCH] Allow windowhandles with NO_INPUT_CHANNEL - DO NOT MERGE
+
+This allows container surfaces to be considered visible in
+InputDispatcher and prevent touches from passing through them. In
+particular this is used by ActivityRecordInputSink to block touches that
+would otherwise pass through the area available to the activity.
+
+Bug: 194480991
+Bug: 222292477
+Test: Manually tested that blocking still works
+Test: atest InputSurfacesTest
+Change-Id: Iacfc952139311363b914b1d6bffc2b4190133d02
+(cherry picked from commit a18588206c240b34128bb27e3ac875af17fce7f2)
+(cherry picked from commit 8758cd1030dc9fd73cc98c09ce7b9c356757a659)
+Merged-In: Iacfc952139311363b914b1d6bffc2b4190133d02
+---
+ libs/gui/tests/EndToEndNativeInputTest.cpp | 91 ++++++++++++++--------
+ services/surfaceflinger/Layer.cpp          |  7 +-
+ 2 files changed, 63 insertions(+), 35 deletions(-)
+
+diff --git a/libs/gui/tests/EndToEndNativeInputTest.cpp b/libs/gui/tests/EndToEndNativeInputTest.cpp
+index 5daef0df2..cdd8ea65c 100644
+--- a/libs/gui/tests/EndToEndNativeInputTest.cpp
++++ b/libs/gui/tests/EndToEndNativeInputTest.cpp
+@@ -74,16 +74,39 @@ static constexpr std::chrono::nanoseconds DISPATCHING_TIMEOUT = 5s;
+ 
+ class InputSurface {
+ public:
+-    InputSurface(const sp<SurfaceControl> &sc, int width, int height) {
++    InputSurface(const sp<SurfaceControl> &sc, int width, int height, bool noInputChannel = false) {
+         mSurfaceControl = sc;
+ 
+         mInputFlinger = getInputFlinger();
+-        mClientChannel = std::make_shared<InputChannel>();
+-        mInputFlinger->createInputChannel("testchannels", mClientChannel.get());
++        if (noInputChannel) {
++            mInputInfo.inputFeatures = WindowInfo::Feature::NO_INPUT_CHANNEL;
++        } else {
++            mClientChannel = std::make_shared<InputChannel>();
++            mInputFlinger->createInputChannel("testchannels", mClientChannel.get());
++            mInputInfo.token = mClientChannel->getConnectionToken();
++            mInputConsumer = new InputConsumer(mClientChannel);
++        }
+ 
+-        populateInputInfo(width, height);
++        mInputInfo.name = "Test info";
++        mInputInfo.dispatchingTimeout = 5s;
++        mInputInfo.globalScaleFactor = 1.0;
++        mInputInfo.flags = WindowInfo::Flag::NOT_TOUCH_MODAL;
++        mInputInfo.type = WindowInfo::Type::BASE_APPLICATION;
++        mInputInfo.focusable = true;
++        mInputInfo.hasWallpaper = false;
++        mInputInfo.paused = false;
++        // TODO: Fill in from SF?
++        mInputInfo.ownerPid = 11111;
++        mInputInfo.ownerUid = 11111;
++        mInputInfo.displayId = 0;
++        mInputInfo.touchableRegion.orSelf(Rect(0, 0, width, height));
+ 
+-        mInputConsumer = new InputConsumer(mClientChannel);
++        InputApplicationInfo aInfo;
++        aInfo.token = new BBinder();
++        aInfo.name = "Test app info";
++        aInfo.dispatchingTimeoutMillis =
++                std::chrono::duration_cast<std::chrono::milliseconds>(DISPATCHING_TIMEOUT).count();
++        mInputInfo.applicationInfo = aInfo;
+     }
+ 
+     static std::unique_ptr<InputSurface> makeColorInputSurface(const sp<SurfaceComposerClient> &scc,
+@@ -112,6 +135,16 @@ public:
+         return std::make_unique<InputSurface>(surfaceControl, width, height);
+     }
+ 
++    static std::unique_ptr<InputSurface> makeContainerInputSurfaceNoInputChannel(
++            const sp<SurfaceComposerClient> &scc, int width, int height) {
++        sp<SurfaceControl> surfaceControl =
++                scc->createSurface(String8("Test Container Surface"), 0 /* bufHeight */,
++                                   0 /* bufWidth */, PIXEL_FORMAT_RGBA_8888,
++                                   ISurfaceComposerClient::eFXSurfaceContainer);
++        return std::make_unique<InputSurface>(surfaceControl, width, height,
++                                              true /* noInputChannel */);
++    }
++
+     static std::unique_ptr<InputSurface> makeCursorInputSurface(
+             const sp<SurfaceComposerClient> &scc, int width, int height) {
+         sp<SurfaceControl> surfaceControl =
+@@ -198,7 +231,9 @@ public:
+     }
+ 
+     virtual ~InputSurface() {
+-        mInputFlinger->removeInputChannel(mClientChannel->getConnectionToken());
++        if (mClientChannel) {
++            mInputFlinger->removeInputChannel(mClientChannel->getConnectionToken());
++        }
+     }
+ 
+     virtual void doTransaction(
+@@ -242,32 +277,6 @@ private:
+         poll(&fd, 1, timeoutMs);
+     }
+ 
+-    void populateInputInfo(int width, int height) {
+-        mInputInfo.token = mClientChannel->getConnectionToken();
+-        mInputInfo.name = "Test info";
+-        mInputInfo.flags = WindowInfo::Flag::NOT_TOUCH_MODAL;
+-        mInputInfo.type = WindowInfo::Type::BASE_APPLICATION;
+-        mInputInfo.dispatchingTimeout = 5s;
+-        mInputInfo.globalScaleFactor = 1.0;
+-        mInputInfo.focusable = true;
+-        mInputInfo.hasWallpaper = false;
+-        mInputInfo.paused = false;
+-
+-        mInputInfo.touchableRegion.orSelf(Rect(0, 0, width, height));
+-
+-        // TODO: Fill in from SF?
+-        mInputInfo.ownerPid = 11111;
+-        mInputInfo.ownerUid = 11111;
+-        mInputInfo.displayId = 0;
+-
+-        InputApplicationInfo aInfo;
+-        aInfo.token = new BBinder();
+-        aInfo.name = "Test app info";
+-        aInfo.dispatchingTimeoutMillis =
+-                std::chrono::duration_cast<std::chrono::milliseconds>(DISPATCHING_TIMEOUT).count();
+-
+-        mInputInfo.applicationInfo = aInfo;
+-    }
+ public:
+     sp<SurfaceControl> mSurfaceControl;
+     std::shared_ptr<InputChannel> mClientChannel;
+@@ -960,4 +969,22 @@ TEST_F(InputSurfacesTest, drop_input_policy) {
+     injectKey(AKEYCODE_V);
+     EXPECT_EQ(surface->consumeEvent(100), nullptr);
+ }
++
++TEST_F(InputSurfacesTest, child_container_with_no_input_channel_blocks_parent) {
++    std::unique_ptr<InputSurface> parent = makeSurface(100, 100);
++
++    parent->showAt(100, 100);
++    injectTap(101, 101);
++    parent->expectTap(1, 1);
++
++    std::unique_ptr<InputSurface> childContainerSurface =
++            InputSurface::makeContainerInputSurfaceNoInputChannel(mComposerClient, 100, 100);
++    childContainerSurface->showAt(0, 0);
++    childContainerSurface->doTransaction(
++            [&](auto &t, auto &sc) { t.reparent(sc, parent->mSurfaceControl); });
++    injectTap(101, 101);
++
++    EXPECT_EQ(parent->consumeEvent(100), nullptr);
++}
++
+ } // namespace android::test
+diff --git a/services/surfaceflinger/Layer.cpp b/services/surfaceflinger/Layer.cpp
+index 3e50217b8..6d26c884f 100644
+--- a/services/surfaceflinger/Layer.cpp
++++ b/services/surfaceflinger/Layer.cpp
+@@ -2165,7 +2165,7 @@ void Layer::writeToProtoCommonState(LayerProto* layerInfo, LayerVector::StateSet
+         layerInfo->set_owner_uid(mOwnerUid);
+     }
+ 
+-    if (traceFlags & SurfaceTracing::TRACE_INPUT) {
++    if (traceFlags & SurfaceTracing::TRACE_INPUT && needsInputInfo()) {
+         WindowInfo info;
+         if (useDrawing) {
+             info = fillInputInfo({nullptr});
+@@ -2215,7 +2215,7 @@ void Layer::fillInputFrameInfo(WindowInfo& info, const ui::Transform& toNonRotat
+         info.frameBottom = 0;
+         info.transform.reset();
+         info.touchableRegion = Region();
+-        info.flags = WindowInfo::Flag::NOT_TOUCH_MODAL | WindowInfo::Flag::NOT_FOCUSABLE;
++        info.flags |= WindowInfo::Flag::NOT_TOUCH_MODAL | WindowInfo::Flag::NOT_FOCUSABLE;
+         return;
+     }
+ 
+@@ -2469,7 +2469,8 @@ sp<Layer> Layer::getClonedRoot() {
+ }
+ 
+ bool Layer::hasInputInfo() const {
+-    return mDrawingState.inputInfo.token != nullptr;
++    return mDrawingState.inputInfo.token != nullptr ||
++            mDrawingState.inputInfo.inputFeatures.test(WindowInfo::Feature::NO_INPUT_CHANNEL);
+ }
+ 
+ bool Layer::canReceiveInput() const {
+-- 
+2.40.0.rc1.284.g88254d51c5-goog
+
