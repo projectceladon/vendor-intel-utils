@@ -1,0 +1,356 @@
+From c8b2481f418ed70fcb76ff55a04159218439fbea Mon Sep 17 00:00:00 2001
+From: Alex Johnston <acjohnston@google.com>
+Date: Wed, 8 Mar 2023 22:28:28 +0000
+Subject: [PATCH] Enforce DevicePolicyManager.setUserControlDisabledPackages in
+ AppStandbyController
+
+When deciding an app's standby bucket, check if the
+app has its user control disabled by an IT admin. If so,
+the app should be the exempted restricted bucket.
+
+Bug: 272042183
+Test: atest AppStandbyControllerTests
+(cherry picked from commit 269fcb6873dee199dd8023831f882aafff1f6291)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:3dbab873d6d8f78c4d498a575ad37fd0dc20efbe)
+Merged-In: I4279dc37f0e17aedb1c2a87468478248443a253e
+Change-Id: I4279dc37f0e17aedb1c2a87468478248443a253e
+---
+ .../server/usage/AppStandbyInternal.java      |  2 +
+ .../server/usage/AppStandbyController.java    | 40 +++++++++++++++++++
+ .../app/admin/DevicePolicyManager.java        |  3 +-
+ .../app/usage/UsageStatsManagerInternal.java  | 10 +++++
+ .../DevicePolicyManagerService.java           |  2 +-
+ .../android/server/devicepolicy/Owners.java   | 18 ++++++++-
+ .../DevicePolicyManagerServiceTestable.java   |  3 +-
+ .../usage/AppStandbyControllerTests.java      | 38 ++++++++++++++++++
+ .../server/usage/UsageStatsService.java       |  5 +++
+ 9 files changed, 116 insertions(+), 5 deletions(-)
+
+diff --git a/apex/jobscheduler/framework/java/com/android/server/usage/AppStandbyInternal.java b/apex/jobscheduler/framework/java/com/android/server/usage/AppStandbyInternal.java
+index 8c06338560bf..4be7b3f5f86e 100644
+--- a/apex/jobscheduler/framework/java/com/android/server/usage/AppStandbyInternal.java
++++ b/apex/jobscheduler/framework/java/com/android/server/usage/AppStandbyInternal.java
+@@ -157,6 +157,8 @@ public interface AppStandbyInternal {
+ 
+     void setActiveAdminApps(Set<String> adminPkgs, int userId);
+ 
++    void setAdminProtectedPackages(Set<String> packageNames, int userId);
++
+     void onAdminDataAvailable();
+ 
+     void clearCarrierPrivilegedApps();
+diff --git a/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java b/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java
+index 4b081d258fd4..d23bef487685 100644
+--- a/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java
++++ b/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java
+@@ -247,6 +247,10 @@ public class AppStandbyController
+     @GuardedBy("mActiveAdminApps")
+     private final SparseArray<Set<String>> mActiveAdminApps = new SparseArray<>();
+ 
++    /** List of admin protected packages. Can contain {@link android.os.UserHandle#USER_ALL}. */
++    @GuardedBy("mAdminProtectedPackages")
++    private final SparseArray<Set<String>> mAdminProtectedPackages = new SparseArray<>();
++
+     /**
+      * Set of system apps that are headless (don't have any declared activities, enabled or
+      * disabled). Presence in this map indicates that the app is a headless system app.
+@@ -1088,6 +1092,9 @@ public class AppStandbyController
+             synchronized (mActiveAdminApps) {
+                 mActiveAdminApps.remove(userId);
+             }
++            synchronized (mAdminProtectedPackages) {
++                mAdminProtectedPackages.remove(userId);
++            }
+         }
+     }
+ 
+@@ -1177,6 +1184,10 @@ public class AppStandbyController
+                 return STANDBY_BUCKET_EXEMPTED;
+             }
+ 
++            if (isAdminProtectedPackages(packageName, userId)) {
++                return STANDBY_BUCKET_EXEMPTED;
++            }
++
+             if (isActiveNetworkScorer(packageName)) {
+                 return STANDBY_BUCKET_EXEMPTED;
+             }
+@@ -1583,6 +1594,17 @@ public class AppStandbyController
+         }
+     }
+ 
++    private boolean isAdminProtectedPackages(String packageName, int userId) {
++        synchronized (mAdminProtectedPackages) {
++            if (mAdminProtectedPackages.contains(UserHandle.USER_ALL)
++                    && mAdminProtectedPackages.get(UserHandle.USER_ALL).contains(packageName)) {
++                return true;
++            }
++            return mAdminProtectedPackages.contains(userId)
++                    && mAdminProtectedPackages.get(userId).contains(packageName);
++        }
++    }
++
+     @Override
+     public void addActiveDeviceAdmin(String adminPkg, int userId) {
+         synchronized (mActiveAdminApps) {
+@@ -1606,6 +1628,17 @@ public class AppStandbyController
+         }
+     }
+ 
++    @Override
++    public void setAdminProtectedPackages(Set<String> packageNames, int userId) {
++        synchronized (mAdminProtectedPackages) {
++            if (packageNames == null || packageNames.isEmpty()) {
++                mAdminProtectedPackages.remove(userId);
++            } else {
++                mAdminProtectedPackages.put(userId, packageNames);
++            }
++        }
++    }
++
+     @Override
+     public void onAdminDataAvailable() {
+         mAdminDataAvailableLatch.countDown();
+@@ -1628,6 +1661,13 @@ public class AppStandbyController
+         }
+     }
+ 
++    @VisibleForTesting
++    Set<String> getAdminProtectedPackagesForTest(int userId) {
++        synchronized (mAdminProtectedPackages) {
++            return mAdminProtectedPackages.get(userId);
++        }
++    }
++
+     /**
+      * Returns {@code true} if the supplied package is the device provisioning app. Otherwise,
+      * returns {@code false}.
+diff --git a/core/java/android/app/admin/DevicePolicyManager.java b/core/java/android/app/admin/DevicePolicyManager.java
+index 976f243b3db0..d000ff742359 100644
+--- a/core/java/android/app/admin/DevicePolicyManager.java
++++ b/core/java/android/app/admin/DevicePolicyManager.java
+@@ -13538,7 +13538,8 @@ public class DevicePolicyManager {
+ 
+     /**
+      * Called by Device owner to disable user control over apps. User will not be able to clear
+-     * app data or force-stop packages.
++     * app data or force-stop packages. Packages with user control disabled are exempted from
++     * App Standby Buckets.
+      *
+      * @param admin which {@link DeviceAdminReceiver} this request is associated with
+      * @param packages The package names for the apps.
+diff --git a/services/core/java/android/app/usage/UsageStatsManagerInternal.java b/services/core/java/android/app/usage/UsageStatsManagerInternal.java
+index b2226d1e0fa3..b55971848720 100644
+--- a/services/core/java/android/app/usage/UsageStatsManagerInternal.java
++++ b/services/core/java/android/app/usage/UsageStatsManagerInternal.java
+@@ -198,6 +198,16 @@ public abstract class UsageStatsManagerInternal {
+      */
+     public abstract void setActiveAdminApps(Set<String> adminApps, int userId);
+ 
++    /**
++     * Called by DevicePolicyManagerService to inform about the protected packages for a user.
++     * User control will be disabled for protected packages.
++     *
++     * @param packageNames the set of protected packages for {@code userId}.
++     * @param userId the userId to which the protected packages belong.
++     */
++    public abstract void setAdminProtectedPackages(@Nullable Set<String> packageNames,
++            @UserIdInt int userId);
++
+     /**
+      * Called by DevicePolicyManagerService during boot to inform that admin data is loaded and
+      * pushed to UsageStatsService.
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+index 5760a7a6f1ec..ddaf1a2c0e7d 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+@@ -1341,7 +1341,7 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
+         Owners newOwners() {
+             return new Owners(getUserManager(), getUserManagerInternal(),
+                     getPackageManagerInternal(), getActivityTaskManagerInternal(),
+-                    getActivityManagerInternal());
++                    getActivityManagerInternal(), getUsageStatsManagerInternal());
+         }
+ 
+         UserManager getUserManager() {
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/Owners.java b/services/devicepolicy/java/com/android/server/devicepolicy/Owners.java
+index 3584728a2e62..6849a4db9c69 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/Owners.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/Owners.java
+@@ -24,6 +24,7 @@ import android.app.AppOpsManagerInternal;
+ import android.app.admin.DevicePolicyManager.DeviceOwnerType;
+ import android.app.admin.SystemUpdateInfo;
+ import android.app.admin.SystemUpdatePolicy;
++import android.app.usage.UsageStatsManagerInternal;
+ import android.content.ComponentName;
+ import android.content.pm.PackageManager;
+ import android.content.pm.PackageManagerInternal;
+@@ -123,6 +124,7 @@ class Owners {
+     private final PackageManagerInternal mPackageManagerInternal;
+     private final ActivityTaskManagerInternal mActivityTaskManagerInternal;
+     private final ActivityManagerInternal mActivityManagerInternal;
++    private final UsageStatsManagerInternal mUsageStatsManagerInternal;
+ 
+     private boolean mSystemReady;
+ 
+@@ -155,9 +157,11 @@ class Owners {
+             UserManagerInternal userManagerInternal,
+             PackageManagerInternal packageManagerInternal,
+             ActivityTaskManagerInternal activityTaskManagerInternal,
+-            ActivityManagerInternal activitykManagerInternal) {
++            ActivityManagerInternal activitykManagerInternal,
++            UsageStatsManagerInternal usageStatsManagerInternal) {
+         this(userManager, userManagerInternal, packageManagerInternal,
+-                activityTaskManagerInternal, activitykManagerInternal, new Injector());
++                activityTaskManagerInternal, activitykManagerInternal,
++                usageStatsManagerInternal, new Injector());
+     }
+ 
+     @VisibleForTesting
+@@ -166,12 +170,14 @@ class Owners {
+             PackageManagerInternal packageManagerInternal,
+             ActivityTaskManagerInternal activityTaskManagerInternal,
+             ActivityManagerInternal activityManagerInternal,
++            UsageStatsManagerInternal usageStatsManagerInternal,
+             Injector injector) {
+         mUserManager = userManager;
+         mUserManagerInternal = userManagerInternal;
+         mPackageManagerInternal = packageManagerInternal;
+         mActivityTaskManagerInternal = activityTaskManagerInternal;
+         mActivityManagerInternal = activityManagerInternal;
++        mUsageStatsManagerInternal = usageStatsManagerInternal;
+         mInjector = injector;
+     }
+ 
+@@ -226,6 +232,8 @@ class Owners {
+                     mDeviceOwnerProtectedPackages.entrySet()) {
+                 mPackageManagerInternal.setDeviceOwnerProtectedPackages(
+                         entry.getKey(), entry.getValue());
++                mUsageStatsManagerInternal.setAdminProtectedPackages(
++                        new ArraySet(entry.getValue()), UserHandle.USER_ALL);
+             }
+         }
+     }
+@@ -359,6 +367,8 @@ class Owners {
+             if (protectedPackages != null) {
+                 mPackageManagerInternal.setDeviceOwnerProtectedPackages(
+                         mDeviceOwner.packageName, new ArrayList<>());
++                mUsageStatsManagerInternal.setAdminProtectedPackages(
++                        Collections.emptySet(), UserHandle.USER_ALL);
+             }
+             mDeviceOwner = null;
+             mDeviceOwnerUserId = UserHandle.USER_NULL;
+@@ -416,6 +426,8 @@ class Owners {
+             if (previousProtectedPackages != null) {
+                 mPackageManagerInternal.setDeviceOwnerProtectedPackages(
+                         mDeviceOwner.packageName, new ArrayList<>());
++                mUsageStatsManagerInternal.setAdminProtectedPackages(
++                        Collections.emptySet(), UserHandle.USER_ALL);
+             }
+             // We don't set a name because it's not used anyway.
+             // See DevicePolicyManagerService#getDeviceOwnerName
+@@ -684,6 +696,8 @@ class Owners {
+ 
+             mDeviceOwnerProtectedPackages.put(packageName, protectedPackages);
+             mPackageManagerInternal.setDeviceOwnerProtectedPackages(packageName, protectedPackages);
++            mUsageStatsManagerInternal.setAdminProtectedPackages(
++                        new ArraySet(protectedPackages), UserHandle.USER_ALL);
+             writeDeviceOwner();
+         }
+     }
+diff --git a/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerServiceTestable.java b/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerServiceTestable.java
+index 61d7ede98f45..b509630de13e 100644
+--- a/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerServiceTestable.java
++++ b/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerServiceTestable.java
+@@ -69,7 +69,8 @@ public class DevicePolicyManagerServiceTestable extends DevicePolicyManagerServi
+         public OwnersTestable(MockSystemServices services) {
+             super(services.userManager, services.userManagerInternal,
+                     services.packageManagerInternal, services.activityTaskManagerInternal,
+-                    services.activityManagerInternal, new MockInjector(services));
++                    services.activityManagerInternal, services.usageStatsManagerInternal,
++                    new MockInjector(services));
+         }
+ 
+         static class MockInjector extends Injector {
+diff --git a/services/tests/servicestests/src/com/android/server/usage/AppStandbyControllerTests.java b/services/tests/servicestests/src/com/android/server/usage/AppStandbyControllerTests.java
+index 9e46e1f2be92..955f7f2d5e95 100644
+--- a/services/tests/servicestests/src/com/android/server/usage/AppStandbyControllerTests.java
++++ b/services/tests/servicestests/src/com/android/server/usage/AppStandbyControllerTests.java
+@@ -152,6 +152,9 @@ public class AppStandbyControllerTests {
+     private static final String ADMIN_PKG2 = "com.android.admin2";
+     private static final String ADMIN_PKG3 = "com.android.admin3";
+ 
++    private static final String ADMIN_PROTECTED_PKG = "com.android.admin.protected";
++    private static final String ADMIN_PROTECTED_PKG2 = "com.android.admin.protected2";
++
+     private static final long MINUTE_MS = 60 * 1000;
+     private static final long HOUR_MS = 60 * MINUTE_MS;
+     private static final long DAY_MS = 24 * HOUR_MS;
+@@ -1631,6 +1634,19 @@ public class AppStandbyControllerTests {
+         assertIsNotActiveAdmin(ADMIN_PKG2, USER_ID);
+     }
+ 
++    @Test
++    public void testSetAdminProtectedPackages() {
++        assertAdminProtectedPackagesForTest(USER_ID, (String[]) null);
++        assertAdminProtectedPackagesForTest(USER_ID2, (String[]) null);
++
++        setAdminProtectedPackages(USER_ID, ADMIN_PROTECTED_PKG, ADMIN_PROTECTED_PKG2);
++        assertAdminProtectedPackagesForTest(USER_ID, ADMIN_PROTECTED_PKG, ADMIN_PROTECTED_PKG2);
++        assertAdminProtectedPackagesForTest(USER_ID2, (String[]) null);
++
++        setAdminProtectedPackages(USER_ID, (String[]) null);
++        assertAdminProtectedPackagesForTest(USER_ID, (String[]) null);
++    }
++
+     @Test
+     @FlakyTest(bugId = 185169504)
+     public void testUserInteraction_CrossProfile() throws Exception {
+@@ -2025,6 +2041,28 @@ public class AppStandbyControllerTests {
+         mController.setActiveAdminApps(new ArraySet<>(Arrays.asList(admins)), userId);
+     }
+ 
++    private void setAdminProtectedPackages(int userId, String... packageNames) {
++        Set<String> adminProtectedPackages = packageNames != null ? new ArraySet<>(
++                Arrays.asList(packageNames)) : null;
++        mController.setAdminProtectedPackages(adminProtectedPackages, userId);
++    }
++
++    private void assertAdminProtectedPackagesForTest(int userId, String... packageNames) {
++        final Set<String> actualAdminProtectedPackages =
++                mController.getAdminProtectedPackagesForTest(userId);
++        if (packageNames == null) {
++            if (actualAdminProtectedPackages != null && !actualAdminProtectedPackages.isEmpty()) {
++                fail("Admin protected packages should be null; " + getAdminAppsStr(userId,
++                        actualAdminProtectedPackages));
++            }
++            return;
++        }
++        assertEquals(packageNames.length, actualAdminProtectedPackages.size());
++        for (String adminProtectedPackage : packageNames) {
++            assertTrue(actualAdminProtectedPackages.contains(adminProtectedPackage));
++        }
++    }
++
+     private void setAndAssertBucket(String pkg, int user, int bucket, int reason) throws Exception {
+         rearmLatch(pkg);
+         mController.setAppStandbyBucket(pkg, user, bucket, reason);
+diff --git a/services/usage/java/com/android/server/usage/UsageStatsService.java b/services/usage/java/com/android/server/usage/UsageStatsService.java
+index ac1fcce20dc0..8872e1a1bcbd 100644
+--- a/services/usage/java/com/android/server/usage/UsageStatsService.java
++++ b/services/usage/java/com/android/server/usage/UsageStatsService.java
+@@ -2494,6 +2494,11 @@ public class UsageStatsService extends SystemService implements
+             mAppStandby.setActiveAdminApps(packageNames, userId);
+         }
+ 
++        @Override
++        public void setAdminProtectedPackages(Set<String> packageNames, int userId) {
++            mAppStandby.setAdminProtectedPackages(packageNames, userId);
++        }
++
+         @Override
+         public void onAdminDataAvailable() {
+             mAppStandby.onAdminDataAvailable();
+-- 
+2.41.0.rc0.172.g3f132b7071-goog
+
