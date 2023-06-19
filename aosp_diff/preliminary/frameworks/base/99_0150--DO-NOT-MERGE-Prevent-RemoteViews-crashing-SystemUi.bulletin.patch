@@ -1,0 +1,279 @@
+From 4b7745152bda1aedf77a2f4960def4b0d080134c Mon Sep 17 00:00:00 2001
+From: Valentin Iftime <valiiftime@google.com>
+Date: Wed, 22 Feb 2023 09:38:55 +0100
+Subject: [PATCH] [DO NOT MERGE] Prevent RemoteViews crashing SystemUi
+
+  Catch canvas drawing exceptions caused  by unsuported image sizes.
+
+Test: 1. Post a custom view notification with a layout
+	containing an ImageView that references a 5k x 5k image
+2. Add an App Widget to the home screen with that has the
+	layout mentioned above as preview/initial layout.
+
+Bug: 268193777
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:7505c570ff7646894692158dc6f7bda7a1281507)
+Merged-In: Ib3bda769c499b4069b49c566b1b227f98f707a8a
+Change-Id: Ib3bda769c499b4069b49c566b1b227f98f707a8a
+---
+ .../android/appwidget/AppWidgetHostView.java  | 39 ++++++++++++++-----
+ .../row/ExpandableNotificationRow.java        |  4 +-
+ .../ExpandableNotificationRowController.java  |  9 ++++-
+ .../row/NotificationContentView.java          | 39 +++++++++++++++++++
+ ...NotificationEntryManagerInflationTest.java |  3 +-
+ .../row/NotificationTestHelper.java           |  4 +-
+ 6 files changed, 83 insertions(+), 15 deletions(-)
+
+diff --git a/core/java/android/appwidget/AppWidgetHostView.java b/core/java/android/appwidget/AppWidgetHostView.java
+index 8be2b4873c67..b0ffd7690377 100644
+--- a/core/java/android/appwidget/AppWidgetHostView.java
++++ b/core/java/android/appwidget/AppWidgetHostView.java
+@@ -31,6 +31,7 @@ import android.content.pm.LauncherActivityInfo;
+ import android.content.pm.LauncherApps;
+ import android.content.pm.PackageManager.NameNotFoundException;
+ import android.content.res.Resources;
++import android.graphics.Canvas;
+ import android.graphics.Color;
+ import android.graphics.PointF;
+ import android.graphics.Rect;
+@@ -312,19 +313,26 @@ public class AppWidgetHostView extends FrameLayout {
+             super.onLayout(changed, left, top, right, bottom);
+         } catch (final RuntimeException e) {
+             Log.e(TAG, "Remote provider threw runtime exception, using error view instead.", e);
+-            removeViewInLayout(mView);
+-            View child = getErrorView();
+-            prepareView(child);
+-            addViewInLayout(child, 0, child.getLayoutParams());
+-            measureChild(child, MeasureSpec.makeMeasureSpec(getMeasuredWidth(), MeasureSpec.EXACTLY),
+-                    MeasureSpec.makeMeasureSpec(getMeasuredHeight(), MeasureSpec.EXACTLY));
+-            child.layout(0, 0, child.getMeasuredWidth() + mPaddingLeft + mPaddingRight,
+-                    child.getMeasuredHeight() + mPaddingTop + mPaddingBottom);
+-            mView = child;
+-            mViewMode = VIEW_MODE_ERROR;
++            handleViewError();
+         }
+     }
+ 
++    /**
++     * Remove bad view and replace with error message view
++     */
++    private void handleViewError() {
++        removeViewInLayout(mView);
++        View child = getErrorView();
++        prepareView(child);
++        addViewInLayout(child, 0, child.getLayoutParams());
++        measureChild(child, MeasureSpec.makeMeasureSpec(getMeasuredWidth(), MeasureSpec.EXACTLY),
++                MeasureSpec.makeMeasureSpec(getMeasuredHeight(), MeasureSpec.EXACTLY));
++        child.layout(0, 0, child.getMeasuredWidth() + mPaddingLeft + mPaddingRight,
++                child.getMeasuredHeight() + mPaddingTop + mPaddingBottom);
++        mView = child;
++        mViewMode = VIEW_MODE_ERROR;
++    }
++
+     /**
+      * Provide guidance about the size of this widget to the AppWidgetManager. The widths and
+      * heights should correspond to the full area the AppWidgetHostView is given. Padding added by
+@@ -940,4 +948,15 @@ public class AppWidgetHostView extends FrameLayout {
+             reapplyLastRemoteViews();
+         }
+     }
++
++    @Override
++    protected void dispatchDraw(@NonNull Canvas canvas) {
++        try {
++            super.dispatchDraw(canvas);
++        } catch (Exception e) {
++            // Catch draw exceptions that may be caused by RemoteViews
++            Log.e(TAG, "Drawing view failed: " + e);
++            post(this::handleViewError);
++        }
++    }
+ }
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRow.java b/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRow.java
+index 819f5a3f6dc2..e1b44122b225 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRow.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRow.java
+@@ -70,6 +70,7 @@ import android.widget.ImageView;
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.logging.MetricsLogger;
+ import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
++import com.android.internal.statusbar.IStatusBarService;
+ import com.android.internal.util.ContrastColorUtil;
+ import com.android.internal.widget.CachingIconView;
+ import com.android.internal.widget.CallLayout;
+@@ -1568,7 +1569,8 @@ public class ExpandableNotificationRow extends ActivatableNotificationView
+             PeopleNotificationIdentifier peopleNotificationIdentifier,
+             OnUserInteractionCallback onUserInteractionCallback,
+             Optional<BubblesManager> bubblesManagerOptional,
+-            NotificationGutsManager gutsManager) {
++            NotificationGutsManager gutsManager,
++            IStatusBarService statusBarService) {
+         mEntry = entry;
+         mAppName = appName;
+         if (mMenuRow == null) {
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRowController.java b/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRowController.java
+index 0662a1eba8b6..539838e7d32c 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRowController.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/ExpandableNotificationRowController.java
+@@ -26,6 +26,7 @@ import android.view.ViewGroup;
+ import androidx.annotation.NonNull;
+ 
+ import com.android.systemui.R;
++import com.android.internal.statusbar.IStatusBarService;
+ import com.android.systemui.classifier.FalsingCollector;
+ import com.android.systemui.plugins.FalsingManager;
+ import com.android.systemui.plugins.statusbar.NotificationMenuRowPlugin;
+@@ -85,6 +86,7 @@ public class ExpandableNotificationRowController implements NodeController {
+     private final boolean mAllowLongPress;
+     private final PeopleNotificationIdentifier mPeopleNotificationIdentifier;
+     private final Optional<BubblesManager> mBubblesManagerOptional;
++    private final IStatusBarService mStatusBarService;
+ 
+     private final ExpandableNotificationRowDragController mDragController;
+ 
+@@ -113,7 +115,8 @@ public class ExpandableNotificationRowController implements NodeController {
+             FalsingCollector falsingCollector,
+             PeopleNotificationIdentifier peopleNotificationIdentifier,
+             Optional<BubblesManager> bubblesManagerOptional,
+-            ExpandableNotificationRowDragController dragController) {
++            ExpandableNotificationRowDragController dragController,
++            IStatusBarService statusBarService) {
+         mView = view;
+         mListContainer = listContainer;
+         mActivatableNotificationViewController = activatableNotificationViewController;
+@@ -139,6 +142,7 @@ public class ExpandableNotificationRowController implements NodeController {
+         mPeopleNotificationIdentifier = peopleNotificationIdentifier;
+         mBubblesManagerOptional = bubblesManagerOptional;
+         mDragController = dragController;
++        mStatusBarService = statusBarService;
+     }
+ 
+     /**
+@@ -165,7 +169,8 @@ public class ExpandableNotificationRowController implements NodeController {
+                 mPeopleNotificationIdentifier,
+                 mOnUserInteractionCallback,
+                 mBubblesManagerOptional,
+-                mNotificationGutsManager
++                mNotificationGutsManager,
++                mStatusBarService
+         );
+         mView.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+         if (mAllowLongPress) {
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/NotificationContentView.java b/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/NotificationContentView.java
+index 9cc484c02802..ac4f1563ce00 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/NotificationContentView.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/notification/row/NotificationContentView.java
+@@ -21,10 +21,13 @@ import android.annotation.Nullable;
+ import android.app.Notification;
+ import android.app.PendingIntent;
+ import android.content.Context;
++import android.graphics.Canvas;
+ import android.graphics.Rect;
+ import android.graphics.drawable.Drawable;
+ import android.os.Build;
++import android.os.RemoteException;
+ import android.provider.Settings;
++import android.service.notification.StatusBarNotification;
+ import android.util.ArrayMap;
+ import android.util.AttributeSet;
+ import android.util.IndentingPrintWriter;
+@@ -41,6 +44,7 @@ import android.widget.LinearLayout;
+ 
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.systemui.Dependency;
++import com.android.internal.statusbar.IStatusBarService;
+ import com.android.systemui.R;
+ import com.android.systemui.plugins.statusbar.NotificationMenuRowPlugin;
+ import com.android.systemui.statusbar.RemoteInputController;
+@@ -127,6 +131,8 @@ public class NotificationContentView extends FrameLayout implements Notification
+     private RemoteInputController mRemoteInputController;
+     private Runnable mExpandedVisibleListener;
+     private PeopleNotificationIdentifier mPeopleIdentifier;
++    private IStatusBarService mStatusBarService;
++
+     /**
+      * List of listeners for when content views become inactive (i.e. not the showing view).
+      */
+@@ -180,6 +186,7 @@ public class NotificationContentView extends FrameLayout implements Notification
+         mHybridGroupManager = new HybridGroupManager(getContext());
+         mSmartReplyConstants = Dependency.get(SmartReplyConstants.class);
+         mSmartReplyController = Dependency.get(SmartReplyController.class);
++        mStatusBarService = Dependency.get(IStatusBarService.class);
+         initView();
+     }
+ 
+@@ -2030,4 +2037,36 @@ public class NotificationContentView extends FrameLayout implements Notification
+         }
+         return false;
+     }
++
++    @Override
++    protected void dispatchDraw(Canvas canvas) {
++        try {
++            super.dispatchDraw(canvas);
++        } catch (Exception e) {
++            // Catch draw exceptions that may be caused by RemoteViews
++            Log.e(TAG, "Drawing view failed: " + e);
++            cancelNotification(e);
++        }
++    }
++
++    private void cancelNotification(Exception exception) {
++        try {
++            setVisibility(GONE);
++            final StatusBarNotification sbn = mNotificationEntry.getSbn();
++            if (mStatusBarService != null) {
++                // report notification inflation errors back up
++                // to notification delegates
++                mStatusBarService.onNotificationError(
++                        sbn.getPackageName(),
++                        sbn.getTag(),
++                        sbn.getId(),
++                        sbn.getUid(),
++                        sbn.getInitialPid(),
++                        exception.getMessage(),
++                        sbn.getUser().getIdentifier());
++            }
++        } catch (RemoteException ex) {
++            Log.e(TAG, "cancelNotification failed: " + ex);
++        }
++    }
+ }
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationEntryManagerInflationTest.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationEntryManagerInflationTest.java
+index d3738f42e020..b00e80788521 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationEntryManagerInflationTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationEntryManagerInflationTest.java
+@@ -271,7 +271,8 @@ public class NotificationEntryManagerInflationTest extends SysuiTestCase {
+                                 new FalsingCollectorFake(),
+                                 mPeopleNotificationIdentifier,
+                                 Optional.of(mock(BubblesManager.class)),
+-                                mock(ExpandableNotificationRowDragController.class)
++                                mock(ExpandableNotificationRowDragController.class),
++                                mock(IStatusBarService.class)
+                         ));
+ 
+         when(mNotificationRowComponentBuilder.activatableNotificationView(any()))
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationTestHelper.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationTestHelper.java
+index c5d1e3acb2b9..883f8e9bd7b2 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationTestHelper.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/row/NotificationTestHelper.java
+@@ -43,6 +43,7 @@ import android.text.TextUtils;
+ import android.view.LayoutInflater;
+ import android.widget.RemoteViews;
+ 
++import com.android.internal.statusbar.IStatusBarService;
+ import com.android.systemui.TestableDependency;
+ import com.android.systemui.classifier.FalsingCollectorFake;
+ import com.android.systemui.classifier.FalsingManagerFake;
+@@ -490,7 +491,8 @@ public class NotificationTestHelper {
+                 mPeopleNotificationIdentifier,
+                 mock(OnUserInteractionCallback.class),
+                 Optional.of(mock(BubblesManager.class)),
+-                mock(NotificationGutsManager.class));
++                mock(NotificationGutsManager.class),
++                mock(IStatusBarService.class));
+ 
+         row.setAboveShelfChangedListener(aboveShelf -> { });
+         mBindStage.getStageParams(entry).requireContentViews(extraInflationFlags);
+-- 
+2.41.0.rc0.172.g3f132b7071-goog
+
