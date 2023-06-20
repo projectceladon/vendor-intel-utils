@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,132 +13,164 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#define LOG_TAG "android.hardware.boot@1.2-impl-intel"
 
-#include <memory>
+#define LOG_TAG "android.hardware.boot-service.intel"
 
-#include <log/log.h>
-#include <hardware/boot_control.h>
-#include <hardware/hardware.h>
 #include "BootControl.h"
 #include "boot_control_avb.h"
+#include <cstdint>
+#include <log/log.h>
 
-namespace android {
-namespace hardware {
-namespace boot {
-namespace V1_2 {
-namespace implementation {
+#include <android-base/logging.h>
 
-using ::android::hardware::boot::V1_0::CommandResult;
-using ::android::hardware::boot::V1_1::MergeStatus;
+using HIDLMergeStatus = ::android::bootable::BootControl::MergeStatus;
+using ndk::ScopedAStatus;
 
-BootControl::BootControl(boot_control_module_t *module) : mModule(module) {}
+namespace aidl::android::hardware::boot {
 
-// Methods from ::android::hardware::boot::V1_0::IBootControl.
-Return<uint32_t> BootControl::getNumberSlots() {
-    return mModule->getNumberSlots(mModule);
-}
-
-Return<uint32_t> BootControl::getCurrentSlot() {
-    return mModule->getCurrentSlot(mModule);
-}
-
-Return<void> BootControl::markBootSuccessful(markBootSuccessful_cb _hidl_cb) {
-    int ret = mModule->markBootSuccessful(mModule);
-    struct CommandResult cr;
-    cr.success = (ret == 0);
-    cr.errMsg = strerror(-ret);
-    _hidl_cb(cr);
-    return Void();
-}
-
-Return<void> BootControl::setActiveBootSlot(uint32_t slot, setActiveBootSlot_cb _hidl_cb) {
-    int ret = mModule->setActiveBootSlot(mModule, slot);
-    struct CommandResult cr;
-    cr.success = (ret == 0);
-    cr.errMsg = strerror(-ret);
-    _hidl_cb(cr);
-    return Void();
-}
-
-Return<void> BootControl::setSlotAsUnbootable(uint32_t slot, setSlotAsUnbootable_cb _hidl_cb) {
-    int ret = mModule->setSlotAsUnbootable(mModule, slot);
-    struct CommandResult cr;
-    cr.success = (ret == 0);
-    cr.errMsg = strerror(-ret);
-    _hidl_cb(cr);
-    return Void();
-}
-
-Return<BoolResult> BootControl::isSlotBootable(uint32_t slot) {
-    int32_t ret = mModule->isSlotBootable(mModule, slot);
-    if (ret < 0) {
-        return BoolResult::INVALID_SLOT;
-    }
-    return ret ? BoolResult::TRUE : BoolResult::FALSE;
-}
-
-Return<BoolResult> BootControl::isSlotMarkedSuccessful(uint32_t slot) {
-    int32_t ret = mModule->isSlotMarkedSuccessful(mModule, slot);
-    if (ret < 0) {
-        return BoolResult::INVALID_SLOT;
-    }
-    return ret ? BoolResult::TRUE : BoolResult::FALSE;
-}
-
-Return<void> BootControl::getSuffix(uint32_t slot, getSuffix_cb _hidl_cb) {
-    hidl_string ans;
-    const char *suffix = mModule->getSuffix(mModule, slot);
-    if (suffix) {
-        ans = suffix;
-    }
-    _hidl_cb(ans);
-    return Void();
-}
-
-// Methods from ::android::hardware::boot::V1_1::IBootControl.
-// Snapshot merge status is only used by virtual a/b update.
-Return<bool> BootControl::setSnapshotMergeStatus(MergeStatus status) {
-    private_boot_control_t *pModule = (private_boot_control_t *)(mModule);
-    return pModule->SetSnapshotMergeStatus((uint8_t)status);
-}
-
-Return<MergeStatus> BootControl::getSnapshotMergeStatus() {
-    private_boot_control_t *pModule = (private_boot_control_t *)(mModule);
-    return (MergeStatus)(pModule->GetSnapshotMergeStatus());
-}
-
-
-// Methods from ::android::hardware::boot::V1_2::IBootControl.
-Return<uint32_t> BootControl::getActiveBootSlot() {
-    auto get_active_slot = mModule->getActiveBootSlot;
-    if (!get_active_slot) {
-        ALOGE("Failed to find the implementation of getActiveBootSlot in boot"
-              " control HAL.");
-        return 0;
-    }
-    return get_active_slot(mModule);
-
-}
-
-IBootControl* HIDL_FETCH_IBootControl(const char* /* hal */) {
+BootControl::BootControl() {
     int ret = 0;
+
     boot_control_module_t *module = NULL;
     hw_module_t **hwm = reinterpret_cast<hw_module_t **>(&module);
     ret = hw_get_module(BOOT_CONTROL_HARDWARE_MODULE_ID, const_cast<const hw_module_t **>(hwm));
     if (ret) {
         ALOGE("hw_get_module %s failed: %d", BOOT_CONTROL_HARDWARE_MODULE_ID, ret);
-        return nullptr;
+    } else {
+        mModule = module;
     }
-    module->init(module);
 
-    auto hal = new BootControl(module);
-    return hal;
+    mModule->init(mModule);
+}
+
+ScopedAStatus BootControl::getActiveBootSlot(int32_t* _aidl_return) {
+    *_aidl_return = mModule->getActiveBootSlot(mModule);
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::getCurrentSlot(int32_t* _aidl_return) {
+    *_aidl_return = mModule->getCurrentSlot(mModule);
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::getNumberSlots(int32_t* _aidl_return) {
+    *_aidl_return = mModule->getNumberSlots(mModule);
+    return ScopedAStatus::ok();
+}
+
+namespace {
+
+static constexpr MergeStatus ToAIDLMergeStatus(HIDLMergeStatus status) {
+    switch (status) {
+        case HIDLMergeStatus::NONE:
+            return MergeStatus::NONE;
+        case HIDLMergeStatus::UNKNOWN:
+            return MergeStatus::UNKNOWN;
+        case HIDLMergeStatus::SNAPSHOTTED:
+            return MergeStatus::SNAPSHOTTED;
+        case HIDLMergeStatus::MERGING:
+            return MergeStatus::MERGING;
+        case HIDLMergeStatus::CANCELLED:
+            return MergeStatus::CANCELLED;
+    }
+}
+
+static constexpr HIDLMergeStatus ToHIDLMergeStatus(MergeStatus status) {
+    switch (status) {
+        case MergeStatus::NONE:
+            return HIDLMergeStatus::NONE;
+        case MergeStatus::UNKNOWN:
+            return HIDLMergeStatus::UNKNOWN;
+        case MergeStatus::SNAPSHOTTED:
+            return HIDLMergeStatus::SNAPSHOTTED;
+        case MergeStatus::MERGING:
+            return HIDLMergeStatus::MERGING;
+        case MergeStatus::CANCELLED:
+            return HIDLMergeStatus::CANCELLED;
+    }
+}
 
 }
 
-}  // namespace implementation
-}  // namespace V1_2
-}  // namespace boot
-}  // namespace hardware
-}  // namespace android
+ScopedAStatus BootControl::getSnapshotMergeStatus(MergeStatus* _aidl_return) {
+    private_boot_control_t *pModule = (private_boot_control_t *)(mModule);
+
+    *_aidl_return = ToAIDLMergeStatus((HIDLMergeStatus)pModule->GetSnapshotMergeStatus());
+
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::getSuffix(int32_t in_slot, std::string* _aidl_return) {
+    const char *suffix = mModule->getSuffix(mModule, in_slot);
+
+    if (suffix) {
+        *_aidl_return = suffix;
+    }
+
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::isSlotBootable(int32_t in_slot, bool* _aidl_return) {
+    int ret = mModule->isSlotBootable(mModule, in_slot);
+
+    if (ret < 0) {
+        return ScopedAStatus::fromServiceSpecificErrorWithMessage(
+                INVALID_SLOT, (std::string("Invalid slot ") + std::to_string(in_slot)).c_str());
+    }
+    *_aidl_return = ret;
+
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::isSlotMarkedSuccessful(int32_t in_slot, bool* _aidl_return) {
+    int ret = mModule->isSlotMarkedSuccessful(mModule, in_slot);
+
+    if (ret < 0) {
+        return ScopedAStatus::fromServiceSpecificErrorWithMessage(
+                INVALID_SLOT, (std::string("Invalid slot ") + std::to_string(in_slot)).c_str());
+    }
+    *_aidl_return = ret;
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::markBootSuccessful() {
+    if (mModule->markBootSuccessful(mModule)) {
+        return ScopedAStatus::fromServiceSpecificErrorWithMessage(COMMAND_FAILED,
+                                                                  "Operation failed");
+    }
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::setActiveBootSlot(int32_t in_slot) {
+    int ret = mModule->setActiveBootSlot(mModule, in_slot);
+
+    if (ret != 0) {
+        return ScopedAStatus::fromServiceSpecificErrorWithMessage(
+                INVALID_SLOT, (std::string("Invalid slot ") + std::to_string(in_slot)).c_str());
+    }
+
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::setSlotAsUnbootable(int32_t in_slot) {
+    int ret = mModule->setSlotAsUnbootable(mModule, in_slot);
+
+    if (ret != 0) {
+        return ScopedAStatus::fromServiceSpecificErrorWithMessage(
+                INVALID_SLOT, (std::string("Invalid slot ") + std::to_string(in_slot)).c_str());
+    }
+
+    return ScopedAStatus::ok();
+}
+
+ScopedAStatus BootControl::setSnapshotMergeStatus(MergeStatus in_status) {
+    private_boot_control_t *pModule = (private_boot_control_t *)(mModule);
+
+    if (!pModule->SetSnapshotMergeStatus((uint8_t)ToHIDLMergeStatus(in_status))) {
+        return ScopedAStatus::fromServiceSpecificErrorWithMessage(COMMAND_FAILED,
+                                                                  "Operation failed");
+    }
+    return ScopedAStatus::ok();
+}
+
+}  // namespace aidl::android::hardware::boot

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,50 +16,33 @@
 
 #pragma once
 
-#include <android/hardware/boot/1.2/IBootControl.h>
-#include <hidl/MQDescriptor.h>
-#include <hidl/Status.h>
+#include <aidl/android/hardware/boot/BnBootControl.h>
+#include <libboot_control/libboot_control.h>
+#include <hardware/boot_control.h>
 
-namespace android {
-namespace hardware {
-namespace boot {
-namespace V1_2 {
-namespace implementation {
-using ::android::hardware::Return;
-using ::android::hardware::Void;
-using ::android::hardware::boot::V1_0::BoolResult;
-using ::android::hardware::boot::V1_1::MergeStatus;
-using ::android::hardware::boot::V1_2::IBootControl;
+using ndk::ScopedAStatus;
 
-class BootControl : public IBootControl {
+namespace aidl::android::hardware::boot {
+
+class BootControl final : public BnBootControl {
   public:
-    explicit BootControl(boot_control_module_t *module);
-
-    // Methods from ::android::hardware::boot::V1_0::IBootControl.
-    Return<uint32_t> getNumberSlots() override;
-    Return<uint32_t> getCurrentSlot() override;
-    Return<void> markBootSuccessful(markBootSuccessful_cb _hidl_cb) override;
-    Return<void> setActiveBootSlot(uint32_t slot, setActiveBootSlot_cb _hidl_cb) override;
-    Return<void> setSlotAsUnbootable(uint32_t slot, setSlotAsUnbootable_cb _hidl_cb) override;
-    Return<BoolResult> isSlotBootable(uint32_t slot) override;
-    Return<BoolResult> isSlotMarkedSuccessful(uint32_t slot) override;
-    Return<void> getSuffix(uint32_t slot, getSuffix_cb _hidl_cb) override;
-
-    // Methods from ::android::hardware::boot::V1_1::IBootControl.
-    Return<bool> setSnapshotMergeStatus(MergeStatus status) override;
-    Return<MergeStatus> getSnapshotMergeStatus() override;
-
-    // Methods from ::android::hardware::boot::V1_2::IBootControl.
-    Return<uint32_t> getActiveBootSlot() override;
+    BootControl();
+    ScopedAStatus getActiveBootSlot(int32_t* _aidl_return) override;
+    ScopedAStatus getCurrentSlot(int32_t* _aidl_return) override;
+    ScopedAStatus getNumberSlots(int32_t* _aidl_return) override;
+    ScopedAStatus getSnapshotMergeStatus(
+        ::aidl::android::hardware::boot::MergeStatus* _aidl_return) override;
+    ScopedAStatus getSuffix(int32_t in_slot, std::string* _aidl_return) override;
+    ScopedAStatus isSlotBootable(int32_t in_slot, bool* _aidl_return) override;
+    ScopedAStatus isSlotMarkedSuccessful(int32_t in_slot, bool* _aidl_return) override;
+    ScopedAStatus markBootSuccessful() override;
+    ScopedAStatus setActiveBootSlot(int32_t in_slot) override;
+    ScopedAStatus setSlotAsUnbootable(int32_t in_slot) override;
+    ScopedAStatus setSnapshotMergeStatus(
+        ::aidl::android::hardware::boot::MergeStatus in_status) override;
 
   private:
     boot_control_module_t *mModule;
 };
 
-extern "C" IBootControl* HIDL_FETCH_IBootControl(const char* name);
-
-}  // namespace implementation
-}  // namespace V1_2
-}  // namespace boot
-}  // namespace hardware
-}  // namespace android
+}  // namespace aidl::android::hardware::boot
