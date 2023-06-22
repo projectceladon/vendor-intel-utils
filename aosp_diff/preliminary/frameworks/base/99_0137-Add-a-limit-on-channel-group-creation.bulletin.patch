@@ -1,0 +1,136 @@
+From d1eb5f5d345d21beef66529913665e35ee71f01c Mon Sep 17 00:00:00 2001
+From: Julia Reynolds <juliacr@google.com>
+Date: Tue, 18 Jan 2022 11:59:54 -0500
+Subject: [PATCH] Add a limit on channel group creation
+
+Same as exists for channels
+
+This is a backport of the fix in ag/16659457, including the adjustment from ag/20920023 (changed the max value from 50000 to 6000).
+
+Test: PreferencesHelperTest
+Bug: 210114537
+Bug: 261723753
+Change-Id: Ic27efba4c54e22eebca16fc948879e652df4467b
+(cherry picked from commit 37b3549807d15452ac334fae316e615c3b9b8e8b & I3f3a99765c161369e1b026686a0e5f0c83ed839e)
+Merged-In: I3f3a99765c161369e1b026686a0e5f0c83ed839e
+(cherry picked from commit 38257af19e18d19075483dfa351c7e5cbb9cbf75)
+Merged-In: Ic27efba4c54e22eebca16fc948879e652df4467b
+---
+ .../notification/PreferencesHelper.java       | 14 ++++++
+ .../notification/PreferencesHelperTest.java   | 47 +++++++++++++++++++
+ 2 files changed, 61 insertions(+)
+
+diff --git a/services/core/java/com/android/server/notification/PreferencesHelper.java b/services/core/java/com/android/server/notification/PreferencesHelper.java
+index c6cb3c0d2ab7..da8b1f4130ac 100644
+--- a/services/core/java/com/android/server/notification/PreferencesHelper.java
++++ b/services/core/java/com/android/server/notification/PreferencesHelper.java
+@@ -98,6 +98,8 @@ public class PreferencesHelper implements RankingConfig {
+ 
+     @VisibleForTesting
+     static final int NOTIFICATION_CHANNEL_COUNT_LIMIT = 5000;
++    @VisibleForTesting
++    static final int NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT = 6000;
+ 
+     private static final int NOTIFICATION_PREFERENCES_PULL_LIMIT = 1000;
+     private static final int NOTIFICATION_CHANNEL_PULL_LIMIT = 2000;
+@@ -239,6 +241,7 @@ public class PreferencesHelper implements RankingConfig {
+                                 }
+                             }
+                             boolean skipWarningLogged = false;
++                            boolean skipGroupWarningLogged = false;
+                             boolean hasSAWPermission = false;
+                             if (upgradeForBubbles && uid != UNKNOWN_UID) {
+                                 hasSAWPermission = mAppOps.noteOpNoThrow(
+@@ -289,6 +292,14 @@ public class PreferencesHelper implements RankingConfig {
+                                 String tagName = parser.getName();
+                                 // Channel groups
+                                 if (TAG_GROUP.equals(tagName)) {
++                                    if (r.groups.size() >= NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT) {
++                                        if (!skipGroupWarningLogged) {
++                                            Slog.w(TAG, "Skipping further groups for " + r.pkg
++                                                    + "; app has too many");
++                                            skipGroupWarningLogged = true;
++                                        }
++                                        continue;
++                                    }
+                                     String id = parser.getAttributeValue(null, ATT_ID);
+                                     CharSequence groupName = parser.getAttributeValue(null,
+                                             ATT_NAME);
+@@ -799,6 +810,9 @@ public class PreferencesHelper implements RankingConfig {
+             }
+             if (fromTargetApp) {
+                 group.setBlocked(false);
++                if (r.groups.size() >= NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT) {
++                    throw new IllegalStateException("Limit exceed; cannot create more groups");
++                }
+             }
+             final NotificationChannelGroup oldGroup = r.groups.get(group.getId());
+             if (oldGroup != null) {
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
+index cc1483594a41..6deb7af4fca8 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
+@@ -42,6 +42,7 @@ import static com.android.os.AtomsProto.PackageNotificationChannelPreferences.IS
+ import static com.android.os.AtomsProto.PackageNotificationChannelPreferences.UID_FIELD_NUMBER;
+ import static com.android.server.notification.PreferencesHelper.DEFAULT_BUBBLE_PREFERENCE;
+ import static com.android.server.notification.PreferencesHelper.NOTIFICATION_CHANNEL_COUNT_LIMIT;
++import static com.android.server.notification.PreferencesHelper.NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT;
+ import static com.android.server.notification.PreferencesHelper.UNKNOWN_UID;
+ 
+ import static com.google.common.truth.Truth.assertThat;
+@@ -3173,6 +3174,52 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         assertNull(mHelper.getNotificationChannel(PKG_O, UID_O, extraChannel1, true));
+     }
+ 
++    @Test
++    public void testTooManyGroups() {
++        for (int i = 0; i < NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT; i++) {
++            NotificationChannelGroup group = new NotificationChannelGroup(String.valueOf(i),
++                    String.valueOf(i));
++            mHelper.createNotificationChannelGroup(PKG_O, UID_O, group, true);
++        }
++        try {
++            NotificationChannelGroup group = new NotificationChannelGroup(
++                    String.valueOf(NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT),
++                    String.valueOf(NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT));
++            mHelper.createNotificationChannelGroup(PKG_O, UID_O, group, true);
++            fail("Allowed to create too many notification channel groups");
++        } catch (IllegalStateException e) {
++            // great
++        }
++    }
++
++    @Test
++    public void testTooManyGroups_xml() throws Exception {
++        String extraGroup = "EXTRA";
++        String extraGroup1 = "EXTRA1";
++
++        // create first... many... directly so we don't need a big xml blob in this test
++        for (int i = 0; i < NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT; i++) {
++            NotificationChannelGroup group = new NotificationChannelGroup(String.valueOf(i),
++                    String.valueOf(i));
++            mHelper.createNotificationChannelGroup(PKG_O, UID_O, group, true);
++        }
++
++        final String xml = "<ranking version=\"1\">\n"
++                + "<package name=\"" + PKG_O + "\" uid=\"" + UID_O + "\" >\n"
++                + "<channelGroup id=\"" + extraGroup + "\" name=\"hi\"/>"
++                + "<channelGroup id=\"" + extraGroup1 + "\" name=\"hi2\"/>"
++                + "</package>"
++                + "</ranking>";
++        TypedXmlPullParser parser = Xml.newFastPullParser();
++        parser.setInput(new BufferedInputStream(new ByteArrayInputStream(xml.getBytes())),
++                null);
++        parser.nextTag();
++        mHelper.readXml(parser, false, UserHandle.USER_ALL);
++
++        assertNull(mHelper.getNotificationChannelGroup(extraGroup, PKG_O, UID_O));
++        assertNull(mHelper.getNotificationChannelGroup(extraGroup1, PKG_O, UID_O));
++    }
++
+     @Test
+     public void testRestoreMultiUser() throws Exception {
+         String pkg = "restore_pkg";
+-- 
+2.39.1.456.gfc5497dd1b-goog
+

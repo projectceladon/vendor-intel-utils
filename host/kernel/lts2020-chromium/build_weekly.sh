@@ -3,9 +3,11 @@
 rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
-git clone https://github.com/projectceladon/linux-intel-lts2020-chromium.git
+
+tag="lts-v5.10.118-20230615-r11"
+git clone -b $tag https://github.com/projectceladon/linux-intel-lts2020-chromium.git
 cd linux-intel-lts2020-chromium
-git checkout 8b980c44db8347e1e954592f62f48af7213f3692
+
 cp ../../x86_64_defconfig .config
 patch_list=`find ../../ -iname "*.patch" | sort -u`
 for i in $patch_list

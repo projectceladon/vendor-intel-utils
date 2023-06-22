@@ -1,0 +1,207 @@
+From 3f11c41c53f109ba7873e800c615012d4d3a97d2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Iv=C3=A1n=20Budnik?= <ivanbuper@google.com>
+Date: Tue, 4 Oct 2022 15:52:30 +0000
+Subject: [PATCH] Enforce MediaButtonReceiver extracted component name matches
+ session package name
+
+This change makes sure that the extracted component name in a
+MediaButtonReceiverHolder matches the Media Session owner's package
+name. This avoids incorrectly routing media button events and potential
+security issues.
+
+Bug: 244312001
+Bug: 238177121
+Test: atest CtsMediaBetterTogetherTestCases
+Change-Id: Ifac9cf53889222e31d18c14c1e096ee68c0a346c
+(cherry picked from commit 185c3e252397bfa37592edbb5b2f5ae97db92eda)
+Merged-In: Ifac9cf53889222e31d18c14c1e096ee68c0a346c
+(cherry picked from commit 48c388277880e56ab5cc29e145e4d00aa383ce01)
+Merged-In: Ifac9cf53889222e31d18c14c1e096ee68c0a346c
+---
+ .../java/android/media/session/ISession.aidl  |  2 +-
+ .../android/media/session/MediaSession.java   |  2 +-
+ .../media/MediaButtonReceiverHolder.java      | 61 +++++++++++--------
+ .../server/media/MediaSessionRecord.java      |  5 +-
+ .../server/media/MediaSessionService.java     |  6 +-
+ 5 files changed, 43 insertions(+), 33 deletions(-)
+
+diff --git a/media/java/android/media/session/ISession.aidl b/media/java/android/media/session/ISession.aidl
+index 9bf126b7a875..31fb8d03c4a0 100644
+--- a/media/java/android/media/session/ISession.aidl
++++ b/media/java/android/media/session/ISession.aidl
+@@ -35,7 +35,7 @@ interface ISession {
+     ISessionController getController();
+     void setFlags(int flags);
+     void setActive(boolean active);
+-    void setMediaButtonReceiver(in PendingIntent mbr, String sessionPackageName);
++    void setMediaButtonReceiver(in PendingIntent mbr);
+     void setMediaButtonBroadcastReceiver(in ComponentName broadcastReceiver);
+     void setLaunchPendingIntent(in PendingIntent pi);
+     void destroySession();
+diff --git a/media/java/android/media/session/MediaSession.java b/media/java/android/media/session/MediaSession.java
+index 20fa53d3ec32..24118b086c24 100644
+--- a/media/java/android/media/session/MediaSession.java
++++ b/media/java/android/media/session/MediaSession.java
+@@ -286,7 +286,7 @@ public final class MediaSession {
+     @Deprecated
+     public void setMediaButtonReceiver(@Nullable PendingIntent mbr) {
+         try {
+-            mBinder.setMediaButtonReceiver(mbr, mContext.getPackageName());
++            mBinder.setMediaButtonReceiver(mbr);
+         } catch (RemoteException e) {
+             Log.wtf(TAG, "Failure in setMediaButtonReceiver.", e);
+         }
+diff --git a/services/core/java/com/android/server/media/MediaButtonReceiverHolder.java b/services/core/java/com/android/server/media/MediaButtonReceiverHolder.java
+index 9a190316f4eb..c5fb5270f841 100644
+--- a/services/core/java/com/android/server/media/MediaButtonReceiverHolder.java
++++ b/services/core/java/com/android/server/media/MediaButtonReceiverHolder.java
+@@ -18,6 +18,7 @@ package com.android.server.media;
+ 
+ import android.annotation.IntDef;
+ import android.annotation.NonNull;
++import android.annotation.Nullable;
+ import android.app.BroadcastOptions;
+ import android.app.PendingIntent;
+ import android.content.ComponentName;
+@@ -37,6 +38,7 @@ import android.view.KeyEvent;
+ 
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
++import java.util.Collections;
+ import java.util.List;
+ 
+ /**
+@@ -102,15 +104,19 @@ final class MediaButtonReceiverHolder {
+     }
+ 
+     /**
+-     * Creates a new instance.
++     * Creates a new instance from a {@link PendingIntent}.
++     *
++     * <p>This method assumes the session package name has been validated and effectively belongs to
++     * the media session's owner.
+      *
+-     * @param context context
+      * @param userId userId
+-     * @param pendingIntent pending intent
+-     * @return Can be {@code null} if pending intent was null.
++     * @param pendingIntent pending intent that will receive media button events
++     * @param sessionPackageName package name of media session owner
++     * @return {@link MediaButtonReceiverHolder} instance or {@code null} if pending intent was
++     *     null.
+      */
+-    public static MediaButtonReceiverHolder create(Context context, int userId,
+-            PendingIntent pendingIntent, String sessionPackageName) {
++    public static MediaButtonReceiverHolder create(
++            int userId, @Nullable PendingIntent pendingIntent, String sessionPackageName) {
+         if (pendingIntent == null) {
+             return null;
+         }
+@@ -312,7 +318,7 @@ final class MediaButtonReceiverHolder {
+     }
+ 
+     private static ComponentName getComponentName(PendingIntent pendingIntent, int componentType) {
+-        List<ResolveInfo> resolveInfos = null;
++        List<ResolveInfo> resolveInfos = Collections.emptyList();
+         switch (componentType) {
+             case COMPONENT_TYPE_ACTIVITY:
+                 resolveInfos = pendingIntent.queryIntentComponents(
+@@ -330,32 +336,37 @@ final class MediaButtonReceiverHolder {
+                         PACKAGE_MANAGER_COMMON_FLAGS | PackageManager.GET_RECEIVERS);
+                 break;
+         }
+-        if (resolveInfos != null && !resolveInfos.isEmpty()) {
+-            return createComponentName(resolveInfos.get(0));
++
++        for (ResolveInfo resolveInfo : resolveInfos) {
++            ComponentInfo componentInfo = getComponentInfo(resolveInfo);
++            if (componentInfo != null && TextUtils.equals(componentInfo.packageName,
++                    pendingIntent.getCreatorPackage())
++                    && componentInfo.packageName != null && componentInfo.name != null) {
++                return new ComponentName(componentInfo.packageName, componentInfo.name);
++            }
+         }
++
+         return null;
+     }
+ 
+-    private static ComponentName createComponentName(ResolveInfo resolveInfo) {
+-        if (resolveInfo == null) {
+-            return null;
+-        }
+-        ComponentInfo componentInfo;
++    /**
++     * Retrieves the {@link ComponentInfo} from a {@link ResolveInfo} instance. Similar to {@link
++     * ResolveInfo#getComponentInfo()}, but returns {@code null} if this {@link ResolveInfo} points
++     * to a content provider.
++     *
++     * @param resolveInfo Where to extract the {@link ComponentInfo} from.
++     * @return Either a non-null {@link ResolveInfo#activityInfo} or {@link
++     *     ResolveInfo#serviceInfo}. Otherwise {@code null} if {@link ResolveInfo#providerInfo} is
++     *     not {@code null}.
++     */
++    private static ComponentInfo getComponentInfo(@NonNull ResolveInfo resolveInfo) {
+         // Code borrowed from ResolveInfo#getComponentInfo().
+         if (resolveInfo.activityInfo != null) {
+-            componentInfo = resolveInfo.activityInfo;
++            return resolveInfo.activityInfo;
+         } else if (resolveInfo.serviceInfo != null) {
+-            componentInfo = resolveInfo.serviceInfo;
++            return resolveInfo.serviceInfo;
+         } else {
+-            // We're not interested in content provider.
+-            return null;
+-        }
+-        // Code borrowed from ComponentInfo#getComponentName().
+-        try {
+-            return new ComponentName(componentInfo.packageName, componentInfo.name);
+-        } catch (IllegalArgumentException | NullPointerException e) {
+-            // This may be happen if resolveActivity() end up with matching multiple activities.
+-            // see PackageManager#resolveActivity().
++            // We're not interested in content providers.
+             return null;
+         }
+     }
+diff --git a/services/core/java/com/android/server/media/MediaSessionRecord.java b/services/core/java/com/android/server/media/MediaSessionRecord.java
+index 1525cd4da669..a970a4730a9f 100644
+--- a/services/core/java/com/android/server/media/MediaSessionRecord.java
++++ b/services/core/java/com/android/server/media/MediaSessionRecord.java
+@@ -892,8 +892,7 @@ public class MediaSessionRecord implements IBinder.DeathRecipient, MediaSessionR
+         }
+ 
+         @Override
+-        public void setMediaButtonReceiver(PendingIntent pi, String sessionPackageName)
+-                throws RemoteException {
++        public void setMediaButtonReceiver(PendingIntent pi) throws RemoteException {
+             final long token = Binder.clearCallingIdentity();
+             try {
+                 if ((mPolicies & MediaSessionPolicyProvider.SESSION_POLICY_IGNORE_BUTTON_RECEIVER)
+@@ -901,7 +900,7 @@ public class MediaSessionRecord implements IBinder.DeathRecipient, MediaSessionR
+                     return;
+                 }
+                 mMediaButtonReceiverHolder =
+-                        MediaButtonReceiverHolder.create(mContext, mUserId, pi, sessionPackageName);
++                        MediaButtonReceiverHolder.create(mUserId, pi, mPackageName);
+                 mService.onMediaButtonReceiverChanged(MediaSessionRecord.this);
+             } finally {
+                 Binder.restoreCallingIdentity(token);
+diff --git a/services/core/java/com/android/server/media/MediaSessionService.java b/services/core/java/com/android/server/media/MediaSessionService.java
+index b477ea353c25..52f97574a03b 100644
+--- a/services/core/java/com/android/server/media/MediaSessionService.java
++++ b/services/core/java/com/android/server/media/MediaSessionService.java
+@@ -2229,9 +2229,9 @@ public class MediaSessionService extends SystemService implements Monitor {
+                     PendingIntent pi = mCustomMediaKeyDispatcher.getMediaButtonReceiver(keyEvent,
+                             uid, asSystemService);
+                     if (pi != null) {
+-                        mediaButtonReceiverHolder = MediaButtonReceiverHolder.create(mContext,
+-                                mCurrentFullUserRecord.mFullUserId, pi,
+-                                /* sessionPackageName= */ "");
++                        mediaButtonReceiverHolder =
++                                MediaButtonReceiverHolder.create(
++                                        mCurrentFullUserRecord.mFullUserId, pi, "");
+                     }
+                 }
+             }
+-- 
+2.39.1.456.gfc5497dd1b-goog
+

@@ -1,0 +1,120 @@
+From 21b89e6f7111f8bbb93586dfa4b156d74865319e Mon Sep 17 00:00:00 2001
+From: jiabin <jiabin@google.com>
+Date: Wed, 15 Jun 2022 19:26:01 +0000
+Subject: [PATCH] Cache MMAP client silenced state.
+
+When starting MMAP input stream, APM will check if the client is allowed
+to capture at that moment or not and call setRecordSilenced if the
+client is not allowed. However, the client is not active when starting
+the MMAP input stream. In that case, the client silenced state will be
+lost and the client will be able to capture even though it is not
+allowed. In this CL, when setRecordSilenced is called, it will cache
+the client silenced state so that it can apply when the client is
+active.
+
+Test: atest AAudioTests
+Test: repo steps from the bug
+Bug: 235850634
+Change-Id: I49b5a0f08d1747053f868db6e88c0f677256fc3c
+Merged-In: I49b5a0f08d1747053f868db6e88c0f677256fc3c
+(cherry picked from commit 0960903b2fee5d1d449ffcd598e0b5d3a945d99a)
+(cherry picked from commit cfc10a47f66b2864350aa31a9bf96b76f35b366b)
+Merged-In: I49b5a0f08d1747053f868db6e88c0f677256fc3c
+---
+ services/audioflinger/Threads.cpp | 12 ++++++++++++
+ services/audioflinger/Threads.h   | 21 +++++++++++++++++++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/services/audioflinger/Threads.cpp b/services/audioflinger/Threads.cpp
+index b9cdab8359..6235db91b3 100644
+--- a/services/audioflinger/Threads.cpp
++++ b/services/audioflinger/Threads.cpp
+@@ -9237,6 +9237,12 @@ status_t AudioFlinger::MmapThread::start(const AudioClient& client,
+     if (isOutput()) {
+         ret = AudioSystem::startOutput(portId);
+     } else {
++        {
++            // Add the track record before starting input so that the silent status for the
++            // client can be cached.
++            Mutex::Autolock _l(mLock);
++            setClientSilencedState_l(portId, false /*silenced*/);
++        }
+         ret = AudioSystem::startInput(portId);
+     }
+ 
+@@ -9255,6 +9261,7 @@ status_t AudioFlinger::MmapThread::start(const AudioClient& client,
+         } else {
+             mHalStream->stop();
+         }
++        eraseClientSilencedState_l(portId);
+         return PERMISSION_DENIED;
+     }
+ 
+@@ -9263,6 +9270,9 @@ status_t AudioFlinger::MmapThread::start(const AudioClient& client,
+                                         mChannelMask, mSessionId, isOutput(),
+                                         client.attributionSource,
+                                         IPCThreadState::self()->getCallingPid(), portId);
++    if (!isOutput()) {
++        track->setSilenced_l(isClientSilenced_l(portId));
++    }
+ 
+     if (isOutput()) {
+         // force volume update when a new track is added
+@@ -9320,6 +9330,7 @@ status_t AudioFlinger::MmapThread::stop(audio_port_handle_t handle)
+     }
+ 
+     mActiveTracks.remove(track);
++    eraseClientSilencedState_l(track->portId());
+ 
+     mLock.unlock();
+     if (isOutput()) {
+@@ -10127,6 +10138,7 @@ void AudioFlinger::MmapCaptureThread::setRecordSilenced(audio_port_handle_t port
+             broadcast_l();
+         }
+     }
++    setClientSilencedIfExists_l(portId, silenced);
+ }
+ 
+ void AudioFlinger::MmapCaptureThread::toAudioPortConfig(struct audio_port_config *config)
+diff --git a/services/audioflinger/Threads.h b/services/audioflinger/Threads.h
+index 16082a9cfa..8596c4dd0a 100644
+--- a/services/audioflinger/Threads.h
++++ b/services/audioflinger/Threads.h
+@@ -1966,6 +1966,26 @@ class MmapThread : public ThreadBase
+ 
+     virtual     bool        isStreamInitialized() { return false; }
+ 
++                void        setClientSilencedState_l(audio_port_handle_t portId, bool silenced) {
++                                mClientSilencedStates[portId] = silenced;
++                            }
++
++                size_t      eraseClientSilencedState_l(audio_port_handle_t portId) {
++                                return mClientSilencedStates.erase(portId);
++                            }
++
++                bool        isClientSilenced_l(audio_port_handle_t portId) const {
++                                const auto it = mClientSilencedStates.find(portId);
++                                return it != mClientSilencedStates.end() ? it->second : false;
++                            }
++
++                void        setClientSilencedIfExists_l(audio_port_handle_t portId, bool silenced) {
++                                const auto it = mClientSilencedStates.find(portId);
++                                if (it != mClientSilencedStates.end()) {
++                                    it->second = silenced;
++                                }
++                            }
++
+  protected:
+                 void        dumpInternals_l(int fd, const Vector<String16>& args) override;
+                 void        dumpTracks_l(int fd, const Vector<String16>& args) override;
+@@ -1985,6 +2005,7 @@ class MmapThread : public ThreadBase
+                 AudioHwDevice* const    mAudioHwDev;
+                 ActiveTracks<MmapTrack> mActiveTracks;
+                 float                   mHalVolFloat;
++                std::map<audio_port_handle_t, bool> mClientSilencedStates;
+ 
+                 int32_t                 mNoCallbackWarningCount;
+      static     constexpr int32_t       kMaxNoCallbackWarnings = 5;
+-- 
+2.37.2.789.g6183377224-goog
+

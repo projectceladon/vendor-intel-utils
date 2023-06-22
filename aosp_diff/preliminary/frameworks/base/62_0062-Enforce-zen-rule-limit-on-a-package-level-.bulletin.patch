@@ -1,0 +1,118 @@
+From 7fa32b4da4a1ba77e8091b3c44cae173a661c22c Mon Sep 17 00:00:00 2001
+From: Yuri Lin <yurilin@google.com>
+Date: Tue, 28 Jun 2022 15:43:33 -0400
+Subject: [PATCH] Enforce zen rule limit on a package level.
+
+This means that a single package with multiple different condition providers or configuration activities will correctly have all of their zen rules associated with the same package rather than each owner/activity having their rules counted separately.
+
+Bug: 235823407
+Test: ZenModeHelperTest
+Change-Id: I35daf9a24f546ae25a78a2d841be39072cdc5641
+Merged-In: I35daf9a24f546ae25a78a2d841be39072cdc5641
+(cherry picked from commit f4e69394eee569ac3ec5748094b9ce88a91c278c)
+(cherry picked from commit 34f2ef779b368e9d57bfab09b61cab6d282e10e9)
+Merged-In: I35daf9a24f546ae25a78a2d841be39072cdc5641
+---
+ .../server/notification/ZenModeHelper.java    | 20 ++++++++++-
+ .../notification/ZenModeHelperTest.java       | 35 +++++++++++++++++--
+ 2 files changed, 52 insertions(+), 3 deletions(-)
+
+diff --git a/services/core/java/com/android/server/notification/ZenModeHelper.java b/services/core/java/com/android/server/notification/ZenModeHelper.java
+index c11116c827cb..5e62496d5cca 100644
+--- a/services/core/java/com/android/server/notification/ZenModeHelper.java
++++ b/services/core/java/com/android/server/notification/ZenModeHelper.java
+@@ -326,7 +326,8 @@ public class ZenModeHelper {
+             int newRuleInstanceCount = getCurrentInstanceCount(automaticZenRule.getOwner())
+                     + getCurrentInstanceCount(automaticZenRule.getConfigurationActivity())
+                     + 1;
+-            if (newRuleInstanceCount > RULE_LIMIT_PER_PACKAGE
++            int newPackageRuleCount = getPackageRuleCount(pkg) + 1;
++            if (newPackageRuleCount > RULE_LIMIT_PER_PACKAGE
+                     || (ruleInstanceLimit > 0 && ruleInstanceLimit < newRuleInstanceCount)) {
+                 throw new IllegalArgumentException("Rule instance limit exceeded");
+             }
+@@ -507,6 +508,23 @@ public class ZenModeHelper {
+         return count;
+     }
+ 
++    // Equivalent method to getCurrentInstanceCount, but for all rules associated with a specific
++    // package rather than a condition provider service or activity.
++    private int getPackageRuleCount(String pkg) {
++        if (pkg == null) {
++            return 0;
++        }
++        int count = 0;
++        synchronized (mConfig) {
++            for (ZenRule rule : mConfig.automaticRules.values()) {
++                if (pkg.equals(rule.getPkg())) {
++                    count++;
++                }
++            }
++        }
++        return count;
++    }
++
+     public boolean canManageAutomaticZenRule(ZenRule rule) {
+         final int callingUid = Binder.getCallingUid();
+         if (callingUid == 0 || callingUid == Process.SYSTEM_UID) {
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+index e03cf1cd83a3..c0fb39c41676 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+@@ -1618,7 +1618,9 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+                     ZenModeConfig.toScheduleConditionId(si),
+                     new ZenPolicy.Builder().build(),
+                     NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
+-            String id = mZenModeHelperSpy.addAutomaticZenRule("android", zenRule, "test");
++            // We need the package name to be something that's not "android" so there aren't any
++            // existing rules under that package.
++            String id = mZenModeHelperSpy.addAutomaticZenRule("pkgname", zenRule, "test");
+             assertNotNull(id);
+         }
+         try {
+@@ -1628,12 +1630,41 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+                     ZenModeConfig.toScheduleConditionId(new ScheduleInfo()),
+                     new ZenPolicy.Builder().build(),
+                     NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
+-            String id = mZenModeHelperSpy.addAutomaticZenRule("android", zenRule, "test");
++            String id = mZenModeHelperSpy.addAutomaticZenRule("pkgname", zenRule, "test");
+             fail("allowed too many rules to be created");
+         } catch (IllegalArgumentException e) {
+             // yay
+         }
++    }
+ 
++    @Test
++    public void testAddAutomaticZenRule_beyondSystemLimit_differentComponents() {
++        // Make sure the system limit is enforced per-package even with different component provider
++        // names.
++        for (int i = 0; i < RULE_LIMIT_PER_PACKAGE; i++) {
++            ScheduleInfo si = new ScheduleInfo();
++            si.startHour = i;
++            AutomaticZenRule zenRule = new AutomaticZenRule("name" + i,
++                    null,
++                    new ComponentName("android", "ScheduleConditionProvider" + i),
++                    ZenModeConfig.toScheduleConditionId(si),
++                    new ZenPolicy.Builder().build(),
++                    NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++            String id = mZenModeHelperSpy.addAutomaticZenRule("pkgname", zenRule, "test");
++            assertNotNull(id);
++        }
++        try {
++            AutomaticZenRule zenRule = new AutomaticZenRule("name",
++                    null,
++                    new ComponentName("android", "ScheduleConditionProviderFinal"),
++                    ZenModeConfig.toScheduleConditionId(new ScheduleInfo()),
++                    new ZenPolicy.Builder().build(),
++                    NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++            String id = mZenModeHelperSpy.addAutomaticZenRule("pkgname", zenRule, "test");
++            fail("allowed too many rules to be created");
++        } catch (IllegalArgumentException e) {
++            // yay
++        }
+     }
+ 
+     @Test
+-- 
+2.37.2.789.g6183377224-goog
+

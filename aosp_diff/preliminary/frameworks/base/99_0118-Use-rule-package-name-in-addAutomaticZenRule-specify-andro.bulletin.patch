@@ -1,0 +1,223 @@
+From 560d3deedc4613665a5ec10495615355962b5bcd Mon Sep 17 00:00:00 2001
+From: Yuri Lin <yurilin@google.com>
+Date: Wed, 9 Nov 2022 15:26:20 -0500
+Subject: [PATCH] Use rule package name in addAutomaticZenRule; specify
+ "android" for all system apps
+
+This is a roll forward of two reverted changes combined into one:
+commit b6d04416628ab29df57efcd738332912d9260cea
+commit e5e51116fb767162966a8e0d23fafb4f0ff46e86
+
+It additionally fixes an issue where in multi-user profiles (such as a guest user), rules would be incorrectly identified as not created by the system and would therefore fail to be created in settings.
+
+Bug: 257477671
+Bug: 245236706
+Bug: 242537431
+Test: NotificationManagerServiceTest; ZenModeHelperTest; manually verified that it's possible to create zen schedules from guest mode
+Change-Id: I0c4c705cfe5fc875151958957daaf8657fbc21a7
+Merged-In: I0c4c705cfe5fc875151958957daaf8657fbc21a7
+(cherry picked from commit 7261cdd30bf18965d421fc28c68c61e380bc952d)
+(cherry picked from commit 6e34748bdc541dbc841d6f29c0fb19a2eedec57d)
+Merged-In: I0c4c705cfe5fc875151958957daaf8657fbc21a7
+---
+ .../NotificationManagerService.java           | 17 ++++-
+ .../server/notification/ZenModeHelper.java    |  7 +-
+ .../NotificationManagerServiceTest.java       | 66 +++++++++++++++++++
+ .../notification/ZenModeHelperTest.java       | 30 +++++++++
+ 4 files changed, 113 insertions(+), 7 deletions(-)
+
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index 59d9d87696ea..5484b6384a48 100755
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -4893,7 +4893,16 @@ public class NotificationManagerService extends SystemService {
+             }
+             enforcePolicyAccess(Binder.getCallingUid(), "addAutomaticZenRule");
+ 
+-            return mZenModeHelper.addAutomaticZenRule(pkg, automaticZenRule,
++            // If the calling app is the system (from any user), take the package name from the
++            // rule's owner rather than from the caller's package.
++            String rulePkg = pkg;
++            if (isCallingAppIdSystem()) {
++                if (automaticZenRule.getOwner() != null) {
++                    rulePkg = automaticZenRule.getOwner().getPackageName();
++                }
++            }
++
++            return mZenModeHelper.addAutomaticZenRule(rulePkg, automaticZenRule,
+                     "addAutomaticZenRule");
+         }
+ 
+@@ -9207,6 +9216,12 @@ public class NotificationManagerService extends SystemService {
+         return uid == Process.SYSTEM_UID;
+     }
+ 
++    protected boolean isCallingAppIdSystem() {
++        final int uid = Binder.getCallingUid();
++        final int appid = UserHandle.getAppId(uid);
++        return appid == Process.SYSTEM_UID;
++    }
++
+     protected boolean isUidSystemOrPhone(int uid) {
+         final int appid = UserHandle.getAppId(uid);
+         return (appid == Process.SYSTEM_UID || appid == Process.PHONE_UID
+diff --git a/services/core/java/com/android/server/notification/ZenModeHelper.java b/services/core/java/com/android/server/notification/ZenModeHelper.java
+index 5e62496d5cca..9fd480134ae9 100644
+--- a/services/core/java/com/android/server/notification/ZenModeHelper.java
++++ b/services/core/java/com/android/server/notification/ZenModeHelper.java
+@@ -310,7 +310,7 @@ public class ZenModeHelper {
+ 
+     public String addAutomaticZenRule(String pkg, AutomaticZenRule automaticZenRule,
+             String reason) {
+-        if (!isSystemRule(automaticZenRule)) {
++        if (!ZenModeConfig.SYSTEM_AUTHORITY.equals(pkg)) {
+             PackageItemInfo component = getServiceInfo(automaticZenRule.getOwner());
+             if (component == null) {
+                 component = getActivityInfo(automaticZenRule.getConfigurationActivity());
+@@ -566,11 +566,6 @@ public class ZenModeHelper {
+         }
+     }
+ 
+-    private boolean isSystemRule(AutomaticZenRule rule) {
+-        return rule.getOwner() != null
+-                && ZenModeConfig.SYSTEM_AUTHORITY.equals(rule.getOwner().getPackageName());
+-    }
+-
+     private ServiceInfo getServiceInfo(ComponentName owner) {
+         Intent queryIntent = new Intent();
+         queryIntent.setComponent(owner);
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+index 3f9a8d23c432..2f2ef195553e 100755
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -341,6 +341,7 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+     private static class TestableNotificationManagerService extends NotificationManagerService {
+         int countSystemChecks = 0;
+         boolean isSystemUid = true;
++        boolean isSystemAppId = true;
+         int countLogSmartSuggestionsVisible = 0;
+         @Nullable
+         NotificationAssistantAccessGrantedCallback mNotificationAssistantAccessGrantedCallback;
+@@ -360,6 +361,12 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+             return isSystemUid;
+         }
+ 
++        @Override
++        protected boolean isCallingAppIdSystem() {
++            countSystemChecks++;
++            return isSystemUid || isSystemAppId;
++        }
++
+         @Override
+         protected boolean isCallerSystemOrPhone() {
+             countSystemChecks++;
+@@ -6656,6 +6663,65 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         mBinderService.addAutomaticZenRule(rule, mContext.getPackageName());
+     }
+ 
++    @Test
++    public void testAddAutomaticZenRule_systemCallTakesPackageFromOwner() throws Exception {
++        mService.isSystemUid = true;
++        ZenModeHelper mockZenModeHelper = mock(ZenModeHelper.class);
++        when(mConditionProviders.isPackageOrComponentAllowed(anyString(), anyInt()))
++                .thenReturn(true);
++        mService.setZenHelper(mockZenModeHelper);
++        ComponentName owner = new ComponentName("android", "ProviderName");
++        ZenPolicy zenPolicy = new ZenPolicy.Builder().allowAlarms(true).build();
++        boolean isEnabled = true;
++        AutomaticZenRule rule = new AutomaticZenRule("test", owner, owner, mock(Uri.class),
++                zenPolicy, NotificationManager.INTERRUPTION_FILTER_PRIORITY, isEnabled);
++        mBinderService.addAutomaticZenRule(rule, "com.android.settings");
++
++        // verify that zen mode helper gets passed in a package name of "android"
++        verify(mockZenModeHelper).addAutomaticZenRule(eq("android"), eq(rule), anyString());
++    }
++
++    @Test
++    public void testAddAutomaticZenRule_systemAppIdCallTakesPackageFromOwner() throws Exception {
++        // The multi-user case: where the calling uid doesn't match the system uid, but the calling
++        // *appid* is the system.
++        mService.isSystemUid = false;
++        mService.isSystemAppId = true;
++        ZenModeHelper mockZenModeHelper = mock(ZenModeHelper.class);
++        when(mConditionProviders.isPackageOrComponentAllowed(anyString(), anyInt()))
++                .thenReturn(true);
++        mService.setZenHelper(mockZenModeHelper);
++        ComponentName owner = new ComponentName("android", "ProviderName");
++        ZenPolicy zenPolicy = new ZenPolicy.Builder().allowAlarms(true).build();
++        boolean isEnabled = true;
++        AutomaticZenRule rule = new AutomaticZenRule("test", owner, owner, mock(Uri.class),
++                zenPolicy, NotificationManager.INTERRUPTION_FILTER_PRIORITY, isEnabled);
++        mBinderService.addAutomaticZenRule(rule, "com.android.settings");
++
++        // verify that zen mode helper gets passed in a package name of "android"
++        verify(mockZenModeHelper).addAutomaticZenRule(eq("android"), eq(rule), anyString());
++    }
++
++    @Test
++    public void testAddAutomaticZenRule_nonSystemCallTakesPackageFromArg() throws Exception {
++        mService.isSystemUid = false;
++        mService.isSystemAppId = false;
++        ZenModeHelper mockZenModeHelper = mock(ZenModeHelper.class);
++        when(mConditionProviders.isPackageOrComponentAllowed(anyString(), anyInt()))
++                .thenReturn(true);
++        mService.setZenHelper(mockZenModeHelper);
++        ComponentName owner = new ComponentName("android", "ProviderName");
++        ZenPolicy zenPolicy = new ZenPolicy.Builder().allowAlarms(true).build();
++        boolean isEnabled = true;
++        AutomaticZenRule rule = new AutomaticZenRule("test", owner, owner, mock(Uri.class),
++                zenPolicy, NotificationManager.INTERRUPTION_FILTER_PRIORITY, isEnabled);
++        mBinderService.addAutomaticZenRule(rule, "another.package");
++
++        // verify that zen mode helper gets passed in the package name from the arg, not the owner
++        verify(mockZenModeHelper).addAutomaticZenRule(
++                eq("another.package"), eq(rule), anyString());
++    }
++
+     @Test
+     public void testAreNotificationsEnabledForPackage_crossUser() throws Exception {
+         try {
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+index c0fb39c41676..5c2730fb1075 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+@@ -1667,6 +1667,36 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+         }
+     }
+ 
++    @Test
++    public void testAddAutomaticZenRule_claimedSystemOwner() {
++        // Make sure anything that claims to have a "system" owner but not actually part of the
++        // system package still gets limited on number of rules
++        for (int i = 0; i < RULE_LIMIT_PER_PACKAGE; i++) {
++            ScheduleInfo si = new ScheduleInfo();
++            si.startHour = i;
++            AutomaticZenRule zenRule = new AutomaticZenRule("name" + i,
++                    new ComponentName("android", "ScheduleConditionProvider" + i),
++                    null, // configuration activity
++                    ZenModeConfig.toScheduleConditionId(si),
++                    new ZenPolicy.Builder().build(),
++                    NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++            String id = mZenModeHelperSpy.addAutomaticZenRule("pkgname", zenRule, "test");
++            assertNotNull(id);
++        }
++        try {
++            AutomaticZenRule zenRule = new AutomaticZenRule("name",
++                    new ComponentName("android", "ScheduleConditionProviderFinal"),
++                    null, // configuration activity
++                    ZenModeConfig.toScheduleConditionId(new ScheduleInfo()),
++                    new ZenPolicy.Builder().build(),
++                    NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++            String id = mZenModeHelperSpy.addAutomaticZenRule("pkgname", zenRule, "test");
++            fail("allowed too many rules to be created");
++        } catch (IllegalArgumentException e) {
++            // yay
++        }
++    }
++
+     @Test
+     public void testAddAutomaticZenRule_CA() {
+         AutomaticZenRule zenRule = new AutomaticZenRule("name",
+-- 
+2.39.0.rc1.256.g54fd8350bd-goog
+

@@ -1,0 +1,172 @@
+From a1419335dd86469b1451e82e40e8bae1d2c59075 Mon Sep 17 00:00:00 2001
+From: Adrian Roos <roosa@google.com>
+Date: Wed, 16 Feb 2022 18:57:24 +0100
+Subject: [PATCH] Restrict getInputMethodWindowVisibleHeight
+
+Make sure only the app currently interacting with the IME can
+query this, and restrict the API to apps targeting SDKs before T
+
+Fixes: 204906124
+Test: atest 'InputMethodManagerTest#getInputMethodWindowVisibleHeight_returnsZeroIfNotFocused'
+Change-Id: If1da19a3dd8c29542afc970b4b201d87547c27a9
+Merged-In: If1da19a3dd8c29542afc970b4b201d87547c27a9
+(cherry picked from commit 753331b390dc4d7cf895087223a8d72952af4de4)
+Merged-In: If1da19a3dd8c29542afc970b4b201d87547c27a9
+---
+ .../view/inputmethod/InputMethodManager.java  |  2 +-
+ .../internal/view/IInputMethodManager.aidl    |  2 +-
+ .../InputMethodManagerService.java            | 70 ++++++++++++++-----
+ .../MultiClientInputMethodManagerService.java |  2 +-
+ 4 files changed, 55 insertions(+), 21 deletions(-)
+
+diff --git a/core/java/android/view/inputmethod/InputMethodManager.java b/core/java/android/view/inputmethod/InputMethodManager.java
+index 42d77cd09689..f5674786f703 100644
+--- a/core/java/android/view/inputmethod/InputMethodManager.java
++++ b/core/java/android/view/inputmethod/InputMethodManager.java
+@@ -2957,7 +2957,7 @@ public final class InputMethodManager {
+     @UnsupportedAppUsage
+     public int getInputMethodWindowVisibleHeight() {
+         try {
+-            return mService.getInputMethodWindowVisibleHeight();
++            return mService.getInputMethodWindowVisibleHeight(mClient);
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+diff --git a/core/java/com/android/internal/view/IInputMethodManager.aidl b/core/java/com/android/internal/view/IInputMethodManager.aidl
+index d40c064c62e6..07512135c312 100644
+--- a/core/java/com/android/internal/view/IInputMethodManager.aidl
++++ b/core/java/com/android/internal/view/IInputMethodManager.aidl
+@@ -67,7 +67,7 @@ interface IInputMethodManager {
+     void setAdditionalInputMethodSubtypes(String id, in InputMethodSubtype[] subtypes);
+     // This is kept due to @UnsupportedAppUsage.
+     // TODO(Bug 113914148): Consider removing this.
+-    int getInputMethodWindowVisibleHeight();
++    int getInputMethodWindowVisibleHeight(in IInputMethodClient client);
+ 
+     oneway void reportPerceptibleAsync(in IBinder windowToken, boolean perceptible);
+     /** Remove the IME surface. Requires INTERNAL_SYSTEM_WINDOW permission. */
+diff --git a/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java b/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java
+index dc955337fdbc..fbe59fbbe176 100644
+--- a/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java
++++ b/services/core/java/com/android/server/inputmethod/InputMethodManagerService.java
+@@ -124,6 +124,7 @@ import android.util.Pair;
+ import android.util.PrintWriterPrinter;
+ import android.util.Printer;
+ import android.util.Slog;
++import android.util.SparseBooleanArray;
+ import android.util.imetracing.ImeTracing;
+ import android.util.proto.ProtoOutputStream;
+ import android.view.IWindowManager;
+@@ -300,6 +301,8 @@ public class InputMethodManagerService extends IInputMethodManager.Stub
+     final InputMethodSettings mSettings;
+     final SettingsObserver mSettingsObserver;
+     final IWindowManager mIWindowManager;
++    private final SparseBooleanArray mLoggedDeniedGetInputMethodWindowVisibleHeightForUid =
++            new SparseBooleanArray(0);
+     final WindowManagerInternal mWindowManagerInternal;
+     final PackageManagerInternal mPackageManagerInternal;
+     final InputManagerInternal mInputManagerInternal;
+@@ -1334,6 +1337,13 @@ public class InputMethodManagerService extends IInputMethodManager.Stub
+             clearPackageChangeState();
+         }
+ 
++        @Override
++        public void onUidRemoved(int uid) {
++            synchronized (mMethodMap) {
++                mLoggedDeniedGetInputMethodWindowVisibleHeightForUid.delete(uid);
++            }
++        }
++
+         private void clearPackageChangeState() {
+             // No need to lock them because we access these fields only on getRegisteredHandler().
+             mChangedPackages.clear();
+@@ -3063,21 +3073,8 @@ public class InputMethodManagerService extends IInputMethodManager.Stub
+             }
+             final long ident = Binder.clearCallingIdentity();
+             try {
+-                if (mCurClient == null || client == null
+-                        || mCurClient.client.asBinder() != client.asBinder()) {
+-                    // We need to check if this is the current client with
+-                    // focus in the window manager, to allow this call to
+-                    // be made before input is started in it.
+-                    final ClientState cs = mClients.get(client.asBinder());
+-                    if (cs == null) {
+-                        throw new IllegalArgumentException(
+-                                "unknown client " + client.asBinder());
+-                    }
+-                    if (!mWindowManagerInternal.isInputMethodClientFocus(cs.uid, cs.pid,
+-                            cs.selfReportedDisplayId)) {
+-                        Slog.w(TAG, "Ignoring showSoftInput of uid " + uid + ": " + client);
+-                        return false;
+-                    }
++                if (!canInteractWithImeLocked(uid, client, "showSoftInput")) {
++                    return false;
+                 }
+                 if (DEBUG) Slog.v(TAG, "Client requesting input be shown");
+                 return showCurrentInputLocked(windowToken, flags, resultReceiver, reason);
+@@ -3902,9 +3899,46 @@ public class InputMethodManagerService extends IInputMethodManager.Stub
+      * @return {@link WindowManagerInternal#getInputMethodWindowVisibleHeight(int)}
+      */
+     @Override
+-    public int getInputMethodWindowVisibleHeight() {
+-        // TODO(yukawa): Should we verify the display ID?
+-        return mWindowManagerInternal.getInputMethodWindowVisibleHeight(mCurTokenDisplayId);
++    @Deprecated
++    public int getInputMethodWindowVisibleHeight(@NonNull IInputMethodClient client) {
++        int callingUid = Binder.getCallingUid();
++        return Binder.withCleanCallingIdentity(() -> {
++            final int curTokenDisplayId;
++            synchronized (mMethodMap) {
++                if (!canInteractWithImeLocked(callingUid, client,
++                        "getInputMethodWindowVisibleHeight")) {
++                    if (!mLoggedDeniedGetInputMethodWindowVisibleHeightForUid.get(callingUid)) {
++                        EventLog.writeEvent(0x534e4554, "204906124", callingUid, "");
++                        mLoggedDeniedGetInputMethodWindowVisibleHeightForUid.put(callingUid, true);
++                    }
++                    return 0;
++                }
++                // This should probably use the caller's display id, but because this is unsupported
++                // and maintained only for compatibility, there's no point in fixing it.
++                curTokenDisplayId = mCurTokenDisplayId;
++            }
++            return mWindowManagerInternal.getInputMethodWindowVisibleHeight(curTokenDisplayId);
++        });
++    }
++
++    private boolean canInteractWithImeLocked(int callingUid, IInputMethodClient client,
++            String method) {
++        if (mCurClient == null || client == null
++                || mCurClient.client.asBinder() != client.asBinder()) {
++            // We need to check if this is the current client with
++            // focus in the window manager, to allow this call to
++            // be made before input is started in it.
++            final ClientState cs = mClients.get(client.asBinder());
++            if (cs == null) {
++                throw new IllegalArgumentException("unknown client " + client.asBinder());
++            }
++            if (!mWindowManagerInternal.isInputMethodClientFocus(cs.uid, cs.pid,
++                    cs.selfReportedDisplayId)) {
++                Slog.w(TAG, "Ignoring " + method + " of uid " + callingUid + ": " + client);
++                return false;
++            }
++        }
++        return true;
+     }
+ 
+     @Override
+diff --git a/services/core/java/com/android/server/inputmethod/MultiClientInputMethodManagerService.java b/services/core/java/com/android/server/inputmethod/MultiClientInputMethodManagerService.java
+index aa4fa7c6f470..68c97e1b717b 100644
+--- a/services/core/java/com/android/server/inputmethod/MultiClientInputMethodManagerService.java
++++ b/services/core/java/com/android/server/inputmethod/MultiClientInputMethodManagerService.java
+@@ -1803,7 +1803,7 @@ public final class MultiClientInputMethodManagerService {
+ 
+         @BinderThread
+         @Override
+-        public int getInputMethodWindowVisibleHeight() {
++        public int getInputMethodWindowVisibleHeight(IInputMethodClient client) {
+             reportNotSupported();
+             return 0;
+         }
+-- 
+2.37.2.789.g6183377224-goog
+

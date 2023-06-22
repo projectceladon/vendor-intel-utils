@@ -1,0 +1,225 @@
+From 6ec9728f60437441eeb74457ba6ba96d226cd646 Mon Sep 17 00:00:00 2001
+From: Louis Chang <louischang@google.com>
+Date: Wed, 28 Sep 2022 06:46:29 +0000
+Subject: [PATCH] [RESTRICT AUTOMERGE] Strip part of the activity info of
+ another uid if no privilege
+
+The activity info could be from another uid which is different
+from the app that hosts the task. The information should be
+trimmed if the caller app doesn't have the privilege.
+
+However, removing the entire info may result in app compatibility
+issues. So, only swiping the info that are sensitive to empty
+string.
+
+Bug: 243130512
+Test: verified market app locally
+Test: atest RecentTasksTest
+Change-Id: I5b6775dd3c4e2ccdacd30741884d336b2eaa70da
+Merged-In: I5b6775dd3c4e2ccdacd30741884d336b2eaa70da
+(cherry picked from commit 5ba72200f6a66b5da48c9c3abd103a73aea1ef95)
+(cherry picked from commit 7be9e6efb63884f8f4bb647e537a29746bbeb9fa)
+Merged-In: I5b6775dd3c4e2ccdacd30741884d336b2eaa70da
+---
+ .../com/android/server/wm/AppTaskImpl.java    |  2 +-
+ .../com/android/server/wm/RecentTasks.java    |  8 +++-
+ .../com/android/server/wm/RunningTasks.java   |  4 ++
+ .../core/java/com/android/server/wm/Task.java | 48 +++++++++++++++++++
+ .../android/server/wm/RecentTasksTest.java    | 28 +++++++++--
+ 5 files changed, 82 insertions(+), 8 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wm/AppTaskImpl.java b/services/core/java/com/android/server/wm/AppTaskImpl.java
+index 81de82c85cb1..d4e8541789c7 100644
+--- a/services/core/java/com/android/server/wm/AppTaskImpl.java
++++ b/services/core/java/com/android/server/wm/AppTaskImpl.java
+@@ -84,7 +84,7 @@ class AppTaskImpl extends IAppTask.Stub {
+                     throw new IllegalArgumentException("Unable to find task ID " + mTaskId);
+                 }
+                 return mService.getRecentTasks().createRecentTaskInfo(task,
+-                        false /* stripExtras */);
++                        false /* stripExtras */, true /* getTasksAllowed */);
+             } finally {
+                 Binder.restoreCallingIdentity(origId);
+             }
+diff --git a/services/core/java/com/android/server/wm/RecentTasks.java b/services/core/java/com/android/server/wm/RecentTasks.java
+index 455f568d7523..9726c2c838c6 100644
+--- a/services/core/java/com/android/server/wm/RecentTasks.java
++++ b/services/core/java/com/android/server/wm/RecentTasks.java
+@@ -974,7 +974,7 @@ class RecentTasks {
+                 continue;
+             }
+ 
+-            res.add(createRecentTaskInfo(task, true /* stripExtras */));
++            res.add(createRecentTaskInfo(task, true /* stripExtras */, getTasksAllowed));
+         }
+         return res;
+     }
+@@ -1886,7 +1886,8 @@ class RecentTasks {
+     /**
+      * Creates a new RecentTaskInfo from a Task.
+      */
+-    ActivityManager.RecentTaskInfo createRecentTaskInfo(Task tr, boolean stripExtras) {
++    ActivityManager.RecentTaskInfo createRecentTaskInfo(Task tr, boolean stripExtras,
++            boolean getTasksAllowed) {
+         final ActivityManager.RecentTaskInfo rti = new ActivityManager.RecentTaskInfo();
+         // If the recent Task is detached, we consider it will be re-attached to the default
+         // TaskDisplayArea because we currently only support recent overview in the default TDA.
+@@ -1898,6 +1899,9 @@ class RecentTasks {
+         rti.id = rti.isRunning ? rti.taskId : INVALID_TASK_ID;
+         rti.persistentId = rti.taskId;
+         rti.lastSnapshotData.set(tr.mLastTaskSnapshotData);
++        if (!getTasksAllowed) {
++            Task.trimIneffectiveInfo(tr, rti);
++        }
+ 
+         // Fill in organized child task info for the task created by organizer.
+         if (tr.mCreatedByOrganizer) {
+diff --git a/services/core/java/com/android/server/wm/RunningTasks.java b/services/core/java/com/android/server/wm/RunningTasks.java
+index 7ba772c18455..bd201557e75f 100644
+--- a/services/core/java/com/android/server/wm/RunningTasks.java
++++ b/services/core/java/com/android/server/wm/RunningTasks.java
+@@ -137,6 +137,10 @@ class RunningTasks {
+         task.fillTaskInfo(rti, !mKeepIntentExtra);
+         // Fill in some deprecated values
+         rti.id = rti.taskId;
++
++        if (!mAllowed) {
++            Task.trimIneffectiveInfo(task, rti);
++        }
+         return rti;
+     }
+ }
+diff --git a/services/core/java/com/android/server/wm/Task.java b/services/core/java/com/android/server/wm/Task.java
+index 12ee8ce9ba9c..1dbb3366461b 100644
+--- a/services/core/java/com/android/server/wm/Task.java
++++ b/services/core/java/com/android/server/wm/Task.java
+@@ -4156,6 +4156,54 @@ class Task extends WindowContainer<WindowContainer> {
+         info.mTopActivityLocusId = topRecord != null ? topRecord.getLocusId() : null;
+     }
+ 
++    /**
++     * Removes the activity info if the activity belongs to a different uid, which is
++     * different from the app that hosts the task.
++     */
++    static void trimIneffectiveInfo(Task task, TaskInfo info) {
++        final ActivityRecord baseActivity = task.getActivity(r -> !r.finishing,
++                false /* traverseTopToBottom */);
++        final int baseActivityUid =
++                baseActivity != null ? baseActivity.getUid() : task.effectiveUid;
++
++        if (info.topActivityInfo != null
++                && task.effectiveUid != info.topActivityInfo.applicationInfo.uid) {
++            // Making a copy to prevent eliminating the info in the original ActivityRecord.
++            info.topActivityInfo = new ActivityInfo(info.topActivityInfo);
++            info.topActivityInfo.applicationInfo =
++                    new ApplicationInfo(info.topActivityInfo.applicationInfo);
++
++            // Strip the sensitive info.
++            info.topActivity = new ComponentName("", "");
++            info.topActivityInfo.packageName = "";
++            info.topActivityInfo.taskAffinity = "";
++            info.topActivityInfo.processName = "";
++            info.topActivityInfo.name = "";
++            info.topActivityInfo.parentActivityName = "";
++            info.topActivityInfo.targetActivity = "";
++            info.topActivityInfo.splitName = "";
++            info.topActivityInfo.applicationInfo.className = "";
++            info.topActivityInfo.applicationInfo.credentialProtectedDataDir = "";
++            info.topActivityInfo.applicationInfo.dataDir = "";
++            info.topActivityInfo.applicationInfo.deviceProtectedDataDir = "";
++            info.topActivityInfo.applicationInfo.manageSpaceActivityName = "";
++            info.topActivityInfo.applicationInfo.nativeLibraryDir = "";
++            info.topActivityInfo.applicationInfo.nativeLibraryRootDir = "";
++            info.topActivityInfo.applicationInfo.processName = "";
++            info.topActivityInfo.applicationInfo.publicSourceDir = "";
++            info.topActivityInfo.applicationInfo.scanPublicSourceDir = "";
++            info.topActivityInfo.applicationInfo.scanSourceDir = "";
++            info.topActivityInfo.applicationInfo.sourceDir = "";
++            info.topActivityInfo.applicationInfo.taskAffinity = "";
++            info.topActivityInfo.applicationInfo.name = "";
++            info.topActivityInfo.applicationInfo.packageName = "";
++        }
++
++        if (task.effectiveUid != baseActivityUid) {
++            info.baseActivity = new ComponentName("", "");
++        }
++    }
++
+     @Nullable PictureInPictureParams getPictureInPictureParams() {
+         return getPictureInPictureParams(getTopMostTask());
+     }
+diff --git a/services/tests/wmtests/src/com/android/server/wm/RecentTasksTest.java b/services/tests/wmtests/src/com/android/server/wm/RecentTasksTest.java
+index 5af68021b201..d60e535cb04a 100644
+--- a/services/tests/wmtests/src/com/android/server/wm/RecentTasksTest.java
++++ b/services/tests/wmtests/src/com/android/server/wm/RecentTasksTest.java
+@@ -30,6 +30,7 @@ import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
+ import static android.content.pm.ActivityInfo.LAUNCH_MULTIPLE;
+ import static android.content.pm.ActivityInfo.LAUNCH_SINGLE_INSTANCE;
+ import static android.content.res.Configuration.ORIENTATION_PORTRAIT;
++import static android.os.Process.NOBODY_UID;
+ 
+ import static com.android.dx.mockito.inline.extended.ExtendedMockito.doNothing;
+ import static com.android.dx.mockito.inline.extended.ExtendedMockito.doReturn;
+@@ -1145,21 +1146,36 @@ public class RecentTasksTest extends WindowTestsBase {
+ 
+     @Test
+     public void testCreateRecentTaskInfo_detachedTask() {
+-        final Task task = createTaskBuilder(".Task").setCreateActivity(true).build();
++        final Task task = createTaskBuilder(".Task").build();
++        final ComponentName componentName = new ComponentName("com.foo", ".BarActivity");
++        new ActivityBuilder(mSupervisor.mService)
++                .setTask(task)
++                .setUid(NOBODY_UID)
++                .setComponent(componentName)
++                .build();
+         final TaskDisplayArea tda = task.getDisplayArea();
+ 
+         assertTrue(task.isAttached());
+         assertTrue(task.supportsMultiWindow());
+ 
+-        RecentTaskInfo info = mRecentTasks.createRecentTaskInfo(task, true);
++        RecentTaskInfo info = mRecentTasks.createRecentTaskInfo(task, true /* stripExtras */,
++                true /* getTasksAllowed */);
+ 
+         assertTrue(info.supportsMultiWindow);
+         assertTrue(info.supportsSplitScreenMultiWindow);
+ 
++        info = mRecentTasks.createRecentTaskInfo(task, true /* stripExtras */,
++                false /* getTasksAllowed */);
++
++        assertFalse(info.topActivity.equals(componentName));
++        assertFalse(info.topActivityInfo.packageName.equals(componentName.getPackageName()));
++        assertFalse(info.baseActivity.equals(componentName));
++
+         // The task can be put in split screen even if it is not attached now.
+         task.removeImmediately();
+ 
+-        info = mRecentTasks.createRecentTaskInfo(task, true);
++        info = mRecentTasks.createRecentTaskInfo(task, true /* stripExtras */,
++                true /* getTasksAllowed */);
+ 
+         assertTrue(info.supportsMultiWindow);
+         assertTrue(info.supportsSplitScreenMultiWindow);
+@@ -1169,7 +1185,8 @@ public class RecentTasksTest extends WindowTestsBase {
+         doReturn(false).when(tda).supportsNonResizableMultiWindow();
+         doReturn(false).when(task).isResizeable();
+ 
+-        info = mRecentTasks.createRecentTaskInfo(task, true);
++        info = mRecentTasks.createRecentTaskInfo(task, true /* stripExtras */,
++                true /* getTasksAllowed */);
+ 
+         assertFalse(info.supportsMultiWindow);
+         assertFalse(info.supportsSplitScreenMultiWindow);
+@@ -1178,7 +1195,8 @@ public class RecentTasksTest extends WindowTestsBase {
+         // the device supports it.
+         doReturn(true).when(tda).supportsNonResizableMultiWindow();
+ 
+-        info = mRecentTasks.createRecentTaskInfo(task, true);
++        info = mRecentTasks.createRecentTaskInfo(task, true /* stripExtras */,
++                true /* getTasksAllowed */);
+ 
+         assertTrue(info.supportsMultiWindow);
+         assertTrue(info.supportsSplitScreenMultiWindow);
+-- 
+2.39.1.456.gfc5497dd1b-goog
+

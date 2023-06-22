@@ -1,0 +1,526 @@
+From e9f458c52e9c2c1d7591e279b48d2136244b4c8b Mon Sep 17 00:00:00 2001
+From: Christophe Pinelli <cpinelli@google.com>
+Date: Wed, 28 Dec 2022 04:31:11 +0000
+Subject: [PATCH] [DO NOT MERGE] Backport BAL restrictions from T to S, this
+ blocks apps from using Alarm Manager to bypass BAL restrictions.
+
+Test: atest-src BackgroundActivityLaunchTest
+Bug: 195756028
+Change-Id: I33112ff59d913d8a7244289fe1a43512844e902a
+(cherry picked from commit 7a41e2fbc983ce0083b288e9489288de60dc8d8b)
+Merged-In: I33112ff59d913d8a7244289fe1a43512844e902a
+---
+ .../server/alarm/AlarmManagerService.java     | 25 +++++-
+ core/java/android/app/ActivityOptions.java    | 10 +--
+ core/java/android/app/BroadcastOptions.java   | 25 +++++-
+ core/java/android/app/ComponentOptions.java   | 83 +++++++++++++++++++
+ .../server/am/PendingIntentRecord.java        | 22 ++++-
+ .../android/server/wm/ActivityStarter.java    | 24 +++---
+ .../server/wm/ActivityTaskManagerService.java |  2 +-
+ .../com/android/server/wm/AppTaskImpl.java    |  2 +-
+ .../server/alarm/AlarmManagerServiceTest.java | 59 +++++++++++--
+ 9 files changed, 222 insertions(+), 30 deletions(-)
+ create mode 100644 core/java/android/app/ComponentOptions.java
+
+diff --git a/apex/jobscheduler/service/java/com/android/server/alarm/AlarmManagerService.java b/apex/jobscheduler/service/java/com/android/server/alarm/AlarmManagerService.java
+index d1e3481b1107..e8cfb8d8623e 100644
+--- a/apex/jobscheduler/service/java/com/android/server/alarm/AlarmManagerService.java
++++ b/apex/jobscheduler/service/java/com/android/server/alarm/AlarmManagerService.java
+@@ -56,6 +56,7 @@ import android.annotation.NonNull;
+ import android.annotation.UserIdInt;
+ import android.app.Activity;
+ import android.app.ActivityManagerInternal;
++import android.app.ActivityOptions;
+ import android.app.AlarmManager;
+ import android.app.AppOpsManager;
+ import android.app.BroadcastOptions;
+@@ -317,6 +318,8 @@ public class AlarmManagerService extends SystemService {
+     private final SparseBooleanArray mPendingSendNextAlarmClockChangedForUser =
+             new SparseBooleanArray();
+     private boolean mNextAlarmClockMayChange;
++    ActivityOptions mActivityOptsRestrictBal = ActivityOptions.makeBasic();
++    BroadcastOptions mBroadcastOptsRestrictBal = BroadcastOptions.makeBasic();
+ 
+     @GuardedBy("mLock")
+     private final Runnable mAlarmClockUpdater = () -> mNextAlarmClockMayChange = true;
+@@ -1611,6 +1614,11 @@ public class AlarmManagerService extends SystemService {
+     @Override
+     public void onStart() {
+         mInjector.init();
++        mOptsWithFgs.setPendingIntentBackgroundActivityLaunchAllowed(false);
++        mOptsWithoutFgs.setPendingIntentBackgroundActivityLaunchAllowed(false);
++        mOptsTimeBroadcast.setPendingIntentBackgroundActivityLaunchAllowed(false);
++        mActivityOptsRestrictBal.setPendingIntentBackgroundActivityLaunchAllowed(false);
++        mBroadcastOptsRestrictBal.setPendingIntentBackgroundActivityLaunchAllowed(false);
+         mMetricsHelper = new MetricsHelper(getContext(), mLock);
+ 
+         mListenerDeathRecipient = new IBinder.DeathRecipient() {
+@@ -4306,6 +4314,14 @@ public class AlarmManagerService extends SystemService {
+         return alarm.creatorUid;
+     }
+ 
++    private Bundle getAlarmOperationBundle(Alarm alarm) {
++        if (alarm.mIdleOptions != null) {
++            return alarm.mIdleOptions;
++        } else if (alarm.operation.isActivity()) {
++            return mActivityOptsRestrictBal.toBundle();
++        }
++        return mBroadcastOptsRestrictBal.toBundle();
++    }
+ 
+     @VisibleForTesting
+     class AlarmHandler extends Handler {
+@@ -4344,7 +4360,11 @@ public class AlarmManagerService extends SystemService {
+                     for (int i = 0; i < triggerList.size(); i++) {
+                         Alarm alarm = triggerList.get(i);
+                         try {
+-                            alarm.operation.send();
++                            // Disallow AlarmManager to start random background activity.
++                            final Bundle bundle = getAlarmOperationBundle(alarm);
++                            alarm.operation.send(/* context */ null, /* code */0, /* intent */
++                                    null, /* onFinished */null, /* handler */
++                                    null, /* requiredPermission */ null, bundle);
+                         } catch (PendingIntent.CanceledException e) {
+                             if (alarm.repeatInterval > 0) {
+                                 // This IntentSender is no longer valid, but this
+@@ -4906,9 +4926,10 @@ public class AlarmManagerService extends SystemService {
+                     mSendCount++;
+ 
+                     try {
++                        final Bundle bundle = getAlarmOperationBundle(alarm);
+                         alarm.operation.send(getContext(), 0,
+                                 mBackgroundIntent.putExtra(Intent.EXTRA_ALARM_COUNT, alarm.count),
+-                                mDeliveryTracker, mHandler, null, alarm.mIdleOptions);
++                                mDeliveryTracker, mHandler, null, bundle);
+                     } catch (PendingIntent.CanceledException e) {
+                         if (alarm.repeatInterval > 0) {
+                             // This IntentSender is no longer valid, but this
+diff --git a/core/java/android/app/ActivityOptions.java b/core/java/android/app/ActivityOptions.java
+index 8e1f263ebf03..4076fa7db3fb 100644
+--- a/core/java/android/app/ActivityOptions.java
++++ b/core/java/android/app/ActivityOptions.java
+@@ -68,7 +68,7 @@ import java.util.ArrayList;
+  * {@link android.content.Context#startActivity(android.content.Intent, android.os.Bundle)
+  * Context.startActivity(Intent, Bundle)} and related methods.
+  */
+-public class ActivityOptions {
++public class ActivityOptions extends ComponentOptions {
+     private static final String TAG = "ActivityOptions";
+ 
+     /**
+@@ -1071,13 +1071,12 @@ public class ActivityOptions {
+     }
+ 
+     private ActivityOptions() {
++        super();
+     }
+ 
+     /** @hide */
+     public ActivityOptions(Bundle opts) {
+-        // If the remote side sent us bad parcelables, they won't get the
+-        // results they want, which is their loss.
+-        opts.setDefusable(true);
++        super(opts);
+ 
+         mPackageName = opts.getString(KEY_PACKAGE_NAME);
+         try {
+@@ -1804,8 +1803,9 @@ public class ActivityOptions {
+      * object; you must not modify it, but can supply it to the startActivity
+      * methods that take an options Bundle.
+      */
++    @Override
+     public Bundle toBundle() {
+-        Bundle b = new Bundle();
++        Bundle b = super.toBundle();
+         if (mPackageName != null) {
+             b.putString(KEY_PACKAGE_NAME, mPackageName);
+         }
+diff --git a/core/java/android/app/BroadcastOptions.java b/core/java/android/app/BroadcastOptions.java
+index bd7162c1bf3b..38c94ec20670 100644
+--- a/core/java/android/app/BroadcastOptions.java
++++ b/core/java/android/app/BroadcastOptions.java
+@@ -34,7 +34,7 @@ import android.os.PowerExemptionManager.TempAllowListType;
+  * {@hide}
+  */
+ @SystemApi
+-public class BroadcastOptions {
++public class BroadcastOptions extends ComponentOptions {
+     private long mTemporaryAppAllowlistDuration;
+     private @TempAllowListType int mTemporaryAppAllowlistType;
+     private @ReasonCode int mTemporaryAppAllowlistReasonCode;
+@@ -108,12 +108,14 @@ public class BroadcastOptions {
+     }
+ 
+     private BroadcastOptions() {
++        super();
+         resetTemporaryAppAllowlist();
+     }
+ 
+     /** @hide */
+     @TestApi
+     public BroadcastOptions(@NonNull Bundle opts) {
++        super(opts);
+         // Match the logic in toBundle().
+         if (opts.containsKey(KEY_TEMPORARY_APP_ALLOWLIST_DURATION)) {
+             mTemporaryAppAllowlistDuration = opts.getLong(KEY_TEMPORARY_APP_ALLOWLIST_DURATION);
+@@ -190,6 +192,24 @@ public class BroadcastOptions {
+         mTemporaryAppAllowlistReason = null;
+     }
+ 
++    /**
++     * Set PendingIntent activity is allowed to be started in the background if the caller
++     * can start background activities.
++     * @hide
++     */
++    public void setPendingIntentBackgroundActivityLaunchAllowed(boolean allowed) {
++        super.setPendingIntentBackgroundActivityLaunchAllowed(allowed);
++    }
++
++    /**
++     * Get PendingIntent activity is allowed to be started in the background if the caller
++     * can start background activities.
++     * @hide
++     */
++    public boolean isPendingIntentBackgroundActivityLaunchAllowed() {
++        return super.isPendingIntentBackgroundActivityLaunchAllowed();
++    }
++
+     /**
+      * Return {@link #setTemporaryAppAllowlist}.
+      * @hide
+@@ -308,8 +328,9 @@ public class BroadcastOptions {
+      * object; you must not modify it, but can supply it to the sendBroadcast
+      * methods that take an options Bundle.
+      */
++    @Override
+     public Bundle toBundle() {
+-        Bundle b = new Bundle();
++        Bundle b = super.toBundle();
+         if (isTemporaryAppAllowlistSet()) {
+             b.putLong(KEY_TEMPORARY_APP_ALLOWLIST_DURATION, mTemporaryAppAllowlistDuration);
+             b.putInt(KEY_TEMPORARY_APP_ALLOWLIST_TYPE, mTemporaryAppAllowlistType);
+diff --git a/core/java/android/app/ComponentOptions.java b/core/java/android/app/ComponentOptions.java
+new file mode 100644
+index 000000000000..86efd622cb82
+--- /dev/null
++++ b/core/java/android/app/ComponentOptions.java
+@@ -0,0 +1,83 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.app;
++
++import android.os.Bundle;
++
++/**
++ * @hide
++ */
++public class ComponentOptions {
++
++    /**
++     * Default value for KEY_PENDING_INTENT_BACKGROUND_ACTIVITY_ALLOWED.
++     * @hide
++     **/
++    public static final boolean PENDING_INTENT_BAL_ALLOWED_DEFAULT = true;
++
++    /**
++     * PendingIntent caller allows activity start even if PendingIntent creator is in background.
++     * This only works if the PendingIntent caller is allowed to start background activities,
++     * for example if it's in the foreground, or has BAL permission.
++     * @hide
++     */
++    public static final String KEY_PENDING_INTENT_BACKGROUND_ACTIVITY_ALLOWED =
++            "android.pendingIntent.backgroundActivityAllowed";
++
++    private boolean mPendingIntentBalAllowed = PENDING_INTENT_BAL_ALLOWED_DEFAULT;
++
++    ComponentOptions() {
++    }
++
++    ComponentOptions(Bundle opts) {
++        // If the remote side sent us bad parcelables, they won't get the
++        // results they want, which is their loss.
++        opts.setDefusable(true);
++        setPendingIntentBackgroundActivityLaunchAllowed(
++                opts.getBoolean(KEY_PENDING_INTENT_BACKGROUND_ACTIVITY_ALLOWED,
++                        PENDING_INTENT_BAL_ALLOWED_DEFAULT));
++    }
++
++    /**
++     * Set PendingIntent activity is allowed to be started in the background if the caller
++     * can start background activities.
++     *
++     * @hide
++     */
++    public void setPendingIntentBackgroundActivityLaunchAllowed(boolean allowed) {
++        mPendingIntentBalAllowed = allowed;
++    }
++
++    /**
++     * Get PendingIntent activity is allowed to be started in the background if the caller
++     * can start background activities.
++     *
++     * @hide
++     */
++    public boolean isPendingIntentBackgroundActivityLaunchAllowed() {
++        return mPendingIntentBalAllowed;
++    }
++
++    /**
++     * @hide
++     */
++    public Bundle toBundle() {
++        Bundle bundle = new Bundle();
++        bundle.putBoolean(KEY_PENDING_INTENT_BACKGROUND_ACTIVITY_ALLOWED, mPendingIntentBalAllowed);
++        return bundle;
++    }
++}
+diff --git a/services/core/java/com/android/server/am/PendingIntentRecord.java b/services/core/java/com/android/server/am/PendingIntentRecord.java
+index dc924c11f867..7e8dcd8db7b1 100644
+--- a/services/core/java/com/android/server/am/PendingIntentRecord.java
++++ b/services/core/java/com/android/server/am/PendingIntentRecord.java
+@@ -310,6 +310,25 @@ public final class PendingIntentRecord extends IIntentSender.Stub {
+                 requiredPermission, null, null, 0, 0, 0, options);
+     }
+ 
++    /**
++     * Return true if the activity options allows PendingIntent to use caller's BAL permission.
++     */
++    public static boolean isPendingIntentBalAllowedByCaller(
++            @Nullable ActivityOptions activityOptions) {
++        if (activityOptions == null) {
++            return ActivityOptions.PENDING_INTENT_BAL_ALLOWED_DEFAULT;
++        }
++        return isPendingIntentBalAllowedByCaller(activityOptions.toBundle());
++    }
++
++    private static boolean isPendingIntentBalAllowedByCaller(@Nullable Bundle options) {
++        if (options == null) {
++            return ActivityOptions.PENDING_INTENT_BAL_ALLOWED_DEFAULT;
++        }
++        return options.getBoolean(ActivityOptions.KEY_PENDING_INTENT_BACKGROUND_ACTIVITY_ALLOWED,
++                ActivityOptions.PENDING_INTENT_BAL_ALLOWED_DEFAULT);
++    }
++
+     public int sendInner(int code, Intent intent, String resolvedType, IBinder allowlistToken,
+             IIntentReceiver finishedReceiver, String requiredPermission, IBinder resultTo,
+             String resultWho, int requestCode, int flagsMask, int flagsValues, Bundle options) {
+@@ -431,7 +450,8 @@ public final class PendingIntentRecord extends IIntentSender.Stub {
+             // temporarily allow receivers and services to open activities from background if the
+             // PendingIntent.send() caller was foreground at the time of sendInner() call
+             final boolean allowTrampoline = uid != callingUid
+-                    && controller.mAtmInternal.isUidForeground(callingUid);
++                    && controller.mAtmInternal.isUidForeground(callingUid)
++                    && isPendingIntentBalAllowedByCaller(options);
+ 
+             // note: we on purpose don't pass in the information about the PendingIntent's creator,
+             // like pid or ProcessRecord, to the ActivityTaskManagerInternal calls below, because
+diff --git a/services/core/java/com/android/server/wm/ActivityStarter.java b/services/core/java/com/android/server/wm/ActivityStarter.java
+index a9a25fc2d272..1df218ab0597 100644
+--- a/services/core/java/com/android/server/wm/ActivityStarter.java
++++ b/services/core/java/com/android/server/wm/ActivityStarter.java
+@@ -981,6 +981,10 @@ class ActivityStarter {
+         abort |= !mService.getPermissionPolicyInternal().checkStartActivity(intent, callingUid,
+                 callingPackage);
+ 
++        // Merge the two options bundles, while realCallerOptions takes precedence.
++        ActivityOptions checkedOptions = options != null
++                ? options.getOptions(intent, aInfo, callerApp, mSupervisor) : null;
++
+         boolean restrictedBgActivity = false;
+         if (!abort) {
+             try {
+@@ -989,15 +993,12 @@ class ActivityStarter {
+                 restrictedBgActivity = shouldAbortBackgroundActivityStart(callingUid,
+                         callingPid, callingPackage, realCallingUid, realCallingPid, callerApp,
+                         request.originatingPendingIntent, request.allowBackgroundActivityStart,
+-                        intent);
++                        intent, checkedOptions);
+             } finally {
+                 Trace.traceEnd(Trace.TRACE_TAG_WINDOW_MANAGER);
+             }
+         }
+ 
+-        // Merge the two options bundles, while realCallerOptions takes precedence.
+-        ActivityOptions checkedOptions = options != null
+-                ? options.getOptions(intent, aInfo, callerApp, mSupervisor) : null;
+         if (request.allowPendingRemoteAnimationRegistryLookup) {
+             checkedOptions = mService.getActivityStartController()
+                     .getPendingRemoteAnimationRegistry()
+@@ -1239,7 +1240,7 @@ class ActivityStarter {
+     boolean shouldAbortBackgroundActivityStart(int callingUid, int callingPid,
+             final String callingPackage, int realCallingUid, int realCallingPid,
+             WindowProcessController callerApp, PendingIntentRecord originatingPendingIntent,
+-            boolean allowBackgroundActivityStart, Intent intent) {
++            boolean allowBackgroundActivityStart, Intent intent, ActivityOptions checkedOptions) {
+         // don't abort for the most important UIDs
+         final int callingAppId = UserHandle.getAppId(callingUid);
+         if (callingUid == Process.ROOT_UID || callingAppId == Process.SYSTEM_UID
+@@ -1308,9 +1309,12 @@ class ActivityStarter {
+                 ? isCallingUidPersistentSystemProcess
+                 : (realCallingAppId == Process.SYSTEM_UID)
+                         || realCallingUidProcState <= ActivityManager.PROCESS_STATE_PERSISTENT_UI;
+-        if (realCallingUid != callingUid) {
+-            // don't abort if the realCallingUid has a visible window
+-            // TODO(b/171459802): We should check appSwitchAllowed also
++
++        // Legacy behavior allows to use caller foreground state to bypass BAL restriction.
++        final boolean balAllowedByPiSender =
++                PendingIntentRecord.isPendingIntentBalAllowedByCaller(checkedOptions);
++
++        if (balAllowedByPiSender && realCallingUid != callingUid) {
+             if (realCallingUidHasAnyVisibleWindow) {
+                 if (DEBUG_ACTIVITY_STARTS) {
+                     Slog.d(TAG, "Activity start allowed: realCallingUid (" + realCallingUid
+@@ -1383,9 +1387,9 @@ class ActivityStarter {
+         // If we don't have callerApp at this point, no caller was provided to startActivity().
+         // That's the case for PendingIntent-based starts, since the creator's process might not be
+         // up and alive. If that's the case, we retrieve the WindowProcessController for the send()
+-        // caller, so that we can make the decision based on its state.
++        // caller if caller allows, so that we can make the decision based on its state.
+         int callerAppUid = callingUid;
+-        if (callerApp == null) {
++        if (callerApp == null && balAllowedByPiSender) {
+             callerApp = mService.getProcessController(realCallingPid, realCallingUid);
+             callerAppUid = realCallingUid;
+         }
+diff --git a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
+index f3ba56a03aef..987cff95bba3 100644
+--- a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
++++ b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
+@@ -2048,7 +2048,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
+         final ActivityStarter starter = getActivityStartController().obtainStarter(
+                 null /* intent */, "moveTaskToFront");
+         if (starter.shouldAbortBackgroundActivityStart(callingUid, callingPid, callingPackage, -1,
+-                -1, callerApp, null, false, null)) {
++                -1, callerApp, null, false, null, null)) {
+             if (!isBackgroundActivityStartsEnabled()) {
+                 return;
+             }
+diff --git a/services/core/java/com/android/server/wm/AppTaskImpl.java b/services/core/java/com/android/server/wm/AppTaskImpl.java
+index 7f0adcacc951..81de82c85cb1 100644
+--- a/services/core/java/com/android/server/wm/AppTaskImpl.java
++++ b/services/core/java/com/android/server/wm/AppTaskImpl.java
+@@ -108,7 +108,7 @@ class AppTaskImpl extends IAppTask.Stub {
+                 final ActivityStarter starter = mService.getActivityStartController().obtainStarter(
+                         null /* intent */, "moveToFront");
+                 if (starter.shouldAbortBackgroundActivityStart(callingUid, callingPid,
+-                        callingPackage, -1, -1, callerApp, null, false, null)) {
++                        callingPackage, -1, -1, callerApp, null, false, null, null)) {
+                     if (!mService.isBackgroundActivityStartsEnabled()) {
+                         return;
+                     }
+diff --git a/services/tests/mockingservicestests/src/com/android/server/alarm/AlarmManagerServiceTest.java b/services/tests/mockingservicestests/src/com/android/server/alarm/AlarmManagerServiceTest.java
+index 16afef57d31e..9363420a0f8f 100644
+--- a/services/tests/mockingservicestests/src/com/android/server/alarm/AlarmManagerServiceTest.java
++++ b/services/tests/mockingservicestests/src/com/android/server/alarm/AlarmManagerServiceTest.java
+@@ -109,6 +109,7 @@ import static org.mockito.Mockito.times;
+ 
+ import android.app.ActivityManager;
+ import android.app.ActivityManagerInternal;
++import android.app.ActivityOptions;
+ import android.app.AlarmManager;
+ import android.app.AppOpsManager;
+ import android.app.BroadcastOptions;
+@@ -552,13 +553,23 @@ public class AlarmManagerServiceTest {
+ 
+ 
+     private PendingIntent getNewMockPendingIntent() {
+-        return getNewMockPendingIntent(TEST_CALLING_UID, TEST_CALLING_PACKAGE);
++        return getNewMockPendingIntent(false);
++    }
++
++    private PendingIntent getNewMockPendingIntent(boolean isActivity) {
++        return getNewMockPendingIntent(TEST_CALLING_UID, TEST_CALLING_PACKAGE, isActivity);
+     }
+ 
+     private PendingIntent getNewMockPendingIntent(int creatorUid, String creatorPackage) {
++        return getNewMockPendingIntent(creatorUid, creatorPackage, false);
++    }
++
++    private PendingIntent getNewMockPendingIntent(int creatorUid, String creatorPackage,
++            boolean isActivity) {
+         final PendingIntent mockPi = mock(PendingIntent.class, Answers.RETURNS_DEEP_STUBS);
+         when(mockPi.getCreatorUid()).thenReturn(creatorUid);
+         when(mockPi.getCreatorPackage()).thenReturn(creatorPackage);
++        when(mockPi.isActivity()).thenReturn(isActivity);
+         return mockPi;
+     }
+ 
+@@ -2801,21 +2812,53 @@ public class AlarmManagerServiceTest {
+                 anyString()));
+     }
+ 
+-    @Test
+-    public void idleOptionsSentOnExpiration() throws Exception {
++    private void optionsSentOnExpiration(boolean isActivity, Bundle idleOptions)
++            throws Exception {
+         final long triggerTime = mNowElapsedTest + 5000;
+-        final PendingIntent alarmPi = getNewMockPendingIntent();
+-        final Bundle idleOptions = new Bundle();
+-        idleOptions.putChar("TEST_CHAR_KEY", 'x');
+-        idleOptions.putInt("TEST_INT_KEY", 53);
++        final PendingIntent alarmPi = getNewMockPendingIntent(isActivity);
+         setTestAlarm(ELAPSED_REALTIME_WAKEUP, triggerTime, 0, alarmPi, 0, 0, TEST_CALLING_UID,
+                 idleOptions);
+ 
+         mNowElapsedTest = mTestTimer.getElapsed();
+         mTestTimer.expire();
+ 
++        ArgumentCaptor<Bundle> bundleCaptor = ArgumentCaptor.forClass(Bundle.class);
+         verify(alarmPi).send(eq(mMockContext), eq(0), any(Intent.class),
+-                any(), any(Handler.class), isNull(), eq(idleOptions));
++                any(), any(Handler.class), isNull(), bundleCaptor.capture());
++        if (idleOptions != null) {
++            assertEquals(idleOptions, bundleCaptor.getValue());
++        } else {
++            assertFalse("BAL flag needs to be false in alarm manager",
++                    bundleCaptor.getValue().getBoolean(
++                            ActivityOptions.KEY_PENDING_INTENT_BACKGROUND_ACTIVITY_ALLOWED,
++                            true));
++        }
++    }
++
++    @Test
++    public void activityIdleOptionsSentOnExpiration() throws Exception {
++        final Bundle idleOptions = new Bundle();
++        idleOptions.putChar("TEST_CHAR_KEY", 'x');
++        idleOptions.putInt("TEST_INT_KEY", 53);
++        optionsSentOnExpiration(true, idleOptions);
++    }
++
++    @Test
++    public void broadcastIdleOptionsSentOnExpiration() throws Exception {
++        final Bundle idleOptions = new Bundle();
++        idleOptions.putChar("TEST_CHAR_KEY", 'x');
++        idleOptions.putInt("TEST_INT_KEY", 53);
++        optionsSentOnExpiration(false, idleOptions);
++    }
++
++    @Test
++    public void emptyActivityOptionsSentOnExpiration() throws Exception {
++        optionsSentOnExpiration(true, null);
++    }
++
++    @Test
++    public void emptyBroadcastOptionsSentOnExpiration() throws Exception {
++        optionsSentOnExpiration(false, null);
+     }
+ 
+     @Test
+-- 
+2.39.1.456.gfc5497dd1b-goog
+

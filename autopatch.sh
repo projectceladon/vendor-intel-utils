@@ -70,7 +70,7 @@ apply_patch() {
     cd $top_dir/$current_project
     a=`grep "Date: " ${pd}/$i | head -1`
     b=`echo ${a#"Date: "}`
-    c=`git log -100 --pretty=format:%aD | grep "$b"`
+    c=`git log -500 --pretty=format:%aD | grep "$b"`
 
     if [[ "$c" == "" ]] ; then
       git am -3 --keep-cr --whitespace=nowarn $pd/$i >& /dev/null

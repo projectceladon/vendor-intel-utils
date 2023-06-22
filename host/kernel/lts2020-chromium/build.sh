@@ -4,7 +4,9 @@ rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
 git clone https://github.com/projectceladon/vendor-intel-utils
-git clone https://github.com/projectceladon/linux-intel-lts2020-chromium.git
+
+branch_name="celadon/s/mr0/stable"
+git clone -b $branch_name https://github.com/projectceladon/linux-intel-lts2020-chromium.git
 cd linux-intel-lts2020-chromium
 cp ../vendor-intel-utils/host/kernel/lts2020-chromium/x86_64_defconfig .config
 patch_list=`find ../vendor-intel-utils/host/kernel/lts2020-chromium -iname "*.patch" | sort -u`

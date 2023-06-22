@@ -1,0 +1,280 @@
+From 7e4ff66597ebf4b4d048004d2aaf05a8e6cec015 Mon Sep 17 00:00:00 2001
+From: Jeff DeCew <jeffdq@google.com>
+Date: Mon, 18 Jul 2022 13:28:21 +0000
+Subject: [PATCH] Block FullScreenIntent while device is in use if notification
+ has a silencing GroupAlertBehavior.
+
+Bug: 231322873
+Test: atest NotificationInterruptStateProviderImplTest
+Merged-In: Id82d20c9f1f2001400871b5381f52b40fbdf81c5
+Change-Id: Id82d20c9f1f2001400871b5381f52b40fbdf81c5
+(cherry picked from commit 09761a98b5bbbefa331c49a96b50b4e08dc3f8df)
+Merged-In: Id82d20c9f1f2001400871b5381f52b40fbdf81c5
+---
+ ...otificationInterruptStateProviderImpl.java |  91 ++++++++++++--
+ ...icationInterruptStateProviderImplTest.java | 112 ++++++++++++++++++
+ 2 files changed, 193 insertions(+), 10 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImpl.java b/packages/SystemUI/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImpl.java
+index 433d5e19ed6b..8313299cef32 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImpl.java
+@@ -175,9 +175,86 @@ public class NotificationInterruptStateProviderImpl implements NotificationInter
+      */
+     @Override
+     public boolean shouldLaunchFullScreenIntentWhenAdded(NotificationEntry entry) {
+-        return entry.getSbn().getNotification().fullScreenIntent != null
+-                && (!shouldHeadsUp(entry)
+-                || mStatusBarStateController.getState() == StatusBarState.KEYGUARD);
++        if (entry.getSbn().getNotification().fullScreenIntent == null) {
++            return false;
++        }
++
++        // Never show FSI when suppressed by DND
++        if (entry.shouldSuppressFullScreenIntent()) {
++            if (DEBUG) {
++                Log.d(TAG, "No FullScreenIntent: Suppressed by DND: " + entry.getKey());
++            }
++            return false;
++        }
++
++        // Never show FSI if importance is not HIGH
++        if (entry.getImportance() < NotificationManager.IMPORTANCE_HIGH) {
++            if (DEBUG) {
++                Log.d(TAG, "No FullScreenIntent: Not important enough: " + entry.getKey());
++            }
++            return false;
++        }
++
++        // If the notification has suppressive GroupAlertBehavior, block FSI and warn.
++        StatusBarNotification sbn = entry.getSbn();
++        if (sbn.isGroup() && sbn.getNotification().suppressAlertingDueToGrouping()) {
++            // b/231322873: Detect and report an event when a notification has both an FSI and a
++            // suppressive groupAlertBehavior, and now correctly block the FSI from firing.
++            final int uid = entry.getSbn().getUid();
++            android.util.EventLog.writeEvent(0x534e4554, "231322873", uid, "groupAlertBehavior");
++            if (DEBUG) {
++                Log.w(TAG, "No FullScreenIntent: WARNING: GroupAlertBehavior will prevent HUN: "
++                        + entry.getKey());
++            }
++            return false;
++        }
++
++        // If the screen is off, then launch the FullScreenIntent
++        if (!mPowerManager.isInteractive()) {
++            if (DEBUG) {
++                Log.d(TAG, "FullScreenIntent: Device is not interactive: " + entry.getKey());
++            }
++            return true;
++        }
++
++        // If the device is currently dreaming, then launch the FullScreenIntent
++        if (isDreaming()) {
++            if (DEBUG) {
++                Log.d(TAG, "FullScreenIntent: Device is dreaming: " + entry.getKey());
++            }
++            return true;
++        }
++
++        // If the keyguard is showing, then launch the FullScreenIntent
++        if (mStatusBarStateController.getState() == StatusBarState.KEYGUARD) {
++            if (DEBUG) {
++                Log.d(TAG, "FullScreenIntent: Keyguard is showing: " + entry.getKey());
++            }
++            return true;
++        }
++
++        // If the notification should HUN, then we don't need FSI
++        if (shouldHeadsUp(entry)) {
++            if (DEBUG) {
++                Log.d(TAG, "No FullScreenIntent: Expected to HUN: " + entry.getKey());
++            }
++            return false;
++        }
++
++        // If the notification won't HUN for some other reason (DND/snooze/etc), launch FSI.
++        if (DEBUG) {
++            Log.d(TAG, "FullScreenIntent: Expected not to HUN: " + entry.getKey());
++        }
++        return true;
++    }
++
++    private boolean isDreaming() {
++        try {
++            return mDreamManager.isDreaming();
++        } catch (RemoteException e) {
++            Log.e(TAG, "Failed to query dream manager.", e);
++            return false;
++        }
+     }
+ 
+     private boolean shouldHeadsUpWhenAwake(NotificationEntry entry) {
+@@ -228,13 +305,7 @@ public class NotificationInterruptStateProviderImpl implements NotificationInter
+             return false;
+         }
+ 
+-        boolean isDreaming = false;
+-        try {
+-            isDreaming = mDreamManager.isDreaming();
+-        } catch (RemoteException e) {
+-            Log.e(TAG, "Failed to query dream manager.", e);
+-        }
+-        boolean inUse = mPowerManager.isScreenOn() && !isDreaming;
++        boolean inUse = mPowerManager.isScreenOn() && !isDreaming();
+ 
+         if (!inUse) {
+             if (DEBUG_HEADS_UP) {
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImplTest.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImplTest.java
+index 60c3bc874235..440f76af2af4 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImplTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/notification/interruption/NotificationInterruptStateProviderImplTest.java
+@@ -24,6 +24,7 @@ import static android.app.NotificationManager.Policy.SUPPRESSED_EFFECT_AMBIENT;
+ import static android.app.NotificationManager.Policy.SUPPRESSED_EFFECT_PEEK;
+ 
+ import static com.android.systemui.statusbar.NotificationEntryHelper.modifyRanking;
++import static com.android.systemui.statusbar.StatusBarState.KEYGUARD;
+ import static com.android.systemui.statusbar.StatusBarState.SHADE;
+ 
+ import static com.google.common.truth.Truth.assertThat;
+@@ -84,6 +85,8 @@ public class NotificationInterruptStateProviderImplTest extends SysuiTestCase {
+     BatteryController mBatteryController;
+     @Mock
+     Handler mMockHandler;
++    @Mock
++    PendingIntent mPendingIntent;
+ 
+     private NotificationInterruptStateProviderImpl mNotifInterruptionStateProvider;
+ 
+@@ -399,6 +402,97 @@ public class NotificationInterruptStateProviderImplTest extends SysuiTestCase {
+         assertThat(mNotifInterruptionStateProvider.shouldHeadsUp(entry)).isFalse();
+     }
+ 
++    @Test
++    public void testShouldNotFullScreen_notPendingIntent() throws RemoteException {
++        NotificationEntry entry = createNotification(IMPORTANCE_HIGH);
++        when(mPowerManager.isInteractive()).thenReturn(true);
++        when(mDreamManager.isDreaming()).thenReturn(false);
++        when(mStatusBarStateController.getState()).thenReturn(SHADE);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isFalse();
++    }
++
++    @Test
++    public void testShouldNotFullScreen_notHighImportance() throws RemoteException {
++        NotificationEntry entry = createFsiNotification(IMPORTANCE_DEFAULT, /* silenced */ false);
++        when(mPowerManager.isInteractive()).thenReturn(true);
++        when(mDreamManager.isDreaming()).thenReturn(false);
++        when(mStatusBarStateController.getState()).thenReturn(SHADE);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isFalse();
++    }
++
++    @Test
++    public void testShouldNotFullScreen_isGroupAlertSilenced() throws RemoteException {
++        NotificationEntry entry = createFsiNotification(IMPORTANCE_HIGH, /* silenced */ true);
++        when(mPowerManager.isInteractive()).thenReturn(false);
++        when(mDreamManager.isDreaming()).thenReturn(true);
++        when(mStatusBarStateController.getState()).thenReturn(KEYGUARD);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isFalse();
++    }
++
++    @Test
++    public void testShouldFullScreen_notInteractive() throws RemoteException {
++        NotificationEntry entry = createFsiNotification(IMPORTANCE_HIGH, /* silenced */ false);
++        when(mPowerManager.isInteractive()).thenReturn(false);
++        when(mDreamManager.isDreaming()).thenReturn(false);
++        when(mStatusBarStateController.getState()).thenReturn(SHADE);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isTrue();
++    }
++
++    @Test
++    public void testShouldFullScreen_isDreaming() throws RemoteException {
++        NotificationEntry entry = createFsiNotification(IMPORTANCE_HIGH, /* silenced */ false);
++        when(mPowerManager.isInteractive()).thenReturn(true);
++        when(mDreamManager.isDreaming()).thenReturn(true);
++        when(mStatusBarStateController.getState()).thenReturn(SHADE);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isTrue();
++    }
++
++    @Test
++    public void testShouldFullScreen_onKeyguard() throws RemoteException {
++        NotificationEntry entry = createFsiNotification(IMPORTANCE_HIGH, /* silenced */ false);
++        when(mPowerManager.isInteractive()).thenReturn(true);
++        when(mDreamManager.isDreaming()).thenReturn(false);
++        when(mStatusBarStateController.getState()).thenReturn(KEYGUARD);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isTrue();
++    }
++
++    @Test
++    public void testShouldNotFullScreen_willHun() throws RemoteException {
++        NotificationEntry entry = createFsiNotification(IMPORTANCE_HIGH, /* silenced */ false);
++        when(mPowerManager.isInteractive()).thenReturn(true);
++        when(mPowerManager.isScreenOn()).thenReturn(true);
++        when(mDreamManager.isDreaming()).thenReturn(false);
++        when(mStatusBarStateController.getState()).thenReturn(SHADE);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isFalse();
++    }
++
++    @Test
++    public void testShouldFullScreen_packageSnoozed() throws RemoteException {
++        NotificationEntry entry = createFsiNotification(IMPORTANCE_HIGH, /* silenced */ false);
++        when(mPowerManager.isInteractive()).thenReturn(true);
++        when(mPowerManager.isScreenOn()).thenReturn(true);
++        when(mDreamManager.isDreaming()).thenReturn(false);
++        when(mStatusBarStateController.getState()).thenReturn(SHADE);
++        when(mHeadsUpManager.isSnoozed("a")).thenReturn(true);
++
++        assertThat(mNotifInterruptionStateProvider.shouldLaunchFullScreenIntentWhenAdded(entry))
++                .isTrue();
++    }
++
+     /**
+      * Bubbles can happen.
+      */
+@@ -503,6 +597,10 @@ public class NotificationInterruptStateProviderImplTest extends SysuiTestCase {
+                 .setContentText("content text")
+                 .build();
+ 
++        return createNotification(importance, n);
++    }
++
++    private NotificationEntry createNotification(int importance, Notification n) {
+         return new NotificationEntryBuilder()
+                 .setPkg("a")
+                 .setOpPkg("a")
+@@ -512,6 +610,20 @@ public class NotificationInterruptStateProviderImplTest extends SysuiTestCase {
+                 .build();
+     }
+ 
++    private NotificationEntry createFsiNotification(int importance, boolean silent) {
++        Notification n = new Notification.Builder(getContext(), "a")
++                .setContentTitle("title")
++                .setContentText("content text")
++                .setFullScreenIntent(mPendingIntent, true)
++                .setGroup("fsi")
++                .setGroupAlertBehavior(silent
++                        ? Notification.GROUP_ALERT_SUMMARY
++                        : Notification.GROUP_ALERT_ALL)
++                .build();
++
++        return createNotification(importance, n);
++    }
++
+     private final NotificationInterruptSuppressor
+             mSuppressAwakeHeadsUp =
+             new NotificationInterruptSuppressor() {
+-- 
+2.37.2.789.g6183377224-goog
+

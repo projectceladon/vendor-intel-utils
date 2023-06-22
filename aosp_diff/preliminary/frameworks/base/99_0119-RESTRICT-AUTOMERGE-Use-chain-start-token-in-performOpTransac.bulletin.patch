@@ -1,0 +1,602 @@
+From 2777165c17d8f39a64c84f7e81571c872f2b7450 Mon Sep 17 00:00:00 2001
+From: Nate Myren <ntmyren@google.com>
+Date: Thu, 10 Nov 2022 14:07:28 -0800
+Subject: [PATCH] RESTRICT AUTOMERGE Use chain start token in
+ performOpTransaction
+
+Bug: 258672042
+Test: atest CtsPermission4TestCases
+Change-Id: I1d484ed7c72d4ae73f4cbec47522a18ae9088f6e
+(cherry picked from commit 9d09846798bce7253ed1202adb61257d4eefbd1d)
+Merged-In: I1d484ed7c72d4ae73f4cbec47522a18ae9088f6e
+---
+ core/java/android/app/AppOpsManager.java      | 22 ++++---
+ .../android/app/AppOpsManagerInternal.java    | 23 ++++---
+ .../android/internal/app/IAppOpsService.aidl  | 11 ++--
+ .../server/am/ActivityManagerService.java     | 24 ++++----
+ .../android/server/appop/AppOpsService.java   | 61 +++++++++----------
+ .../permission/PermissionManagerService.java  | 39 ++++++------
+ .../android/server/policy/AppOpsPolicy.java   | 18 +++---
+ 7 files changed, 103 insertions(+), 95 deletions(-)
+
+diff --git a/core/java/android/app/AppOpsManager.java b/core/java/android/app/AppOpsManager.java
+index fc89e1395073..5b1666935ba8 100644
+--- a/core/java/android/app/AppOpsManager.java
++++ b/core/java/android/app/AppOpsManager.java
+@@ -8888,8 +8888,9 @@ public class AppOpsManager {
+      */
+     public int startProxyOpNoThrow(int op, @NonNull AttributionSource attributionSource,
+             @Nullable String message, boolean skipProxyOperation) {
+-        return startProxyOpNoThrow(op, attributionSource, message, skipProxyOperation,
+-                ATTRIBUTION_FLAGS_NONE, ATTRIBUTION_FLAGS_NONE, ATTRIBUTION_CHAIN_ID_NONE);
++        return startProxyOpNoThrow(attributionSource.getToken(), op, attributionSource, message,
++                skipProxyOperation, ATTRIBUTION_FLAGS_NONE, ATTRIBUTION_FLAGS_NONE,
++                ATTRIBUTION_CHAIN_ID_NONE);
+     }
+ 
+     /**
+@@ -8901,7 +8902,8 @@ public class AppOpsManager {
+      *
+      * @hide
+      */
+-    public int startProxyOpNoThrow(int op, @NonNull AttributionSource attributionSource,
++    public int startProxyOpNoThrow(@NonNull IBinder clientId, int op,
++            @NonNull AttributionSource attributionSource,
+             @Nullable String message, boolean skipProxyOperation, @AttributionFlags
+             int proxyAttributionFlags, @AttributionFlags int proxiedAttributionFlags,
+             int attributionChainId) {
+@@ -8919,7 +8921,7 @@ public class AppOpsManager {
+                 }
+             }
+ 
+-            SyncNotedAppOp syncOp = mService.startProxyOperation(op,
++            SyncNotedAppOp syncOp = mService.startProxyOperation(clientId, op,
+                     attributionSource, false, collectionMode == COLLECT_ASYNC, message,
+                     shouldCollectMessage, skipProxyOperation, proxyAttributionFlags,
+                     proxiedAttributionFlags, attributionChainId);
+@@ -9017,9 +9019,10 @@ public class AppOpsManager {
+      */
+     public void finishProxyOp(@NonNull String op, int proxiedUid,
+             @NonNull String proxiedPackageName, @Nullable String proxiedAttributionTag) {
+-        finishProxyOp(op, new AttributionSource(mContext.getAttributionSource(),
++        IBinder token = mContext.getAttributionSource().getToken();
++        finishProxyOp(token, op, new AttributionSource(mContext.getAttributionSource(),
+                 new AttributionSource(proxiedUid, proxiedPackageName,  proxiedAttributionTag,
+-                        mContext.getAttributionSource().getToken())), /*skipProxyOperation*/ false);
++                        token)), /*skipProxyOperation*/ false);
+     }
+ 
+     /**
+@@ -9034,10 +9037,11 @@ public class AppOpsManager {
+      *
+      * @hide
+      */
+-    public void finishProxyOp(@NonNull String op, @NonNull AttributionSource attributionSource,
+-            boolean skipProxyOperation) {
++    public void finishProxyOp(@NonNull IBinder clientId, @NonNull String op,
++            @NonNull AttributionSource attributionSource, boolean skipProxyOperation) {
+         try {
+-            mService.finishProxyOperation(strOpToOp(op), attributionSource, skipProxyOperation);
++            mService.finishProxyOperation(clientId, strOpToOp(op), attributionSource,
++                    skipProxyOperation);
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+diff --git a/core/java/android/app/AppOpsManagerInternal.java b/core/java/android/app/AppOpsManagerInternal.java
+index 4d6e4aedba66..43023fe9c2ab 100644
+--- a/core/java/android/app/AppOpsManagerInternal.java
++++ b/core/java/android/app/AppOpsManagerInternal.java
+@@ -26,13 +26,11 @@ import android.util.SparseArray;
+ import android.util.SparseIntArray;
+ 
+ import com.android.internal.app.IAppOpsCallback;
+-import com.android.internal.util.function.DecFunction;
+ import com.android.internal.util.function.HeptFunction;
+ import com.android.internal.util.function.HexFunction;
+ import com.android.internal.util.function.QuadFunction;
+ import com.android.internal.util.function.QuintConsumer;
+ import com.android.internal.util.function.QuintFunction;
+-import com.android.internal.util.function.TriFunction;
+ import com.android.internal.util.function.UndecFunction;
+ 
+ /**
+@@ -135,6 +133,7 @@ public abstract class AppOpsManagerInternal {
+         /**
+          * Allows overriding start proxy operation behavior.
+          *
++         * @param clientId The client calling start, represented by an IBinder
+          * @param code The op code to start.
+          * @param attributionSource The permission identity of the caller.
+          * @param startIfModeDefault Whether to start the op of the mode is default.
+@@ -148,11 +147,12 @@ public abstract class AppOpsManagerInternal {
+          * @param superImpl The super implementation.
+          * @return The app op note result.
+          */
+-        SyncNotedAppOp startProxyOperation(int code, @NonNull AttributionSource attributionSource,
+-                boolean startIfModeDefault, boolean shouldCollectAsyncNotedOp, String message,
+-                boolean shouldCollectMessage, boolean skipProxyOperation, @AttributionFlags
+-                int proxyAttributionFlags, @AttributionFlags int proxiedAttributionFlags,
+-                int attributionChainId, @NonNull DecFunction<Integer, AttributionSource, Boolean,
++        SyncNotedAppOp startProxyOperation(@NonNull IBinder clientId, int code,
++                @NonNull AttributionSource attributionSource, boolean startIfModeDefault,
++                boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
++                boolean skipProxyOperation, @AttributionFlags int proxyAttributionFlags,
++                @AttributionFlags int proxiedAttributionFlags, int attributionChainId,
++                @NonNull UndecFunction<IBinder, Integer, AttributionSource, Boolean,
+                         Boolean, String, Boolean, Boolean, Integer, Integer, Integer,
+                         SyncNotedAppOp> superImpl);
+ 
+@@ -176,10 +176,15 @@ public abstract class AppOpsManagerInternal {
+          *
+          * @param code The op code to finish.
+          * @param attributionSource The permission identity of the caller.
++         * @param skipProxyOperation Whether to skip the proxy in the proxy/proxied operation
++         * @param clientId The client calling finishProxyOperation
++         * @param superImpl The "standard" implementation to potentially call
+          */
+-        void finishProxyOperation(int code, @NonNull AttributionSource attributionSource,
++        void finishProxyOperation(@NonNull IBinder clientId, int code,
++                @NonNull AttributionSource attributionSource,
+                 boolean skipProxyOperation,
+-                @NonNull TriFunction<Integer, AttributionSource, Boolean, Void> superImpl);
++                @NonNull QuadFunction<IBinder, Integer, AttributionSource, Boolean,
++                        Void> superImpl);
+     }
+ 
+     /**
+diff --git a/core/java/com/android/internal/app/IAppOpsService.aidl b/core/java/com/android/internal/app/IAppOpsService.aidl
+index 30da4b470ab6..88447daf7338 100644
+--- a/core/java/com/android/internal/app/IAppOpsService.aidl
++++ b/core/java/com/android/internal/app/IAppOpsService.aidl
+@@ -58,11 +58,12 @@ interface IAppOpsService {
+     SyncNotedAppOp noteProxyOperation(int code, in AttributionSource attributionSource,
+             boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
+             boolean skipProxyOperation);
+-    SyncNotedAppOp startProxyOperation(int code, in AttributionSource attributionSource,
+-            boolean startIfModeDefault, boolean shouldCollectAsyncNotedOp, String message,
+-            boolean shouldCollectMessage, boolean skipProxyOperation, int proxyAttributionFlags,
+-            int proxiedAttributionFlags, int attributionChainId);
+-    void finishProxyOperation(int code, in AttributionSource attributionSource,
++    SyncNotedAppOp startProxyOperation(IBinder clientId, int code,
++            in AttributionSource attributionSource, boolean startIfModeDefault,
++            boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
++            boolean skipProxyOperation, int proxyAttributionFlags, int proxiedAttributionFlags,
++            int attributionChainId);
++    void finishProxyOperation(IBinder clientId, int code, in AttributionSource attributionSource,
+             boolean skipProxyOperation);
+ 
+     // Remaining methods are only used in Java.
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index 6c78b5efe749..710d0db3c542 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -348,12 +348,10 @@ import com.android.internal.util.FastPrintWriter;
+ import com.android.internal.util.FrameworkStatsLog;
+ import com.android.internal.util.MemInfoReader;
+ import com.android.internal.util.Preconditions;
+-import com.android.internal.util.function.DecFunction;
+ import com.android.internal.util.function.HeptFunction;
+ import com.android.internal.util.function.HexFunction;
+ import com.android.internal.util.function.QuadFunction;
+ import com.android.internal.util.function.QuintFunction;
+-import com.android.internal.util.function.TriFunction;
+ import com.android.internal.util.function.UndecFunction;
+ import com.android.server.AlarmManagerInternal;
+ import com.android.server.DeviceIdleInternal;
+@@ -17028,19 +17026,20 @@ public class ActivityManagerService extends IActivityManager.Stub
+         }
+ 
+         @Override
+-        public SyncNotedAppOp startProxyOperation(int code,
++        public SyncNotedAppOp startProxyOperation(@NonNull IBinder clientId, int code,
+                 @NonNull AttributionSource attributionSource, boolean startIfModeDefault,
+                 boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
+                 boolean skipProxyOperation, @AttributionFlags int proxyAttributionFlags,
+                 @AttributionFlags int proxiedAttributionFlags, int attributionChainId,
+-                @NonNull DecFunction<Integer, AttributionSource, Boolean, Boolean, String, Boolean,
+-                        Boolean, Integer, Integer, Integer, SyncNotedAppOp> superImpl) {
++                @NonNull UndecFunction<IBinder, Integer, AttributionSource,
++                        Boolean, Boolean, String, Boolean, Boolean, Integer, Integer, Integer,
++                        SyncNotedAppOp> superImpl) {
+             if (attributionSource.getUid() == mTargetUid && isTargetOp(code)) {
+                 final int shellUid = UserHandle.getUid(UserHandle.getUserId(
+                         attributionSource.getUid()), Process.SHELL_UID);
+                 final long identity = Binder.clearCallingIdentity();
+                 try {
+-                    return superImpl.apply(code, new AttributionSource(shellUid,
++                    return superImpl.apply(clientId, code, new AttributionSource(shellUid,
+                             "com.android.shell", attributionSource.getAttributionTag(),
+                             attributionSource.getToken(), attributionSource.getNext()),
+                             startIfModeDefault, shouldCollectAsyncNotedOp, message,
+@@ -17050,21 +17049,22 @@ public class ActivityManagerService extends IActivityManager.Stub
+                     Binder.restoreCallingIdentity(identity);
+                 }
+             }
+-            return superImpl.apply(code, attributionSource, startIfModeDefault,
++            return superImpl.apply(clientId, code, attributionSource, startIfModeDefault,
+                     shouldCollectAsyncNotedOp, message, shouldCollectMessage, skipProxyOperation,
+                     proxyAttributionFlags, proxiedAttributionFlags, attributionChainId);
+         }
+ 
+         @Override
+-        public void finishProxyOperation(int code, @NonNull AttributionSource attributionSource,
+-                boolean skipProxyOperation, @NonNull TriFunction<Integer, AttributionSource,
+-                        Boolean, Void> superImpl) {
++        public void finishProxyOperation(@NonNull IBinder clientId, int code,
++                @NonNull AttributionSource attributionSource, boolean skipProxyOperation,
++                @NonNull QuadFunction<IBinder, Integer, AttributionSource, Boolean,
++                        Void> superImpl) {
+             if (attributionSource.getUid() == mTargetUid && isTargetOp(code)) {
+                 final int shellUid = UserHandle.getUid(UserHandle.getUserId(
+                         attributionSource.getUid()), Process.SHELL_UID);
+                 final long identity = Binder.clearCallingIdentity();
+                 try {
+-                    superImpl.apply(code, new AttributionSource(shellUid,
++                    superImpl.apply(clientId, code, new AttributionSource(shellUid,
+                             "com.android.shell", attributionSource.getAttributionTag(),
+                             attributionSource.getToken(), attributionSource.getNext()),
+                             skipProxyOperation);
+@@ -17072,7 +17072,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+                     Binder.restoreCallingIdentity(identity);
+                 }
+             }
+-            superImpl.apply(code, attributionSource, skipProxyOperation);
++            superImpl.apply(clientId, code, attributionSource, skipProxyOperation);
+         }
+ 
+         private boolean isTargetOp(int code) {
+diff --git a/services/core/java/com/android/server/appop/AppOpsService.java b/services/core/java/com/android/server/appop/AppOpsService.java
+index 3808e0c93a38..759099f89b76 100644
+--- a/services/core/java/com/android/server/appop/AppOpsService.java
++++ b/services/core/java/com/android/server/appop/AppOpsService.java
+@@ -3839,18 +3839,18 @@ public class AppOpsService extends IAppOpsService.Stub {
+     }
+ 
+     @Override
+-    public SyncNotedAppOp startProxyOperation(int code,
++    public SyncNotedAppOp startProxyOperation(@NonNull IBinder clientId, int code,
+             @NonNull AttributionSource attributionSource, boolean startIfModeDefault,
+             boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
+             boolean skipProxyOperation, @AttributionFlags int proxyAttributionFlags,
+             @AttributionFlags int proxiedAttributionFlags, int attributionChainId) {
+-        return mCheckOpsDelegateDispatcher.startProxyOperation(code, attributionSource,
++        return mCheckOpsDelegateDispatcher.startProxyOperation(clientId, code, attributionSource,
+                 startIfModeDefault, shouldCollectAsyncNotedOp, message, shouldCollectMessage,
+                 skipProxyOperation, proxyAttributionFlags, proxiedAttributionFlags,
+                 attributionChainId);
+     }
+ 
+-    private SyncNotedAppOp startProxyOperationImpl(int code,
++    private SyncNotedAppOp startProxyOperationImpl(@NonNull IBinder clientId, int code,
+             @NonNull AttributionSource attributionSource,
+             boolean startIfModeDefault, boolean shouldCollectAsyncNotedOp, String message,
+             boolean shouldCollectMessage, boolean skipProxyOperation, @AttributionFlags
+@@ -3859,11 +3859,9 @@ public class AppOpsService extends IAppOpsService.Stub {
+         final int proxyUid = attributionSource.getUid();
+         final String proxyPackageName = attributionSource.getPackageName();
+         final String proxyAttributionTag = attributionSource.getAttributionTag();
+-        final IBinder proxyToken = attributionSource.getToken();
+         final int proxiedUid = attributionSource.getNextUid();
+         final String proxiedPackageName = attributionSource.getNextPackageName();
+         final String proxiedAttributionTag = attributionSource.getNextAttributionTag();
+-        final IBinder proxiedToken = attributionSource.getNextToken();
+ 
+         verifyIncomingProxyUid(attributionSource);
+         verifyIncomingOp(code);
+@@ -3902,7 +3900,7 @@ public class AppOpsService extends IAppOpsService.Stub {
+ 
+         if (!skipProxyOperation) {
+             // Test if the proxied operation will succeed before starting the proxy operation
+-            final SyncNotedAppOp testProxiedOp = startOperationUnchecked(proxiedToken, code,
++            final SyncNotedAppOp testProxiedOp = startOperationUnchecked(clientId, code,
+                     proxiedUid, resolvedProxiedPackageName, proxiedAttributionTag, proxyUid,
+                     resolvedProxyPackageName, proxyAttributionTag, proxiedFlags, startIfModeDefault,
+                     shouldCollectAsyncNotedOp, message, shouldCollectMessage,
+@@ -3914,7 +3912,7 @@ public class AppOpsService extends IAppOpsService.Stub {
+             final int proxyFlags = isProxyTrusted ? AppOpsManager.OP_FLAG_TRUSTED_PROXY
+                     : AppOpsManager.OP_FLAG_UNTRUSTED_PROXY;
+ 
+-            final SyncNotedAppOp proxyAppOp = startOperationUnchecked(proxyToken, code, proxyUid,
++            final SyncNotedAppOp proxyAppOp = startOperationUnchecked(clientId, code, proxyUid,
+                     resolvedProxyPackageName, proxyAttributionTag, Process.INVALID_UID, null, null,
+                     proxyFlags, startIfModeDefault, !isProxyTrusted, "proxy " + message,
+                     shouldCollectMessage, proxyAttributionFlags, attributionChainId,
+@@ -3924,7 +3922,7 @@ public class AppOpsService extends IAppOpsService.Stub {
+             }
+         }
+ 
+-        return startOperationUnchecked(proxiedToken, code, proxiedUid, resolvedProxiedPackageName,
++        return startOperationUnchecked(clientId, code, proxiedUid, resolvedProxiedPackageName,
+                 proxiedAttributionTag, proxyUid, resolvedProxyPackageName, proxyAttributionTag,
+                 proxiedFlags, startIfModeDefault, shouldCollectAsyncNotedOp, message,
+                 shouldCollectMessage, proxiedAttributionFlags, attributionChainId,
+@@ -4065,22 +4063,20 @@ public class AppOpsService extends IAppOpsService.Stub {
+     }
+ 
+     @Override
+-    public void finishProxyOperation(int code, @NonNull AttributionSource attributionSource,
+-            boolean skipProxyOperation) {
+-        mCheckOpsDelegateDispatcher.finishProxyOperation(code, attributionSource,
++    public void finishProxyOperation(@NonNull IBinder clientId, int code,
++            @NonNull AttributionSource attributionSource, boolean skipProxyOperation) {
++        mCheckOpsDelegateDispatcher.finishProxyOperation(clientId, code, attributionSource,
+                 skipProxyOperation);
+     }
+ 
+-    private Void finishProxyOperationImpl(int code, @NonNull AttributionSource attributionSource,
+-            boolean skipProxyOperation) {
++    private Void finishProxyOperationImpl(IBinder clientId, int code,
++            @NonNull AttributionSource attributionSource, boolean skipProxyOperation) {
+         final int proxyUid = attributionSource.getUid();
+         final String proxyPackageName = attributionSource.getPackageName();
+         final String proxyAttributionTag = attributionSource.getAttributionTag();
+-        final IBinder proxyToken = attributionSource.getToken();
+         final int proxiedUid = attributionSource.getNextUid();
+         final String proxiedPackageName = attributionSource.getNextPackageName();
+         final String proxiedAttributionTag = attributionSource.getNextAttributionTag();
+-        final IBinder proxiedToken = attributionSource.getNextToken();
+ 
+         skipProxyOperation = skipProxyOperation
+                 && isCallerAndAttributionTrusted(attributionSource);
+@@ -4097,7 +4093,7 @@ public class AppOpsService extends IAppOpsService.Stub {
+         }
+ 
+         if (!skipProxyOperation) {
+-            finishOperationUnchecked(proxyToken, code, proxyUid, resolvedProxyPackageName,
++            finishOperationUnchecked(clientId, code, proxyUid, resolvedProxyPackageName,
+                     proxyAttributionTag);
+         }
+ 
+@@ -4107,7 +4103,7 @@ public class AppOpsService extends IAppOpsService.Stub {
+             return null;
+         }
+ 
+-        finishOperationUnchecked(proxiedToken, code, proxiedUid, resolvedProxiedPackageName,
++        finishOperationUnchecked(clientId, code, proxiedUid, resolvedProxiedPackageName,
+                 proxiedAttributionTag);
+ 
+         return null;
+@@ -7642,42 +7638,42 @@ public class AppOpsService extends IAppOpsService.Stub {
+                     attributionFlags, attributionChainId, AppOpsService.this::startOperationImpl);
+         }
+ 
+-        public SyncNotedAppOp startProxyOperation(int code,
++        public SyncNotedAppOp startProxyOperation(@NonNull IBinder clientId, int code,
+                 @NonNull AttributionSource attributionSource, boolean startIfModeDefault,
+                 boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
+                 boolean skipProxyOperation, @AttributionFlags int proxyAttributionFlags,
+                 @AttributionFlags int proxiedAttributionFlags, int attributionChainId) {
+             if (mPolicy != null) {
+                 if (mCheckOpsDelegate != null) {
+-                    return mPolicy.startProxyOperation(code, attributionSource,
++                    return mPolicy.startProxyOperation(clientId, code, attributionSource,
+                             startIfModeDefault, shouldCollectAsyncNotedOp, message,
+                             shouldCollectMessage, skipProxyOperation, proxyAttributionFlags,
+                             proxiedAttributionFlags, attributionChainId,
+                             this::startDelegateProxyOperationImpl);
+                 } else {
+-                    return mPolicy.startProxyOperation(code, attributionSource,
++                    return mPolicy.startProxyOperation(clientId, code, attributionSource,
+                             startIfModeDefault, shouldCollectAsyncNotedOp, message,
+                             shouldCollectMessage, skipProxyOperation, proxyAttributionFlags,
+                             proxiedAttributionFlags, attributionChainId,
+                             AppOpsService.this::startProxyOperationImpl);
+                 }
+             } else if (mCheckOpsDelegate != null) {
+-                return startDelegateProxyOperationImpl(code, attributionSource,
++                return startDelegateProxyOperationImpl(clientId, code, attributionSource,
+                         startIfModeDefault, shouldCollectAsyncNotedOp, message,
+                         shouldCollectMessage, skipProxyOperation, proxyAttributionFlags,
+                         proxiedAttributionFlags, attributionChainId);
+             }
+-            return startProxyOperationImpl(code, attributionSource, startIfModeDefault,
++            return startProxyOperationImpl(clientId, code, attributionSource, startIfModeDefault,
+                     shouldCollectAsyncNotedOp, message, shouldCollectMessage, skipProxyOperation,
+                     proxyAttributionFlags, proxiedAttributionFlags, attributionChainId);
+         }
+ 
+-        private SyncNotedAppOp startDelegateProxyOperationImpl(int code,
++        private SyncNotedAppOp startDelegateProxyOperationImpl(@NonNull IBinder clientId, int code,
+                 @NonNull AttributionSource attributionSource, boolean startIfModeDefault,
+                 boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
+                 boolean skipProxyOperation, @AttributionFlags int proxyAttributionFlags,
+                 @AttributionFlags int proxiedAttributionFlsgs, int attributionChainId) {
+-            return mCheckOpsDelegate.startProxyOperation(code, attributionSource,
++            return mCheckOpsDelegate.startProxyOperation(clientId, code, attributionSource,
+                     startIfModeDefault, shouldCollectAsyncNotedOp, message, shouldCollectMessage,
+                     skipProxyOperation, proxyAttributionFlags, proxiedAttributionFlsgs,
+                     attributionChainId, AppOpsService.this::startProxyOperationImpl);
+@@ -7706,27 +7702,28 @@ public class AppOpsService extends IAppOpsService.Stub {
+                     AppOpsService.this::finishOperationImpl);
+         }
+ 
+-        public void finishProxyOperation(int code,
++        public void finishProxyOperation(@NonNull IBinder clientId, int code,
+                 @NonNull AttributionSource attributionSource, boolean skipProxyOperation) {
+             if (mPolicy != null) {
+                 if (mCheckOpsDelegate != null) {
+-                    mPolicy.finishProxyOperation(code, attributionSource,
++                    mPolicy.finishProxyOperation(clientId, code, attributionSource,
+                             skipProxyOperation, this::finishDelegateProxyOperationImpl);
+                 } else {
+-                    mPolicy.finishProxyOperation(code, attributionSource,
++                    mPolicy.finishProxyOperation(clientId, code, attributionSource,
+                             skipProxyOperation, AppOpsService.this::finishProxyOperationImpl);
+                 }
+             } else if (mCheckOpsDelegate != null) {
+-                finishDelegateProxyOperationImpl(code, attributionSource, skipProxyOperation);
++                finishDelegateProxyOperationImpl(clientId, code, attributionSource,
++                        skipProxyOperation);
+             } else {
+-                finishProxyOperationImpl(code, attributionSource, skipProxyOperation);
++                finishProxyOperationImpl(clientId, code, attributionSource, skipProxyOperation);
+             }
+         }
+ 
+-        private Void finishDelegateProxyOperationImpl(int code,
++        private Void finishDelegateProxyOperationImpl(@NonNull IBinder clientId, int code,
+                 @NonNull AttributionSource attributionSource, boolean skipProxyOperation) {
+-            mCheckOpsDelegate.finishProxyOperation(code, attributionSource, skipProxyOperation,
+-                    AppOpsService.this::finishProxyOperationImpl);
++            mCheckOpsDelegate.finishProxyOperation(clientId, code, attributionSource,
++                    skipProxyOperation, AppOpsService.this::finishProxyOperationImpl);
+             return null;
+         }
+     }
+diff --git a/services/core/java/com/android/server/pm/permission/PermissionManagerService.java b/services/core/java/com/android/server/pm/permission/PermissionManagerService.java
+index 73b8b158b252..dda1c36bb06f 100644
+--- a/services/core/java/com/android/server/pm/permission/PermissionManagerService.java
++++ b/services/core/java/com/android/server/pm/permission/PermissionManagerService.java
+@@ -5639,7 +5639,7 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                     if (resolvedPackageName == null) {
+                         return;
+                     }
+-                    appOpsManager.finishOp(accessorSource.getToken(), op,
++                    appOpsManager.finishOp(attributionSourceState.token, op,
+                             accessorSource.getUid(), resolvedPackageName,
+                             accessorSource.getAttributionTag());
+                 } else {
+@@ -5648,8 +5648,9 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                     if (resolvedAttributionSource.getPackageName() == null) {
+                         return;
+                     }
+-                    appOpsManager.finishProxyOp(AppOpsManager.opToPublicName(op),
+-                            resolvedAttributionSource, skipCurrentFinish);
++                    appOpsManager.finishProxyOp(attributionSourceState.token,
++                            AppOpsManager.opToPublicName(op), resolvedAttributionSource,
++                            skipCurrentFinish);
+                 }
+ 
+                 if (next == null || next.getNext() == null) {
+@@ -5759,10 +5760,11 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                         && next.getNext() == null);
+                 final boolean selfAccess = singleReceiverFromDatasource || next == null;
+ 
+-                final int opMode = performOpTransaction(context, op, current, message,
+-                        forDataDelivery, /*startDataDelivery*/ false, skipCurrentChecks,
+-                        selfAccess, singleReceiverFromDatasource, AppOpsManager.OP_NONE,
+-                        AppOpsManager.ATTRIBUTION_FLAGS_NONE, AppOpsManager.ATTRIBUTION_FLAGS_NONE,
++                final int opMode = performOpTransaction(context, attributionSource.getToken(), op,
++                        current, message, forDataDelivery, /*startDataDelivery*/ false,
++                        skipCurrentChecks, selfAccess, singleReceiverFromDatasource,
++                        AppOpsManager.OP_NONE, AppOpsManager.ATTRIBUTION_FLAGS_NONE,
++                        AppOpsManager.ATTRIBUTION_FLAGS_NONE,
+                         AppOpsManager.ATTRIBUTION_CHAIN_ID_NONE);
+ 
+                 switch (opMode) {
+@@ -5864,10 +5866,10 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                         attributionSource, next, fromDatasource, startDataDelivery, selfAccess,
+                         isLinkTrusted) : ATTRIBUTION_FLAGS_NONE;
+ 
+-                final int opMode = performOpTransaction(context, op, current, message,
+-                        forDataDelivery, startDataDelivery, skipCurrentChecks, selfAccess,
+-                        singleReceiverFromDatasource, attributedOp, proxyAttributionFlags,
+-                        proxiedAttributionFlags, attributionChainId);
++                final int opMode = performOpTransaction(context, attributionSource.getToken(), op,
++                        current, message, forDataDelivery, startDataDelivery, skipCurrentChecks,
++                        selfAccess, singleReceiverFromDatasource, attributedOp,
++                        proxyAttributionFlags, proxiedAttributionFlags, attributionChainId);
+ 
+                 switch (opMode) {
+                     case AppOpsManager.MODE_ERRORED: {
+@@ -6012,8 +6014,8 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                         attributionSource, next, /*fromDatasource*/ false, startDataDelivery,
+                         selfAccess, isLinkTrusted) : ATTRIBUTION_FLAGS_NONE;
+ 
+-                final int opMode = performOpTransaction(context, op, current, message,
+-                        forDataDelivery, startDataDelivery, skipCurrentChecks, selfAccess,
++                final int opMode = performOpTransaction(context, current.getToken(), op, current,
++                        message, forDataDelivery, startDataDelivery, skipCurrentChecks, selfAccess,
+                         /*fromDatasource*/ false, AppOpsManager.OP_NONE, proxyAttributionFlags,
+                         proxiedAttributionFlags, attributionChainId);
+ 
+@@ -6035,7 +6037,8 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+         }
+ 
+         @SuppressWarnings("ConstantConditions")
+-        private static int performOpTransaction(@NonNull Context context, int op,
++        private static int performOpTransaction(@NonNull Context context,
++                @NonNull IBinder chainStartToken, int op,
+                 @NonNull AttributionSource attributionSource, @Nullable String message,
+                 boolean forDataDelivery, boolean startDataDelivery, boolean skipProxyOperation,
+                 boolean selfAccess, boolean singleReceiverFromDatasource, int attributedOp,
+@@ -6097,7 +6100,7 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                 if (selfAccess) {
+                     try {
+                         startedOpResult = appOpsManager.startOpNoThrow(
+-                                resolvedAttributionSource.getToken(), startedOp,
++                                chainStartToken, startedOp,
+                                 resolvedAttributionSource.getUid(),
+                                 resolvedAttributionSource.getPackageName(),
+                                 /*startIfModeDefault*/ false,
+@@ -6108,12 +6111,12 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                                 + " platform defined runtime permission "
+                                 + AppOpsManager.opToPermission(op) + " while not having "
+                                 + Manifest.permission.UPDATE_APP_OPS_STATS);
+-                        startedOpResult = appOpsManager.startProxyOpNoThrow(attributedOp,
+-                                attributionSource, message, skipProxyOperation,
++                        startedOpResult = appOpsManager.startProxyOpNoThrow(chainStartToken,
++                                attributedOp, attributionSource, message, skipProxyOperation,
+                                 proxyAttributionFlags, proxiedAttributionFlags, attributionChainId);
+                     }
+                 } else {
+-                    startedOpResult = appOpsManager.startProxyOpNoThrow(startedOp,
++                    startedOpResult = appOpsManager.startProxyOpNoThrow(chainStartToken, startedOp,
+                             resolvedAttributionSource, message, skipProxyOperation,
+                             proxyAttributionFlags, proxiedAttributionFlags, attributionChainId);
+                 }
+diff --git a/services/core/java/com/android/server/policy/AppOpsPolicy.java b/services/core/java/com/android/server/policy/AppOpsPolicy.java
+index 8b4690629ec5..b31216d05e3e 100644
+--- a/services/core/java/com/android/server/policy/AppOpsPolicy.java
++++ b/services/core/java/com/android/server/policy/AppOpsPolicy.java
+@@ -44,13 +44,11 @@ import android.util.Log;
+ import android.util.SparseArray;
+ 
+ import com.android.internal.annotations.GuardedBy;
+-import com.android.internal.util.function.DecFunction;
+ import com.android.internal.util.function.HeptFunction;
+ import com.android.internal.util.function.HexFunction;
+ import com.android.internal.util.function.QuadFunction;
+ import com.android.internal.util.function.QuintConsumer;
+ import com.android.internal.util.function.QuintFunction;
+-import com.android.internal.util.function.TriFunction;
+ import com.android.internal.util.function.UndecFunction;
+ import com.android.server.LocalServices;
+ 
+@@ -250,14 +248,14 @@ public final class AppOpsPolicy implements AppOpsManagerInternal.CheckOpsDelegat
+     }
+ 
+     @Override
+-    public SyncNotedAppOp startProxyOperation(int code,
++    public SyncNotedAppOp startProxyOperation(@NonNull IBinder clientId, int code,
+             @NonNull AttributionSource attributionSource, boolean startIfModeDefault,
+             boolean shouldCollectAsyncNotedOp, String message, boolean shouldCollectMessage,
+             boolean skipProxyOperation, @AttributionFlags int proxyAttributionFlags,
+             @AttributionFlags int proxiedAttributionFlags, int attributionChainId,
+-            @NonNull DecFunction<Integer, AttributionSource, Boolean, Boolean, String, Boolean,
+-                    Boolean, Integer, Integer, Integer, SyncNotedAppOp> superImpl) {
+-        return superImpl.apply(resolveDatasourceOp(code, attributionSource.getUid(),
++            @NonNull UndecFunction<IBinder, Integer, AttributionSource, Boolean, Boolean, String,
++                    Boolean, Boolean, Integer, Integer, Integer, SyncNotedAppOp> superImpl) {
++        return superImpl.apply(clientId, resolveDatasourceOp(code, attributionSource.getUid(),
+                 attributionSource.getPackageName(), attributionSource.getAttributionTag()),
+                 attributionSource, startIfModeDefault, shouldCollectAsyncNotedOp, message,
+                 shouldCollectMessage, skipProxyOperation, proxyAttributionFlags,
+@@ -273,10 +271,10 @@ public final class AppOpsPolicy implements AppOpsManagerInternal.CheckOpsDelegat
+     }
+ 
+     @Override
+-    public void finishProxyOperation(int code, @NonNull AttributionSource attributionSource,
+-            boolean skipProxyOperation, @NonNull TriFunction<Integer, AttributionSource,
+-            Boolean, Void> superImpl) {
+-        superImpl.apply(resolveDatasourceOp(code, attributionSource.getUid(),
++    public void finishProxyOperation(@NonNull IBinder clientId, int code,
++            @NonNull AttributionSource attributionSource, boolean skipProxyOperation,
++            @NonNull QuadFunction<IBinder, Integer, AttributionSource, Boolean, Void> superImpl) {
++        superImpl.apply(clientId, resolveDatasourceOp(code, attributionSource.getUid(),
+                 attributionSource.getPackageName(), attributionSource.getAttributionTag()),
+                 attributionSource, skipProxyOperation);
+     }
+-- 
+2.39.0.rc1.256.g54fd8350bd-goog
+

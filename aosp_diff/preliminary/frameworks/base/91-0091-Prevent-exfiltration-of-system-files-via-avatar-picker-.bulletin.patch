@@ -1,0 +1,139 @@
+From d9d78c2aa8fed86b0cf3e7d4aadf6824579b39a6 Mon Sep 17 00:00:00 2001
+From: Oli Lan <olilan@google.com>
+Date: Fri, 26 Aug 2022 17:35:21 +0100
+Subject: [PATCH] Prevent exfiltration of system files via avatar picker.
+
+This adds mitigations to prevent system files being exfiltrated
+via the settings content provider when a content URI is provided
+as a chosen user image.
+
+The mitigations are:
+
+1) Copy the image to a new URI rather than the existing takePictureUri
+prior to cropping.
+
+2) Only allow a system handler to respond to the CROP intent.
+
+This is a fixed version of ag/17071224, to address b/239513606.
+
+Bug: 187702830
+Test: build and check functionality
+Change-Id: Ie352d07bbcfc7e0b0a1db1dbe3fd43085e0ecbb6
+Merged-In: Idf1ab60878d619ee30505d71e8afe31d8b0c0ebe
+(cherry picked from commit 1b48ca6b7f44bacdb7b9469bfaf08fe4881ea0ae)
+Merged-In: Ie352d07bbcfc7e0b0a1db1dbe3fd43085e0ecbb6
+---
+ .../users/EditUserPhotoController.java        | 44 +++++++++++++------
+ 1 file changed, 31 insertions(+), 13 deletions(-)
+
+diff --git a/packages/SettingsLib/src/com/android/settingslib/users/EditUserPhotoController.java b/packages/SettingsLib/src/com/android/settingslib/users/EditUserPhotoController.java
+index f9584a3e15e9..0c6cd048619c 100644
+--- a/packages/SettingsLib/src/com/android/settingslib/users/EditUserPhotoController.java
++++ b/packages/SettingsLib/src/com/android/settingslib/users/EditUserPhotoController.java
+@@ -21,6 +21,8 @@ import android.content.ClipData;
+ import android.content.ContentResolver;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.pm.PackageManager;
++import android.content.pm.ResolveInfo;
+ import android.database.Cursor;
+ import android.graphics.Bitmap;
+ import android.graphics.Bitmap.Config;
+@@ -83,6 +85,7 @@ public class EditUserPhotoController {
+     private static final int DEFAULT_PHOTO_SIZE = 500;
+ 
+     private static final String IMAGES_DIR = "multi_user";
++    private static final String PRE_CROP_PICTURE_FILE_NAME = "PreCropEditUserPhoto.jpg";
+     private static final String CROP_PICTURE_FILE_NAME = "CropEditUserPhoto.jpg";
+     private static final String TAKE_PICTURE_FILE_NAME = "TakeEditUserPhoto.jpg";
+     private static final String NEW_USER_PHOTO_FILE_NAME = "NewUserPhoto.png";
+@@ -95,6 +98,7 @@ public class EditUserPhotoController {
+     private final String mFileAuthority;
+ 
+     private final File mImagesDir;
++    private final Uri mPreCropPictureUri;
+     private final Uri mCropPictureUri;
+     private final Uri mTakePictureUri;
+ 
+@@ -110,6 +114,7 @@ public class EditUserPhotoController {
+ 
+         mImagesDir = new File(activity.getCacheDir(), IMAGES_DIR);
+         mImagesDir.mkdir();
++        mPreCropPictureUri = createTempImageUri(activity, PRE_CROP_PICTURE_FILE_NAME, !waiting);
+         mCropPictureUri = createTempImageUri(activity, CROP_PICTURE_FILE_NAME, !waiting);
+         mTakePictureUri = createTempImageUri(activity, TAKE_PICTURE_FILE_NAME, !waiting);
+         mPhotoSize = getPhotoSize(activity);
+@@ -143,7 +148,7 @@ public class EditUserPhotoController {
+             case REQUEST_CODE_CHOOSE_PHOTO:
+                 if (mTakePictureUri.equals(pictureUri)) {
+                     if (PhotoCapabilityUtils.canCropPhoto(mActivity)) {
+-                        cropPhoto();
++                        cropPhoto(pictureUri);
+                     } else {
+                         onPhotoNotCropped(pictureUri);
+                     }
+@@ -224,7 +229,7 @@ public class EditUserPhotoController {
+             protected Void doInBackground(Void... params) {
+                 final ContentResolver cr = mActivity.getContentResolver();
+                 try (InputStream in = cr.openInputStream(pictureUri);
+-                     OutputStream out = cr.openOutputStream(mTakePictureUri)) {
++                        OutputStream out = cr.openOutputStream(mPreCropPictureUri)) {
+                     Streams.copy(in, out);
+                 } catch (IOException e) {
+                     Log.w(TAG, "Failed to copy photo", e);
+@@ -235,28 +240,41 @@ public class EditUserPhotoController {
+             @Override
+             protected void onPostExecute(Void result) {
+                 if (!mActivity.isFinishing() && !mActivity.isDestroyed()) {
+-                    cropPhoto();
++                    cropPhoto(mPreCropPictureUri);
+                 }
+             }
+         }.execute();
+     }
+ 
+-    private void cropPhoto() {
++    private void cropPhoto(final Uri pictureUri) {
+         // TODO: Use a public intent, when there is one.
+         Intent intent = new Intent("com.android.camera.action.CROP");
+-        intent.setDataAndType(mTakePictureUri, "image/*");
++        intent.setDataAndType(pictureUri, "image/*");
+         appendOutputExtra(intent, mCropPictureUri);
+         appendCropExtras(intent);
+-        if (intent.resolveActivity(mActivity.getPackageManager()) != null) {
+-            try {
+-                StrictMode.disableDeathOnFileUriExposure();
+-                mActivityStarter.startActivityForResult(intent, REQUEST_CODE_CROP_PHOTO);
+-            } finally {
+-                StrictMode.enableDeathOnFileUriExposure();
++        try {
++            StrictMode.disableDeathOnFileUriExposure();
++            if (startSystemActivityForResult(intent, REQUEST_CODE_CROP_PHOTO)) {
++                return;
+             }
+-        } else {
+-            onPhotoNotCropped(mTakePictureUri);
++        } finally {
++            StrictMode.enableDeathOnFileUriExposure();
++        }
++
++        onPhotoNotCropped(mTakePictureUri);
++
++    }
++
++    private boolean startSystemActivityForResult(Intent intent, int code) {
++        List<ResolveInfo> resolveInfos = mActivity.getPackageManager()
++                .queryIntentActivities(intent, PackageManager.MATCH_SYSTEM_ONLY);
++        if (resolveInfos.isEmpty()) {
++            Log.w(TAG, "No system package activity could be found for code " + code);
++            return false;
+         }
++        intent.setPackage(resolveInfos.get(0).activityInfo.packageName);
++        mActivityStarter.startActivityForResult(intent, code);
++        return true;
+     }
+ 
+     private void appendOutputExtra(Intent intent, Uri pictureUri) {
+-- 
+2.38.1.273.g43a17bfeac-goog
+
