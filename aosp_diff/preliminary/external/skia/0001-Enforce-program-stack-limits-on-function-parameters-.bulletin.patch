@@ -1,0 +1,135 @@
+From cfaa1ca1ceec8ec46ffbc89f707d280007a52c83 Mon Sep 17 00:00:00 2001
+From: John Stiles <johnstiles@google.com>
+Date: Wed, 26 Apr 2023 14:52:49 -0400
+Subject: [PATCH] Enforce program stack limits on function parameters.
+
+Previously, a function's parameter list did not count against its
+stack size limit.
+
+Bug: 278113033
+Test: SkQP
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:e3ab186a075a174f44692bf6a31165f30f6b7ded)
+Merged-In: If49dce98f3155f3144a766c26b5a3a39401ce1b2
+Change-Id: If49dce98f3155f3144a766c26b5a3a39401ce1b2
+---
+ gn/sksl_tests.gni                             |  1 +
+ .../errors/ProgramTooLarge_Parameters.rts     | 14 +++++++
+ src/sksl/ir/SkSLFunctionDefinition.cpp        | 41 +++++++++++--------
+ .../errors/ProgramTooLarge_Parameters.glsl    |  6 +++
+ 4 files changed, 46 insertions(+), 16 deletions(-)
+ create mode 100644 resources/sksl/errors/ProgramTooLarge_Parameters.rts
+ create mode 100644 tests/sksl/errors/ProgramTooLarge_Parameters.glsl
+
+diff --git a/gn/sksl_tests.gni b/gn/sksl_tests.gni
+index d4c4ad4958..fdb0b91aee 100644
+--- a/gn/sksl_tests.gni
++++ b/gn/sksl_tests.gni
+@@ -146,6 +146,7 @@ sksl_error_tests = [
+   "/sksl/errors/PrivateTypes.rts",
+   "/sksl/errors/PrivateVariables.rts",
+   "/sksl/errors/ProgramTooLarge_Globals.rts",
++  "/sksl/errors/ProgramTooLarge_Parameters.rts",
+   "/sksl/errors/ProgramTooLarge_Stack.rts",
+   "/sksl/errors/PrototypeInFuncBody.rts",
+   "/sksl/errors/RedeclareBasicType.rts",
+diff --git a/resources/sksl/errors/ProgramTooLarge_Parameters.rts b/resources/sksl/errors/ProgramTooLarge_Parameters.rts
+new file mode 100644
+index 0000000000..cced977be4
+--- /dev/null
++++ b/resources/sksl/errors/ProgramTooLarge_Parameters.rts
+@@ -0,0 +1,14 @@
++struct S {
++    half4 ah4[1];
++    half ah[99999];
++    half4 h4;
++    half h;
++};
++
++void func(int small,
++          S big_chungus,
++          S no_report /*we don't need to report overflows past the first*/) {}
++
++/*%%*
++variable 'big_chungus' exceeds the stack size limit
++*%%*/
+diff --git a/src/sksl/ir/SkSLFunctionDefinition.cpp b/src/sksl/ir/SkSLFunctionDefinition.cpp
+index 3c7c3d182e..5daee59cc0 100644
+--- a/src/sksl/ir/SkSLFunctionDefinition.cpp
++++ b/src/sksl/ir/SkSLFunctionDefinition.cpp
+@@ -21,6 +21,8 @@
+ #include "src/sksl/transform/SkSLProgramWriter.h"
+ 
+ #include <forward_list>
++#include <string_view>
++#include <vector>
+ 
+ namespace SkSL {
+ 
+@@ -80,7 +82,27 @@ std::unique_ptr<FunctionDefinition> FunctionDefinition::Convert(const Context& c
+                   FunctionSet* referencedBuiltinFunctions)
+             : fContext(context)
+             , fFunction(function)
+-            , fReferencedBuiltinFunctions(referencedBuiltinFunctions) {}
++            , fReferencedBuiltinFunctions(referencedBuiltinFunctions) {
++            // Function parameters count as local variables.
++            for (const Variable* var : function.parameters()) {
++                this->addLocalVariable(var, function.fLine);
++            }
++        }
++
++        void addLocalVariable(const Variable* var, int line) {
++            // We count the number of slots used, but don't consider the precision of the base type.
++            // In practice, this reflects what GPUs actually do pretty well. (i.e., RelaxedPrecision
++            // math doesn't mean your variable takes less space.) We also don't attempt to reclaim
++            // slots at the end of a Block.
++            size_t prevSlotsUsed = fSlotsUsed;
++            fSlotsUsed = SkSafeMath::Add(fSlotsUsed, var->type().slotCount());
++            // To avoid overzealous error reporting, only trigger the error at the first
++            // place where the stack limit is exceeded.
++            if (prevSlotsUsed < kVariableSlotLimit && fSlotsUsed >= kVariableSlotLimit) {
++                fContext.fErrors->error(line, "variable '" + std::string(var->name()) +
++                                              "' exceeds the stack size limit");
++            }
++        }
+ 
+         ~Finalizer() override {
+             SkASSERT(fBreakableLevel == 0);
+@@ -144,21 +166,8 @@ std::unique_ptr<FunctionDefinition> FunctionDefinition::Convert(const Context& c
+         bool visitStatement(Statement& stmt) override {
+             switch (stmt.kind()) {
+                 case Statement::Kind::kVarDeclaration: {
+-                    // We count the number of slots used, but don't consider the precision of the
+-                    // base type. In practice, this reflects what GPUs really do pretty well.
+-                    // (i.e., RelaxedPrecision math doesn't mean your variable takes less space.)
+-                    // We also don't attempt to reclaim slots at the end of a Block.
+-                    size_t prevSlotsUsed = fSlotsUsed;
+-                    fSlotsUsed = SkSafeMath::Add(
+-                            fSlotsUsed, stmt.as<VarDeclaration>().var().type().slotCount());
+-                    // To avoid overzealous error reporting, only trigger the error at the first
+-                    // place where the stack limit is exceeded.
+-                    if (prevSlotsUsed < kVariableSlotLimit && fSlotsUsed >= kVariableSlotLimit) {
+-                        fContext.fErrors->error(
+-                                stmt.fLine,
+-                                "variable '" + std::string(stmt.as<VarDeclaration>().var().name()) +
+-                                "' exceeds the stack size limit");
+-                    }
++                    const Variable* var = &stmt.as<VarDeclaration>().var();
++                    this->addLocalVariable(var, stmt.fLine);
+                     break;
+                 }
+                 case Statement::Kind::kReturn: {
+diff --git a/tests/sksl/errors/ProgramTooLarge_Parameters.glsl b/tests/sksl/errors/ProgramTooLarge_Parameters.glsl
+new file mode 100644
+index 0000000000..d92c3256e8
+--- /dev/null
++++ b/tests/sksl/errors/ProgramTooLarge_Parameters.glsl
+@@ -0,0 +1,6 @@
++### Compilation failed:
++
++error: 10: variable 'big_chungus' exceeds the stack size limit
++          S no_report /*we don't need to report overflows past the first*/) {}
++                                                                            ^^
++1 error
+-- 
+2.41.0.162.gfafddb0af9-goog
+
