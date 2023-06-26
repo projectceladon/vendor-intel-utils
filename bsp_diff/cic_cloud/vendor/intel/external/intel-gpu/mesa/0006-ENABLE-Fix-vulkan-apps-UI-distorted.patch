@@ -1,0 +1,195 @@
+From c853ad6463748f93def260d631497af49862ebff Mon Sep 17 00:00:00 2001
+From: Huang Rui <rui1.huang@intel.com>
+Date: Mon, 26 Jun 2023 11:18:20 +0800
+Subject: [ENABLE] Fix vulkan apps' UI distortion
+
+Gralloc4.0 and ICR encoder support TILING instead
+of LINEAR, SG1 is TileY and DG2 is Tile4.
+
+Vulkan driver get the tiling information from api
+has_tiling_uapi which is not support in dGPU. And
+it'll fallback to LINEAR type then result in
+Vulkan UI Garble.
+
+Enable vulkan driver to get tiling information from
+modifier through gralloc4.0 mapper.
+
+Change-Id: I9f6cb9284bd5e3e2e1bd87be1298216a56fa0af0
+Tracked-On: OAM-110727
+Signed-off-by: Huang Rui <rui1.huang@intel.com>
+---
+ src/intel/vulkan/anv_android.c          |  9 ++--
+ src/intel/vulkan/anv_android.h          | 17 ++++++
+ src/intel/vulkan/anv_android_mapper.cpp | 72 +++++++++++++++++++++++++
+ src/intel/vulkan/meson.build            |  8 +++
+ 4 files changed, 103 insertions(+), 3 deletions(-)
+ create mode 100644 src/intel/vulkan/anv_android_mapper.cpp
+
+diff --git a/src/intel/vulkan/anv_android.c b/src/intel/vulkan/anv_android.c
+index ad77a52a053..e2eaea22e03 100644
+--- a/src/intel/vulkan/anv_android.c
++++ b/src/intel/vulkan/anv_android.c
+@@ -382,10 +382,13 @@ anv_image_init_from_gralloc(struct anv_device *device,
+    }
+ 
+    enum isl_tiling tiling;
+-   result = anv_device_get_bo_tiling(device, bo, &tiling);
++   result = anv_get_tiling_from_mapper(gralloc_info->handle, &tiling);
+    if (result != VK_SUCCESS) {
+-      return vk_errorf(device, result,
+-                       "failed to get tiling from VkNativeBufferANDROID");
++      result = anv_device_get_bo_tiling(device, bo, &tiling);
++      if (result != VK_SUCCESS) {
++         return vk_errorf(device, result,
++                        "failed to get tiling from VkNativeBufferANDROID");
++      }
+    }
+    anv_info.isl_tiling_flags = 1u << tiling;
+ 
+diff --git a/src/intel/vulkan/anv_android.h b/src/intel/vulkan/anv_android.h
+index e1f099e1f4f..d9e90bc7939 100644
+--- a/src/intel/vulkan/anv_android.h
++++ b/src/intel/vulkan/anv_android.h
+@@ -30,11 +30,28 @@
+ #include <vulkan/vulkan.h>
+ #include <vulkan/vulkan_android.h>
+ #include <vulkan/vk_android_native_buffer.h>
++#include "isl/isl.h"
+ 
+ struct anv_device_memory;
+ struct anv_device;
+ struct anv_image;
+ 
++#ifdef USE_IMAPPER4_METADATA_API
++#ifdef __cplusplus
++extern "C" {
++#endif
++extern int
++anv_get_tiling_from_mapper(buffer_handle_t handle, enum isl_tiling *tiling_out);
++#ifdef __cplusplus
++}
++#endif
++#else
++static inline int
++anv_get_tiling_from_mapper(buffer_handle_t handle, enum isl_tiling *tiling_out) {
++   return -ENOTSUP;
++}
++#endif /* USE_IMAPPER4_METADATA_API */
++
+ VkResult anv_image_init_from_gralloc(struct anv_device *device,
+                                      struct anv_image *image,
+                                      const VkImageCreateInfo *base_info,
+diff --git a/src/intel/vulkan/anv_android_mapper.cpp b/src/intel/vulkan/anv_android_mapper.cpp
+new file mode 100644
+index 00000000000..cf079f45c98
+--- /dev/null
++++ b/src/intel/vulkan/anv_android_mapper.cpp
+@@ -0,0 +1,72 @@
++#include <system/window.h>
++#include <gralloctypes/Gralloc4.h>
++#include "util/log.h"
++#include "anv_android.h"
++#include "drm-uapi/drm_fourcc.h"
++using android::hardware::graphics::mapper::V4_0::Error;
++using android::hardware::graphics::mapper::V4_0::IMapper;
++using android::hardware::hidl_vec;
++using MetadataType =
++   android::hardware::graphics::mapper::V4_0::IMapper::MetadataType;
++
++Error
++GetMetadata(android::sp<IMapper> mapper, const native_handle_t *buffer,
++            MetadataType type, hidl_vec<uint8_t>* metadata)
++{
++   Error error = Error::NONE;
++
++   auto native_handle = const_cast<native_handle_t*>(buffer);
++
++   auto ret = mapper->get(native_handle, type,
++                          [&](const auto& get_error, const auto& get_metadata) {
++                              error = get_error;
++                              *metadata = get_metadata;
++                          });
++
++   if (!ret.isOk())
++      error = Error::NO_RESOURCES;
++
++   return error;
++}
++
++extern "C"
++{
++int
++anv_get_tiling_from_mapper(buffer_handle_t handle, enum isl_tiling *tiling_out)
++{
++   static android::sp<IMapper> mapper = IMapper::getService();
++   if (mapper == nullptr)
++      return -EINVAL;
++
++   if (!handle)
++      return -EINVAL;
++
++   hidl_vec<uint8_t> encoded_modifier;
++   Error err = GetMetadata(mapper, handle, android::gralloc4::MetadataType_PixelFormatModifier, &encoded_modifier);
++   if (err != Error::NONE)
++      return -EINVAL;
++
++   uint64_t modifier = 0;
++   auto status = android::gralloc4::decodePixelFormatModifier(encoded_modifier, &modifier);
++   if (status != android::OK)
++      return -EINVAL;
++
++   switch (modifier) {
++      case DRM_FORMAT_MOD_LINEAR:
++         *tiling_out = ISL_TILING_LINEAR;
++         break;
++      case I915_FORMAT_MOD_X_TILED:
++         *tiling_out = ISL_TILING_X;
++         break;
++      case I915_FORMAT_MOD_4_TILED:
++         *tiling_out = ISL_TILING_4;
++         break;
++      case I915_FORMAT_MOD_Y_TILED:
++         *tiling_out = ISL_TILING_Y0;
++         break;
++      default:
++         return -ENXIO;
++   }
++   return 0;
++}
++}
+diff --git a/src/intel/vulkan/meson.build b/src/intel/vulkan/meson.build
+index 083b0f438d5..8817c9ae126 100644
+--- a/src/intel/vulkan/meson.build
++++ b/src/intel/vulkan/meson.build
+@@ -28,6 +28,7 @@ anv_flags = [
+ ]
+ 
+ anv_cpp_flags = []
++override_for_anv = []
+ 
+ anv_entrypoints = custom_target(
+   'anv_entrypoints',
+@@ -202,6 +203,12 @@ endif
+ 
+ if with_platform_android
+   libanv_files += files('anv_android.c')
++  if dep_android_mapper4.found()
++    libanv_files += files('anv_android_mapper.cpp')
++    anv_flags += '-DUSE_IMAPPER4_METADATA_API'
++    anv_cpp_flags += '-DUSE_IMAPPER4_METADATA_API'
++    override_for_anv += 'cpp_std=c++17'
++  endif
+ else
+   libanv_files += files('anv_android_stubs.c')
+ endif
+@@ -242,6 +249,7 @@ libvulkan_intel = shared_library(
+     idep_intel_driver_ds, idep_intel_dev,
+   ],
+   c_args : anv_flags,
++  override_options: override_for_anv,
+   gnu_symbol_visibility : 'hidden',
+   link_args : [vulkan_icd_link_args, '-Wl,--build-id=sha1', ld_args_bsymbolic, ld_args_gc_sections],
+   link_depends : vulkan_icd_link_depends,
+-- 
+2.25.1
+
