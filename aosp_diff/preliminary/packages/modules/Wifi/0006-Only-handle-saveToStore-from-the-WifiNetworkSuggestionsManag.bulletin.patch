@@ -1,0 +1,198 @@
+From a39058dba3acd228085061681796ac2ea133c20a Mon Sep 17 00:00:00 2001
+From: Nate Jiang <qiangjiang@google.com>
+Date: Tue, 11 Oct 2022 16:47:00 -0700
+Subject: [PATCH] Only handle saveToStore from the
+ WifiNetworkSuggestionsManager
+
+Suggestion app may add a list of passpoint suggestions, only saveToStore
+once to reduce the number of writing xml.
+Also remove the suggestions which trigger the OOM exception
+
+Bug: 245299920
+Test: atest com.android.server.wifi
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:8c55e165617fef29ecc5b770d47ac149b403563f)
+Merged-In: I8fd038c41399f9f04dda278a6e67b8a5d1d42e44
+Change-Id: I8fd038c41399f9f04dda278a6e67b8a5d1d42e44
+---
+ .../wifi/WifiNetworkSuggestionsManager.java   | 23 ++++++++++++-
+ .../wifi/hotspot2/PasspointManager.java       | 10 ++++--
+ .../WifiNetworkSuggestionsManagerTest.java    | 33 +++++++++++++++++++
+ .../wifi/hotspot2/PasspointManagerTest.java   |  8 ++---
+ 4 files changed, 67 insertions(+), 7 deletions(-)
+
+diff --git a/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java b/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java
+index 30894209e..94532793b 100644
+--- a/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java
++++ b/service/java/com/android/server/wifi/WifiNetworkSuggestionsManager.java
+@@ -57,6 +57,7 @@ import android.telephony.TelephonyManager;
+ import android.text.TextUtils;
+ import android.util.ArrayMap;
+ import android.util.ArraySet;
++import android.util.EventLog;
+ import android.util.Log;
+ import android.util.Pair;
+ import android.view.WindowManager;
+@@ -74,12 +75,14 @@ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+ import java.util.ArrayList;
+ import java.util.Collection;
++import java.util.Comparator;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Objects;
++import java.util.Optional;
+ import java.util.Set;
+ import java.util.stream.Collectors;
+ 
+@@ -1041,7 +1044,23 @@ public class WifiNetworkSuggestionsManager {
+         }
+         // Update the max size for this app.
+         perAppInfo.maxSize = Math.max(perAppInfo.extNetworkSuggestions.size(), perAppInfo.maxSize);
+-        saveToStore();
++        try {
++            saveToStore();
++        } catch (OutOfMemoryError e) {
++            Optional<PerAppInfo> appInfo = mActiveNetworkSuggestionsPerApp.values()
++                    .stream()
++                    .max(Comparator.comparingInt(a -> a.extNetworkSuggestions.size()));
++            if (appInfo.isPresent()) {
++                EventLog.writeEvent(0x534e4554, "245299920", appInfo.get().uid,
++                        "Trying to add large number of suggestion, num="
++                                + appInfo.get().extNetworkSuggestions.size());
++            } else {
++                Log.e(TAG, "serialize out of memory but no app has suggestion!");
++            }
++            // Remove the most recently added suggestions, which should cause the failure.
++            remove(networkSuggestions, uid, packageName);
++            return WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_INTERNAL;
++        }
+         mWifiMetrics.incrementNetworkSuggestionApiNumModification();
+         mWifiMetrics.noteNetworkSuggestionApiListSizeHistogram(getAllMaxSizes());
+         return WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS;
+@@ -1100,6 +1119,8 @@ public class WifiNetworkSuggestionsManager {
+ 
+             } else {
+                 if (!wns.passpointConfiguration.validate()) {
++                    EventLog.writeEvent(0x534e4554, "245299920", uid,
++                            "Trying to add invalid passpoint suggestion");
+                     return false;
+                 }
+             }
+diff --git a/service/java/com/android/server/wifi/hotspot2/PasspointManager.java b/service/java/com/android/server/wifi/hotspot2/PasspointManager.java
+index 8d5a1d7ec..9272eecc7 100644
+--- a/service/java/com/android/server/wifi/hotspot2/PasspointManager.java
++++ b/service/java/com/android/server/wifi/hotspot2/PasspointManager.java
+@@ -535,7 +535,10 @@ public class PasspointManager {
+         }
+         newProvider.enableVerboseLogging(mVerboseLoggingEnabled);
+         mProviders.put(config.getUniqueId(), newProvider);
+-        mWifiConfigManager.saveToStore(true /* forceWrite */);
++        if (!isFromSuggestion) {
++            // Suggestions will be handled by the WifiNetworkSuggestionsManager
++            mWifiConfigManager.saveToStore(true /* forceWrite */);
++        }
+         if (!isFromSuggestion && newProvider.getPackageName() != null) {
+             startTrackingAppOpsChange(newProvider.getPackageName(), uid);
+         }
+@@ -577,7 +580,10 @@ public class PasspointManager {
+         String uniqueId = provider.getConfig().getUniqueId();
+         mProviders.remove(uniqueId);
+         mWifiConfigManager.removeConnectChoiceFromAllNetworks(uniqueId);
+-        mWifiConfigManager.saveToStore(true /* forceWrite */);
++        if (!provider.isFromSuggestion()) {
++            // Suggestions will be handled by the WifiNetworkSuggestionsManager
++            mWifiConfigManager.saveToStore(true /* forceWrite */);
++        }
+ 
+         // Stop monitoring the package if there is no Passpoint profile installed by the package
+         if (mAppOpsChangedListenerPerApp.containsKey(packageName)
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
+index 46942ead2..63de21c03 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
+@@ -1971,6 +1971,39 @@ public class WifiNetworkSuggestionsManagerTest extends WifiBaseTest {
+         assertFalse(mDataSource.hasNewDataToSerialize());
+     }
+ 
++    /**
++     * Verify triggering of config store write after successful addition of network suggestions.
++     * And store write is failure because out of memory.
++     */
++    @Test
++    public void testAddNetworkSuggestionsConfigStoreWriteFailedByOOM() {
++        when(mWifiConfigManager.saveToStore(anyBoolean())).thenThrow(new OutOfMemoryError())
++                .thenReturn(true);
++        WifiNetworkSuggestion networkSuggestion = createWifiNetworkSuggestion(
++                WifiConfigurationTestUtil.createOpenNetwork(), null, false, false, true, true,
++                DEFAULT_PRIORITY_GROUP);
++
++        List<WifiNetworkSuggestion> networkSuggestionList =
++                new ArrayList<WifiNetworkSuggestion>() {{
++                    add(networkSuggestion);
++                }};
++        assertEquals(WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_INTERNAL,
++                mWifiNetworkSuggestionsManager.add(networkSuggestionList, TEST_UID_1,
++                        TEST_PACKAGE_1, TEST_FEATURE));
++
++        // Verify config store interactions.
++        verify(mWifiConfigManager, times(2)).saveToStore(true);
++        assertTrue(mDataSource.hasNewDataToSerialize());
++
++        Map<String, PerAppInfo> networkSuggestionsMapToWrite = mDataSource.toSerialize();
++        assertEquals(1, networkSuggestionsMapToWrite.size());
++        assertEquals(0, networkSuggestionsMapToWrite.get(TEST_PACKAGE_1)
++                .extNetworkSuggestions.size());
++
++        // Ensure that the new data flag has been reset after read.
++        assertFalse(mDataSource.hasNewDataToSerialize());
++    }
++
+     /**
+      * Verify triggering of config store write after successful removal of network suggestions.
+      */
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java b/service/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java
+index f80f7850e..f4d5c45ee 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java
+@@ -2103,7 +2103,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+         verify(provider).uninstallCertsAndKeys();
+         verify(mWifiConfigManager).removePasspointConfiguredNetwork(
+                 provider.getWifiConfig().getProfileKey());
+-        verify(mWifiConfigManager).saveToStore(true);
++        verify(mWifiConfigManager, never()).saveToStore(true);
+         verify(mWifiMetrics).incrementNumPasspointProviderUninstallation();
+         verify(mWifiMetrics).incrementNumPasspointProviderUninstallSuccess();
+         verify(mAppOpsManager, never()).stopWatchingMode(
+@@ -2164,7 +2164,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+         verify(mWifiConfigManager).addOrUpdateNetwork(
+                 argThat((c) -> c.FQDN.equals(TEST_FQDN)), eq(TEST_CREATOR_UID), eq(TEST_PACKAGE));
+         verify(mWifiConfigManager).allowAutojoin(TEST_NETWORK_ID, origWifiConfig.allowAutojoin);
+-        verify(mWifiConfigManager).saveToStore(true);
++        verify(mWifiConfigManager, never()).saveToStore(true);
+         verify(mWifiMetrics).incrementNumPasspointProviderInstallation();
+         verify(mWifiMetrics).incrementNumPasspointProviderInstallSuccess();
+         assertEquals(2, mSharedDataSource.getProviderIndex());
+@@ -2183,7 +2183,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+                 eq(true), eq(mClock))).thenReturn(newProvider);
+         assertTrue(mManager.addOrUpdateProvider(newConfig, TEST_CREATOR_UID, TEST_PACKAGE,
+                 true, true));
+-        verify(mWifiConfigManager).saveToStore(true);
++        verify(mWifiConfigManager, never()).saveToStore(true);
+         verify(mWifiMetrics).incrementNumPasspointProviderInstallation();
+         verify(mWifiMetrics).incrementNumPasspointProviderInstallSuccess();
+ 
+@@ -2294,7 +2294,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+                 eq(true), eq(mClock))).thenReturn(newProvider);
+         assertTrue(mManager.addOrUpdateProvider(newConfig, TEST_CREATOR_UID, TEST_PACKAGE1, true,
+                 true));
+-        verify(mWifiConfigManager).saveToStore(true);
++        verify(mWifiConfigManager, never()).saveToStore(true);
+         verify(mWifiMetrics).incrementNumPasspointProviderInstallation();
+         verify(mWifiMetrics).incrementNumPasspointProviderInstallSuccess();
+ 
+-- 
+2.41.0.162.gfafddb0af9-goog
+
