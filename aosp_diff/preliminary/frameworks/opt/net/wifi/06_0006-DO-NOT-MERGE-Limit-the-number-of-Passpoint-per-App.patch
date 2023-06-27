@@ -1,0 +1,436 @@
+From bac2fe28123d78ba55a94a0d7fc898a050c7fdf9 Mon Sep 17 00:00:00 2001
+From: "Nate(Qiang) Jiang" <qiangjiang@google.com>
+Date: Wed, 12 Apr 2023 18:38:15 +0000
+Subject: [PATCH] DO NOT MERGE: Limit the number of Passpoint per App
+
+Reject the suggestion passpoint with ServiceFriendlyNames
+
+Bug: 274445194
+Test: atest com.android.server.wifi
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:b081fc592709895f0e745ad33b41174b3b2ad399)
+Merged-In: I30606e9bb4eba54b5b9111de4982c0cfb565b3dc
+Change-Id: I30606e9bb4eba54b5b9111de4982c0cfb565b3dc
+---
+ .../wifi/hotspot2/PasspointManager.java       | 14 +++
+ .../wifi/NetworkSuggestionStoreDataTest.java  |  5 -
+ .../WifiNetworkSuggestionsManagerTest.java    |  5 -
+ .../wifi/hotspot2/PasspointManagerTest.java   | 99 ++++++++++---------
+ 4 files changed, 68 insertions(+), 55 deletions(-)
+
+diff --git a/service/java/com/android/server/wifi/hotspot2/PasspointManager.java b/service/java/com/android/server/wifi/hotspot2/PasspointManager.java
+index db0c23d69..ad66f11df 100644
+--- a/service/java/com/android/server/wifi/hotspot2/PasspointManager.java
++++ b/service/java/com/android/server/wifi/hotspot2/PasspointManager.java
+@@ -23,6 +23,7 @@ import static android.net.wifi.WifiInfo.DEFAULT_MAC_ADDRESS;
+ import static java.security.cert.PKIXReason.NO_TRUST_ANCHOR;
+ 
+ import android.annotation.NonNull;
++import android.app.ActivityManager;
+ import android.app.AppOpsManager;
+ import android.content.Context;
+ import android.net.MacAddress;
+@@ -124,6 +125,7 @@ public class PasspointManager {
+     private final WifiCarrierInfoManager mWifiCarrierInfoManager;
+     private final MacAddressUtil mMacAddressUtil;
+     private final WifiPermissionsUtil mWifiPermissionsUtil;
++    private final boolean mIsLowMemory;
+ 
+     /**
+      * Map of package name of an app to the app ops changed listener for the app.
+@@ -332,6 +334,8 @@ public class PasspointManager {
+                 new SharedDataSourceHandler()));
+         mPasspointProvisioner = objectFactory.makePasspointProvisioner(context, wifiNative,
+                 this, wifiMetrics);
++        ActivityManager activityManager = context.getSystemService(ActivityManager.class);
++        mIsLowMemory = activityManager.isLowRamDevice();
+         mAppOps = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
+         sPasspointManager = this;
+         mMacAddressUtil = macAddressUtil;
+@@ -420,6 +424,16 @@ public class PasspointManager {
+             Log.e(TAG, "UID " + uid + " not visible to the current user");
+             return false;
+         }
++        if (config.getServiceFriendlyNames() != null && isFromSuggestion) {
++            Log.e(TAG, "Passpoint from suggestion should not have ServiceFriendlyNames");
++            return false;
++        }
++        if (getPasspointProviderWithPackage(packageName).size()
++                >= WifiManager.getMaxNumberOfNetworkSuggestionsPerApp(mIsLowMemory)) {
++            Log.e(TAG, "packageName " + packageName + " has too many passpoint with exceed the "
++                    + "limitation");
++            return false;
++        }
+ 
+         mWifiCarrierInfoManager.tryUpdateCarrierIdForPasspoint(config);
+         // Create a provider and install the necessary certificates and keys.
+diff --git a/tests/wifitests/src/com/android/server/wifi/NetworkSuggestionStoreDataTest.java b/tests/wifitests/src/com/android/server/wifi/NetworkSuggestionStoreDataTest.java
+index ad31533ba..e7d8bd051 100644
+--- a/tests/wifitests/src/com/android/server/wifi/NetworkSuggestionStoreDataTest.java
++++ b/tests/wifitests/src/com/android/server/wifi/NetworkSuggestionStoreDataTest.java
+@@ -496,11 +496,6 @@ public class NetworkSuggestionStoreDataTest extends WifiBaseTest {
+         homeSp.setFqdn(fqdn);
+         homeSp.setFriendlyName(friendlyName);
+         config.setHomeSp(homeSp);
+-        Map<String, String> friendlyNames = new HashMap<>();
+-        friendlyNames.put("en", friendlyName);
+-        friendlyNames.put("kr", friendlyName + 1);
+-        friendlyNames.put("jp", friendlyName + 2);
+-        config.setServiceFriendlyNames(friendlyNames);
+         Credential credential = new Credential();
+         credential.setRealm(TEST_REALM);
+         credential.setCaCertificate(FakeKeys.CA_CERT0);
+diff --git a/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java b/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
+index c8236a865..1946b3c04 100644
+--- a/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
++++ b/tests/wifitests/src/com/android/server/wifi/WifiNetworkSuggestionsManagerTest.java
+@@ -4169,11 +4169,6 @@ public class WifiNetworkSuggestionsManagerTest extends WifiBaseTest {
+         homeSp.setFqdn(fqdn);
+         homeSp.setFriendlyName(friendlyName);
+         config.setHomeSp(homeSp);
+-        Map<String, String> friendlyNames = new HashMap<>();
+-        friendlyNames.put("en", friendlyName);
+-        friendlyNames.put("kr", friendlyName + 1);
+-        friendlyNames.put("jp", friendlyName + 2);
+-        config.setServiceFriendlyNames(friendlyNames);
+         Credential credential = new Credential();
+         credential.setRealm(TEST_REALM);
+         credential.setCaCertificate(FakeKeys.CA_CERT0);
+diff --git a/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java b/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java
+index 5fecd7149..856056fce 100644
+--- a/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java
++++ b/tests/wifitests/src/com/android/server/wifi/hotspot2/PasspointManagerTest.java
+@@ -48,6 +48,7 @@ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ import static org.mockito.MockitoAnnotations.initMocks;
+ 
++import android.app.ActivityManager;
+ import android.app.AppOpsManager;
+ import android.content.Context;
+ import android.content.Intent;
+@@ -194,6 +195,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Mock WifiNetworkSuggestionsManager mWifiNetworkSuggestionsManager;
+     @Mock MacAddressUtil mMacAddressUtil;
+     @Mock WifiPermissionsUtil mWifiPermissionsUtil;
++    @Mock ActivityManager mActivityManager;
+ 
+     Handler mHandler;
+     TestLooper mLooper;
+@@ -219,6 +221,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+                 any(PasspointManager.class), any(WifiMetrics.class)))
+                 .thenReturn(mPasspointProvisioner);
+         when(mContext.getSystemService(Context.APP_OPS_SERVICE)).thenReturn(mAppOpsManager);
++        when(mContext.getSystemService(ActivityManager.class)).thenReturn(mActivityManager);
+         when(mWifiInjector.getClientModeImpl()).thenReturn(mClientModeImpl);
+         when(mWifiInjector.getWifiNetworkSuggestionsManager())
+                 .thenReturn(mWifiNetworkSuggestionsManager);
+@@ -312,11 +315,6 @@ public class PasspointManagerTest extends WifiBaseTest {
+         homeSp.setFqdn(fqdn);
+         homeSp.setFriendlyName(friendlyName);
+         config.setHomeSp(homeSp);
+-        Map<String, String> friendlyNames = new HashMap<>();
+-        friendlyNames.put("en", friendlyName);
+-        friendlyNames.put("kr", friendlyName + 1);
+-        friendlyNames.put("jp", friendlyName + 2);
+-        config.setServiceFriendlyNames(friendlyNames);
+         Credential credential = new Credential();
+         credential.setRealm(realm != null ? realm : TEST_REALM);
+         credential.setCaCertificate(FakeKeys.CA_CERT0);
+@@ -353,12 +351,14 @@ public class PasspointManagerTest extends WifiBaseTest {
+     }
+ 
+     private PasspointProvider addTestProvider(String fqdn, String friendlyName,
+-            String packageName, boolean isSuggestion, String realm) {
++            String packageName, boolean isSuggestion, String realm,
++            boolean addServiceFriendlyNames) {
+         WifiConfiguration wifiConfig = WifiConfigurationTestUtil.generateWifiConfig(-1, TEST_UID,
+                 "\"PasspointTestSSID\"", true, true,
+                 fqdn, friendlyName, SECURITY_EAP);
+ 
+-        return addTestProvider(fqdn, friendlyName, packageName, wifiConfig, isSuggestion, realm);
++        return addTestProvider(fqdn, friendlyName, packageName, wifiConfig, isSuggestion, realm,
++                addServiceFriendlyNames);
+     }
+ 
+     /**
+@@ -368,9 +368,17 @@ public class PasspointManagerTest extends WifiBaseTest {
+      * @return {@link PasspointProvider}
+      */
+     private PasspointProvider addTestProvider(String fqdn, String friendlyName,
+-            String packageName, WifiConfiguration wifiConfig, boolean isSuggestion, String realm) {
++            String packageName, WifiConfiguration wifiConfig, boolean isSuggestion, String realm,
++            boolean addServiceFriendlyNames) {
+         PasspointConfiguration config =
+                 createTestConfigWithUserCredentialAndRealm(fqdn, friendlyName, realm);
++        if (addServiceFriendlyNames) {
++            Map<String, String> friendlyNames = new HashMap<>();
++            friendlyNames.put("en", friendlyName);
++            friendlyNames.put("kr", friendlyName + 1);
++            friendlyNames.put("jp", friendlyName + 2);
++            config.setServiceFriendlyNames(friendlyNames);
++        }
+         wifiConfig.setPasspointUniqueId(config.getUniqueId());
+         PasspointProvider provider = createMockProvider(config, wifiConfig, isSuggestion);
+         when(mObjectFactory.makePasspointProvider(eq(config), eq(mWifiKeyStore),
+@@ -976,7 +984,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+                 com.android.dx.mockito.inline.extended.ExtendedMockito.mockitoSession().mockStatic(
+                         InformationElementUtil.class).startMocking();
+         try {
+-            addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++            addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+ 
+             when(mAnqpCache.getEntry(TEST_ANQP_KEY)).thenReturn(null);
+             InformationElementUtil.Vsa vsa = new InformationElementUtil.Vsa();
+@@ -1005,7 +1013,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void matchProviderAsHomeProvider() throws Exception {
+         PasspointProvider provider =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         ANQPData entry = new ANQPData(mClock, null);
+ 
+         when(mAnqpCache.getEntry(TEST_ANQP_KEY)).thenReturn(entry);
+@@ -1026,7 +1034,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void matchProviderAsRoamingProvider() throws Exception {
+         PasspointProvider provider =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         ANQPData entry = new ANQPData(mClock, null);
+ 
+         when(mAnqpCache.getEntry(TEST_ANQP_KEY)).thenReturn(entry);
+@@ -1047,9 +1055,9 @@ public class PasspointManagerTest extends WifiBaseTest {
+     public void matchScanResultWithMultipleProviderAsHomeAndRoaming() {
+         // Only add roaming providers.
+         PasspointProvider roamingProvider1 =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         PasspointProvider roamingProvider2 =
+-                addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME2, TEST_PACKAGE1, false, null);
++                addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME2, TEST_PACKAGE1, false, null, false);
+         ANQPData entry = new ANQPData(mClock, null);
+         when(mAnqpCache.getEntry(TEST_ANQP_KEY)).thenReturn(entry);
+         when(roamingProvider1.match(anyMap(), any(RoamingConsortium.class)))
+@@ -1065,9 +1073,10 @@ public class PasspointManagerTest extends WifiBaseTest {
+         }
+         // Add home providers.
+         PasspointProvider homeProvider1 =
+-                addTestProvider(TEST_FQDN + "home", TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN + "home", TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null,
++                        false);
+         PasspointProvider homeProvider2 = addTestProvider(TEST_FQDN2 + "home", TEST_FRIENDLY_NAME2,
+-                TEST_PACKAGE1, false, null);
++                TEST_PACKAGE1, false, null, false);
+         when(homeProvider1.match(anyMap(), any(RoamingConsortium.class)))
+                 .thenReturn(PasspointMatch.HomeProvider);
+         when(homeProvider2.match(anyMap(), any(RoamingConsortium.class)))
+@@ -1088,7 +1097,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void matchProviderWithNoMatch() throws Exception {
+         PasspointProvider provider =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         ANQPData entry = new ANQPData(mClock, null);
+ 
+         when(mAnqpCache.getEntry(TEST_ANQP_KEY)).thenReturn(entry);
+@@ -1147,7 +1156,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+                         InformationElementUtil.class).startMocking();
+         try {
+             PasspointProvider provider = addTestProvider(TEST_FQDN + 0, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             when(provider.tryUpdateCarrierId()).thenReturn(true);
+             reset(mWifiConfigManager);
+ 
+@@ -1181,15 +1190,15 @@ public class PasspointManagerTest extends WifiBaseTest {
+                         InformationElementUtil.class).startMocking();
+         try {
+             PasspointProvider providerHome = addTestProvider(TEST_FQDN + 0, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             providerHome.getWifiConfig().isHomeProviderNetwork = true;
+             PasspointProvider providerRoaming = addTestProvider(TEST_FQDN + 1, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             WifiConfiguration wifiConfiguration = WifiConfigurationTestUtil.generateWifiConfig(-1,
+                     TEST_UID, "\"PasspointTestSSID\"", true, true,
+                     TEST_FQDN + 2, TEST_FRIENDLY_NAME, SECURITY_EAP);
+             PasspointProvider providerNone = addTestProvider(TEST_FQDN + 2, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, wifiConfiguration, false, null);
++                    TEST_PACKAGE, wifiConfiguration, false, null, false);
+             ANQPData entry = new ANQPData(mClock, null);
+             InformationElementUtil.Vsa vsa = new InformationElementUtil.Vsa();
+             vsa.anqpDomainID = TEST_ANQP_DOMAIN_ID2;
+@@ -1232,18 +1241,18 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void getWifiConfigsForPasspointProfiles() {
+         PasspointProvider provider1 = addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, false, null);
++                TEST_PACKAGE, false, null, false);
+         PasspointProvider provider2 = addTestProvider(TEST_FQDN + 1, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, false, null);
++                TEST_PACKAGE, false, null, false);
+         PasspointProvider provider3 = addTestProvider(TEST_FQDN + 2, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, false, null);
++                TEST_PACKAGE, false, null, false);
+ 
+         assertEquals(3, mManager.getWifiConfigsForPasspointProfiles(
+                 Arrays.asList(provider1.getConfig().getUniqueId(),
+                         provider2.getConfig().getUniqueId(), provider3.getConfig().getUniqueId(),
+                         TEST_FQDN + "_353ab8c93", TEST_FQDN + "_83765319aca")).size());
+         PasspointProvider provider4 = addTestProvider(TEST_FQDN + 3, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, true, null);
++                TEST_PACKAGE, true, null, false);
+         when(mWifiNetworkSuggestionsManager
+                 .isPasspointSuggestionSharedWithUser(provider4.getWifiConfig())).thenReturn(false);
+         assertEquals(3, mManager.getWifiConfigsForPasspointProfiles(
+@@ -1251,7 +1260,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+                         provider2.getConfig().getUniqueId(), provider3.getConfig().getUniqueId(),
+                         provider4.getConfig().getUniqueId(), TEST_FQDN + "_83765319aca")).size());
+         PasspointProvider provider5 = addTestProvider(TEST_FQDN + 4, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, true, null);
++                TEST_PACKAGE, true, null, false);
+         when(mWifiNetworkSuggestionsManager
+                 .isPasspointSuggestionSharedWithUser(provider5.getWifiConfig())).thenReturn(true);
+         assertEquals(4, mManager.getWifiConfigsForPasspointProfiles(
+@@ -1488,9 +1497,9 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void getMatchingPasspointConfigsForOsuProvidersWithMatch() {
+         PasspointProvider provider1 =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, true);
+         PasspointProvider provider2 =
+-                addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME2, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME2, TEST_PACKAGE, false, null, true);
+ 
+         List<OsuProvider> osuProviders = new ArrayList<>();
+         Map<String, String> friendlyNames = new HashMap<>();
+@@ -1517,8 +1526,8 @@ public class PasspointManagerTest extends WifiBaseTest {
+      */
+     @Test
+     public void getMatchingPasspointConfigsForOsuProvidersWitNoMatch() {
+-        addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
+-        addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME2, TEST_PACKAGE, false, null);
++        addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
++        addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME2, TEST_PACKAGE, false, null, false);
+ 
+         List<OsuProvider> osuProviders = new ArrayList<>();
+ 
+@@ -1819,7 +1828,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void providerNetworkConnectedFirstTime() throws Exception {
+         PasspointProvider provider =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         when(provider.getHasEverConnected()).thenReturn(false);
+         mManager.onPasspointNetworkConnected(provider.getConfig().getUniqueId());
+         verify(provider).setHasEverConnected(eq(true));
+@@ -1835,7 +1844,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void providerNetworkConnectedNotFirstTime() throws Exception {
+         PasspointProvider provider =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         when(provider.getHasEverConnected()).thenReturn(true);
+         mManager.onPasspointNetworkConnected(TEST_FQDN);
+         verify(provider, never()).setHasEverConnected(anyBoolean());
+@@ -1850,7 +1859,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void updateMetrics() {
+         PasspointProvider provider =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         ArgumentCaptor<Map<String, PasspointProvider>> argCaptor = ArgumentCaptor.forClass(
+                 Map.class);
+         // Provider have not provided a successful network connection.
+@@ -1898,7 +1907,7 @@ public class PasspointManagerTest extends WifiBaseTest {
+         currentConfiguration.FQDN = TEST_FQDN;
+         when(mClientModeImpl.getCurrentWifiConfiguration()).thenReturn(currentConfiguration);
+         PasspointProvider passpointProvider =
+-                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null);
++                addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME, TEST_PACKAGE, false, null, false);
+         currentConfiguration.setPasspointUniqueId(passpointProvider.getConfig().getUniqueId());
+         verify(mAppOpsManager).startWatchingMode(eq(OPSTR_CHANGE_WIFI_STATE), eq(TEST_PACKAGE),
+                 mAppOpChangedListenerCaptor.capture());
+@@ -2256,17 +2265,17 @@ public class PasspointManagerTest extends WifiBaseTest {
+                         InformationElementUtil.class).startMocking();
+         try {
+             PasspointProvider providerHome = addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             providerHome.getConfig().setSubscriptionExpirationTimeInMillis(
+                     System.currentTimeMillis() + 100000);
+             providerHome.getWifiConfig().isHomeProviderNetwork = true;
+             PasspointProvider providerRoaming = addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             WifiConfiguration wifiConfiguration = WifiConfigurationTestUtil.generateWifiConfig(-1,
+                     TEST_UID, "\"PasspointTestSSID\"", true, true,
+                     TEST_FQDN + 2, TEST_FRIENDLY_NAME, SECURITY_EAP);
+             PasspointProvider providerNone = addTestProvider(TEST_FQDN + 2, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, wifiConfiguration, false, null);
++                    TEST_PACKAGE, wifiConfiguration, false, null, false);
+             ANQPData entry = new ANQPData(mClock, null);
+             InformationElementUtil.Vsa vsa = new InformationElementUtil.Vsa();
+             vsa.anqpDomainID = TEST_ANQP_DOMAIN_ID;
+@@ -2306,17 +2315,17 @@ public class PasspointManagerTest extends WifiBaseTest {
+                         InformationElementUtil.class).startMocking();
+         try {
+             PasspointProvider providerHome = addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             providerHome.getConfig().setSubscriptionExpirationTimeInMillis(
+                     System.currentTimeMillis() - 10000);
+             providerHome.getWifiConfig().isHomeProviderNetwork = true;
+             PasspointProvider providerRoaming = addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             WifiConfiguration wifiConfiguration = WifiConfigurationTestUtil.generateWifiConfig(-1,
+                     TEST_UID, "\"PasspointTestSSID\"", true, true,
+                     TEST_FQDN + 2, TEST_FRIENDLY_NAME, SECURITY_EAP);
+             PasspointProvider providerNone = addTestProvider(TEST_FQDN + 2, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, wifiConfiguration, false, null);
++                    TEST_PACKAGE, wifiConfiguration, false, null, false);
+             ANQPData entry = new ANQPData(mClock, null);
+             InformationElementUtil.Vsa vsa = new InformationElementUtil.Vsa();
+             vsa.anqpDomainID = TEST_ANQP_DOMAIN_ID;
+@@ -2356,19 +2365,19 @@ public class PasspointManagerTest extends WifiBaseTest {
+                         InformationElementUtil.class).startMocking();
+         try {
+             PasspointProvider providerHome = addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             providerHome.getConfig().setSubscriptionExpirationTimeInMillis(
+                     System.currentTimeMillis() - 10000);
+             providerHome.getWifiConfig().isHomeProviderNetwork = true;
+             PasspointProvider providerRoaming = addTestProvider(TEST_FQDN2, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, false, null);
++                    TEST_PACKAGE, false, null, false);
+             providerRoaming.getConfig().setSubscriptionExpirationTimeInMillis(
+                     System.currentTimeMillis() + 100000);
+             WifiConfiguration wifiConfiguration = WifiConfigurationTestUtil.generateWifiConfig(-1,
+                     TEST_UID, "\"PasspointTestSSID\"", true, true,
+                     TEST_FQDN + 2, TEST_FRIENDLY_NAME, SECURITY_EAP);
+             PasspointProvider providerNone = addTestProvider(TEST_FQDN + 2, TEST_FRIENDLY_NAME,
+-                    TEST_PACKAGE, wifiConfiguration, false, null);
++                    TEST_PACKAGE, wifiConfiguration, false, null, false);
+             ANQPData entry = new ANQPData(mClock, null);
+             InformationElementUtil.Vsa vsa = new InformationElementUtil.Vsa();
+             vsa.anqpDomainID = TEST_ANQP_DOMAIN_ID;
+@@ -2519,11 +2528,11 @@ public class PasspointManagerTest extends WifiBaseTest {
+     @Test
+     public void removeAllProvidersWithSameFqdn() {
+         PasspointProvider provider1 = addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, false, TEST_REALM);
++                TEST_PACKAGE, false, TEST_REALM, false);
+         PasspointProvider provider2 = addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, false, TEST_REALM2);
++                TEST_PACKAGE, false, TEST_REALM2, false);
+         PasspointProvider provider3 = addTestProvider(TEST_FQDN, TEST_FRIENDLY_NAME,
+-                TEST_PACKAGE, false, TEST_REALM3);
++                TEST_PACKAGE, false, TEST_REALM3, false);
+ 
+         List<PasspointProvider> providers = mUserDataSource.getProviders();
+         assertEquals(3, providers.size());
+-- 
+2.17.1
+
