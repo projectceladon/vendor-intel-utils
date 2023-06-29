@@ -1,0 +1,486 @@
+From 3bc3eb42e58d879d45a7137596cec6959950ae17 Mon Sep 17 00:00:00 2001
+From: shivasku82 <shiva.kumara.rudrappa@intel.com>
+Date: Wed, 28 Jun 2023 10:23:30 +0530
+Subject: [PATCH] add pipe communication to vhal
+
+Signed-off-by: shivasku82 <shiva.kumara.rudrappa@intel.com>
+---
+ Android.mk                         |   1 +
+ include/CameraSocketCommand.h      |   3 +-
+ include/CameraSocketServerThread.h |   5 +
+ src/CameraSocketCommand.cpp        |   2 +
+ src/CameraSocketServerThread.cpp   | 183 ++++++++++++++++++++++++++---
+ src/VirtualFakeCamera3.cpp         |  16 ++-
+ src/fake-pipeline2/Sensor.cpp      |   9 +-
+ 7 files changed, 198 insertions(+), 21 deletions(-)
+
+diff --git a/Android.mk b/Android.mk
+index f0dafd0..b33245b 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -174,6 +174,7 @@ ifeq ($(TARGET_BOARD_PLATFORM), celadon)
+ camera_vhal_cflags += -DGRALLOC_MAPPER4
+ else
+ camera_vhal_cflags += -DENABLE_FFMPEG
++camera_vhal_cflags += -DUSE_PIPE
+ endif
+ 
+ LOCAL_MODULE_RELATIVE_PATH	:= ${camera_vhal_module_relative_path}
+diff --git a/include/CameraSocketCommand.h b/include/CameraSocketCommand.h
+index a9a1522..cd7e5b8 100644
+--- a/include/CameraSocketCommand.h
++++ b/include/CameraSocketCommand.h
+@@ -33,7 +33,7 @@ namespace android {
+ namespace socket {
+ 
+ enum class VideoCodecType { kH264 = 1, kH265 = 2,kI420 = 4, kMJPEG = 8, kAll = 15 };
+-enum class FrameResolution { k480p = 1, k720p = 2, k1080p = 4, kAll = 7 };
++enum class FrameResolution { k480p = 1, k720p = 2, k1080p = 4, kWXGA = 8, kAll = 15 };
+ 
+ enum class SensorOrientation {
+     ORIENTATION_0 = 0,
+@@ -63,6 +63,7 @@ typedef struct _camera_config {
+     uint32_t cameraId;
+     uint32_t codec_type;
+     uint32_t resolution;
++    char pkg_name[128];
+     uint32_t reserved[5];
+ } camera_config_t;
+ 
+diff --git a/include/CameraSocketServerThread.h b/include/CameraSocketServerThread.h
+index ca5ab40..02b5eaa 100644
+--- a/include/CameraSocketServerThread.h
++++ b/include/CameraSocketServerThread.h
+@@ -35,6 +35,7 @@
+ #endif
+ #include "CameraSocketCommand.h"
+ #include <linux/vm_sockets.h>
++#include "VirtualBuffer.h"
+ 
+ namespace android {
+ 
+@@ -43,6 +44,7 @@ enum tranSock
+     UNIX  = 0,
+     TCP   = 1,
+     VSOCK = 2,
++    PIPE = 3,
+ };
+ 
+ class VirtualCameraFactory;
+@@ -65,6 +67,9 @@ public:
+ private:
+     virtual status_t readyToRun();
+     virtual bool threadLoop() override;
++    bool ProcessCameraDataFromPipe(ClientVideoBuffer *handle);
++    ssize_t recvData(int handle, char *pkt, int size, int flag);
++    ssize_t sendData(int handle, char *pkt, int size, int flag);
+ 
+     bool configureCapabilities();
+     void setCameraResolution(uint32_t resolution);
+diff --git a/src/CameraSocketCommand.cpp b/src/CameraSocketCommand.cpp
+index 9c8eceb..c25b8db 100644
+--- a/src/CameraSocketCommand.cpp
++++ b/src/CameraSocketCommand.cpp
+@@ -54,6 +54,8 @@ const char* codec_type_to_str(uint32_t type) {
+             return "H264";
+         case int(android::socket::VideoCodecType::kH265):
+             return "H265";
++        case int(android::socket::VideoCodecType::kI420):
++            return "I420";
+         default:
+             return "invalid";
+     }
+diff --git a/src/CameraSocketServerThread.cpp b/src/CameraSocketServerThread.cpp
+index 028147a..2cdabfd 100644
+--- a/src/CameraSocketServerThread.cpp
++++ b/src/CameraSocketServerThread.cpp
+@@ -66,6 +66,7 @@ bool gCameraFacingBack;
+ bool gCapabilityInfoReceived;
+ bool gStartMetadataUpdate;
+ bool gDoneMetadataUpdate;
++int gDataPipeHandle = -1;
+ 
+ using namespace socket;
+ #ifdef ENABLE_FFMPEG
+@@ -151,6 +152,11 @@ void CameraSocketServerThread::setCameraResolution(uint32_t resolution) {
+             gCameraMaxWidth = 1920;
+             gCameraMaxHeight = 1080;
+             break;
++        case uint32_t(FrameResolution::kWXGA):
++            gCameraMaxWidth = 640;
++            gCameraMaxHeight = 360;
++            break;
++
+         default:
+             break;
+     }
+@@ -159,6 +165,21 @@ void CameraSocketServerThread::setCameraResolution(uint32_t resolution) {
+ 
+     setCameraMaxSupportedResolution(gCameraMaxWidth, gCameraMaxHeight);
+ }
++ssize_t CameraSocketServerThread::recvData(int handle, char *pkt, int size, int flag) {
++#ifndef USE_PIPE
++    return recv(handle, pkt, size, flag);
++#else
++    return read(handle, pkt, size);
++#endif
++}
++
++ssize_t CameraSocketServerThread::sendData(int handle, char *pkt, int size, int flag) {
++#ifndef USE_PIPE
++    return send(handle, pkt, size, flag);
++#else
++    return write(handle, pkt, size);
++#endif
++}
+ 
+ bool CameraSocketServerThread::configureCapabilities() {
+     ALOGVV(LOG_TAG " %s Enter", __FUNCTION__);
+@@ -179,7 +200,7 @@ bool CameraSocketServerThread::configureCapabilities() {
+     camera_packet_t *ack_packet = NULL;
+     camera_header_t header = {};
+ 
+-    if ((recv_size = recv(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
++    if ((recv_size = recvData(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
+         ALOGE(LOG_TAG "%s: Failed to receive header, err: %s ", __FUNCTION__, strerror(errno));
+         goto out;
+     }
+@@ -203,14 +224,14 @@ bool CameraSocketServerThread::configureCapabilities() {
+     capability.maxNumberOfCameras = MAX_NUMBER_OF_SUPPORTED_CAMERAS;
+ 
+     memcpy(cap_packet->payload, &capability, sizeof(camera_capability_t));
+-    if (send(mClientFd, cap_packet, cap_packet_size, 0) < 0) {
++    if (sendData(mClientFd, (char *)cap_packet, cap_packet_size, 0) < 0) {
+         ALOGE(LOG_TAG "%s: Failed to send camera capabilities, err: %s ", __FUNCTION__,
+               strerror(errno));
+         goto out;
+     }
+     ALOGI(LOG_TAG "%s: Sent CAPABILITY packet to client", __FUNCTION__);
+ 
+-    if ((recv_size = recv(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
++    if ((recv_size = recvData(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
+         ALOGE(LOG_TAG "%s: Failed to receive header, err: %s ", __FUNCTION__, strerror(errno));
+         goto out;
+     }
+@@ -242,7 +263,7 @@ bool CameraSocketServerThread::configureCapabilities() {
+         // Update the number of cameras globally to create camera pipeline.
+         gMaxNumOfCamerasSupported = mNumOfCamerasRequested;
+     }
+-    if ((recv_size = recv(mClientFd, (char *)&camera_info,
++    if ((recv_size = recvData(mClientFd, (char *)&camera_info,
+                           mNumOfCamerasRequested * sizeof(camera_info_t), MSG_WAITALL)) < 0) {
+         ALOGE(LOG_TAG "%s: Failed to receive camera info, err: %s ", __FUNCTION__, strerror(errno));
+         goto out;
+@@ -288,6 +309,7 @@ bool CameraSocketServerThread::configureCapabilities() {
+         }
+ 
+         switch (camera_info[i].resolution) {
++            case uint32_t(FrameResolution::kWXGA):
+             case uint32_t(FrameResolution::k480p):
+             case uint32_t(FrameResolution::k720p):
+             case uint32_t(FrameResolution::k1080p):
+@@ -429,7 +451,7 @@ bool CameraSocketServerThread::configureCapabilities() {
+     ack_packet->header.size = sizeof(camera_ack_t);
+ 
+     memcpy(ack_packet->payload, &ack_payload, sizeof(camera_ack_t));
+-    if (send(mClientFd, ack_packet, ack_packet_size, 0) < 0) {
++    if (sendData(mClientFd, (char *)ack_packet, ack_packet_size, 0) < 0) {
+         ALOGE(LOG_TAG "%s: Failed to send camera capabilities, err: %s ", __FUNCTION__,
+               strerror(errno));
+         goto out;
+@@ -444,6 +466,57 @@ out:
+     ALOGVV(LOG_TAG " %s: Exit", __FUNCTION__);
+     return status;
+ }
++bool CameraSocketServerThread::ProcessCameraDataFromPipe(ClientVideoBuffer *handle) {
++    int size_header =0;
++    ssize_t size_pending =0;
++    camera_header_t buffer_header = {};
++    int retryCount = 0;
++    uint8_t *fbuffer = (uint8_t *)handle->clientBuf[handle->clientRevCount % 1].buffer;
++    size_header = read(gDataPipeHandle, (char *)&buffer_header, sizeof(camera_header_t));
++    if (buffer_header.type == CAMERA_DATA) {
++        size_pending = buffer_header.size;
++        while (size_pending != 0) {
++            ssize_t size_data = 0;
++            size_data = read(gDataPipeHandle, (char *)fbuffer+size_update, size_pending);
++            if (size_data < 0) {
++                if (retryCount > 3) {
++                    ALOGE("Dropping frame \n");
++                    break;
++                }
++                retryCount++;
++                ALOGE(LOG_TAG "entered into recv error, break to recover");
++                continue;
++            }
++            size_update += size_data;
++            size_pending -= size_data;
++            if (size_pending == 0) {
++                handle->clientRevCount++;
++#if 0
++                FILE *fp_dump = fopen("/data/dump.yuv","w");
++                if (fp_dump != NULL) {
++                    fwrite(fbuffer,size_update,1,fp_dump);
++                    ALOGE(LOG_TAG "dump camera frame");
++                    fclose(fp_dump);
++                }
++#endif
++                size_update = 0;
++                ALOGE(LOG_TAG "[I420] %s: Packet rev %d and "
++                    "size %zd",
++                    __FUNCTION__, handle->clientRevCount, size_data);
++                break;
++            }
++        }
++    } else if (buffer_header.type == REQUEST_CAPABILITY) {
++       ALOGE("Calling request Capability \n");
++       if (!configureCapabilities()) {
++           return false;
++       }
++    } else {
++        ALOGE("invalid packet received");
++        return false;
++    }
++    return true;
++}
+ 
+ bool CameraSocketServerThread::threadLoop() {
+  struct sockaddr_un addr_un;
+@@ -455,6 +528,7 @@ bool CameraSocketServerThread::threadLoop() {
+     struct sockaddr_vm addr_vm ;
+     struct sockaddr_in addr_ip;
+     int trans_mode = 0;
++    int pipe_handle = -1;
+     char mode[PROPERTY_VALUE_MAX];
+ 
+     if ((property_get("ro.vendor.camera.transference", mode, nullptr) > 0) ){
+@@ -469,12 +543,14 @@ bool CameraSocketServerThread::threadLoop() {
+     else{
+        //Fall back to unix socket by default
+        //trans_mode = UNIX;
+-       //D to do 
++#ifndef USE_PIPE
+        trans_mode = VSOCK;
++#else
++       trans_mode = PIPE;
++#endif
+        ALOGV("%s: falling back to UNIX as the trans mode is not set",__FUNCTION__);
+     }
+-    if(trans_mode == UNIX)
+-    {
++    if (trans_mode == UNIX) {
+         mSocketServerFd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+         if (mSocketServerFd < 0) {
+             ALOGV("%s:%d Fail to construct camera socket with error: %s", __FUNCTION__, __LINE__,
+@@ -523,7 +599,7 @@ bool CameraSocketServerThread::threadLoop() {
+             return false;
+         }
+     }
+-    else if(trans_mode == TCP){
++    else if (trans_mode == TCP) {
+         int ret = 0;
+         int new_client_fd =-1;
+         int port = 8085;
+@@ -556,7 +632,7 @@ bool CameraSocketServerThread::threadLoop() {
+             ALOGV("%s Failed to listen on ", __FUNCTION__);
+             return false;
+         }
+-    }else{
++    }else if (trans_mode == VSOCK) {
+         memset(&addr_ip, 0, sizeof(addr_ip));
+         addr_vm.svm_family = AF_VSOCK;
+         addr_vm.svm_port = 1982;
+@@ -566,9 +642,9 @@ bool CameraSocketServerThread::threadLoop() {
+         size_update = 0;
+         mSocketServerFd = ::socket(AF_VSOCK, SOCK_STREAM, 0);
+         if (mSocketServerFd < 0) {
+-        ALOGV(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
+-        __FUNCTION__, __LINE__, strerror(errno));
+-        return false;
++            ALOGV(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
++              __FUNCTION__, __LINE__, strerror(errno));
++            return false;
+         }
+         ret = ::bind(mSocketServerFd, (struct sockaddr *)&addr_vm,
+             sizeof(struct sockaddr_vm));
+@@ -579,10 +655,84 @@ bool CameraSocketServerThread::threadLoop() {
+         }
+         ret = listen(mSocketServerFd, 32);
+         if (ret < 0) {
+-        ALOGV("%s Failed to listen on ", __FUNCTION__);
+-        return false;
++            ALOGV("%s Failed to listen on ", __FUNCTION__);
++            return false;
+         }
++    } else if (trans_mode == PIPE) {
++        while (mRunning) {
++            if (trans_mode == PIPE) {
++                while (1) {
++                    pipe_handle = open("/dev/virtpipe-common", O_RDWR);
++                    if (pipe_handle < 0) {
++                        ALOGD("%s open /dev/virtpipe-common fail errno=%d, error=%s\n", __FUNCTION__, errno, strerror(errno));
++                        sleep(1);
++                        continue;
++                    } else {
++                        break;
++                    }
++                }
++                while(1) {
++                    ALOGD("%s: after pipe open writing camera_ctrl to create pipe handle \n", __FUNCTION__);
++                    if (write(pipe_handle, "camera_ctrl", strlen("camera_ctrl")) < 0) {
++                        ALOGE("%s: open pipe fail...\n", __FUNCTION__);
++                        sleep(1);
++                        continue;
++                    } else {
++                        break;
++                    }
++                }
++                while (1) {
++                    gDataPipeHandle = open("/dev/virtpipe-common", O_RDWR);
++                    if (gDataPipeHandle < 0) {
++                        ALOGD("%s open /dev/virtpipe-common fail errno=%d, error=%s\n", __FUNCTION__, errno, strerror(errno));
++                        sleep(1);
++                        continue;
++                    } else {
++                        break;
++                    }
++                }
++                while(1) {
++                    ALOGD("%s: after pipe open writing camera_data to create pipe handle \n", __FUNCTION__);
++                    if (write(gDataPipeHandle, "camera_data", strlen("camera_data")) < 0) {
++                        ALOGE("%s: open camera data pipe fail...\n", __FUNCTION__);
++                        sleep(1);
++                        continue;
++                    } else {
++                        break;
++                    }
++                }
++                ALOGE("pipe connected success \n");
++            }
++
++            mClientFd = pipe_handle;
++
++            bool status = false;
++            status = configureCapabilities();
++            if (status) {
++                ALOGI(LOG_TAG
++                      "%s: Capability negotiation and metadata update"
++                      "for %d camera(s) completed successfully..",
++                      __FUNCTION__, mNumOfCamerasRequested);
++            }
+ 
++            ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++            uint8_t *fbuffer = (uint8_t *)handle->clientBuf[handle->clientRevCount % 1].buffer;
++            // Reset and clear the input buffer before receiving the frames.
++            handle->reset();
++
++            int retryLoop = 0;
++            while (true) {
++                if (!ProcessCameraDataFromPipe(handle)) {
++                    retryLoop++;
++                    if (retryLoop > 5) {
++                        break;
++                    }
++                    sleep(1);
++                    continue;
++                }
++                retryLoop = 0;
++            }
++        }
+     }
+     while (mRunning) {
+         ALOGI(LOG_TAG " %s: Wait for camera client to connect. . .", __FUNCTION__);
+@@ -595,8 +745,7 @@ bool CameraSocketServerThread::threadLoop() {
+             socklen_t alen = sizeof(struct sockaddr_vm);
+             new_client_fd = ::accept(mSocketServerFd, (struct sockaddr *)&addr_vm, &alen);
+         }
+-        else
+-        {
++        else if(trans_mode == UNIX) {
+             socklen_t alen = sizeof(struct sockaddr_un);
+             new_client_fd = ::accept(mSocketServerFd, (struct sockaddr *)&addr_un, &alen);
+         }
+diff --git a/src/VirtualFakeCamera3.cpp b/src/VirtualFakeCamera3.cpp
+index bf1c0b7..04cc94b 100644
+--- a/src/VirtualFakeCamera3.cpp
++++ b/src/VirtualFakeCamera3.cpp
+@@ -209,7 +209,11 @@ status_t VirtualFakeCamera3::sendCommandToClient(camera_cmd_t cmd) {
+     camera_config_cmd_t config_cmd = {};
+     config_cmd.version = CAMERA_VHAL_VERSION_2;
+     config_cmd.cmd = cmd;
++    char prop_val[PROPERTY_VALUE_MAX] = {'\0'};
++    property_get("vendor.camera.app.name", prop_val, "false");
++
+     config_cmd.config.cameraId = mCameraID;
++    strncpy(config_cmd.config.pkg_name, prop_val, PROPERTY_VALUE_MAX);
+     config_cmd.config.codec_type = mCodecType;
+     config_cmd.config.resolution = mDecoderResolution;
+ 
+@@ -231,13 +235,21 @@ status_t VirtualFakeCamera3::sendCommandToClient(camera_cmd_t cmd) {
+     config_cmd_packet->header.size = sizeof(camera_config_cmd_t);
+     memcpy(config_cmd_packet->payload, &config_cmd, sizeof(camera_config_cmd_t));
+ 
+-    ALOGI("%s: Camera client fd %d!", __FUNCTION__, client_fd);
+-    if (send(client_fd, config_cmd_packet, config_cmd_packet_size, 0) < 0) {
++    ALOGI("%s: Camera client fd %d! camera id %d", __FUNCTION__, client_fd, config_cmd.config.cameraId);
++#ifdef USE_PIPE
++    if (write(client_fd, config_cmd_packet, config_cmd_packet_size) < 0) {
+         ALOGE(LOG_TAG "%s: Failed to send Camera %s command to client, err %s ", __FUNCTION__,
+               (cmd == camera_cmd_t::CMD_CLOSE) ? "CloseCamera" : "OpenCamera", strerror(errno));
+         goto out;
+     }
+ 
++#else
++    if (send(client_fd, config_cmd_packet, config_cmd_packet_size, 0) < 0) {
++        ALOGE(LOG_TAG "%s: Failed to send Camera %s command to client, err %s ", __FUNCTION__,
++              (cmd == camera_cmd_t::CMD_CLOSE) ? "CloseCamera" : "OpenCamera", strerror(errno));
++        goto out;
++    }
++#endif
+     ALOGI("%s: Sent cmd %s to client %d!", __FUNCTION__,
+           (cmd == camera_cmd_t::CMD_CLOSE) ? "CloseCamera" : "OpenCamera", client_fd);
+     status = OK;
+diff --git a/src/fake-pipeline2/Sensor.cpp b/src/fake-pipeline2/Sensor.cpp
+index 4a64516..0b5694b 100644
+--- a/src/fake-pipeline2/Sensor.cpp
++++ b/src/fake-pipeline2/Sensor.cpp
+@@ -888,6 +888,9 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+             // For I420 input support
+             ALOGVV(LOG_TAG " %s: I420 no scaling required Size = %dx%d", __FUNCTION__, width,
+                    height);
++#ifdef USE_PIPE
++            memcpy(img, bufData, width * height * 1.5);
++#else
+             const uint8_t *src_y = bufData;
+             int src_stride_y = mSrcWidth;
+             const uint8_t *src_u = bufData + src_size;
+@@ -911,6 +914,7 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+                                                  dst_stride_uv, width, height)) {
+                 }
+             }
++#endif
+         } else {
+             // For NV12 Input support. No Color conversion
+             ALOGVV(LOG_TAG " %s: NV12 frame without scaling and color conversion: Size = %dx%d",
+@@ -960,7 +964,9 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+ 
+             uint8_t *dst_uv = dst_y + width * height;
+             int dst_stride_uv = width;
+-
++#ifdef USE_PIPE
++            memcpy(img, mDstBuf.data(), width * height * 1.5);
++#else
+             if (m_major_version == 1) {
+                 ALOGVV(LOG_TAG " %s: [SG1] convert I420 to NV12!", __FUNCTION__);
+                 if (int ret = libyuv::I420ToNV12(src_y, src_stride_y, src_u, src_stride_u, src_v,
+@@ -974,6 +980,7 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+                                                  dst_stride_uv, width, height)) {
+                 }
+             }
++#endif
+         } else {
+             // For NV12 Input support
+             ALOGVV(LOG_TAG " %s: NV12 frame with scaling to Size = %dx%d", __FUNCTION__, width,
+-- 
+2.17.1
+
