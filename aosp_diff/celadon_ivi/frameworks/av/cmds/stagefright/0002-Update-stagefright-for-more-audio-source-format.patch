@@ -1,0 +1,236 @@
+From 25d247dff6689f0a848513a450b97a8ad666663f Mon Sep 17 00:00:00 2001
+From: "Martin, Chen" <haochuan.z.chen@intel.com>
+Date: Sun, 9 Jul 2023 13:38:21 -0400
+Subject: [PATCH] Update stagefright for more audio source format
+
+Add command option for format 24bit, 24bit packed,
+32bit, with channel 1ch,5.1ch,7.1ch,7.1.4ch
+
+Tracked-On: OAM-111132
+Signed-off-by: Martin, Chen <haochuan.z.chen@intel.com>
+---
+ cmds/stagefright/AudioPlayer.cpp              |  5 +-
+ cmds/stagefright/SineSource.cpp               | 71 ++++++++++++++++---
+ cmds/stagefright/SineSource.h                 |  4 +-
+ cmds/stagefright/stagefright.cpp              | 28 +++++++-
+ .../media/stagefright/foundation/MediaDefs.h  |  1 +
+ 5 files changed, 95 insertions(+), 14 deletions(-)
+
+diff --git a/cmds/stagefright/AudioPlayer.cpp b/cmds/stagefright/AudioPlayer.cpp
+index 55427cafac..f0dab96972 100644
+--- a/cmds/stagefright/AudioPlayer.cpp
++++ b/cmds/stagefright/AudioPlayer.cpp
+@@ -78,6 +78,9 @@ ALookup<audio_format_t, int32_t> sAudioFormatToPcmEncoding {
+         { AUDIO_FORMAT_PCM_16_BIT, kAudioEncodingPcm16bit },
+         { AUDIO_FORMAT_PCM_8_BIT,  kAudioEncodingPcm8bit  },
+         { AUDIO_FORMAT_PCM_FLOAT,  kAudioEncodingPcmFloat },
++        { AUDIO_FORMAT_PCM_24_BIT_PACKED, kAudioEncodingPcm24bitPacked },
++        { AUDIO_FORMAT_PCM_8_24_BIT, kAudioEncodingPcm24_8bit},
++        { AUDIO_FORMAT_PCM_32_BIT, kAudioEncodingPcm32bit },
+     }
+ };
+ 
+@@ -248,7 +251,7 @@ status_t AudioPlayer::start(bool sourceAlreadyStarted) {
+         }
+ 
+         mAudioTrack = new AudioTrack(
+-                AUDIO_STREAM_MUSIC, mSampleRate, AUDIO_FORMAT_PCM_16_BIT, audioMask,
++                AUDIO_STREAM_MUSIC, mSampleRate, audioFormat, audioMask,
+                 0 /*frameCount*/, AUDIO_OUTPUT_FLAG_NONE, &AudioCallback, this,
+                 0 /*notificationFrames*/);
+ 
+diff --git a/cmds/stagefright/SineSource.cpp b/cmds/stagefright/SineSource.cpp
+index 0ecc16ccb5..ffba4d2275 100644
+--- a/cmds/stagefright/SineSource.cpp
++++ b/cmds/stagefright/SineSource.cpp
+@@ -10,13 +10,15 @@
+ 
+ namespace android {
+ 
+-SineSource::SineSource(int32_t sampleRate, int32_t numChannels)
++SineSource::SineSource(int32_t sampleRate, int32_t numChannels, audio_format_t format)
+     : mStarted(false),
+       mSampleRate(sampleRate),
+       mNumChannels(numChannels),
++      mFormat(format),
+       mPhase(0),
+       mGroup(NULL) {
+-    CHECK(numChannels == 1 || numChannels == 2);
++    CHECK(numChannels == 1 || numChannels == 2 || numChannels == 6 ||
++            numChannels == 8 || numChannels == 12 || numChannels == 16);
+ }
+ 
+ SineSource::~SineSource() {
+@@ -54,7 +56,24 @@ sp<MetaData> SineSource::getFormat() {
+     meta->setInt32(kKeyChannelCount, mNumChannels);
+     meta->setInt32(kKeySampleRate, mSampleRate);
+     meta->setInt32(kKeyMaxInputSize, kBufferSize);
+-    meta->setInt32(kKeyPcmEncoding, kAudioEncodingPcm16bit);
++
++    switch (mFormat) {
++    case AUDIO_FORMAT_PCM_32_BIT:
++        meta->setInt32(kKeyPcmEncoding, kAudioEncodingPcm32bit);
++        break;
++    case AUDIO_FORMAT_PCM_24_BIT_PACKED:
++        meta->setInt32(kKeyPcmEncoding, kAudioEncodingPcm24bitPacked);
++        break;
++    case AUDIO_FORMAT_PCM_8_24_BIT:
++        meta->setInt32(kKeyPcmEncoding, kAudioEncodingPcm24_8bit);
++	break;
++    case AUDIO_FORMAT_PCM_16_BIT:
++        meta->setInt32(kKeyPcmEncoding, kAudioEncodingPcm16bit);
++        break;
++    default:
++        meta->setInt32(kKeyPcmEncoding, kAudioEncodingPcm16bit);
++        break;
++    }
+ 
+     return meta;
+ }
+@@ -70,20 +89,52 @@ status_t SineSource::read(
+         return err;
+     }
+ 
+-    size_t frameSize = mNumChannels * sizeof(int16_t);
++    size_t frameSize = mNumChannels * audio_bytes_per_sample(mFormat);
+     size_t numFramesPerBuffer = buffer->size() / frameSize;
+ 
+-    int16_t *ptr = (int16_t *)buffer->data();
++    int8_t *ptr = (int8_t *)buffer->data();
+ 
+     const double k = kFrequency / mSampleRate * (2.0 * M_PI);
+ 
+     double x = mPhase * k;
+     for (size_t i = 0; i < numFramesPerBuffer; ++i) {
+-        int16_t amplitude = (int16_t)(32767.0 * sin(x));
+-        
+-        *ptr++ = amplitude;
+-        if (mNumChannels == 2) {
+-            *ptr++ = amplitude;
++        if (mFormat == AUDIO_FORMAT_PCM_16_BIT) {
++            int16_t amplitude = (int16_t)(32767.0 * sin(x));
++
++            for (int32_t j = 0; j < mNumChannels; j++) {
++                *((int16_t *)ptr) = amplitude;
++
++                ptr += audio_bytes_per_sample(mFormat);
++            }
++        } else if (mFormat == AUDIO_FORMAT_PCM_24_BIT_PACKED) {
++            int32_t amplitude = (int32_t)(8388607.0 * sin(x));
++
++            for (int32_t j = 0; j < mNumChannels; j++) {
++                *((int8_t *)ptr)       = *((int8_t *)(&amplitude));
++                *((int8_t *)(ptr + 1)) = *((int8_t *)(&amplitude) + 1);
++                *((int8_t *)(ptr + 2)) = *((int8_t *)(&amplitude) + 2);
++
++                ptr += audio_bytes_per_sample(mFormat);
++            }
++        } else if (mFormat == AUDIO_FORMAT_PCM_8_24_BIT) {
++            int32_t amplitude = (int32_t)(8388607.0 * sin(x));
++
++            for (int32_t j = 0; j < mNumChannels; j++) {
++                *((int8_t *)ptr)       = *((int8_t *)(&amplitude));
++                *((int8_t *)(ptr + 1)) = *((int8_t *)(&amplitude) + 1);
++                *((int8_t *)(ptr + 2)) = *((int8_t *)(&amplitude) + 2);
++                *((int8_t *)(ptr + 3)) = 0;
++
++                ptr += audio_bytes_per_sample(mFormat);
++            }
++        } else if (mFormat == AUDIO_FORMAT_PCM_32_BIT) {
++            int32_t amplitude = (int32_t)(2147483647.0 * sin(x));
++
++            for (int32_t j = 0; j < mNumChannels; j++) {
++                *((int32_t *)ptr) = amplitude;
++
++                ptr += audio_bytes_per_sample(mFormat);
++            }
+         }
+ 
+         x += k;
+diff --git a/cmds/stagefright/SineSource.h b/cmds/stagefright/SineSource.h
+index 6f1d98c769..2ed1e335b3 100644
+--- a/cmds/stagefright/SineSource.h
++++ b/cmds/stagefright/SineSource.h
+@@ -4,13 +4,14 @@
+ 
+ #include <media/stagefright/MediaSource.h>
+ #include <utils/Compat.h>
++#include <system/audio.h>
+ 
+ namespace android {
+ 
+ class MediaBufferGroup;
+ 
+ struct SineSource : public MediaSource {
+-    SineSource(int32_t sampleRate, int32_t numChannels);
++    SineSource(int32_t sampleRate, int32_t numChannels, audio_format_t format = AUDIO_FORMAT_PCM_16_BIT);
+ 
+     virtual status_t start(MetaData *params);
+     virtual status_t stop();
+@@ -30,6 +31,7 @@ private:
+     bool mStarted;
+     int32_t mSampleRate;
+     int32_t mNumChannels;
++    audio_format_t mFormat;
+     size_t mPhase;
+ 
+     MediaBufferGroup *mGroup;
+diff --git a/cmds/stagefright/stagefright.cpp b/cmds/stagefright/stagefright.cpp
+index c430f05ab6..75978222a0 100644
+--- a/cmds/stagefright/stagefright.cpp
++++ b/cmds/stagefright/stagefright.cpp
+@@ -1108,13 +1108,37 @@ int main(int argc, char **argv) {
+                 mediaSources.push(mediaSource);
+             }
+         } else if (!strncasecmp("sine:", filename, 5)) {
++            char *start;
+             char *end;
+             long sampleRate = strtol(filename + 5, &end, 10);
+ 
+             if (end == filename + 5) {
+-                sampleRate = 44100;
++                sampleRate = 48000;
+             }
+-            mediaSource = new SineSource(sampleRate, 1);
++
++            int32_t channel = 0;
++            if (end && *end == ':') {
++                start = end + 1;
++
++                channel = static_cast<int32_t>(strtol(start, &end, 10));
++            }
++
++	    audio_format_t format = AUDIO_FORMAT_PCM_16_BIT;
++            if (end && *end == ':') {
++                start = end + 1;
++
++                if (!strncmp(start, "16", 2)) {
++                   format = AUDIO_FORMAT_PCM_16_BIT;
++                } else if (!strncmp(start, "24", 2)) {
++                   format = AUDIO_FORMAT_PCM_24_BIT_PACKED;
++                } else if (!strncmp(start, "24_8", 4)) {
++                   format = AUDIO_FORMAT_PCM_8_24_BIT;
++                } else if (!strncmp(start, "32", 2)) {
++                   format = AUDIO_FORMAT_PCM_32_BIT;
++                }
++	    }
++
++            mediaSource = new SineSource(sampleRate, (channel ? channel : 1), format);
+             if (gWriteMP4) {
+                 mediaSources.push(mediaSource);
+             }
+diff --git a/media/libstagefright/foundation/include/media/stagefright/foundation/MediaDefs.h b/media/libstagefright/foundation/include/media/stagefright/foundation/MediaDefs.h
+index f5ceceffd9..3ea3b5a30f 100644
+--- a/media/libstagefright/foundation/include/media/stagefright/foundation/MediaDefs.h
++++ b/media/libstagefright/foundation/include/media/stagefright/foundation/MediaDefs.h
+@@ -94,6 +94,7 @@ enum AudioEncoding {
+     kAudioEncodingPcmFloat = 4,
+     kAudioEncodingPcm24bitPacked = 21,
+     kAudioEncodingPcm32bit = 22,
++    kAudioEncodingPcm24_8bit = 23,
+ };
+ 
+ }  // namespace android
+-- 
+2.17.1
+
