@@ -1,0 +1,1511 @@
+From 2f7d3086ac68c220240c5742959f71ec5eda9584 Mon Sep 17 00:00:00 2001
+From: "Jia, Lin A" <lin.a.jia@intel.com>
+Date: Thu, 6 Jul 2023 14:16:20 +0800
+Subject: [PATCH] drm/bridge: Add max serdes/deserdes driver
+
+Enable max dp serdes/deserdes function for 1080p and 2k resolution
+---
+ drivers/gpu/drm/bridge/Makefile          |   1 +
+ drivers/gpu/drm/bridge/max/Kconfig       |   8 +
+ drivers/gpu/drm/bridge/max/Makefile      |   3 +
+ drivers/gpu/drm/bridge/max/max_ser_drv.c | 576 ++++++++++++++++++++++
+ drivers/gpu/drm/bridge/max/max_ser_drv.h | 114 +++++
+ drivers/gpu/drm/i915/Makefile            |   3 +-
+ drivers/gpu/drm/i915/i915_dp_ser_drv.c   | 590 +++++++++++++++++++++++
+ drivers/gpu/drm/i915/i915_dp_ser_drv.h   | 113 +++++
+ drivers/gpu/drm/i915/i915_module.c       |   3 +
+ 9 files changed, 1410 insertions(+), 1 deletion(-)
+ create mode 100755 drivers/gpu/drm/bridge/max/Kconfig
+ create mode 100755 drivers/gpu/drm/bridge/max/Makefile
+ create mode 100755 drivers/gpu/drm/bridge/max/max_ser_drv.c
+ create mode 100755 drivers/gpu/drm/bridge/max/max_ser_drv.h
+ create mode 100755 drivers/gpu/drm/i915/i915_dp_ser_drv.c
+ create mode 100755 drivers/gpu/drm/i915/i915_dp_ser_drv.h
+
+diff --git a/drivers/gpu/drm/bridge/Makefile b/drivers/gpu/drm/bridge/Makefile
+index 1884803c6860..9905455e1964 100644
+--- a/drivers/gpu/drm/bridge/Makefile
++++ b/drivers/gpu/drm/bridge/Makefile
+@@ -38,3 +38,4 @@ obj-y += analogix/
+ obj-y += cadence/
+ obj-y += imx/
+ obj-y += synopsys/
++#obj-y += max/
+diff --git a/drivers/gpu/drm/bridge/max/Kconfig b/drivers/gpu/drm/bridge/max/Kconfig
+new file mode 100755
+index 000000000000..f534b5b16ea2
+--- /dev/null
++++ b/drivers/gpu/drm/bridge/max/Kconfig
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0-only
++config DRM_I2C_MAX
++	tristate "MAX serdes/deserdes"
++	depends on OF
++	select DRM_KMS_HELPER
++	select REGMAP_I2C
++	help
++	  Support for the maxim Devices Max94749/Max96774 serdes/deserdes.
+diff --git a/drivers/gpu/drm/bridge/max/Makefile b/drivers/gpu/drm/bridge/max/Makefile
+new file mode 100755
+index 000000000000..07fdda7de43b
+--- /dev/null
++++ b/drivers/gpu/drm/bridge/max/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++#
++max_ser-objs:=max_ser_drv.o
+diff --git a/drivers/gpu/drm/bridge/max/max_ser_drv.c b/drivers/gpu/drm/bridge/max/max_ser_drv.c
+new file mode 100755
+index 000000000000..bc3c04b9dec8
+--- /dev/null
++++ b/drivers/gpu/drm/bridge/max/max_ser_drv.c
+@@ -0,0 +1,576 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include "max_ser_drv.h"
++
++char max_dp_ser_read_reg(struct i2c_client *client, unsigned int reg_addr, u8 *val)
++{
++    u8 buf[2];
++    int ret = 0;
++
++    struct i2c_msg msg[2];
++
++    buf[0] = reg_addr >> 8;
++    buf[1] = reg_addr & 0xff;
++
++    msg[0].addr = client->addr;
++    msg[0].flags = client->flags;
++    msg[0].buf = buf;
++    msg[0].len = sizeof(buf);
++
++    msg[1].addr = client->addr;
++    msg[1].flags = client->flags | I2C_M_RD;
++    msg[1].buf = val;
++    msg[1].len = 1;
++
++    i2c_transfer(client->adapter, msg, 2);
++    if (ret < 0) {
++        pr_debug("[-%s-%s-%d-], fail reg_addr=0x%x, val=%u\n",
++               __FILE__, __func__, __LINE__, reg_addr, *val);
++        return -ENODEV;
++    } else {
++        pr_debug(" 0x%04x,0x%02x\n", reg_addr, *val);
++    }
++    return 0;
++}
++
++void max_dp_ser_write_reg(struct i2c_client *client, unsigned int reg_addr, unsigned int val)
++{
++    int ret= 0;
++    struct i2c_msg msg;
++    u8 buf[3];
++    u8 read_val;
++
++    buf[0] = (reg_addr&0xff00) >> 8;
++    buf[1] = reg_addr & 0xff;
++    buf[2] = val;
++
++    msg.addr = client->addr;
++    msg.flags = client->flags;
++    msg.buf = buf;
++    msg.len = sizeof(buf);
++
++    ret=i2c_transfer(client->adapter, &msg, 1);
++    if (ret < 0) {
++        pr_debug(
++         "[-%s-%s-%d-], fail client->addr=0x%x, reg_addr=0x%x, val=0x%x\n",
++         __FILE__, __func__, __LINE__, client->addr, reg_addr, val);
++    }  else {
++        max_dp_ser_read_reg(client, reg_addr, &read_val);
++    }
++}
++
++int max_dp_ser_prepare(void)
++{
++    int i;
++    u8  read_val;
++
++    max_priv->priv_client[0] = priv_client[0];
++    max_priv->priv_client[1] = priv_client[1];
++    max_priv->current_mode   = MAX_MODE_2K;
++
++    max_dp_ser_read_reg(max_priv->priv_client[0], MAX_DP_SER_CTRL3, &read_val);
++    if (read_val != 0) {
++        pr_debug("%s: MAXIM Serializer detected\n", __func__);
++    } else {
++        pr_debug("%s: MAXIM Serializer Not detected\n", __func__);
++        return -ENODEV;
++    }
++
++    switch (max_priv->current_mode) {
++    case MAX_MODE_2K:
++        max_priv->gmsl_link_select[0] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[1] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[2] = MAX_GMSL_DP_SER_ENABLE_LINK_B;
++        max_priv->gmsl_link_select[3] = MAX_GMSL_DP_SER_ENABLE_LINK_B;
++        break;
++    case MAX_MODE_1080P:
++    default:
++        max_priv->gmsl_link_select[0] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[1] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[2] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[3] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        break;
++    }
++
++    for (i = 0; i < MAX_ARRAY_SIZE; i++) {
++        if ((max_priv->gmsl_link_select[i] ==
++             MAX_GMSL_DP_SER_ENABLE_LINK_A) ||
++            (max_priv->gmsl_link_select[i] ==
++             MAX_GMSL_DP_SER_ENABLE_LINK_AB)) {
++            max_priv->link_a_is_enabled = true;
++        } else if ((max_priv->gmsl_link_select[i] ==
++            MAX_GMSL_DP_SER_ENABLE_LINK_B) ||
++            (max_priv->gmsl_link_select[i] ==
++            MAX_GMSL_DP_SER_ENABLE_LINK_AB)) {
++            max_priv->link_b_is_enabled = true;
++        } else {
++            pr_debug("%s: GMSL Link select values are invalid\n",
++                   __func__);
++            return -ENODEV;
++        }
++    }
++
++    // set dual link
++    if (max_priv->link_a_is_enabled && max_priv->link_b_is_enabled) {
++        max_dp_ser_write_reg(priv_client[1], 0x10, 0x00);
++        max_dp_ser_write_reg(priv_client[0], 0x45, 0x7A);
++    }
++
++    return 0;
++}
++
++int max_dp_ser_init(struct i2c_client *client)
++{
++    // set i2c bitrate 100k
++    max_dp_ser_write_reg(client, 0x70A4, 0x8);
++    // dual link
++    if (!(max_priv->link_a_is_enabled && max_priv->link_b_is_enabled))
++    {
++        max_dp_ser_write_reg(client, 0x45, 0x78);
++    }
++
++    // CTRL3
++    max_dp_ser_write_reg(client, 0x13, 0x08);
++    // reset link
++    max_dp_ser_write_reg(client, 0x29, 0x01);
++    max_dp_ser_write_reg(client, 0x33, 0x01);
++    //max_dp_ser_write_reg(client, 0x04, 0x40);
++    // Disable video output on the GMSL link
++    max_dp_ser_write_reg(client, 0x100, 0x00);
++    max_dp_ser_write_reg(client, 0x110, 0x00);
++    max_dp_ser_write_reg(client, 0x120, 0x00);
++    max_dp_ser_write_reg(client, 0x130, 0x00);
++
++    return 0;
++}
++
++int max_dp_ser_setup(struct i2c_client *client)
++{
++    // Disable LINK_ENABLE
++    max_dp_ser_write_reg(client, 0x7000, 0x00);
++    // Set DP_VERSION to 12
++    max_dp_ser_write_reg(client, 0x701C, 0x12);
++    // Set EDID_READ_ONLY to 0
++    max_dp_ser_write_reg(client, 0x6422, 0x74);
++    // Set X_VID_LINK_SEL to 0
++    max_dp_ser_write_reg(client, 0x100, 0x61);
++    // Set Y_VID_LINK_SEL to 0
++    max_dp_ser_write_reg(client, 0x110, 0x61);
++    // Set MAX_LINK_RATE to 06
++    max_dp_ser_write_reg(client, 0x7074, 0x14);
++    // Set MAX_LINK_COUNT to 4
++    max_dp_ser_write_reg(client, 0x7070, 0x04);
++    // Disable reporting MST Capability
++    max_dp_ser_write_reg(client, 0x7019, 0x00);
++    // Set MST_SST_PORT_SELECT to 0
++    max_dp_ser_write_reg(client, 0x7900, 0x00);
++    // Set Y_VID_LINK_SEL to 0
++    max_dp_ser_write_reg(client, 0x6064, 0x00);
++    // Set MAX_LINK_RATE to 06
++    max_dp_ser_write_reg(client, 0x6065, 0x00);
++    // Set MAX_LINK_COUNT to 4
++    max_dp_ser_write_reg(client, 0x6164, 0x00);
++    // Disable reporting MST Capability
++    max_dp_ser_write_reg(client, 0x6165, 0x00);
++    // Set AUX_RD_INTERVAL to 16ms
++    max_dp_ser_write_reg(client, 0xA3, 0x00);
++    // Set MAX_LINK_RATE to 5.4Gb/s
++    max_dp_ser_write_reg(client, 0xA7, 0x01);
++    // Set MAX_LINK_COUNT to 4
++    max_dp_ser_write_reg(client, 0x29, 0x00);
++    max_dp_ser_write_reg(client, 0x33, 0x00);
++    // Enable LINK_ENABLE
++    max_dp_ser_write_reg(client, 0x7000, 0x01);
++
++    return 0;
++}
++
++int max_dp_deser_setup(struct i2c_client *client)
++{
++    switch (max_priv->current_mode) {
++    case MAX_MODE_2K:
++        // Set Stream ID on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0050, 0x00);
++        // FEC disabled on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0600, 0x06);
++        // eDP Video Configuration Registers
++        // Link Rate
++        max_dp_ser_write_reg(client, 0xE790, 0x14);
++        max_dp_ser_write_reg(client, 0xE791, 0x00);
++        // Lane Count
++        max_dp_ser_write_reg(client, 0xE792, 0x04);
++        max_dp_ser_write_reg(client, 0xE793, 0x00);
++        // Hres
++        max_dp_ser_write_reg(client, 0xE794, 0x00);
++        max_dp_ser_write_reg(client, 0xE795, 0x0A);
++        // Hfp
++        max_dp_ser_write_reg(client, 0xE796, 0x30);
++        max_dp_ser_write_reg(client, 0xE797, 0x00);
++        // Hsw
++        max_dp_ser_write_reg(client, 0xE798, 0x20);
++        max_dp_ser_write_reg(client, 0xE799, 0x00);
++        // Hbp
++        max_dp_ser_write_reg(client, 0xE79A, 0x50);
++        max_dp_ser_write_reg(client, 0xE79B, 0x00);
++        // Vres
++        max_dp_ser_write_reg(client, 0xE79C, 0xA0);
++        max_dp_ser_write_reg(client, 0xE79D, 0x05);
++        // Vfp
++        max_dp_ser_write_reg(client, 0xE79E, 0x03);
++        max_dp_ser_write_reg(client, 0xE79F, 0x00);
++        // Vsw
++        max_dp_ser_write_reg(client, 0xE7A0, 0x05);
++        max_dp_ser_write_reg(client, 0xE7A1, 0x00);
++        // Vbp
++        max_dp_ser_write_reg(client, 0xE7A2, 0x21);
++        max_dp_ser_write_reg(client, 0xE7A3, 0x00);
++        // Hwords
++        max_dp_ser_write_reg(client, 0xE7A4, 0xFC);
++        max_dp_ser_write_reg(client, 0xE7A5, 0x0E);
++        // Mvid PCLK
++        max_dp_ser_write_reg(client, 0xE7A6, 0x4B);
++        max_dp_ser_write_reg(client, 0xE7A7, 0x39);
++        // Nvid Line Rate
++        max_dp_ser_write_reg(client, 0xE7A8, 0x00);
++        max_dp_ser_write_reg(client, 0xE7A9, 0x80);
++        // TUC_Value
++        max_dp_ser_write_reg(client, 0xE7AA, 0x40);
++        max_dp_ser_write_reg(client, 0xE7AB, 0x00);
++        // HVPOL
++        max_dp_ser_write_reg(client, 0xE7AC, 0x02);
++        max_dp_ser_write_reg(client, 0xE7AD, 0x00);
++        // SSC Enable
++        max_dp_ser_write_reg(client, 0xE7B0, 0x01);
++        max_dp_ser_write_reg(client, 0xE7B1, 0x10);
++        // Spread Bit Ratio
++        max_dp_ser_write_reg(client, 0x6003, 0x81);
++        // CLK_REF_BLOCK
++        max_dp_ser_write_reg(client, 0xE7B2, 0x30);
++        max_dp_ser_write_reg(client, 0xE7B3, 0x00);
++        max_dp_ser_write_reg(client, 0xE7B4, 0xD7);
++        max_dp_ser_write_reg(client, 0xE7B5, 0x45);
++        max_dp_ser_write_reg(client, 0xE7B6, 0x6B);
++        max_dp_ser_write_reg(client, 0xE7B7, 0x20);
++        max_dp_ser_write_reg(client, 0xE7B8, 0x14);
++        max_dp_ser_write_reg(client, 0xE7B9, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BA, 0x2E);
++        max_dp_ser_write_reg(client, 0xE7BB, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BC, 0x02);
++        max_dp_ser_write_reg(client, 0xE7BD, 0x01);
++        max_dp_ser_write_reg(client, 0xE7BE, 0x32);
++        max_dp_ser_write_reg(client, 0xE7BF, 0x00);
++        // Send eDP Controller Command - Start Link Training
++        max_dp_ser_write_reg(client, 0xE776, 0x02);
++        max_dp_ser_write_reg(client, 0xE777, 0x80);
++        break;
++    case MAX_MODE_1080P:
++        // Set Stream ID on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0050, 0x00);
++        // FEC disabled on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0600, 0x06);
++        // eDP Video Configuration Registers
++        // Link Rate
++        max_dp_ser_write_reg(client, 0xE790, 0x06);
++        max_dp_ser_write_reg(client, 0xE791, 0x00);
++        // Lane Count
++        max_dp_ser_write_reg(client, 0xE792, 0x04);
++        max_dp_ser_write_reg(client, 0xE793, 0x00);
++        // Hres
++        max_dp_ser_write_reg(client, 0xE794, 0x80);
++        max_dp_ser_write_reg(client, 0xE795, 0x07);
++        // Hfp
++        max_dp_ser_write_reg(client, 0xE796, 0x58);
++        max_dp_ser_write_reg(client, 0xE797, 0x00);
++        // Hsw
++        max_dp_ser_write_reg(client, 0xE798, 0x2C);
++        max_dp_ser_write_reg(client, 0xE799, 0x00);
++        // Hbp
++        max_dp_ser_write_reg(client, 0xE79A, 0x94);
++        max_dp_ser_write_reg(client, 0xE79B, 0x00);
++        // Vres
++        max_dp_ser_write_reg(client, 0xE79C, 0x38);
++        max_dp_ser_write_reg(client, 0xE79D, 0x04);
++        // Vfp
++        max_dp_ser_write_reg(client, 0xE79E, 0x04);
++        max_dp_ser_write_reg(client, 0xE79F, 0x00);
++        // Vsw
++        max_dp_ser_write_reg(client, 0xE7A0, 0x05);
++        max_dp_ser_write_reg(client, 0xE7A1, 0x00);
++        // Vbp
++        max_dp_ser_write_reg(client, 0xE7A2, 0x24);
++        max_dp_ser_write_reg(client, 0xE7A3, 0x00);
++        // Hwords
++        max_dp_ser_write_reg(client, 0xE7A4, 0x3C);
++        max_dp_ser_write_reg(client, 0xE7A5, 0x0B);
++        // Mvid PCLK
++        max_dp_ser_write_reg(client, 0xE7A6, 0x55);
++        max_dp_ser_write_reg(client, 0xE7A7, 0x75);
++        // Nvid Line Rate
++        max_dp_ser_write_reg(client, 0xE7A8, 0x00);
++        max_dp_ser_write_reg(client, 0xE7A9, 0x80);
++        // TUC_Value
++        max_dp_ser_write_reg(client, 0xE7AA, 0x40);
++        max_dp_ser_write_reg(client, 0xE7AB, 0x00);
++        // HVPOL
++        max_dp_ser_write_reg(client, 0xE7AC, 0x00);
++        max_dp_ser_write_reg(client, 0xE7AD, 0x00);
++        // SSC Enable
++        max_dp_ser_write_reg(client, 0xE7B0, 0x01);
++        max_dp_ser_write_reg(client, 0xE7B1, 0x10);
++        // Spread Bit Ratio
++        max_dp_ser_write_reg(client, 0x6003, 0x81);
++        // CLK_REF_BLOCK
++        max_dp_ser_write_reg(client, 0xE7B2, 0x50);
++        max_dp_ser_write_reg(client, 0xE7B3, 0x00);
++        max_dp_ser_write_reg(client, 0xE7B4, 0x35);
++        max_dp_ser_write_reg(client, 0xE7B5, 0x42);
++        max_dp_ser_write_reg(client, 0xE7B6, 0x81);
++        max_dp_ser_write_reg(client, 0xE7B7, 0x30);
++        max_dp_ser_write_reg(client, 0xE7B8, 0x07);
++        max_dp_ser_write_reg(client, 0xE7B9, 0x10);
++        max_dp_ser_write_reg(client, 0xE7BA, 0x01);
++        max_dp_ser_write_reg(client, 0xE7BB, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BC, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BD, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BE, 0x52);
++        max_dp_ser_write_reg(client, 0xE7BF, 0x00);
++        // Send eDP Controller Command - Start Link Training
++        max_dp_ser_write_reg(client, 0xE776, 0x02);
++        max_dp_ser_write_reg(client, 0xE777, 0x80);
++        break;
++    default:
++        pr_debug("[-%s-%s-%d-], invalid mode =%d \n",
++           __FILE__, __func__, __LINE__, max_priv->current_mode);
++        return -1;
++    }
++
++    return 0;
++}
++
++static int max_read_lock(struct i2c_client *client, unsigned int reg_addr,
++              u32 mask, u32 expected_value)
++{
++    u8 reg_data;
++
++    max_dp_ser_read_reg(client, reg_addr, &reg_data);
++    if ((reg_data & mask) == expected_value)
++        return 0;
++
++    return -1;
++}
++
++/* static api to update given value */
++static inline void max_dp_ser_update(struct i2c_client *client,
++                unsigned int reg, u32 mask, u8 val)
++{
++    u8 update_val;
++
++    max_dp_ser_read_reg(client, reg, &update_val);
++    update_val = ((update_val & (~mask)) | (val & mask));
++    max_dp_ser_write_reg(client, reg, update_val);
++}
++
++static void max_poll_gmsl_training_lock(struct work_struct *work)
++{
++    int ret = 0;
++    static int count = 0;
++
++    ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_CTRL3,
++            MAX_DP_SER_CTRL3_LOCK_MASK,
++            MAX_DP_SER_CTRL3_LOCK_VAL);
++    if (ret < 0) {
++        pr_debug("GMSL Lock is not set\n");
++        goto reschedule;
++    }
++
++    if (max_priv->link_a_is_enabled) {
++        ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_LCTRL2_A,
++            MAX_DP_SER_LCTRL2_LOCK_MASK,
++            MAX_DP_SER_LCTRL2_LOCK_VAL);
++        if (ret < 0) {
++            pr_debug("GMSL Lock set failed for Link A\n");
++            goto reschedule;
++        }
++    }
++
++    if (max_priv->link_b_is_enabled) {
++        ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_LCTRL2_B,
++            MAX_DP_SER_LCTRL2_LOCK_MASK,
++            MAX_DP_SER_LCTRL2_LOCK_VAL);
++        if (ret < 0) {
++            pr_debug("GMSL Lock set failed for Link B\n");
++            goto reschedule;
++        }
++    }
++
++    ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_DPRX_TRAIN,
++                MAX_DP_SER_DPRX_TRAIN_STATE_MASK,
++                MAX_DP_SER_DPRX_TRAIN_STATE_VAL);
++    if (ret < 0) {
++        pr_debug("DP Link tranining hasn't completed\n");
++        goto reschedule;
++    }
++
++    ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_VID_TX2_PCLK,
++                MAX_DP_SER_VID_TX2_PCLK_STATE_MASK,
++                MAX_DP_SER_VID_TX2_PCLK_STATE_VAL);
++    if (ret < 0) {
++        pr_debug("DP PCLK hasn't completed\n");
++        goto reschedule;
++    }
++
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_X,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_Y,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_Z,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_U,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++
++    pr_debug("DP ser training lock completed, count = %d\n", count);
++
++    max_dp_deser_setup(max_priv->priv_client[1]);
++    return;
++
++reschedule:
++    if (count < 4) {
++        count++;
++    }
++    else
++    {
++        max_dp_deser_setup(max_priv->priv_client[1]);
++        return;
++    }
++
++    queue_delayed_work(max_priv->wq, &max_priv->delay_work, msecs_to_jiffies(500));
++}
++
++void max_dp_ser_enable(void)
++{
++    max_dp_ser_prepare();
++    max_dp_ser_init(max_priv->priv_client[0]);
++
++    /* Wait ~2ms for powerup to complete */
++    usleep_range(2000, 2200);
++
++    max_dp_ser_setup(max_priv->priv_client[0]);
++
++    queue_delayed_work(max_priv->wq, &max_priv->delay_work, msecs_to_jiffies(500));
++}
++
++static int max_dp_ser_probe(struct i2c_client *client,
++        const struct i2c_device_id *idt)
++{
++    unsigned long type;
++    type = idt->driver_data;
++
++    if (type == MAX96749) {
++        priv_client[0] = client;
++    } else if (type == MAX96774) {
++        priv_client[1] = client;
++        max_priv = devm_kzalloc(&client->dev, sizeof(struct max_dp_ser_priv),
++                       GFP_KERNEL);
++        if (max_priv == NULL)
++            return -ENOMEM;
++
++        max_priv->wq = alloc_workqueue("max_poll_gmsl_training_lock",
++                WQ_HIGHPRI, 0);
++
++        INIT_DELAYED_WORK(&max_priv->delay_work,
++                max_poll_gmsl_training_lock);
++
++        max_dp_ser_enable();
++    } else {
++        pr_debug("fail [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    }
++
++    return 0;
++}
++
++static int max_dp_ser_remove(struct i2c_client *client)
++{
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    return 0;
++}
++
++static const struct i2c_device_id max_dp_ser_i2c_id_table[] = {
++    { "max96749ap", MAX96749 },
++    { "max96774", MAX96774 },
++    { },
++};
++
++struct i2c_driver max_dp_ser_drv = {
++    .probe = max_dp_ser_probe,
++    .remove= max_dp_ser_remove,
++    .driver= {
++    .name = "max96749ap",
++    },
++    .id_table = max_dp_ser_i2c_id_table,
++};
++
++static int max_ser_client_init(void)
++{
++    int i = 0;
++    struct i2c_adapter *i2c_adap;
++
++    i2c_adap = i2c_get_adapter(BUS_NUMBER);
++    if (!i2c_adap) {
++        pr_debug("Cannot find a valid i2c bus for max serdes\n");
++        return -ENOMEM;
++    }
++
++    for(i = 0; i < NUM_DEVICE; i++)
++        max_client[i]=i2c_new_client_device(i2c_adap, &max_i2c0_board_info[i]);
++
++    i2c_put_adapter(i2c_adap);
++
++    return 0;
++}
++
++static void max_ser_client_exit(void)
++{
++    int i = 0;
++    for (i = 0; i < NUM_DEVICE; i++)
++        i2c_unregister_device(max_client[i]);
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++static int max_dp_ser_module_init(void)
++{
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    max_ser_client_init();
++    return i2c_add_driver(&max_dp_ser_drv);
++}
++
++static void __exit max_dp_ser_module_exit(void)
++{
++    max_ser_client_exit();
++    i2c_del_driver(&max_dp_ser_drv);
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++module_init(max_dp_ser_module_init);
++module_exit(max_dp_ser_module_exit);
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/bridge/max/max_ser_drv.h b/drivers/gpu/drm/bridge/max/max_ser_drv.h
+new file mode 100755
+index 000000000000..746cf5e423e0
+--- /dev/null
++++ b/drivers/gpu/drm/bridge/max/max_ser_drv.h
+@@ -0,0 +1,114 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef __MAX_SER_DEV_h__
++#define __MAX_SER_DEV_h__
++
++//#define DEBUG
++
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/i2c.h>
++#include <linux/platform_device.h>
++#include <linux/delay.h>
++#include <linux/workqueue.h>
++
++#define MAX_DP_SER_TX_ADD                  0x40
++#define MAX_DP_SER_RX_ADD                  0x48
++#define MAX_ARRAY_SIZE                     4
++
++#define MAX_DP_SER_CTRL3                   0x13
++#define MAX_DP_SER_CTRL3_LOCK_MASK         (1 << 3)
++#define MAX_DP_SER_CTRL3_LOCK_VAL          (1 << 3)
++
++#define MAX_DP_SER_LCTRL2_A                0x2A
++#define MAX_DP_SER_LCTRL2_B                0x34
++#define MAX_DP_SER_LCTRL2_LOCK_MASK        (1 << 0)
++#define MAX_DP_SER_LCTRL2_LOCK_VAL         0x1
++
++#define MAX_DP_SER_VID_TX_MASK             (1 << 0)
++#define MAX_DP_SER_VID_TX_LINK_MASK        (3 << 1)
++#define MAX_DP_SER_LINK_SEL_SHIFT_VAL      0x1
++
++#define MAX_DP_SER_DPRX_TRAIN              0x641A
++#define MAX_DP_SER_DPRX_TRAIN_STATE_MASK   (0xF << 4)
++#define MAX_DP_SER_DPRX_TRAIN_STATE_VAL    0xF0
++
++#define MAX_DP_SER_VID_TX2_PCLK            0x0102
++#define MAX_DP_SER_VID_TX2_PCLK_STATE_MASK (0x8 << 4)
++#define MAX_DP_SER_VID_TX2_PCLK_STATE_VAL  0x80
++
++#define MAX_DP_SER_VID_TX_X                0x100
++#define MAX_DP_SER_VID_TX_Y                0x110
++#define MAX_DP_SER_VID_TX_Z                0x120
++#define MAX_DP_SER_VID_TX_U                0x130
++
++#define MAX_GMSL_DP_SER_ENABLE_LINK_A      0x0
++#define MAX_GMSL_DP_SER_ENABLE_LINK_B      0x1
++#define MAX_GMSL_DP_SER_ENABLE_LINK_AB     0x2
++
++#define MAX96749                           0
++#define MAX96774                           1
++
++#define NUM_DEVICE                         2
++#define BUS_NUMBER                         3
++
++enum max_ser_current_mode {
++    MAX_MODE_1080P,
++    MAX_MODE_2K,
++    MAX_MODE_4K,
++};
++
++static struct __init i2c_board_info max_i2c0_board_info[] = {
++    {
++        I2C_BOARD_INFO("max96749ap", MAX_DP_SER_TX_ADD),
++    },
++    {
++        I2C_BOARD_INFO("max96774", MAX_DP_SER_RX_ADD),
++    },
++};
++
++struct max_dp_ser_priv {
++    struct gpio_desc *gpiod_pwrdn;
++    u8 dprx_lane_count;
++    u8 dprx_link_rate;
++    struct mutex mutex;
++    int ser_errb;
++    unsigned int ser_irq;
++    bool enable_mst;
++    u8 mst_payload_ids[MAX_ARRAY_SIZE];
++    u8 gmsl_stream_ids[MAX_ARRAY_SIZE];
++    u8 gmsl_link_select[MAX_ARRAY_SIZE];
++    bool link_a_is_enabled;
++    bool link_b_is_enabled;
++    int current_mode;
++    struct i2c_client *priv_client[2];
++    struct delayed_work delay_work;
++    struct workqueue_struct *wq;
++};
++
++struct i2c_client *max_client[2];
++struct max_dp_ser_priv *max_priv;
++struct i2c_client *priv_client[2];
++
++#endif /* __MAX_SER_DRV__ */
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index e202ea8a86bb..7a3947c3fe5c 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -62,7 +62,8 @@ i915-y += i915_driver.o \
+ 	  intel_uncore.o \
+ 	  intel_wakeref.o \
+ 	  vlv_sideband.o \
+-	  vlv_suspend.o
++	  vlv_suspend.o \
++	  i915_dp_ser_drv.o
+ 
+ # core library code
+ i915-y += \
+diff --git a/drivers/gpu/drm/i915/i915_dp_ser_drv.c b/drivers/gpu/drm/i915/i915_dp_ser_drv.c
+new file mode 100755
+index 000000000000..5aa68c4b63a4
+--- /dev/null
++++ b/drivers/gpu/drm/i915/i915_dp_ser_drv.c
+@@ -0,0 +1,590 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include "i915_dp_ser_drv.h"
++
++struct i2c_client      *max_client[NUM_DP_DEVICE];
++struct max_dp_ser_priv *max_priv;
++struct i2c_client      *priv_client[NUM_DP_DEVICE];
++
++char max_dp_ser_read_reg(struct i2c_client *client, unsigned int reg_addr, u8 *val)
++{
++    u8 buf[2];
++    int ret = 0;
++
++    struct i2c_msg msg[2];
++
++    buf[0] = reg_addr >> 8;
++    buf[1] = reg_addr & 0xff;
++
++    msg[0].addr = client->addr;
++    msg[0].flags = client->flags;
++    msg[0].buf = buf;
++    msg[0].len = sizeof(buf);
++
++    msg[1].addr = client->addr;
++    msg[1].flags = client->flags | I2C_M_RD;
++    msg[1].buf = val;
++    msg[1].len = 1;
++
++    i2c_transfer(client->adapter, msg, 2);
++    if (ret < 0) {
++        pr_debug("[-%s-%s-%d-], fail reg_addr=0x%x, val=%u\n",
++               __FILE__, __func__, __LINE__, reg_addr, *val);
++        return -ENODEV;
++    } else {
++        pr_debug(" 0x%04x,0x%02x\n", reg_addr, *val);
++    }
++    return 0;
++}
++
++void max_dp_ser_write_reg(struct i2c_client *client, unsigned int reg_addr, unsigned int val)
++{
++    int ret= 0;
++    struct i2c_msg msg;
++    u8 buf[3];
++    u8 read_val;
++
++    buf[0] = (reg_addr&0xff00) >> 8;
++    buf[1] = reg_addr & 0xff;
++    buf[2] = val;
++
++    msg.addr = client->addr;
++    msg.flags = client->flags;
++    msg.buf = buf;
++    msg.len = sizeof(buf);
++
++    ret=i2c_transfer(client->adapter, &msg, 1);
++    if (ret < 0) {
++        pr_debug(
++         "[-%s-%s-%d-], fail client->addr=0x%x, reg_addr=0x%x, val=0x%x\n",
++         __FILE__, __func__, __LINE__, client->addr, reg_addr, val);
++    }  else {
++        max_dp_ser_read_reg(client, reg_addr, &read_val);
++    }
++}
++
++int max_dp_ser_prepare(void)
++{
++    int i;
++    u8  read_val;
++
++    max_priv->priv_client[0] = priv_client[0];
++    max_priv->priv_client[1] = priv_client[1];
++    max_priv->current_mode   = MAX_MODE_1080P;
++
++    max_dp_ser_read_reg(max_priv->priv_client[0], MAX_DP_SER_CTRL3, &read_val);
++    if (read_val != 0) {
++        pr_debug("%s: MAXIM Serializer detected\n", __func__);
++    } else {
++        pr_debug("%s: MAXIM Serializer Not detected\n", __func__);
++        return -ENODEV;
++    }
++
++    switch (max_priv->current_mode) {
++    case MAX_MODE_2K:
++        max_priv->gmsl_link_select[0] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[1] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[2] = MAX_GMSL_DP_SER_ENABLE_LINK_B;
++        max_priv->gmsl_link_select[3] = MAX_GMSL_DP_SER_ENABLE_LINK_B;
++        break;
++    case MAX_MODE_1080P:
++    default:
++        max_priv->gmsl_link_select[0] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[1] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[2] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        max_priv->gmsl_link_select[3] = MAX_GMSL_DP_SER_ENABLE_LINK_A;
++        break;
++    }
++
++    for (i = 0; i < MAX_ARRAY_SIZE; i++) {
++        if ((max_priv->gmsl_link_select[i] ==
++             MAX_GMSL_DP_SER_ENABLE_LINK_A) ||
++            (max_priv->gmsl_link_select[i] ==
++             MAX_GMSL_DP_SER_ENABLE_LINK_AB)) {
++            max_priv->link_a_is_enabled = true;
++        } else if ((max_priv->gmsl_link_select[i] ==
++            MAX_GMSL_DP_SER_ENABLE_LINK_B) ||
++            (max_priv->gmsl_link_select[i] ==
++            MAX_GMSL_DP_SER_ENABLE_LINK_AB)) {
++            max_priv->link_b_is_enabled = true;
++        } else {
++            pr_debug("%s: GMSL Link select values are invalid\n",
++                   __func__);
++            return -ENODEV;
++        }
++    }
++
++    // set dual link
++    if (max_priv->link_a_is_enabled && max_priv->link_b_is_enabled) {
++        max_dp_ser_write_reg(priv_client[1], 0x10, 0x00);
++        max_dp_ser_write_reg(priv_client[0], 0x45, 0x7A);
++    }
++
++    return 0;
++}
++
++int max_dp_ser_init(struct i2c_client *client)
++{
++    // set i2c bitrate 100k
++    max_dp_ser_write_reg(client, 0x70A4, 0x8);
++    // dual link
++    if (!(max_priv->link_a_is_enabled && max_priv->link_b_is_enabled))
++    {
++        max_dp_ser_write_reg(client, 0x45, 0x78);
++    }
++
++    // CTRL3
++    max_dp_ser_write_reg(client, 0x13, 0x08);
++    // reset link
++    max_dp_ser_write_reg(client, 0x29, 0x01);
++    max_dp_ser_write_reg(client, 0x33, 0x01);
++    //max_dp_ser_write_reg(client, 0x04, 0x40);
++    // Disable video output on the GMSL link
++    max_dp_ser_write_reg(client, 0x100, 0x00);
++    max_dp_ser_write_reg(client, 0x110, 0x00);
++    max_dp_ser_write_reg(client, 0x120, 0x00);
++    max_dp_ser_write_reg(client, 0x130, 0x00);
++
++    return 0;
++}
++
++int max_dp_ser_setup(struct i2c_client *client)
++{
++    // Disable LINK_ENABLE
++    max_dp_ser_write_reg(client, 0x7000, 0x00);
++    // Set DP_VERSION to 12
++    max_dp_ser_write_reg(client, 0x701C, 0x12);
++    // Set EDID_READ_ONLY to 0
++    max_dp_ser_write_reg(client, 0x6422, 0x74);
++    // Set X_VID_LINK_SEL to 0
++    max_dp_ser_write_reg(client, 0x100, 0x61);
++    // Set Y_VID_LINK_SEL to 0
++    max_dp_ser_write_reg(client, 0x110, 0x61);
++    // Set MAX_LINK_RATE to 06
++    max_dp_ser_write_reg(client, 0x7074, 0x14);
++    // Set MAX_LINK_COUNT to 4
++    max_dp_ser_write_reg(client, 0x7070, 0x04);
++    // Disable reporting MST Capability
++    max_dp_ser_write_reg(client, 0x7019, 0x00);
++    // Set MST_SST_PORT_SELECT to 0
++    max_dp_ser_write_reg(client, 0x7900, 0x00);
++    // Set Y_VID_LINK_SEL to 0
++    max_dp_ser_write_reg(client, 0x6064, 0x00);
++    // Set MAX_LINK_RATE to 06
++    max_dp_ser_write_reg(client, 0x6065, 0x00);
++    // Set MAX_LINK_COUNT to 4
++    max_dp_ser_write_reg(client, 0x6164, 0x00);
++    // Disable reporting MST Capability
++    max_dp_ser_write_reg(client, 0x6165, 0x00);
++    // Set AUX_RD_INTERVAL to 16ms
++    max_dp_ser_write_reg(client, 0xA3, 0x00);
++    // Set MAX_LINK_RATE to 5.4Gb/s
++    max_dp_ser_write_reg(client, 0xA7, 0x01);
++    // Set MAX_LINK_COUNT to 4
++    max_dp_ser_write_reg(client, 0x29, 0x00);
++    max_dp_ser_write_reg(client, 0x33, 0x00);
++    // Enable LINK_ENABLE
++    max_dp_ser_write_reg(client, 0x7000, 0x01);
++
++    return 0;
++}
++
++int max_dp_deser_setup(struct i2c_client *client)
++{
++    switch (max_priv->current_mode) {
++    case MAX_MODE_2K:
++        // Set Stream ID on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0050, 0x00);
++        // FEC disabled on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0600, 0x06);
++        // eDP Video Configuration Registers
++        // Link Rate
++        max_dp_ser_write_reg(client, 0xE790, 0x14);
++        max_dp_ser_write_reg(client, 0xE791, 0x00);
++        // Lane Count
++        max_dp_ser_write_reg(client, 0xE792, 0x04);
++        max_dp_ser_write_reg(client, 0xE793, 0x00);
++        // Hres
++        max_dp_ser_write_reg(client, 0xE794, 0x00);
++        max_dp_ser_write_reg(client, 0xE795, 0x0A);
++        // Hfp
++        max_dp_ser_write_reg(client, 0xE796, 0x30);
++        max_dp_ser_write_reg(client, 0xE797, 0x00);
++        // Hsw
++        max_dp_ser_write_reg(client, 0xE798, 0x20);
++        max_dp_ser_write_reg(client, 0xE799, 0x00);
++        // Hbp
++        max_dp_ser_write_reg(client, 0xE79A, 0x50);
++        max_dp_ser_write_reg(client, 0xE79B, 0x00);
++        // Vres
++        max_dp_ser_write_reg(client, 0xE79C, 0xA0);
++        max_dp_ser_write_reg(client, 0xE79D, 0x05);
++        // Vfp
++        max_dp_ser_write_reg(client, 0xE79E, 0x03);
++        max_dp_ser_write_reg(client, 0xE79F, 0x00);
++        // Vsw
++        max_dp_ser_write_reg(client, 0xE7A0, 0x05);
++        max_dp_ser_write_reg(client, 0xE7A1, 0x00);
++        // Vbp
++        max_dp_ser_write_reg(client, 0xE7A2, 0x21);
++        max_dp_ser_write_reg(client, 0xE7A3, 0x00);
++        // Hwords
++        max_dp_ser_write_reg(client, 0xE7A4, 0xFC);
++        max_dp_ser_write_reg(client, 0xE7A5, 0x0E);
++        // Mvid PCLK
++        max_dp_ser_write_reg(client, 0xE7A6, 0x4B);
++        max_dp_ser_write_reg(client, 0xE7A7, 0x39);
++        // Nvid Line Rate
++        max_dp_ser_write_reg(client, 0xE7A8, 0x00);
++        max_dp_ser_write_reg(client, 0xE7A9, 0x80);
++        // TUC_Value
++        max_dp_ser_write_reg(client, 0xE7AA, 0x40);
++        max_dp_ser_write_reg(client, 0xE7AB, 0x00);
++        // HVPOL
++        max_dp_ser_write_reg(client, 0xE7AC, 0x02);
++        max_dp_ser_write_reg(client, 0xE7AD, 0x00);
++        // SSC Enable
++        max_dp_ser_write_reg(client, 0xE7B0, 0x01);
++        max_dp_ser_write_reg(client, 0xE7B1, 0x10);
++        // Spread Bit Ratio
++        max_dp_ser_write_reg(client, 0x6003, 0x81);
++        // CLK_REF_BLOCK
++        max_dp_ser_write_reg(client, 0xE7B2, 0x30);
++        max_dp_ser_write_reg(client, 0xE7B3, 0x00);
++        max_dp_ser_write_reg(client, 0xE7B4, 0xD7);
++        max_dp_ser_write_reg(client, 0xE7B5, 0x45);
++        max_dp_ser_write_reg(client, 0xE7B6, 0x6B);
++        max_dp_ser_write_reg(client, 0xE7B7, 0x20);
++        max_dp_ser_write_reg(client, 0xE7B8, 0x14);
++        max_dp_ser_write_reg(client, 0xE7B9, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BA, 0x2E);
++        max_dp_ser_write_reg(client, 0xE7BB, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BC, 0x02);
++        max_dp_ser_write_reg(client, 0xE7BD, 0x01);
++        max_dp_ser_write_reg(client, 0xE7BE, 0x32);
++        max_dp_ser_write_reg(client, 0xE7BF, 0x00);
++        // Send eDP Controller Command - Start Link Training
++        max_dp_ser_write_reg(client, 0xE776, 0x02);
++        max_dp_ser_write_reg(client, 0xE777, 0x80);
++        break;
++    case MAX_MODE_1080P:
++        // Set Stream ID on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0050, 0x00);
++        // FEC disabled on eDP Deserializer
++        max_dp_ser_write_reg(client, 0x0600, 0x06);
++        // eDP Video Configuration Registers
++        // Link Rate
++        max_dp_ser_write_reg(client, 0xE790, 0x06);
++        max_dp_ser_write_reg(client, 0xE791, 0x00);
++        // Lane Count
++        max_dp_ser_write_reg(client, 0xE792, 0x04);
++        max_dp_ser_write_reg(client, 0xE793, 0x00);
++        // Hres
++        max_dp_ser_write_reg(client, 0xE794, 0x80);
++        max_dp_ser_write_reg(client, 0xE795, 0x07);
++        // Hfp
++        max_dp_ser_write_reg(client, 0xE796, 0x58);
++        max_dp_ser_write_reg(client, 0xE797, 0x00);
++        // Hsw
++        max_dp_ser_write_reg(client, 0xE798, 0x2C);
++        max_dp_ser_write_reg(client, 0xE799, 0x00);
++        // Hbp
++        max_dp_ser_write_reg(client, 0xE79A, 0x94);
++        max_dp_ser_write_reg(client, 0xE79B, 0x00);
++        // Vres
++        max_dp_ser_write_reg(client, 0xE79C, 0x38);
++        max_dp_ser_write_reg(client, 0xE79D, 0x04);
++        // Vfp
++        max_dp_ser_write_reg(client, 0xE79E, 0x04);
++        max_dp_ser_write_reg(client, 0xE79F, 0x00);
++        // Vsw
++        max_dp_ser_write_reg(client, 0xE7A0, 0x05);
++        max_dp_ser_write_reg(client, 0xE7A1, 0x00);
++        // Vbp
++        max_dp_ser_write_reg(client, 0xE7A2, 0x24);
++        max_dp_ser_write_reg(client, 0xE7A3, 0x00);
++        // Hwords
++        max_dp_ser_write_reg(client, 0xE7A4, 0x3C);
++        max_dp_ser_write_reg(client, 0xE7A5, 0x0B);
++        // Mvid PCLK
++        max_dp_ser_write_reg(client, 0xE7A6, 0x55);
++        max_dp_ser_write_reg(client, 0xE7A7, 0x75);
++        // Nvid Line Rate
++        max_dp_ser_write_reg(client, 0xE7A8, 0x00);
++        max_dp_ser_write_reg(client, 0xE7A9, 0x80);
++        // TUC_Value
++        max_dp_ser_write_reg(client, 0xE7AA, 0x40);
++        max_dp_ser_write_reg(client, 0xE7AB, 0x00);
++        // HVPOL
++        max_dp_ser_write_reg(client, 0xE7AC, 0x00);
++        max_dp_ser_write_reg(client, 0xE7AD, 0x00);
++        // SSC Enable
++        max_dp_ser_write_reg(client, 0xE7B0, 0x01);
++        max_dp_ser_write_reg(client, 0xE7B1, 0x10);
++        // Spread Bit Ratio
++        max_dp_ser_write_reg(client, 0x6003, 0x81);
++        // CLK_REF_BLOCK
++        max_dp_ser_write_reg(client, 0xE7B2, 0x50);
++        max_dp_ser_write_reg(client, 0xE7B3, 0x00);
++        max_dp_ser_write_reg(client, 0xE7B4, 0x35);
++        max_dp_ser_write_reg(client, 0xE7B5, 0x42);
++        max_dp_ser_write_reg(client, 0xE7B6, 0x81);
++        max_dp_ser_write_reg(client, 0xE7B7, 0x30);
++        max_dp_ser_write_reg(client, 0xE7B8, 0x07);
++        max_dp_ser_write_reg(client, 0xE7B9, 0x10);
++        max_dp_ser_write_reg(client, 0xE7BA, 0x01);
++        max_dp_ser_write_reg(client, 0xE7BB, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BC, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BD, 0x00);
++        max_dp_ser_write_reg(client, 0xE7BE, 0x52);
++        max_dp_ser_write_reg(client, 0xE7BF, 0x00);
++        // Send eDP Controller Command - Start Link Training
++        max_dp_ser_write_reg(client, 0xE776, 0x02);
++        max_dp_ser_write_reg(client, 0xE777, 0x80);
++        break;
++    default:
++        pr_debug("[-%s-%s-%d-], invalid mode =%d \n",
++           __FILE__, __func__, __LINE__, max_priv->current_mode);
++        return -1;
++    }
++
++    return 0;
++}
++
++static int max_read_lock(struct i2c_client *client, unsigned int reg_addr,
++              u32 mask, u32 expected_value)
++{
++    u8 reg_data;
++
++    max_dp_ser_read_reg(client, reg_addr, &reg_data);
++    if ((reg_data & mask) == expected_value)
++        return 0;
++
++    return -1;
++}
++
++/* static api to update given value */
++static inline void max_dp_ser_update(struct i2c_client *client,
++                unsigned int reg, u32 mask, u8 val)
++{
++    u8 update_val;
++
++    max_dp_ser_read_reg(client, reg, &update_val);
++    update_val = ((update_val & (~mask)) | (val & mask));
++    max_dp_ser_write_reg(client, reg, update_val);
++}
++
++static void max_poll_gmsl_training_lock(struct work_struct *work)
++{
++    int ret = 0;
++    static int count = 0;
++
++    ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_CTRL3,
++            MAX_DP_SER_CTRL3_LOCK_MASK,
++            MAX_DP_SER_CTRL3_LOCK_VAL);
++    if (ret < 0) {
++        pr_debug("GMSL Lock is not set\n");
++        goto reschedule;
++    }
++
++    if (max_priv->link_a_is_enabled) {
++        ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_LCTRL2_A,
++            MAX_DP_SER_LCTRL2_LOCK_MASK,
++            MAX_DP_SER_LCTRL2_LOCK_VAL);
++        if (ret < 0) {
++            pr_debug("GMSL Lock set failed for Link A\n");
++            goto reschedule;
++        }
++    }
++
++    if (max_priv->link_b_is_enabled) {
++        ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_LCTRL2_B,
++            MAX_DP_SER_LCTRL2_LOCK_MASK,
++            MAX_DP_SER_LCTRL2_LOCK_VAL);
++        if (ret < 0) {
++            pr_debug("GMSL Lock set failed for Link B\n");
++            goto reschedule;
++        }
++    }
++
++    ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_DPRX_TRAIN,
++                MAX_DP_SER_DPRX_TRAIN_STATE_MASK,
++                MAX_DP_SER_DPRX_TRAIN_STATE_VAL);
++    if (ret < 0) {
++        pr_debug("DP Link tranining hasn't completed\n");
++        goto reschedule;
++    }
++
++    ret = max_read_lock(max_priv->priv_client[0], MAX_DP_SER_VID_TX2_PCLK,
++                MAX_DP_SER_VID_TX2_PCLK_STATE_MASK,
++                MAX_DP_SER_VID_TX2_PCLK_STATE_VAL);
++    if (ret < 0) {
++        pr_debug("DP PCLK hasn't completed\n");
++        goto reschedule;
++    }
++
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_X,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_Y,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_Z,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++    max_dp_ser_update(max_priv->priv_client[0], MAX_DP_SER_VID_TX_U,
++               MAX_DP_SER_VID_TX_MASK, 0x1);
++
++    pr_debug("DP ser training lock completed, count = %d\n", count);
++
++    max_dp_deser_setup(max_priv->priv_client[1]);
++    return;
++
++reschedule:
++    if (count < 4) {
++        count++;
++    }
++    else
++    {
++        max_dp_deser_setup(max_priv->priv_client[1]);
++        return;
++    }
++
++    queue_delayed_work(max_priv->wq, &max_priv->delay_work, msecs_to_jiffies(500));
++}
++
++void max_dp_ser_enable(void)
++{
++    max_dp_ser_prepare();
++    max_dp_ser_init(max_priv->priv_client[0]);
++
++    /* Wait ~2ms for powerup to complete */
++    usleep_range(2000, 2200);
++
++    max_dp_ser_setup(max_priv->priv_client[0]);
++
++    queue_delayed_work(max_priv->wq, &max_priv->delay_work, msecs_to_jiffies(500));
++}
++
++static int max_dp_ser_probe(struct i2c_client *client,
++        const struct i2c_device_id *idt)
++{
++    unsigned long type;
++    type = idt->driver_data;
++
++    if (type == MAX96749) {
++        priv_client[0] = client;
++    } else if (type == MAX96774) {
++        priv_client[1] = client;
++        max_priv = devm_kzalloc(&client->dev, sizeof(struct max_dp_ser_priv),
++                       GFP_KERNEL);
++        if (max_priv == NULL)
++            return -ENOMEM;
++
++        max_priv->wq = alloc_workqueue("max_poll_gmsl_training_lock",
++                WQ_HIGHPRI, 0);
++
++        INIT_DELAYED_WORK(&max_priv->delay_work,
++                max_poll_gmsl_training_lock);
++
++        max_dp_ser_enable();
++    } else {
++        pr_debug("fail [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    }
++
++    return 0;
++}
++
++static int max_dp_ser_remove(struct i2c_client *client)
++{
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    return 0;
++}
++
++static const struct i2c_device_id max_dp_ser_i2c_id_table[] = {
++    { "max96749ap", MAX96749 },
++    { "max96774", MAX96774 },
++    { },
++};
++
++struct i2c_driver max_dp_ser_drv = {
++    .probe = max_dp_ser_probe,
++    .remove= max_dp_ser_remove,
++    .driver= {
++    .name = "max96749ap",
++    },
++    .id_table = max_dp_ser_i2c_id_table,
++};
++
++static int max_ser_client_init(void)
++{
++    int i = 0;
++    struct i2c_adapter *i2c_adap;
++
++    i2c_adap = i2c_get_adapter(BUS_DP_NUMBER);
++    if (!i2c_adap) {
++        pr_debug("Cannot find a valid i2c bus for max serdes\n");
++        return -ENOMEM;
++    }
++
++    for(i = 0; i < BUS_DP_NUMBER; i++)
++        max_client[i]=i2c_new_client_device(i2c_adap, &max_dp_i2c_board_info[i]);
++
++    i2c_put_adapter(i2c_adap);
++
++    return 0;
++}
++
++static void max_ser_client_exit(void)
++{
++    int i = 0;
++    for (i = 0; i < BUS_DP_NUMBER; i++)
++        i2c_unregister_device(max_client[i]);
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++static int max_dp_ser_module_init(void)
++{
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    max_ser_client_init();
++    return i2c_add_driver(&max_dp_ser_drv);
++}
++
++static void __exit max_dp_ser_module_exit(void)
++{
++    max_ser_client_exit();
++    i2c_del_driver(&max_dp_ser_drv);
++    pr_debug("[-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++void i915_dp_module_exit(void)
++{
++    max_dp_ser_module_exit();
++}
++
++int __init i915_dp_module_init(void)
++{
++    max_dp_ser_module_init();
++
++    return 0;
++}
++
++MODULE_LICENSE("GPL");
+diff --git a/drivers/gpu/drm/i915/i915_dp_ser_drv.h b/drivers/gpu/drm/i915/i915_dp_ser_drv.h
+new file mode 100755
+index 000000000000..5caddd8d7539
+--- /dev/null
++++ b/drivers/gpu/drm/i915/i915_dp_ser_drv.h
+@@ -0,0 +1,113 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef __I915_DP_SER_DEV_h__
++#define __I915_DP_SER_DEV_h__
++
++#define DEBUG
++
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/i2c.h>
++#include <linux/platform_device.h>
++#include <linux/delay.h>
++#include <linux/workqueue.h>
++
++#define MAX_DP_SER_TX_ADD                  0x60
++#define MAX_DP_SER_RX_ADD                  0x68
++#define MAX_ARRAY_SIZE                     4
++
++#define MAX_DP_SER_CTRL3                   0x13
++#define MAX_DP_SER_CTRL3_LOCK_MASK         (1 << 3)
++#define MAX_DP_SER_CTRL3_LOCK_VAL          (1 << 3)
++
++#define MAX_DP_SER_LCTRL2_A                0x2A
++#define MAX_DP_SER_LCTRL2_B                0x34
++#define MAX_DP_SER_LCTRL2_LOCK_MASK        (1 << 0)
++#define MAX_DP_SER_LCTRL2_LOCK_VAL         0x1
++
++#define MAX_DP_SER_VID_TX_MASK             (1 << 0)
++#define MAX_DP_SER_VID_TX_LINK_MASK        (3 << 1)
++#define MAX_DP_SER_LINK_SEL_SHIFT_VAL      0x1
++
++#define MAX_DP_SER_DPRX_TRAIN              0x641A
++#define MAX_DP_SER_DPRX_TRAIN_STATE_MASK   (0xF << 4)
++#define MAX_DP_SER_DPRX_TRAIN_STATE_VAL    0xF0
++
++#define MAX_DP_SER_VID_TX2_PCLK            0x0102
++#define MAX_DP_SER_VID_TX2_PCLK_STATE_MASK (0x8 << 4)
++#define MAX_DP_SER_VID_TX2_PCLK_STATE_VAL  0x80
++
++#define MAX_DP_SER_VID_TX_X                0x100
++#define MAX_DP_SER_VID_TX_Y                0x110
++#define MAX_DP_SER_VID_TX_Z                0x120
++#define MAX_DP_SER_VID_TX_U                0x130
++
++#define MAX_GMSL_DP_SER_ENABLE_LINK_A      0x0
++#define MAX_GMSL_DP_SER_ENABLE_LINK_B      0x1
++#define MAX_GMSL_DP_SER_ENABLE_LINK_AB     0x2
++
++#define MAX96749                           0
++#define MAX96774                           1
++
++#define NUM_DP_DEVICE                         2
++#define BUS_DP_NUMBER                         1
++
++enum max_dp_ser_current_mode {
++    MAX_MODE_1080P,
++    MAX_MODE_2K,
++    MAX_MODE_4K,
++};
++
++static struct i2c_board_info max_dp_i2c_board_info[] = {
++    {
++        I2C_BOARD_INFO("max96749ap", MAX_DP_SER_TX_ADD),
++    },
++    {
++        I2C_BOARD_INFO("max96774", MAX_DP_SER_RX_ADD),
++    },
++};
++
++struct max_dp_ser_priv {
++    struct gpio_desc *gpiod_pwrdn;
++    u8 dprx_lane_count;
++    u8 dprx_link_rate;
++    struct mutex mutex;
++    int ser_errb;
++    unsigned int ser_irq;
++    bool enable_mst;
++    u8 mst_payload_ids[MAX_ARRAY_SIZE];
++    u8 gmsl_stream_ids[MAX_ARRAY_SIZE];
++    u8 gmsl_link_select[MAX_ARRAY_SIZE];
++    bool link_a_is_enabled;
++    bool link_b_is_enabled;
++    int current_mode;
++    struct i2c_client *priv_client[NUM_DP_DEVICE];
++    struct delayed_work delay_work;
++    struct workqueue_struct *wq;
++};
++
++void i915_dp_module_exit(void);
++int i915_dp_module_init(void);
++
++#endif /* __I915_DP_SER_DRV__ */
+diff --git a/drivers/gpu/drm/i915/i915_module.c b/drivers/gpu/drm/i915/i915_module.c
+index 65acd7bf75d0..1d96f854bcdc 100644
+--- a/drivers/gpu/drm/i915/i915_module.c
++++ b/drivers/gpu/drm/i915/i915_module.c
+@@ -18,6 +18,7 @@
+ #include "i915_selftest.h"
+ #include "i915_vma.h"
+ #include "i915_vma_resource.h"
++#include "i915_dp_ser_drv.h"
+ 
+ static int i915_check_nomodeset(void)
+ {
+@@ -68,6 +69,8 @@ static const struct {
+ 	{ .init = i915_mock_selftests },
+ 	{ .init = i915_pmu_init,
+ 	  .exit = i915_pmu_exit },
++    { .init = i915_dp_module_init,
++      .exit = i915_dp_module_exit },
+ 	{ .init = i915_pci_register_driver,
+ 	  .exit = i915_pci_unregister_driver },
+ 	{ .init = i915_perf_sysctl_register,
+-- 
+2.34.1
+
