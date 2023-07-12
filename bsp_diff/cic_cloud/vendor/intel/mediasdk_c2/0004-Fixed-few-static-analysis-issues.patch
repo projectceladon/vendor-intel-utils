@@ -1,0 +1,135 @@
+From 9e95b60459a6610d6bb90285240f3e0d81eee0ca Mon Sep 17 00:00:00 2001
+From: zhangyichix <yichix.zhang@intel.com>
+Date: Thu, 1 Jun 2023 16:09:35 +0800
+Subject: [PATCH] Fixed few static analysis issues
+
+1. Time of check time of use (TOCTOU)
+2. Uncaught exception
+3. Calling usleep(1000U) is only useful for its return value, which
+   is ignored
+
+Change-Id: I9b536107bfa5658230ebb42846dc0651fba31aa4
+Tracked-On: OAM-110916
+Signed-off-by: zhangyichix <yichix.zhang@intel.com>
+---
+ .../src/mfx_c2_decoder_component.cpp          |  2 +-
+ c2_store/src/mfx_c2_service.cpp               | 23 ++++++------
+ c2_utils/src/mfx_c2_utils.cpp                 | 36 ++++++-------------
+ 3 files changed, 22 insertions(+), 39 deletions(-)
+
+diff --git a/c2_components/src/mfx_c2_decoder_component.cpp b/c2_components/src/mfx_c2_decoder_component.cpp
+index 6b0e995..d9c37ce 100755
+--- a/c2_components/src/mfx_c2_decoder_component.cpp
++++ b/c2_components/src/mfx_c2_decoder_component.cpp
+@@ -1754,7 +1754,7 @@ c2_status_t MfxC2DecoderComponent::AllocateC2Block(uint32_t width, uint32_t heig
+                 c2_status_t sts = m_grallocAllocator->GetBackingStore(hndl.get(), &id);
+                 if (m_allocator && !m_allocator->InCache(id)) {
+                     res = C2_BLOCKING;
+-                    usleep(1000);
++                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                     // If always fetch a nocached block, check if width or height have changed
+                     // compare to when it was initialized.
+                     MFX_DEBUG_TRACE_STREAM("fetchGraphicBlock a nocached block, please retune output blocks. id = " << id);
+diff --git a/c2_store/src/mfx_c2_service.cpp b/c2_store/src/mfx_c2_service.cpp
+index e21e51b..0b5d910 100755
+--- a/c2_store/src/mfx_c2_service.cpp
++++ b/c2_store/src/mfx_c2_service.cpp
+@@ -93,24 +93,23 @@ int main(int /* argc */, char** /* argv */) {
+     // ALOGD("hardware.intel.media.c2@1.0-service starting...");
+ 
+     signal(SIGPIPE, SIG_IGN);
+-    try
+-    {
++
++    try {
+         android::SetUpMinijail(kBaseSeccompPolicyPath, kExtSeccompPolicyPath);
++    
+         // vndbinder is needed by BufferQueue.
+         android::ProcessState::initWithDriver("/dev/vndbinder");
+         android::ProcessState::self()->startThreadPool();
+-    }
+-    catch(const std::exception& e)
+-    {
+-        // ALOGE("SetUpMinijail function execution error");
+-    }
+ 
++        // Extra threads may be needed to handle a stacked IPC sequence that
++        // contains alternating binder and hwbinder calls. (See b/35283480.)
++        android::hardware::configureRpcThreadpool(8, true /* callerWillJoin */);
+ 
+-    // Extra threads may be needed to handle a stacked IPC sequence that
+-    // contains alternating binder and hwbinder calls. (See b/35283480.)
+-    android::hardware::configureRpcThreadpool(8, true /* callerWillJoin */);
+-
+-    RegisterC2Service();
++        RegisterC2Service();
++    } catch(const std::exception& ex) {
++        // ALOGE("hardware.intel.media.c2@1.0-service exception: %s", ex.what());
++        return 0;
++    }
+ 
+     android::hardware::joinRpcThreadpool();
+     return 0;
+diff --git a/c2_utils/src/mfx_c2_utils.cpp b/c2_utils/src/mfx_c2_utils.cpp
+index 1b58a82..7969297 100755
+--- a/c2_utils/src/mfx_c2_utils.cpp
++++ b/c2_utils/src/mfx_c2_utils.cpp
+@@ -630,22 +630,14 @@ BinaryWriter::BinaryWriter(const std::string& dir,
+     for(const std::string& sub_dir : sub_dirs) {
+         full_name << sub_dir;
+ 
+-        bool dir_exists = false;
++        int ret = mkdir(full_name.str().c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+ 
+-        struct stat info;
+-
+-        if (stat(full_name.str().c_str(), &info) == 0) {
+-            dir_exists = (info.st_mode & S_IFDIR) != 0;
+-        }
+-
+-        if (!dir_exists) {
+-            MFX_DEBUG_TRACE_STREAM(NAMED(full_name.str()));
+-            if(mkdir(full_name.str().c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH)) {
+-                MFX_DEBUG_TRACE_MSG("cannot create the path");
+-                return;
+-            }
++        if (ret != 0 && errno != EEXIST) {
++            MFX_DEBUG_TRACE_MSG("cannot create the path");
++            return;
+         }
+ 
++        MFX_DEBUG_TRACE_STREAM(NAMED(full_name.str()));
+         full_name << "/";
+     }
+ 
+@@ -666,22 +658,14 @@ YUVWriter::YUVWriter(const std::string& dir,
+     for(const std::string& sub_dir : sub_dirs) {
+         full_name << sub_dir;
+ 
+-        bool dir_exists = false;
++        int ret = mkdir(full_name.str().c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+ 
+-        struct stat info;
+-
+-        if (stat(full_name.str().c_str(), &info) == 0) {
+-            dir_exists = (info.st_mode & S_IFDIR) != 0;
+-        }
+-
+-        if (!dir_exists) {
+-            MFX_DEBUG_TRACE_STREAM(NAMED(full_name.str()));
+-            if(mkdir(full_name.str().c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH)) {
+-                MFX_DEBUG_TRACE_MSG("cannot create the path");
+-                return;
+-            }
++        if (ret != 0 && errno != EEXIST) {
++            MFX_DEBUG_TRACE_MSG("cannot create the path");
++            return;
+         }
+ 
++        MFX_DEBUG_TRACE_STREAM(NAMED(full_name.str()));
+         full_name << "/";
+     }
+ 
+-- 
+2.39.2
+
