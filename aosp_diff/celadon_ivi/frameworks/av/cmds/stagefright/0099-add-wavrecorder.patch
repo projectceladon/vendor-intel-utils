@@ -1,0 +1,513 @@
+From 997d6c01ffe5fcb26ca05f5063743b9050464bff Mon Sep 17 00:00:00 2001
+From: "Martin, Chen" <haochuan.z.chen@intel.com>
+Date: Sun, 9 Jul 2023 13:37:38 -0400
+Subject: [PATCH] add wavrecorder and pcm2wav
+
+---
+ cmds/stagefright/Android.mk      |  54 ++++++++
+ cmds/stagefright/WavRecorder.cpp | 219 +++++++++++++++++++++++++++++++
+ cmds/stagefright/WaveWriter.h    |   9 +-
+ cmds/stagefright/pcm2wav.cpp     | 172 ++++++++++++++++++++++++
+ 4 files changed, 450 insertions(+), 4 deletions(-)
+ create mode 100644 cmds/stagefright/WavRecorder.cpp
+ create mode 100644 cmds/stagefright/pcm2wav.cpp
+
+diff --git a/cmds/stagefright/Android.mk b/cmds/stagefright/Android.mk
+index 803c4a477a..5c204b0280 100644
+--- a/cmds/stagefright/Android.mk
++++ b/cmds/stagefright/Android.mk
+@@ -274,3 +274,57 @@ LOCAL_LICENSE_CONDITIONS:= notice
+ LOCAL_NOTICE_FILE:= $(LOCAL_PATH)/NOTICE
+ 
+ include $(BUILD_EXECUTABLE)
++#################################################################################
++
++include $(CLEAR_VARS)
++
++LOCAL_SRC_FILES:=               \
++        WavRecorder.cpp          \
++
++LOCAL_HEADER_LIBRARIES := \
++        libmediametrics_headers \
++
++LOCAL_SHARED_LIBRARIES := \
++        libstagefright liblog libutils libbinder libstagefright_foundation \
++        libcutils libc libaudioclient
++
++LOCAL_C_INCLUDES:= \
++        frameworks/av/media/libstagefright
++
++LOCAL_CFLAGS += -Wno-multichar -Werror -Wall
++
++LOCAL_MODULE_TAGS := optional
++
++LOCAL_MODULE:= wavrecorder
++LOCAL_LICENSE_KINDS:= SPDX-license-identifier-Apache-2.0
++LOCAL_LICENSE_CONDITIONS:= notice
++LOCAL_NOTICE_FILE:= $(LOCAL_PATH)/NOTICE
++
++include $(BUILD_EXECUTABLE)
++#################################################################################
++
++include $(CLEAR_VARS)
++
++LOCAL_SRC_FILES:=               \
++        pcm2wav.cpp             \
++
++LOCAL_HEADER_LIBRARIES := \
++        libmediametrics_headers \
++
++LOCAL_SHARED_LIBRARIES := \
++        libstagefright liblog libutils libbinder libstagefright_foundation \
++        libcutils libc libaudioclient
++
++LOCAL_C_INCLUDES:= \
++        frameworks/av/media/libstagefright
++
++LOCAL_CFLAGS += -Wno-multichar -Werror -Wall
++
++LOCAL_MODULE_TAGS := optional
++
++LOCAL_MODULE:= pcm2wav
++LOCAL_LICENSE_KINDS:= SPDX-license-identifier-Apache-2.0
++LOCAL_LICENSE_CONDITIONS:= notice
++LOCAL_NOTICE_FILE:= $(LOCAL_PATH)/NOTICE
++
++include $(BUILD_EXECUTABLE)
+diff --git a/cmds/stagefright/WavRecorder.cpp b/cmds/stagefright/WavRecorder.cpp
+new file mode 100644
+index 0000000000..7ab3b5ab9a
+--- /dev/null
++++ b/cmds/stagefright/WavRecorder.cpp
+@@ -0,0 +1,219 @@
++/*
++ * Copyright (C) 2014 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#define LOG_NDEBUG 0
++#define LOG_TAG "WavRecoder"
++#include <utils/Log.h>
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++
++#include <utils/threads.h>
++#include <utils/String16.h>
++
++#include <android/content/AttributionSourceState.h>
++#include <binder/ProcessState.h>
++#include <media/AudioRecord.h>
++#include <media/stagefright/MediaDefs.h>
++#include "WaveWriter.h"
++#include <fcntl.h>
++
++#define WAV
++
++using namespace android;
++
++using content::AttributionSourceState;
++
++static void usage(const char* name)
++{
++    fprintf(stderr, "Usage: %s [-d du.ration] [<output-file>]\n", name);
++    fprintf(stderr, "    -d               duration in seconds, default 5 seconds\n");
++    fprintf(stderr, "    -c [1,2,8,12]    channels, default 2 channels\n");
++    fprintf(stderr, "    -s [48000,44100] sample rate, default 48000\n");
++    fprintf(stderr, "    -f [16,24,24_8,32]    format, default 16 bit\n");
++    fprintf(stderr, "    <output-file>    output file for WAV file\n");
++}
++
++int main(int argc, char* argv[])
++{
++    unsigned duration = 5;
++    unsigned channels = 1;
++    unsigned sampleRate = 48000;
++    audio_format_t audioFormat = AUDIO_FORMAT_PCM_16_BIT;
++    const char* fileOut = NULL;
++
++    int c;
++    while ((c = getopt(argc, argv, "d:c:s:f:")) != -1) {
++        switch (c) {
++        case 'd':
++            duration = atoi(optarg);
++            break;
++	case 'c':
++	    channels = atoi(optarg);
++	    break;
++	case 's':
++	    sampleRate = atoi(optarg);
++	    break;
++	case 'f':
++            if (!strncmp(optarg, "16", 2)) {
++               audioFormat = AUDIO_FORMAT_PCM_16_BIT;
++            } else if (!strncmp(optarg, "24", 2)) {
++               audioFormat = AUDIO_FORMAT_PCM_24_BIT_PACKED;
++            } else if (!strncmp(optarg, "24_8", 4)) {
++               audioFormat = AUDIO_FORMAT_PCM_8_24_BIT;
++            } else if (!strncmp(optarg, "32", 2)) {
++               audioFormat = AUDIO_FORMAT_PCM_32_BIT;
++            }
++	    break;
++        default:
++            usage(argv[0]);
++            return -1;
++        }
++    }
++    argc -= optind;
++    argv += optind;
++    if (argc == 1) {
++        fileOut = argv[0];
++    } else {
++        fprintf(stderr, "No filename\n");
++	return -1;
++    }
++
++    android::ProcessState::self()->startThreadPool();
++
++    // 20ms for every time read
++    size_t frameCount = (20 * sampleRate) / 1000;
++
++#ifdef WAV
++    WaveWriter* writer = new WaveWriter(fileOut, channels, sampleRate, audioFormat);
++    if (writer == NULL) {
++        fprintf(stderr, "Fail to new wav writer\n");
++        return -1;
++    }
++#else
++    FILE *output = NULL;
++
++    output = fopen(fileOut, "a");
++#endif
++
++    void* buffer = NULL;
++    int bufferSize = 0;
++
++    bufferSize = channels * audio_bytes_per_sample(audioFormat) * frameCount;
++    buffer  = malloc(bufferSize);
++    if (!buffer) {
++	fprintf(stderr, "failed to allocate inBuffer\n");
++
++        return -1;
++    }
++    memset(buffer, 0, bufferSize);
++
++    audio_attributes_t attr = AUDIO_ATTRIBUTES_INITIALIZER;
++    attr.source = AUDIO_SOURCE_HOTWORD;
++    attr.flags = AUDIO_FLAG_MUTE_HAPTIC;
++
++    audio_channel_mask_t channelMask = AUDIO_CHANNEL_NONE;
++    switch (channels) {
++    case 1:
++        channelMask = AUDIO_CHANNEL_IN_MONO;
++        break;
++    case 2:
++        channelMask = AUDIO_CHANNEL_IN_STEREO;
++        break;
++    case 4:
++        channelMask = AUDIO_CHANNEL_IN_2POINT0POINT2;
++        break;
++    case 6:
++        channelMask = AUDIO_CHANNEL_IN_5POINT1;
++        break;
++    default:
++        break;
++    }
++
++    sp<AudioRecord> pAudioRecord = new AudioRecord(
++        AUDIO_SOURCE_HOTWORD, sampleRate, audioFormat,
++        channelMask, AttributionSourceState(), frameCount,
++        NULL, NULL, frameCount /*notificationFrames*/,
++        AUDIO_SESSION_ALLOCATE,
++        AudioRecord::TRANSFER_DEFAULT,
++        AUDIO_INPUT_FLAG_NONE,
++        NULL,
++        AUDIO_PORT_HANDLE_NONE,
++        MIC_DIRECTION_UNSPECIFIED,
++        MIC_FIELD_DIMENSION_DEFAULT);
++    if (pAudioRecord == NULL) {
++        free(buffer);
++#ifdef WAV
++        delete writer;
++#else
++        fclose(output);
++#endif
++
++        fprintf(stderr, "Fail to create AudioRecord!\n");
++        return -1;
++    }
++
++    if (pAudioRecord->initCheck() != NO_ERROR) {
++	free(buffer);
++#ifdef WAV
++        delete writer;
++#else
++        fclose(output);
++#endif
++
++        fprintf(stderr, "pAudioRecord->initCheck() failed\n");
++        return -1;
++    }
++
++    if (pAudioRecord->start() != NO_ERROR) {
++        free(buffer);
++#ifdef WAV
++        delete writer;
++#else
++	fclose(output);
++#endif
++
++        fprintf(stderr, "pAudioRecord->start() failed\n");
++        return -1;
++    }
++
++    ssize_t size = 0;
++    uint32_t cnt = duration * 1000 / 20;
++    for (uint32_t i = 0; i < cnt; i++) {
++        size = pAudioRecord->read(buffer, bufferSize);
++
++        if (size > 0) {
++#ifdef WAV
++            writer->Append(buffer, size);
++#else
++	    fwrite(buffer, 1, size, output);
++#endif
++        }
++	memset(buffer, 0, bufferSize);
++    }
++
++    pAudioRecord->stop();
++#ifdef WAV
++    delete writer;
++#else
++    fclose(output);
++#endif
++    free(buffer);
++
++
++    return 0;
++}
+diff --git a/cmds/stagefright/WaveWriter.h b/cmds/stagefright/WaveWriter.h
+index a0eb66e2b9..def0b79e06 100644
+--- a/cmds/stagefright/WaveWriter.h
++++ b/cmds/stagefright/WaveWriter.h
+@@ -17,21 +17,22 @@
+ #ifndef ANDROID_WAVEWRITER_H_
+ 
+ #define ANDROID_WAVEWRITER_H_
++#include <system/audio.h>
+ 
+ namespace android {
+ 
+ class WaveWriter {
+ public:
+     WaveWriter(const char *filename,
+-               uint16_t num_channels, uint32_t sampling_rate)
++               uint16_t num_channels, uint32_t sampling_rate, audio_format_t format = AUDIO_FORMAT_PCM_16_BIT)
+         : mFile(fopen(filename, "wb")),
+           mTotalBytes(0) {
+         fwrite("RIFFxxxxWAVEfmt \x10\x00\x00\x00\x01\x00", 1, 22, mFile); 
+         write_u16(num_channels);
+         write_u32(sampling_rate);
+-        write_u32(sampling_rate * num_channels * 2);
+-        write_u16(num_channels * 2);
+-        write_u16(16);
++        write_u32(sampling_rate * num_channels * audio_bytes_per_sample(format));
++        write_u16(num_channels * audio_bytes_per_sample(format));
++        write_u16(8 * audio_bytes_per_sample(format));
+         fwrite("dataxxxx", 1, 8, mFile);
+     }
+ 
+diff --git a/cmds/stagefright/pcm2wav.cpp b/cmds/stagefright/pcm2wav.cpp
+new file mode 100644
+index 0000000000..0a656d1593
+--- /dev/null
++++ b/cmds/stagefright/pcm2wav.cpp
+@@ -0,0 +1,172 @@
++/*
++ * Copyright (C) 2014 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#define LOG_NDEBUG 0
++#define LOG_TAG "WavRecoder"
++#include <utils/Log.h>
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++
++//#include <utils/threads.h>
++#include <utils/String16.h>
++
++//#include <android/content/AttributionSourceState.h>
++//#include <binder/ProcessState.h>
++//#include <media/AudioRecord.h>
++#include <media/stagefright/MediaDefs.h>
++#include "WaveWriter.h"
++
++#define BUF_SIZE 1024
++
++using namespace android;
++
++static void usage(const char* name)
++{
++    fprintf(stderr, "Usage: %s [input-file] [output-file]\n", name);
++    fprintf(stderr, "    -c [2,6,8,12]    channels, default 2 channels\n");
++    fprintf(stderr, "    -s [48000] sample rate, default 48000\n");
++    fprintf(stderr, "    -f [24_8]    format, default 16 bit\n");
++    fprintf(stderr, "    <input-file>     input pcm raw file\n");
++    fprintf(stderr, "    <output-file>    output file for WAV file\n");
++}
++
++int main(int argc, char* argv[])
++{
++    unsigned channels = 1;
++    unsigned sampleRate = 48000;
++    audio_format_t audioFormat = AUDIO_FORMAT_PCM_16_BIT;
++    const char *fileIn, *fileOut = NULL;
++
++    int c;
++    while ((c = getopt(argc, argv, "c:s:f:")) != -1) {
++        switch (c) {
++	case 'c':
++	    channels = atoi(optarg);
++	    break;
++	case 's':
++	    sampleRate = atoi(optarg);
++	    break;
++	case 'f':
++            if (!strncmp(optarg, "16", 2)) {
++               audioFormat = AUDIO_FORMAT_PCM_16_BIT;
++            } else if (!strncmp(optarg, "24_8", 4)) {
++	       audioFormat = AUDIO_FORMAT_PCM_8_24_BIT;
++	    } else if (!strncmp(optarg, "24", 2)) {
++               audioFormat = AUDIO_FORMAT_PCM_24_BIT_PACKED;
++            } else if (!strncmp(optarg, "32", 2)) {
++               audioFormat = AUDIO_FORMAT_PCM_32_BIT;
++            }
++	    break;
++        default:
++            usage(argv[0]);
++            return -1;
++        }
++    }
++    argc -= optind;
++    argv += optind;
++    if (argc == 2) {
++	fileIn = argv[0];
++        fileOut = argv[1];
++    } else {
++        fprintf(stderr, "No input or output file name\n");
++	return -1;
++    }
++
++    if (channels != 2 && channels != 6 && channels != 8 && channels != 12) {
++        fprintf(stderr, "Wrong channel number\n");
++        return -1;
++    }
++
++    WaveWriter* writer = new WaveWriter(fileOut, channels, sampleRate, audioFormat);
++    if (writer == NULL) {
++        fprintf(stderr, "Fail to new wav writer\n");
++        return -1;
++    }
++
++    FILE *file = NULL;
++    file = fopen(fileIn, "r");
++
++    /* fix input with 2ch, 16bit, 48K, 20ms  */
++    size_t frameCount = (20 * sampleRate) / 1000;
++    int input_size = 2 * 2 * frameCount;
++
++    void* inputBuffer  = malloc(input_size);
++    if (!inputBuffer) {
++	fprintf(stderr, "failed to allocate inBuffer\n");
++
++        return -1;
++    }
++    memset(inputBuffer, 0, input_size);
++
++    int output_size = channels * audio_bytes_per_sample(audioFormat) * frameCount;
++    void* outputBuffer  = malloc(output_size);
++    if (!outputBuffer) {
++        fprintf(stderr, "failed to allocate outBuffer\n");
++
++        return -1;
++    }
++    memset(outputBuffer, 0, output_size);
++
++    int8_t *input =NULL, *output = NULL;
++    ssize_t size = 0;
++    while (1) {
++        size = fread(inputBuffer, 1, input_size, file);
++
++        if (size > 0 && size <= input_size) {
++
++            int count = size / 4;
++            input = (int8_t *)inputBuffer; 
++            output = (int8_t *)outputBuffer;
++
++            for (int i = 0; i < count; ++i) {
++
++                if (AUDIO_FORMAT_PCM_8_24_BIT == audioFormat) {
++                    for (int32_t j = 0; j < (channels / 2); j++) {
++                        *(output)     = 0;
++                        *(output + 1) = 0;
++                        *(output + 2) = *(input);
++                        *(output + 3) = *(input + 1);
++
++                        *(output + 4) = 0;
++                        *(output + 5) = 0;
++                        *(output + 6) = *(input + 2);
++                        *(output + 7) = *(input + 3);
++		    }
++
++                    input += 4;
++		    output += channels * audio_bytes_per_sample(audioFormat); 
++		}
++	    }
++            
++            writer->Append(outputBuffer, size / 4 * channels * audio_bytes_per_sample(audioFormat));
++
++	    memset(inputBuffer, 0, input_size);
++	    memset(outputBuffer, 0, output_size);
++        } else {
++            fprintf(stderr, "EOF\n");
++            break;
++	}
++    }
++
++    delete writer;
++    fclose(file);
++    free(inputBuffer);
++    free(outputBuffer);
++
++    return 0;
++}
+-- 
+2.17.1
+
