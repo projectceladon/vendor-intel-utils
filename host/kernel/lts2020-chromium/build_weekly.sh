@@ -4,7 +4,7 @@ rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
 
-tag="lts-v5.10.118-20230329-r9"
+tag="lts-v5.10.118-20230719-r13"
 git clone -b $tag https://github.com/projectceladon/linux-intel-lts2020-chromium.git
 cd linux-intel-lts2020-chromium
 
@@ -14,7 +14,7 @@ for i in $patch_list
 do
   a=`grep "Date: " $i`
   b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD | grep "$b"`
+  c=`git log --pretty=format:%aD -1000 | grep "$b"`
   if [[ "$c" == "" ]] ; then
     git am -3 --keep-cr --whitespace=nowarn $i >& /dev/null
     if [[ $? == 0 ]]; then
@@ -28,6 +28,7 @@ do
     echo -e "\tAlready applied\t\t"`basename $i`
   fi
 done
+
 make ARCH=x86_64 clean
 make ARCH=x86_64 olddefconfig
 make ARCH=x86_64 -j64 LOCALVERSION=-cvhb bindeb-pkg
