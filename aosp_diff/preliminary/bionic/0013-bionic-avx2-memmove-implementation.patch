@@ -1,0 +1,644 @@
+From a3c79771059b6a1eb40d595643287b2dcef2e002 Mon Sep 17 00:00:00 2001
+From: Kaushlendra Kumar <kaushlendra.kumar@intel.com>
+Date: Fri, 14 Jul 2023 17:41:44 +0530
+Subject: [PATCH] bionic: avx2 memmove implementation
+
+Improves AnTuTu v9 "RAM Bandwidth" subtest by 5%
+
+Tracked-On: OAM-111286
+Signed-off-by: ahs <amrita.h.s@intel.com>
+Signed-off-by: Kaushlendra Kumar <kaushlendra.kumar@intel.com>
+---
+ libc/Android.bp                               |   1 +
+ .../arch-x86_64/dynamic_function_dispatch.cpp |   2 +
+ .../kabylake/string/avx2-memmove-kbl.S        | 593 ++++++++++++++++++
+ 3 files changed, 596 insertions(+)
+ create mode 100644 libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index e4f40b323..e53ed5f65 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -1037,6 +1037,7 @@ cc_library_static {
+                 "arch-x86_64/kabylake/string/avx2-wcsnlen-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-wcschr-kbl.S",
+                 "arch-x86_64/kabylake/string/avx2-wcsrchr-kbl.S",
++                "arch-x86_64/kabylake/string/avx2-memmove-kbl.S",
+             
+                 "arch-x86_64/bionic/__bionic_clone.S",
+                 "arch-x86_64/bionic/_exit_with_stack_teardown.S",
+diff --git a/libc/arch-x86_64/dynamic_function_dispatch.cpp b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+index 1c7cf1a5a..b3d0b6fb6 100644
+--- a/libc/arch-x86_64/dynamic_function_dispatch.cpp
++++ b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+@@ -48,6 +48,8 @@ DEFINE_IFUNC_FOR(memset) {
+ 
+ typedef void* memmove_func(void* __dst, const void* __src, size_t __n);
+ DEFINE_IFUNC_FOR(memmove) {
++    __builtin_cpu_init();
++    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memmove_func, memmove_avx2);
+     RETURN_FUNC(memmove_func, memmove_generic);
+ }
+ 
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
+new file mode 100644
+index 000000000..02e9ec1d2
+--- /dev/null
++++ b/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
+@@ -0,0 +1,593 @@
++/*
++Copyright (c) 2014, Intel Corporation
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++    * Redistributions of source code must retain the above copyright notice,
++    * this list of conditions and the following disclaimer.
++
++    * Redistributions in binary form must reproduce the above copyright notice,
++    * this list of conditions and the following disclaimer in the documentation
++    * and/or other materials provided with the distribution.
++
++    * Neither the name of Intel Corporation nor the names of its contributors
++    * may be used to endorse or promote products derived from this software
++    * without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
++ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
++ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
++ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
++SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++*/
++
++#include "cache.h"
++
++#ifndef MEMMOVE
++# define MEMMOVE		memmove_avx2
++#endif
++
++#ifndef L
++# define L(label)	.L##label
++#endif
++
++#ifndef cfi_startproc
++# define cfi_startproc	.cfi_startproc
++#endif
++
++#ifndef cfi_endproc
++# define cfi_endproc	.cfi_endproc
++#endif
++
++#ifndef cfi_rel_offset
++# define cfi_rel_offset(reg, off)	.cfi_rel_offset reg, off
++#endif
++
++#ifndef cfi_restore
++# define cfi_restore(reg)	.cfi_restore reg
++#endif
++
++#ifndef cfi_adjust_cfa_offset
++# define cfi_adjust_cfa_offset(off)	.cfi_adjust_cfa_offset off
++#endif
++
++#ifndef ENTRY
++# define ENTRY(name)		\
++	.type name,  @function;		\
++	.globl name;		\
++	.p2align 4;		\
++name:		\
++	cfi_startproc
++#endif
++
++#ifndef ALIAS_SYMBOL
++# define ALIAS_SYMBOL(alias, original) \
++	.globl alias; \
++	.equ alias, original
++#endif
++
++#ifndef END
++# define END(name)		\
++	cfi_endproc;		\
++	.size name, .-name
++#endif
++
++#define CFI_PUSH(REG)		\
++	cfi_adjust_cfa_offset (4);		\
++	cfi_rel_offset (REG, 0)
++
++#define CFI_POP(REG)		\
++	cfi_adjust_cfa_offset (-4);		\
++	cfi_restore (REG)
++
++#define PUSH(REG)	push REG;
++#define POP(REG)	pop REG;
++
++#define ENTRANCE	PUSH (%rbx);
++#define RETURN_END	POP (%rbx); ret
++#define RETURN		RETURN_END;
++
++	.section .text.avx2,"ax",@progbits
++ENTRY (MEMMOVE)
++	ENTRANCE
++	mov	%rdi, %rax
++
++/* Check whether we should copy backward or forward.  */
++	cmp	%rsi, %rdi
++	je	L(mm_return)
++	jg	L(mm_len_0_or_more_backward)
++
++/* Now do checks for lengths. We do [0..16], [0..32], [0..64], [0..128]
++	separately.  */
++	cmp	$16, %rdx
++	jbe	L(mm_len_0_16_bytes_forward)
++
++	cmp	$32, %rdx
++	ja	L(mm_len_32_or_more_forward)
++
++/* Copy [0..32] and return.  */
++	movdqu	(%rsi), %xmm0
++	movdqu	-16(%rsi, %rdx), %xmm1
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, -16(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_len_32_or_more_forward):
++	cmp	$64, %rdx
++	ja	L(mm_len_64_or_more_forward)
++
++/* Copy [0..64] and return.  */
++        movdqu	(%rsi), %xmm0
++	movdqu	16(%rsi), %xmm1
++	movdqu	-16(%rsi, %rdx), %xmm2
++	movdqu	-32(%rsi, %rdx), %xmm3
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, 16(%rdi)
++	movdqu	%xmm2, -16(%rdi, %rdx)
++	movdqu	%xmm3, -32(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_len_64_or_more_forward):
++	cmp	$128, %rdx
++	ja	L(mm_len_128_or_more_forward)
++
++/* Copy [0..128] and return.  */
++        movdqu	(%rsi), %xmm0
++	movdqu	16(%rsi), %xmm1
++	movdqu	32(%rsi), %xmm2
++	movdqu	48(%rsi), %xmm3
++	movdqu	-64(%rsi, %rdx), %xmm4
++	movdqu	-48(%rsi, %rdx), %xmm5
++	movdqu	-32(%rsi, %rdx), %xmm6
++	movdqu	-16(%rsi, %rdx), %xmm7
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, 16(%rdi)
++	movdqu	%xmm2, 32(%rdi)
++	movdqu	%xmm3, 48(%rdi)
++	movdqu	%xmm4, -64(%rdi, %rdx)
++	movdqu	%xmm5, -48(%rdi, %rdx)
++	movdqu	%xmm6, -32(%rdi, %rdx)
++	movdqu	%xmm7, -16(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_len_128_or_more_forward):
++        cmp     $256, %rdx
++        ja      L(mm_len_256_or_more_forward)
++
++/* Copy [0..256] and return.  */
++	movdqu	(%rsi), %xmm0
++	movdqu	16(%rsi), %xmm1
++	movdqu	32(%rsi), %xmm2
++	movdqu	48(%rsi), %xmm3
++	movdqu	64(%rsi), %xmm4
++	movdqu	80(%rsi), %xmm5
++	movdqu	96(%rsi), %xmm6
++	movdqu	112(%rsi), %xmm7
++	movdqu	-128(%rsi, %rdx), %xmm8
++	movdqu	-112(%rsi, %rdx), %xmm9
++	movdqu	-96(%rsi, %rdx), %xmm10
++	movdqu	-80(%rsi, %rdx), %xmm11
++	movdqu	-64(%rsi, %rdx), %xmm12
++	movdqu	-48(%rsi, %rdx), %xmm13
++	movdqu	-32(%rsi, %rdx), %xmm14
++	movdqu	-16(%rsi, %rdx), %xmm15
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, 16(%rdi)
++	movdqu	%xmm2, 32(%rdi)
++	movdqu	%xmm3, 48(%rdi)
++	movdqu	%xmm4, 64(%rdi)
++	movdqu	%xmm5, 80(%rdi)
++	movdqu	%xmm6, 96(%rdi)
++	movdqu	%xmm7, 112(%rdi)
++	movdqu	%xmm8, -128(%rdi, %rdx)
++	movdqu	%xmm9, -112(%rdi, %rdx)
++	movdqu	%xmm10, -96(%rdi, %rdx)
++	movdqu	%xmm11, -80(%rdi, %rdx)
++	movdqu	%xmm12, -64(%rdi, %rdx)
++	movdqu	%xmm13, -48(%rdi, %rdx)
++	movdqu	%xmm14, -32(%rdi, %rdx)
++	movdqu	%xmm15, -16(%rdi, %rdx)
++        jmp     L(mm_return)
++
++L(mm_len_256_or_more_forward):
++/* Aligning the address of destination.  */
++/*  save first unaligned 128 bytes */
++        vmovdqu (%rsi), %ymm0
++        vmovdqu 32(%rsi), %ymm1
++        vmovdqu 64(%rsi), %ymm2
++        vmovdqu 96(%rsi), %ymm3
++
++        lea     128(%rdi), %r8
++        and     $-128, %r8  /* r8 now aligned to next 128 byte boundary */
++        sub     %rdi, %rsi /* rsi = src - dst = diff */
++
++        vmovdqu (%r8, %rsi), %ymm4
++        vmovdqu 32(%r8, %rsi), %ymm5
++        vmovdqu 64(%r8, %rsi), %ymm6
++        vmovdqu 96(%r8, %rsi), %ymm7
++
++        vmovdqu %ymm0, (%rdi)
++        vmovdqu %ymm1, 32(%rdi)
++        vmovdqu %ymm2, 64(%rdi)
++        vmovdqu %ymm3, 96(%rdi)
++        vmovdqa %ymm4, (%r8)
++        vmovaps %ymm5, 32(%r8)
++        vmovaps %ymm6, 64(%r8)
++        vmovaps %ymm7, 96(%r8)
++        add     $128, %r8
++
++        lea     (%rdi, %rdx), %rbx
++        and     $-128, %rbx
++        cmp     %r8, %rbx
++        jbe     L(mm_copy_remaining_forward)
++
++        cmp     $SHARED_CACHE_SIZE_HALF, %rdx
++        jae     L(mm_large_page_loop_forward)
++
++        .p2align 4
++L(mm_main_loop_forward):
++        prefetcht0 128(%r8, %rsi)
++        vmovdqu (%r8, %rsi), %ymm0
++        vmovdqu 32(%r8, %rsi), %ymm1
++        vmovdqa %ymm0, (%r8)
++        vmovaps %ymm1, 32(%r8)
++        lea     64(%r8), %r8
++        cmp     %r8, %rbx
++        ja      L(mm_main_loop_forward)
++
++L(mm_copy_remaining_forward):
++	add	%rdi, %rdx
++	sub	%r8, %rdx
++/* We copied all up till %rdi position in the dst.
++	In %rdx now is how many bytes are left to copy.
++	Now we need to advance %r8. */
++	lea	(%r8, %rsi), %r9
++
++L(mm_remaining_0_128_bytes_forward):
++        cmp     $64, %rdx
++        ja      L(mm_remaining_65_128_bytes_forward)
++	cmp	$32, %rdx
++	ja	L(mm_remaining_33_64_bytes_forward)
++        vzeroupper
++	cmp	$16, %rdx
++	ja	L(mm_remaining_17_32_bytes_forward)
++	test	%rdx, %rdx
++	.p2align 4,,2
++	je	L(mm_return)
++
++	cmpb	$8, %dl
++	ja	L(mm_remaining_9_16_bytes_forward)
++	cmpb	$4, %dl
++	.p2align 4,,5
++	ja	L(mm_remaining_5_8_bytes_forward)
++	cmpb	$2, %dl
++	.p2align 4,,1
++	ja	L(mm_remaining_3_4_bytes_forward)
++	movzbl	-1(%r9,%rdx), %esi
++	movzbl	(%r9), %ebx
++	movb	%sil, -1(%r8,%rdx)
++	movb	%bl, (%r8)
++	jmp	L(mm_return)
++
++L(mm_remaining_65_128_bytes_forward):
++        vmovdqu (%r9), %ymm0
++        vmovdqu 32(%r9), %ymm1
++        vmovdqu -64(%r9, %rdx), %ymm2
++        vmovdqu -32(%r9, %rdx), %ymm3
++        vmovdqu %ymm0, (%r8)
++        vmovdqu %ymm1, 32(%r8)
++        vmovdqu %ymm2, -64(%r8, %rdx)
++        vmovdqu %ymm3, -32(%r8, %rdx)
++        jmp L(mm_return)
++
++L(mm_remaining_33_64_bytes_forward):
++        vmovdqu (%r9), %ymm0
++        vmovdqu -32(%r9, %rdx), %ymm1
++        vmovdqu %ymm0, (%r8)
++        vmovdqu %ymm1, -32(%r8, %rdx)
++	jmp	L(mm_return)
++
++L(mm_remaining_17_32_bytes_forward):
++	movdqu	(%r9), %xmm0
++	movdqu	-16(%r9, %rdx), %xmm1
++	movdqu	%xmm0, (%r8)
++	movdqu	%xmm1, -16(%r8, %rdx)
++	jmp	L(mm_return)
++
++L(mm_remaining_5_8_bytes_forward):
++	movl	(%r9), %esi
++	movl	-4(%r9,%rdx), %ebx
++	movl	%esi, (%r8)
++	movl	%ebx, -4(%r8,%rdx)
++	jmp	L(mm_return)
++
++L(mm_remaining_9_16_bytes_forward):
++	mov	(%r9), %rsi
++	mov	-8(%r9, %rdx), %rbx
++	mov	%rsi, (%r8)
++	mov	%rbx, -8(%r8, %rdx)
++	jmp	L(mm_return)
++
++L(mm_remaining_3_4_bytes_forward):
++	movzwl	-2(%r9,%rdx), %esi
++	movzwl	(%r9), %ebx
++	movw	%si, -2(%r8,%rdx)
++	movw	%bx, (%r8)
++	jmp	L(mm_return)
++
++L(mm_len_0_16_bytes_forward):
++	testb	$24, %dl
++	jne	L(mm_len_9_16_bytes_forward)
++	testb	$4, %dl
++	.p2align 4,,5
++	jne	L(mm_len_5_8_bytes_forward)
++	test	%rdx, %rdx
++	.p2align 4,,2
++	je	L(mm_return)
++	testb	$2, %dl
++	.p2align 4,,1
++	jne	L(mm_len_2_4_bytes_forward)
++	movzbl	-1(%rsi,%rdx), %ebx
++	movzbl	(%rsi), %esi
++	movb	%bl, -1(%rdi,%rdx)
++	movb	%sil, (%rdi)
++	jmp	L(mm_return)
++
++L(mm_len_2_4_bytes_forward):
++	movzwl	-2(%rsi,%rdx), %ebx
++	movzwl	(%rsi), %esi
++	movw	%bx, -2(%rdi,%rdx)
++	movw	%si, (%rdi)
++	jmp	L(mm_return)
++
++L(mm_len_5_8_bytes_forward):
++	movl	(%rsi), %ebx
++	movl	-4(%rsi,%rdx), %esi
++	movl	%ebx, (%rdi)
++	movl	%esi, -4(%rdi,%rdx)
++	jmp	L(mm_return)
++
++L(mm_len_9_16_bytes_forward):
++	mov	(%rsi), %rbx
++	mov	-8(%rsi, %rdx), %rsi
++	mov	%rbx, (%rdi)
++	mov	%rsi, -8(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_recalc_len):
++/* Compute in %rdx how many bytes are left to copy after
++	the main loop stops.  */
++	vzeroupper
++	mov 	%rbx, %rdx
++	sub 	%rdi, %rdx
++/* The code for copying backwards.  */
++L(mm_len_0_or_more_backward):
++
++/* Now do checks for lengths. We do [0..16], [16..32], [32..64], [64..128]
++	separately.  */
++	cmp	$16, %rdx
++	jbe	L(mm_len_0_16_bytes_backward)
++
++	cmp	$32, %rdx
++	ja	L(mm_len_32_or_more_backward)
++
++/* Copy [0..32] and return.  */
++	movdqu	(%rsi), %xmm0
++	movdqu	-16(%rsi, %rdx), %xmm1
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, -16(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_len_32_or_more_backward):
++	cmp	$64, %rdx
++	ja	L(mm_len_64_or_more_backward)
++
++/* Copy [0..64] and return.  */
++        movdqu	(%rsi), %xmm0
++	movdqu	16(%rsi), %xmm1
++	movdqu	-16(%rsi, %rdx), %xmm2
++	movdqu	-32(%rsi, %rdx), %xmm3
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, 16(%rdi)
++	movdqu	%xmm2, -16(%rdi, %rdx)
++	movdqu	%xmm3, -32(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_len_64_or_more_backward):
++	cmp	$128, %rdx
++	ja	L(mm_len_128_or_more_backward)
++
++/* Copy [0..128] and return.  */
++        movdqu	(%rsi), %xmm0
++	movdqu	16(%rsi), %xmm1
++	movdqu	32(%rsi), %xmm2
++	movdqu	48(%rsi), %xmm3
++	movdqu	-64(%rsi, %rdx), %xmm4
++	movdqu	-48(%rsi, %rdx), %xmm5
++	movdqu	-32(%rsi, %rdx), %xmm6
++	movdqu	-16(%rsi, %rdx), %xmm7
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, 16(%rdi)
++	movdqu	%xmm2, 32(%rdi)
++	movdqu	%xmm3, 48(%rdi)
++	movdqu	%xmm4, -64(%rdi, %rdx)
++	movdqu	%xmm5, -48(%rdi, %rdx)
++	movdqu	%xmm6, -32(%rdi, %rdx)
++	movdqu	%xmm7, -16(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_len_128_or_more_backward):
++	cmp	$256, %rdx
++	ja	L(mm_len_256_or_more_backward)
++
++/* Copy [0..256] and return.  */
++	movdqu	(%rsi), %xmm0
++	movdqu	16(%rsi), %xmm1
++	movdqu	32(%rsi), %xmm2
++	movdqu	48(%rsi), %xmm3
++	movdqu	64(%rsi), %xmm4
++	movdqu	80(%rsi), %xmm5
++	movdqu	96(%rsi), %xmm6
++	movdqu	112(%rsi), %xmm7
++	movdqu	-128(%rsi, %rdx), %xmm8
++	movdqu	-112(%rsi, %rdx), %xmm9
++	movdqu	-96(%rsi, %rdx), %xmm10
++	movdqu	-80(%rsi, %rdx), %xmm11
++	movdqu	-64(%rsi, %rdx), %xmm12
++	movdqu	-48(%rsi, %rdx), %xmm13
++	movdqu	-32(%rsi, %rdx), %xmm14
++	movdqu	-16(%rsi, %rdx), %xmm15
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm1, 16(%rdi)
++	movdqu	%xmm2, 32(%rdi)
++	movdqu	%xmm3, 48(%rdi)
++	movdqu	%xmm4, 64(%rdi)
++	movdqu	%xmm5, 80(%rdi)
++	movdqu	%xmm6, 96(%rdi)
++	movdqu	%xmm7, 112(%rdi)
++	movdqu	%xmm8, -128(%rdi, %rdx)
++	movdqu	%xmm9, -112(%rdi, %rdx)
++	movdqu	%xmm10, -96(%rdi, %rdx)
++	movdqu	%xmm11, -80(%rdi, %rdx)
++	movdqu	%xmm12, -64(%rdi, %rdx)
++	movdqu	%xmm13, -48(%rdi, %rdx)
++	movdqu	%xmm14, -32(%rdi, %rdx)
++	movdqu	%xmm15, -16(%rdi, %rdx)
++	jmp	L(mm_return)
++
++L(mm_len_256_or_more_backward):
++/* Aligning the address of destination. We need to save
++	128 bytes from the source in order not to overwrite them.  */
++	vmovdqu	-32(%rsi, %rdx), %ymm0
++	vmovdqu	-64(%rsi, %rdx), %ymm1
++	vmovdqu	-96(%rsi, %rdx), %ymm2
++	vmovdqu	-128(%rsi, %rdx), %ymm3
++
++	lea	(%rdi, %rdx), %r9
++	and	$-128, %r9 /* r9 = aligned dst */
++
++	mov	%rsi, %r8
++	sub	%rdi, %r8 /* r8 = src - dst, diff */
++
++	vmovdqu	-32(%r9, %r8), %ymm4
++	vmovdqu	-64(%r9, %r8), %ymm5
++	vmovdqu	-96(%r9, %r8), %ymm6
++	vmovdqu	-128(%r9, %r8), %ymm7
++
++	vmovdqu	%ymm0, -32(%rdi, %rdx)
++	vmovdqu	%ymm1, -64(%rdi, %rdx)
++	vmovdqu	%ymm2, -96(%rdi, %rdx)
++	vmovdqu	%ymm3, -128(%rdi, %rdx)
++	vmovdqa	%ymm4, -32(%r9)
++	vmovdqa	%ymm5, -64(%r9)
++	vmovdqa	%ymm6, -96(%r9)
++	vmovdqa	%ymm7, -128(%r9)
++	lea	-128(%r9), %r9
++
++	lea	128(%rdi), %rbx
++	and	$-128, %rbx
++
++	cmp	%r9, %rbx
++	jae	L(mm_recalc_len)
++
++	cmp	$SHARED_CACHE_SIZE_HALF, %rdx
++	jae	L(mm_large_page_loop_backward)
++
++	.p2align 4
++L(mm_main_loop_backward):
++	prefetcht0 -128(%r9, %r8)
++
++	vmovdqu	-64(%r9, %r8), %ymm0
++	vmovdqu	-32(%r9, %r8), %ymm1
++	vmovdqa	%ymm0, -64(%r9)
++	vmovaps	%ymm1, -32(%r9)
++	lea	-64(%r9), %r9
++	cmp	%r9, %rbx
++	jb	L(mm_main_loop_backward)
++	jmp	L(mm_recalc_len)
++
++/* Copy [0..16] and return.  */
++L(mm_len_0_16_bytes_backward):
++	testb	$24, %dl
++	jnz	L(mm_len_9_16_bytes_backward)
++	testb	$4, %dl
++	.p2align 4,,5
++	jnz	L(mm_len_5_8_bytes_backward)
++	test	%rdx, %rdx
++	.p2align 4,,2
++	je	L(mm_return)
++	testb	$2, %dl
++	.p2align 4,,1
++	jne	L(mm_len_3_4_bytes_backward)
++	movzbl	-1(%rsi,%rdx), %ebx
++	movzbl	(%rsi), %ecx
++	movb	%bl, -1(%rdi,%rdx)
++	movb	%cl, (%rdi)
++	jmp	L(mm_return)
++
++L(mm_len_3_4_bytes_backward):
++	movzwl	-2(%rsi,%rdx), %ebx
++	movzwl	(%rsi), %ecx
++	movw	%bx, -2(%rdi,%rdx)
++	movw	%cx, (%rdi)
++	jmp	L(mm_return)
++
++L(mm_len_9_16_bytes_backward):
++	movl	-4(%rsi,%rdx), %ebx
++	movl	-8(%rsi,%rdx), %ecx
++	movl	%ebx, -4(%rdi,%rdx)
++	movl	%ecx, -8(%rdi,%rdx)
++	sub	$8, %rdx
++	jmp	L(mm_len_0_16_bytes_backward)
++
++L(mm_len_5_8_bytes_backward):
++	movl	(%rsi), %ebx
++	movl	-4(%rsi,%rdx), %ecx
++	movl	%ebx, (%rdi)
++	movl	%ecx, -4(%rdi,%rdx)
++
++L(mm_return):
++        vzeroupper
++	RETURN
++
++/* Big length copy forward part.  */
++
++	.p2align 4
++L(mm_large_page_loop_forward):
++	vmovdqu	  (%r8, %rsi), %ymm0
++	vmovdqu	  32(%r8, %rsi), %ymm1
++	vmovdqu	  64(%r8, %rsi), %ymm2
++	vmovdqu	  96(%r8, %rsi), %ymm3
++	vmovntdq  %ymm0, (%r8)
++	vmovntdq  %ymm1, 32(%r8)
++	vmovntdq  %ymm2, 64(%r8)
++	vmovntdq  %ymm3, 96(%r8)
++	lea 	  128(%r8), %r8
++	cmp	  %r8, %rbx
++	ja	  L(mm_large_page_loop_forward)
++	sfence
++	jmp	  L(mm_copy_remaining_forward)
++
++/* Big length copy backward part.  */
++	.p2align 4
++L(mm_large_page_loop_backward):
++	vmovdqu	  -64(%r9, %r8), %ymm0
++	vmovdqu	  -32(%r9, %r8), %ymm1
++	vmovntdq  %ymm0, -64(%r9)
++	vmovntdq  %ymm1, -32(%r9)
++	lea 	  -64(%r9), %r9
++	cmp	  %r9, %rbx
++	jb	  L(mm_large_page_loop_backward)
++	sfence
++	jmp	  L(mm_recalc_len)
++
++END (MEMMOVE)
++
++//ALIAS_SYMBOL(memcpy, MEMMOVE)
+-- 
+2.40.1
+
