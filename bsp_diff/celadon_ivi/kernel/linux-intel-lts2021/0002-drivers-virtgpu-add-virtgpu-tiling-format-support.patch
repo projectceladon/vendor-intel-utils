@@ -1,0 +1,223 @@
+From e524c419911eebdece02f836d40a0f6a4eb1732b Mon Sep 17 00:00:00 2001
+From: Chenli Wei <chenli.wei@intel.com>
+Date: Fri, 7 Jul 2023 16:56:59 +0800
+Subject: [PATCH] drivers: virtgpu: add virtgpu tiling format support
+
+Signed-off-by: hangliu1 <hang1.liu@linux.intel.com>
+Signed-off-by: Yifan Liu <yifan1.liu@intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_display.c |  3 +-
+ drivers/gpu/drm/virtio/virtgpu_drv.c     |  1 +
+ drivers/gpu/drm/virtio/virtgpu_drv.h     |  4 +++
+ drivers/gpu/drm/virtio/virtgpu_kms.c     |  3 ++
+ drivers/gpu/drm/virtio/virtgpu_plane.c   | 41 +++++++++++++++++++++++-
+ drivers/gpu/drm/virtio/virtgpu_vq.c      | 15 +++++++++
+ include/uapi/linux/virtio_gpu.h          | 12 +++++++
+ 7 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_display.c b/drivers/gpu/drm/virtio/virtgpu_display.c
+index 9ea7611a9e0f..e569dbc11a3c 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_display.c
++++ b/drivers/gpu/drm/virtio/virtgpu_display.c
+@@ -349,7 +349,8 @@ int virtio_gpu_modeset_init(struct virtio_gpu_device *vgdev)
+ 	vgdev->ddev->mode_config.max_width = XRES_MAX;
+ 	vgdev->ddev->mode_config.max_height = YRES_MAX;
+ 
+-	vgdev->ddev->mode_config.fb_modifiers_not_supported = true;
++	if(!vgdev->has_modifier)
++		vgdev->ddev->mode_config.fb_modifiers_not_supported = true;
+ 
+ 	for (i = 0 ; i < vgdev->num_scanouts; ++i)
+ 		vgdev_output_init(vgdev, i);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index a1f52d8fe8ce..d8ba8c8a33fc 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -147,6 +147,7 @@ static unsigned int features[] = {
+ 	VIRTIO_GPU_F_RESOURCE_UUID,
+ 	VIRTIO_GPU_F_RESOURCE_BLOB,
+ 	VIRTIO_GPU_F_CONTEXT_INIT,
++	VIRTIO_GPU_F_MODIFIER,
+ };
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index 1520e2cd5fb5..5a7d305fb78a 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -244,6 +244,7 @@ struct virtio_gpu_device {
+ 
+ 	bool has_virgl_3d;
+ 	bool has_edid;
++	bool has_modifier;
+ 	bool has_indirect;
+ 	bool has_resource_assign_uuid;
+ 	bool has_resource_blob;
+@@ -430,6 +431,9 @@ virtio_gpu_cmd_set_scanout_blob(struct virtio_gpu_device *vgdev,
+ 				uint32_t width, uint32_t height,
+ 				uint32_t x, uint32_t y);
+ 
++void virtio_gpu_cmd_set_modifier(struct virtio_gpu_device *vgdev,
++				     uint32_t scanout_id,
++				     struct drm_framebuffer *fb);
+ /* virtgpu_display.c */
+ int virtio_gpu_modeset_init(struct virtio_gpu_device *vgdev);
+ void virtio_gpu_modeset_fini(struct virtio_gpu_device *vgdev);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index 3754ffb6b54b..fd3e7fe01202 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -185,6 +185,9 @@ int virtio_gpu_init(struct virtio_device *vdev, struct drm_device *dev)
+ 	}
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_RESOURCE_BLOB)) {
+ 		vgdev->has_resource_blob = true;
++		if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_MODIFIER)) {
++			vgdev->has_modifier = true;
++		}
+ 	}
+ 	if (virtio_get_shm_region(vgdev->vdev, &vgdev->host_visible_region,
+ 				  VIRTIO_GPU_SHM_ID_HOST_VISIBLE)) {
+diff --git a/drivers/gpu/drm/virtio/virtgpu_plane.c b/drivers/gpu/drm/virtio/virtgpu_plane.c
+index a8dbe5534b95..e3ee73e81747 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_plane.c
++++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
+@@ -66,12 +66,32 @@ uint32_t virtio_gpu_translate_format(uint32_t drm_fourcc)
+ 	return format;
+ }
+ 
++static bool virtio_gpu_plane_format_mod_supported(struct drm_plane *plane,
++	                                            u32 format, u64 modifier)
++{
++	struct drm_device *dev = plane->dev;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++
++	if (!vgdev->has_modifier)
++		return modifier == DRM_FORMAT_MOD_LINEAR;
++
++	switch (modifier) {
++	case DRM_FORMAT_MOD_LINEAR:
++	case I915_FORMAT_MOD_X_TILED:
++	case I915_FORMAT_MOD_Y_TILED:
++		return true;
++	default:
++		return false;
++    }
++}
++
+ static const struct drm_plane_funcs virtio_gpu_plane_funcs = {
+ 	.update_plane		= drm_atomic_helper_update_plane,
+ 	.disable_plane		= drm_atomic_helper_disable_plane,
+ 	.reset			= drm_atomic_helper_plane_reset,
+ 	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
+ 	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
++	.format_mod_supported   = virtio_gpu_plane_format_mod_supported,
+ };
+ 
+ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+@@ -216,6 +236,9 @@ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 						 plane->state->src_h >> 16,
+ 						 plane->state->src_x >> 16,
+ 						 plane->state->src_y >> 16);
++			if(vgdev->has_modifier)
++				virtio_gpu_cmd_set_modifier(vgdev, output->index, plane->state->fb);
++
+ 		} else {
+ 			virtio_gpu_cmd_set_scanout(vgdev, output->index,
+ 						   bo->hw_res_handle,
+@@ -330,6 +353,14 @@ static const struct drm_plane_helper_funcs virtio_gpu_cursor_helper_funcs = {
+ 	.atomic_update		= virtio_gpu_cursor_plane_update,
+ };
+ 
++static const uint64_t virtio_gpu_format_modifiers[] = {
++	DRM_FORMAT_MOD_LINEAR,
++	I915_FORMAT_MOD_X_TILED,
++	I915_FORMAT_MOD_Y_TILED,
++	DRM_FORMAT_MOD_INVALID
++};
++
++
+ struct drm_plane *virtio_gpu_plane_init(struct virtio_gpu_device *vgdev,
+ 					enum drm_plane_type type,
+ 					int index)
+@@ -350,9 +381,17 @@ struct drm_plane *virtio_gpu_plane_init(struct virtio_gpu_device *vgdev,
+ 		funcs = &virtio_gpu_primary_helper_funcs;
+ 	}
+ 
+-	plane = drmm_universal_plane_alloc(dev, struct drm_plane, dev,
++	if(vgdev->has_modifier) {
++		const uint64_t *modifiers = virtio_gpu_format_modifiers;
++		plane = drmm_universal_plane_alloc(dev, struct drm_plane, dev,
++					   1 << index, &virtio_gpu_plane_funcs,
++					   formats, nformats, modifiers, type, NULL);
++	} else {
++		plane = drmm_universal_plane_alloc(dev, struct drm_plane, dev,
+ 					   1 << index, &virtio_gpu_plane_funcs,
+ 					   formats, nformats, NULL, type, NULL);
++	}
++
+ 	if (IS_ERR(plane))
+ 		return plane;
+ 
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index 9ff8660b50ad..a96a8438b475 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -1296,3 +1296,18 @@ void virtio_gpu_cmd_set_scanout_blob(struct virtio_gpu_device *vgdev,
+ 
+ 	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
+ }
++
++void virtio_gpu_cmd_set_modifier(struct virtio_gpu_device *vgdev,
++				     uint32_t scanout_id,
++				     struct drm_framebuffer *fb)
++{
++	struct virtio_gpu_set_modifier *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++
++	cmd_p = virtio_gpu_alloc_cmd(vgdev, &vbuf, sizeof(*cmd_p));
++	memset(cmd_p, 0, sizeof(*cmd_p));
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_SET_MODIFIER);
++	cmd_p->modifier = cpu_to_le64(fb->modifier);
++	cmd_p->scanout_id = cpu_to_le32(scanout_id);
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++}
+diff --git a/include/uapi/linux/virtio_gpu.h b/include/uapi/linux/virtio_gpu.h
+index f556fde07b76..1989a70179aa 100644
+--- a/include/uapi/linux/virtio_gpu.h
++++ b/include/uapi/linux/virtio_gpu.h
+@@ -64,6 +64,10 @@
+  * context_init and multiple timelines
+  */
+ #define VIRTIO_GPU_F_CONTEXT_INIT        4
++/*
++*VIRTIO_GPU_CMD_SET_MODIFIER
++*/
++#define VIRTIO_GPU_F_MODIFIER      5
+ 
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+@@ -83,6 +87,7 @@ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID,
+ 	VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB,
+ 	VIRTIO_GPU_CMD_SET_SCANOUT_BLOB,
++	VIRTIO_GPU_CMD_SET_MODIFIER,
+ 
+ 	/* 3d commands */
+ 	VIRTIO_GPU_CMD_CTX_CREATE = 0x0200,
+@@ -425,6 +430,13 @@ struct virtio_gpu_set_scanout_blob {
+ 	__le32 strides[4];
+ 	__le32 offsets[4];
+ };
++/* VIRTIO_GPU_CMD_SET_MODIFIER */
++struct virtio_gpu_set_modifier {
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le64 modifier;
++	__le32 scanout_id;
++	__le32 padding;
++};
+ 
+ /* VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB */
+ struct virtio_gpu_resource_map_blob {
+-- 
+2.25.1
+
