@@ -1,0 +1,1719 @@
+From 72e903f258b5040b8f492cf18edd124b5a1ac770 Mon Sep 17 00:00:00 2001
+From: Hai Shalom <haishalom@google.com>
+Date: Thu, 9 Mar 2023 09:44:33 -0800
+Subject: [PATCH] [TOFU] Validate full cert chains before displaying dialog
+
+When a full chain including a Root CA is provided by the server,
+perform a full validation of the chain before displaying the
+TOFU dialog.
+If validation passes: Display a TOFU dialog and ask the user if
+they trust this network. Saying yes means that the Root can be
+installed safely for that network. They might say no - this is
+possible if an attacker creates a full chain they control which
+results in a different SHA-256 (everything else looks correct).
+If they say no, we stop the connection.
+If validation fails: Display an error message saying that the
+validation failed, we stop the connection and won't display the
+TOFU dialog.
+Use server certificate pinning for servers that send only a leaf
+or a partial chain with no Root CA.
+Additionally: clean up the debug logs to reduce the noise and
+focus only on the important details.
+
+Bug: 277824547
+Test: atest InsecureEapNetworkHandler
+Test: Connect to various Enterprise networks
+Negative test: Confirm verification fails for invalid chains
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:b0ee00ddf38bb677876a6cffb876e6f511e2c139)
+Merged-In: I224c80e2787497634d3e68760122dac5f177585a
+Change-Id: I224c80e2787497634d3e68760122dac5f177585a
+---
+ .../net/wifi/WifiEnterpriseConfig.java        |  15 +
+ .../server/wifi/CertificateEventInfo.java     |  63 +++
+ .../android/server/wifi/ClientModeImpl.java   |  38 +-
+ .../wifi/InsecureEapNetworkHandler.java       | 169 +++++---
+ .../SupplicantStaNetworkCallbackAidlImpl.java |   3 +-
+ .../server/wifi/WifiConfigManager.java        |  17 +-
+ .../com/android/server/wifi/WifiMonitor.java  |  11 +-
+ service/tests/wifitests/Android.bp            |   3 +
+ .../server/wifi/CertificateEventInfoTest.java |  58 +++
+ .../server/wifi/ClientModeImplTest.java       |  51 ++-
+ .../wifi/InsecureEapNetworkHandlerTest.java   | 401 +++++++++++++-----
+ ...plicantStaNetworkCallbackAidlImplTest.java |  12 +-
+ .../server/wifi/WifiConfigManagerTest.java    | 163 -------
+ .../android/server/wifi/WifiMonitorTest.java  |  13 +-
+ 14 files changed, 659 insertions(+), 358 deletions(-)
+ create mode 100644 service/java/com/android/server/wifi/CertificateEventInfo.java
+ create mode 100644 service/tests/wifitests/src/com/android/server/wifi/CertificateEventInfoTest.java
+
+diff --git a/framework/java/android/net/wifi/WifiEnterpriseConfig.java b/framework/java/android/net/wifi/WifiEnterpriseConfig.java
+index 2a53e35f1..af51a8cf0 100644
+--- a/framework/java/android/net/wifi/WifiEnterpriseConfig.java
++++ b/framework/java/android/net/wifi/WifiEnterpriseConfig.java
+@@ -125,6 +125,11 @@ public class WifiEnterpriseConfig implements Parcelable {
+      */
+     public static final String KEYSTORES_URI = "keystores://";
+ 
++    /**
++     * String representing a SHA-256 certificate hash used for wpa_supplicant.
++     */
++    private static final String CERT_HASH_PREFIX = "hash://server/sha256/";
++
+     /**
+      * String to set the engine value to when it should be enabled.
+      * @hide
+@@ -706,6 +711,16 @@ public class WifiEnterpriseConfig implements Parcelable {
+         }
+     }
+ 
++    /**
++     * Set a server certificate hash instead of a CA certificate for a TOFU connection
++     *
++     * @param certHash Server certificate hash to match against in subsequent connections
++     * @hide
++     */
++    public void setServerCertificateHash(String certHash) {
++        setFieldValue(CA_CERT_KEY, certHash, CERT_HASH_PREFIX);
++    }
++
+     /**
+      * Set CA certificate alias.
+      *
+diff --git a/service/java/com/android/server/wifi/CertificateEventInfo.java b/service/java/com/android/server/wifi/CertificateEventInfo.java
+new file mode 100644
+index 000000000..f688e4da5
+--- /dev/null
++++ b/service/java/com/android/server/wifi/CertificateEventInfo.java
+@@ -0,0 +1,63 @@
++/*
++ * Copyright (C) 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.wifi;
++
++import android.annotation.NonNull;
++
++import java.security.cert.X509Certificate;
++import java.util.Objects;
++
++/**
++ * Stores supplicant certificate event information
++ */
++public class CertificateEventInfo {
++    CertificateEventInfo(@NonNull X509Certificate cert, @NonNull String certHash) {
++        this.mCert = Objects.requireNonNull(cert);
++        this.mCertHash = Objects.requireNonNull(certHash);
++    }
++    @NonNull private final X509Certificate mCert;
++    @NonNull private final String mCertHash;
++
++    /**
++     * Get the X509 certificate stored in this object
++     *
++     * @return X509 certificate
++     */
++    public X509Certificate getCert() {
++        return mCert;
++    }
++
++    /**
++     * Get the certificate hash of the stored certificate
++     *
++     * @return certificate hash
++     */
++    public String getCertHash() {
++        return mCertHash;
++    }
++
++    @Override
++    public String toString() {
++        StringBuilder sb = new StringBuilder();
++        sb.append(" Certificate Hash: ").append(mCertHash);
++        sb.append(" X509Certificate: ").append(mCert);
++        return sb.toString();
++    }
++}
++
++
++
+diff --git a/service/java/com/android/server/wifi/ClientModeImpl.java b/service/java/com/android/server/wifi/ClientModeImpl.java
+index c4c0823db..987bb9356 100644
+--- a/service/java/com/android/server/wifi/ClientModeImpl.java
++++ b/service/java/com/android/server/wifi/ClientModeImpl.java
+@@ -164,7 +164,6 @@ import java.net.Inet4Address;
+ import java.net.Inet6Address;
+ import java.net.InetAddress;
+ import java.net.URL;
+-import java.security.cert.X509Certificate;
+ import java.time.Duration;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -426,6 +425,7 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+     private final RestrictedWifiNetworkFactory mRestrictedWifiNetworkFactory;
+     @VisibleForTesting
+     InsecureEapNetworkHandler mInsecureEapNetworkHandler;
++    boolean mLeafCertSent;
+     @VisibleForTesting
+     InsecureEapNetworkHandler.InsecureEapNetworkHandlerCallbacks
+             mInsecureEapNetworkHandlerCallbacksImpl;
+@@ -829,9 +829,9 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+         mInsecureEapNetworkHandlerCallbacksImpl =
+                 new InsecureEapNetworkHandler.InsecureEapNetworkHandlerCallbacks() {
+                 @Override
+-                public void onAccept(String ssid) {
++                public void onAccept(String ssid, int networkId) {
+                     log("Accept Root CA cert for " + ssid);
+-                    sendMessage(CMD_ACCEPT_EAP_SERVER_CERTIFICATE, ssid);
++                    sendMessage(CMD_ACCEPT_EAP_SERVER_CERTIFICATE, networkId);
+                 }
+ 
+                 @Override
+@@ -905,7 +905,7 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+             WifiMonitor.MBO_OCE_BSS_TM_HANDLING_DONE,
+             WifiMonitor.TRANSITION_DISABLE_INDICATION,
+             WifiMonitor.NETWORK_NOT_FOUND_EVENT,
+-            WifiMonitor.TOFU_ROOT_CA_CERTIFICATE,
++            WifiMonitor.TOFU_CERTIFICATE_EVENT,
+             WifiMonitor.AUXILIARY_SUPPLICANT_EVENT,
+             WifiMonitor.QOS_POLICY_RESET_EVENT,
+             WifiMonitor.QOS_POLICY_REQUEST_EVENT,
+@@ -2307,8 +2307,8 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+                 return "BLOCK_DISCOVERY";
+             case WifiMonitor.NETWORK_NOT_FOUND_EVENT:
+                 return "NETWORK_NOT_FOUND_EVENT";
+-            case WifiMonitor.TOFU_ROOT_CA_CERTIFICATE:
+-                return "TOFU_ROOT_CA_CERTIFICATE";
++            case WifiMonitor.TOFU_CERTIFICATE_EVENT:
++                return "TOFU_CERTIFICATE_EVENT";
+             default:
+                 return "what:" + what;
+         }
+@@ -4025,6 +4025,7 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+ 
+                     // TOFU flow for devices that do not support this feature
+                     mInsecureEapNetworkHandler.prepareConnection(mTargetWifiConfiguration);
++                    mLeafCertSent = false;
+                     if (!isTrustOnFirstUseSupported()) {
+                         mInsecureEapNetworkHandler.startUserApprovalIfNecessary(mIsUserSelected);
+                     }
+@@ -4271,6 +4272,13 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+                     break;
+                 }
+                 case CMD_ACCEPT_EAP_SERVER_CERTIFICATE:
++                    // If TOFU is not supported, then we are already connected
++                    if (!isTrustOnFirstUseSupported()) break;
++                    // Got an approval for a TOFU network. Disconnect (if connected) and trigger
++                    // a connection to the new approved network.
++                    logd("User accepted TOFU provided certificate");
++                    startConnectToNetwork(message.arg1, Process.WIFI_UID, SUPPLICANT_BSSID_ANY);
++                    break;
+                 case CMD_REJECT_EAP_INSECURE_CONNECTION:
+                 case CMD_START_ROAM:
+                 case CMD_START_RSSI_MONITORING_OFFLOAD:
+@@ -5388,22 +5396,24 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+                     handleStatus = NOT_HANDLED;
+                     break;
+                 }
+-                case WifiMonitor.TOFU_ROOT_CA_CERTIFICATE:
++                case WifiMonitor.TOFU_CERTIFICATE_EVENT: {
+                     if (null == mTargetWifiConfiguration) break;
+-                    int certificateDepth = message.arg2;
++                    final int certificateDepth = message.arg2;
++                    final CertificateEventInfo eventInfo = (CertificateEventInfo) message.obj;
+                     if (!mInsecureEapNetworkHandler.addPendingCertificate(
+-                            mTargetWifiConfiguration.SSID, message.arg2,
+-                            (X509Certificate) message.obj)) {
++                            mTargetWifiConfiguration.SSID, certificateDepth, eventInfo)) {
+                         Log.d(TAG, "Cannot set pending cert.");
+                     }
+                     // Launch user approval upon receiving the server certificate and disconnect
+-                    if (certificateDepth == 0 && mInsecureEapNetworkHandler
++                    if (certificateDepth == 0 && !mLeafCertSent && mInsecureEapNetworkHandler
+                             .startUserApprovalIfNecessary(mIsUserSelected)) {
+                         // In the TOFU flow, the user approval dialog is now displayed and the
+                         // network remains disconnected and disabled until it is approved.
+                         sendMessage(CMD_DISCONNECT, StaEvent.DISCONNECT_NETWORK_UNTRUSTED);
++                        mLeafCertSent = true;
+                     }
+                     break;
++                }
+                 default: {
+                     handleStatus = NOT_HANDLED;
+                     break;
+@@ -6419,12 +6429,6 @@ public class ClientModeImpl extends StateMachine implements ClientMode {
+                     }
+                     break;
+                 }
+-                case CMD_ACCEPT_EAP_SERVER_CERTIFICATE:
+-                    // Got an approval for a TOFU network, trigger a scan to accelerate the
+-                    // auto-connection.
+-                    logd("User accepted TOFU provided certificate");
+-                    mWifiConnectivityManager.forceConnectivityScan(ClientModeImpl.WIFI_WORK_SOURCE);
+-                    break;
+                 default: {
+                     handleStatus = NOT_HANDLED;
+                     break;
+diff --git a/service/java/com/android/server/wifi/InsecureEapNetworkHandler.java b/service/java/com/android/server/wifi/InsecureEapNetworkHandler.java
+index 6c55feab7..9116a0a93 100644
+--- a/service/java/com/android/server/wifi/InsecureEapNetworkHandler.java
++++ b/service/java/com/android/server/wifi/InsecureEapNetworkHandler.java
+@@ -18,6 +18,7 @@ package com.android.server.wifi;
+ 
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.annotation.SuppressLint;
+ import android.app.Notification;
+ import android.app.PendingIntent;
+ import android.content.BroadcastReceiver;
+@@ -40,13 +41,21 @@ import com.android.internal.util.HexDump;
+ import com.android.server.wifi.util.CertificateSubjectInfo;
+ import com.android.wifi.resources.R;
+ 
++import java.security.InvalidAlgorithmParameterException;
+ import java.security.MessageDigest;
+ import java.security.NoSuchAlgorithmException;
++import java.security.cert.CertPath;
++import java.security.cert.CertPathValidator;
++import java.security.cert.CertPathValidatorException;
+ import java.security.cert.CertificateEncodingException;
++import java.security.cert.CertificateException;
++import java.security.cert.CertificateFactory;
++import java.security.cert.PKIXParameters;
++import java.security.cert.TrustAnchor;
+ import java.security.cert.X509Certificate;
+-import java.util.ArrayList;
+ import java.util.Date;
+-import java.util.List;
++import java.util.LinkedList;
++import java.util.Set;
+ import java.util.StringJoiner;
+ 
+ /** This class is used to handle insecure EAP networks. */
+@@ -100,9 +109,16 @@ public class InsecureEapNetworkHandler {
+     // This is updated on setting a pending server cert.
+     private CertificateSubjectInfo mPendingServerCertIssuerInfo = null;
+     // Record the whole server cert chain from Root CA to the server cert.
+-    private List<X509Certificate> mServerCertChain = new ArrayList<>();
++    // The order of the certificates in the chain required by the validation method is in the
++    // reverse order to the order we receive them from the lower layers. Therefore, we are using a
++    // LinkedList data type here, so that we could add certificates to the head, rather than
++    // using an ArrayList and then having to reverse it.
++    // Using SuppressLint here to avoid linter errors related to LinkedList usage.
++    @SuppressLint("JdkObsolete")
++    private LinkedList<X509Certificate> mServerCertChain = new LinkedList<>();
+     private WifiDialogManager.DialogHandle mTofuAlertDialog = null;
+     private boolean mIsCertNotificationReceiverRegistered = false;
++    private String mServerCertHash = null;
+ 
+     BroadcastReceiver mCertNotificationReceiver = new BroadcastReceiver() {
+         @Override
+@@ -234,19 +250,17 @@ public class InsecureEapNetworkHandler {
+      * @param ssid the target network SSID.
+      * @param depth the depth of this cert. The Root CA should be 0 or
+      *        a positive number, and the server cert is 0.
+-     * @param cert a certificate from the server.
++     * @param certInfo a certificate info object from the server.
+      * @return true if the cert is cached; otherwise, false.
+      */
+     public boolean addPendingCertificate(@NonNull String ssid, int depth,
+-            @NonNull X509Certificate cert) {
++            @NonNull CertificateEventInfo certInfo) {
+         String configProfileKey = mCurrentTofuConfig != null
+                 ? mCurrentTofuConfig.getProfileKey() : "null";
+-        Log.d(TAG, "setPendingCertificate: " + "ssid=" + ssid + " depth=" + depth
+-                + " current config=" + configProfileKey);
+         if (TextUtils.isEmpty(ssid)) return false;
+         if (null == mCurrentTofuConfig) return false;
+         if (!TextUtils.equals(ssid, mCurrentTofuConfig.SSID)) return false;
+-        if (null == cert) return false;
++        if (null == certInfo) return false;
+         if (depth < 0) return false;
+ 
+         // If TOFU is not supported return immediately, although this should not happen since
+@@ -267,36 +281,38 @@ public class InsecureEapNetworkHandler {
+             putNetworkOnHold();
+         }
+ 
+-        if (!mServerCertChain.contains(cert)) {
+-            mServerCertChain.add(cert);
++        if (!mServerCertChain.contains(certInfo.getCert())) {
++            mServerCertChain.addFirst(certInfo.getCert());
++            Log.d(TAG, "addPendingCertificate: " + "SSID=" + ssid + " depth=" + depth
++                    + " certHash=" + certInfo.getCertHash() + " current config=" + configProfileKey
++                    + "\ncertificate content:\n" + certInfo.getCert());
+         }
+ 
+         // 0 is the tail, i.e. the server cert.
+         if (depth == 0 && null == mPendingServerCert) {
+-            mPendingServerCert = cert;
+-            Log.d(TAG, "Pending server certificate: " + mPendingServerCert);
++            mPendingServerCert = certInfo.getCert();
+             mPendingServerCertSubjectInfo = CertificateSubjectInfo.parse(
+-                    cert.getSubjectX500Principal().getName());
++                    certInfo.getCert().getSubjectX500Principal().getName());
+             if (null == mPendingServerCertSubjectInfo) {
+-                Log.e(TAG, "CA cert has no valid subject.");
++                Log.e(TAG, "Cert has no valid subject.");
+                 return false;
+             }
+             mPendingServerCertIssuerInfo = CertificateSubjectInfo.parse(
+-                    cert.getIssuerX500Principal().getName());
++                    certInfo.getCert().getIssuerX500Principal().getName());
+             if (null == mPendingServerCertIssuerInfo) {
+-                Log.e(TAG, "CA cert has no valid issuer.");
++                Log.e(TAG, "Cert has no valid issuer.");
+                 return false;
+             }
++            mServerCertHash = certInfo.getCertHash();
+         }
+ 
+         // Root or intermediate cert.
+         if (depth < mPendingRootCaCertDepth) {
+-            Log.d(TAG, "Ignore intermediate cert." + cert);
+             return true;
+         }
+         mPendingRootCaCertDepth = depth;
+-        mPendingRootCaCert = cert;
+-        Log.d(TAG, "Pending Root CA certificate: " + mPendingRootCaCert);
++        mPendingRootCaCert = certInfo.getCert();
++
+         return true;
+     }
+ 
+@@ -344,7 +360,13 @@ public class InsecureEapNetworkHandler {
+                 handleError(mCurrentTofuConfig.SSID);
+                 return false;
+             }
+-            if (!isServerCertChainValid()) {
++
++            Log.d(TAG, "TOFU certificate chain:");
++            for (X509Certificate cert : mServerCertChain) {
++                Log.d(TAG, cert.getSubjectX500Principal().getName());
++            }
++
++            if (!configureServerValidationMethod()) {
+                 Log.e(TAG, "Server cert chain is invalid.");
+                 String ssid = mCurrentTofuConfig.SSID;
+                 handleError(ssid);
+@@ -356,9 +378,6 @@ public class InsecureEapNetworkHandler {
+             return false;
+         }
+ 
+-        Log.d(TAG, "startUserApprovalIfNecessaryForInsecureEapNetwork: mIsUserSelected="
+-                + isUserSelected);
+-
+         if (isUserSelected) {
+             askForUserApprovalForCaCertificate();
+         } else {
+@@ -439,32 +458,76 @@ public class InsecureEapNetworkHandler {
+         clearNativeData();
+     }
+ 
+-    private boolean isServerCertChainValid() {
+-        if (mServerCertChain.size() == 0) return false;
+-
+-        X509Certificate parentCert = null;
+-        for (X509Certificate cert: mServerCertChain) {
+-            String subject = cert.getSubjectX500Principal().getName();
+-            String issuer = cert.getIssuerX500Principal().getName();
+-            boolean isCa = cert.getBasicConstraints() >= 0;
+-            Log.d(TAG, "Subject: " + subject + ", Issuer: " + issuer + ", isCA: " + isCa);
+-
+-            if (parentCert == null) {
+-                // The root cert, it should be a CA cert or a self-signed cert.
+-                if (!isCa && !subject.equals(issuer)) {
+-                    Log.e(TAG, "The root cert is not a CA cert or a self-signed cert.");
+-                    return false;
+-                }
+-            } else {
+-                // The issuer of intermediate cert of the leaf cert should be
+-                // the same as the subject of its parent cert.
+-                if (!parentCert.getSubjectX500Principal().getName().equals(issuer)) {
+-                    Log.e(TAG, "The issuer does not match the subject of its parent.");
+-                    return false;
+-                }
++    /**
++     * Configure the server validation method based on the incoming server certificate chain.
++     * If a valid method is found, the method returns true, and the caller can continue the TOFU
++     * process.
++     *
++     * A valid method could be one of the following:
++     * 1. If only the leaf or a partial chain is provided, use server certificate pinning.
++     * 2. If a full chain is provided, use the provided Root CA, but only if we are able to
++     *    cryptographically validate it.
++     *
++     * If no certificates were received, or the certificates are invalid, or chain verification
++     * fails, the method returns false and the caller should abort the TOFU process.
++     */
++    private boolean configureServerValidationMethod() {
++        if (mServerCertChain.size() == 0) {
++            Log.e(TAG, "No certificate chain provided by the server.");
++            return false;
++        }
++        if (mServerCertChain.size() == 1) {
++            Log.i(TAG, "Only one certificate provided, use server certificate pinning");
++            return true;
++        }
++        if (mPendingRootCaCert.getSubjectX500Principal().getName()
++                .equals(mPendingRootCaCert.getIssuerX500Principal().getName())) {
++            if (mPendingRootCaCert.getVersion() >= 2
++                    && mPendingRootCaCert.getBasicConstraints() < 0) {
++                Log.i(TAG, "Root CA with no CA bit set in basic constraints, "
++                        + "use server certificate pinning");
++                return true;
+             }
+-            parentCert = cert;
++        } else {
++            // TODO: b/271921032 some deployments that use globally trusted Root CAs do not include
++            // the Root during the handshake, only an intermediate. We can start the handshake with
++            // the Android trust store and validate the connection with a Root CA rather than
++            // certificate pinning.
++            Log.i(TAG, "Root CA is not self-signed, use server certificate pinning");
++            return true;
++        }
++
++        CertPath certPath;
++        try {
++            certPath = CertificateFactory.getInstance("X.509").generateCertPath(mServerCertChain);
++        } catch (CertificateException e) {
++            Log.e(TAG, "Certificate chain is invalid.");
++            return false;
++        } catch (IllegalStateException e) {
++            Log.wtf(TAG, "Fail: " + e);
++            return false;
+         }
++        CertPathValidator certPathValidator;
++        try {
++            certPathValidator = CertPathValidator.getInstance("PKIX");
++        } catch (NoSuchAlgorithmException e) {
++            Log.wtf(TAG, "PKIX algorithm not supported.");
++            return false;
++        }
++        try {
++            Set<TrustAnchor> anchorSet = Set.of(new TrustAnchor(mPendingRootCaCert, null));
++            PKIXParameters params = new PKIXParameters(anchorSet);
++            params.setRevocationEnabled(false);
++            certPathValidator.validate(certPath, params);
++        } catch (InvalidAlgorithmParameterException e) {
++            Log.wtf(TAG, "Invalid algorithm exception.");
++            return false;
++        } catch (CertPathValidatorException e) {
++            Log.e(TAG, "Server certificate chain validation failed: " + e);
++            return false;
++        }
++        Log.i(TAG, "Server certificate chain validation succeeded, use Root CA");
++        mServerCertHash = null;
+         return true;
+     }
+ 
+@@ -506,19 +569,21 @@ public class InsecureEapNetworkHandler {
+                 return;
+             }
+             if (!mWifiConfigManager.updateCaCertificate(
+-                    mCurrentTofuConfig.networkId, mPendingRootCaCert, mPendingServerCert)) {
++                    mCurrentTofuConfig.networkId, mPendingRootCaCert, mPendingServerCert,
++                    mServerCertHash)) {
+                 // The user approved this network,
+                 // keep the connection regardless of the result.
+                 Log.e(TAG, "Cannot update CA cert to network " + mCurrentTofuConfig.getProfileKey()
+                         + ", CA cert = " + mPendingRootCaCert);
+             }
+         }
+-        mWifiConfigManager.updateNetworkSelectionStatus(mCurrentTofuConfig.networkId,
++        int networkId = mCurrentTofuConfig.networkId;
++        mWifiConfigManager.updateNetworkSelectionStatus(networkId,
+                 WifiConfiguration.NetworkSelectionStatus.DISABLED_NONE);
+         dismissDialogAndNotification();
+         clearInternalData();
+ 
+-        if (null != mCallbacks) mCallbacks.onAccept(ssid);
++        if (null != mCallbacks) mCallbacks.onAccept(ssid, networkId);
+     }
+ 
+     @VisibleForTesting
+@@ -739,6 +804,7 @@ public class InsecureEapNetworkHandler {
+         mPendingServerCertSubjectInfo = null;
+         mPendingServerCertIssuerInfo = null;
+         mCurrentTofuConfig = null;
++        mServerCertHash = null;
+     }
+ 
+     private void clearNativeData() {
+@@ -810,8 +876,9 @@ public class InsecureEapNetworkHandler {
+          * When a certificate is accepted, this callback is called.
+          *
+          * @param ssid SSID of the network.
++         * @param networkId  network ID
+          */
+-        public void onAccept(@NonNull String ssid) {}
++        public void onAccept(@NonNull String ssid, int networkId) {}
+         /**
+          * When a certificate is rejected, this callback is called.
+          *
+diff --git a/service/java/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImpl.java b/service/java/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImpl.java
+index c8d9ff991..63a9e46e2 100644
+--- a/service/java/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImpl.java
++++ b/service/java/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImpl.java
+@@ -209,7 +209,8 @@ class SupplicantStaNetworkCallbackAidlImpl extends ISupplicantStaNetworkCallback
+                     + " certHash=" + certHash
+                     + " cert=" + cert);
+             mWifiMonitor.broadcastCertificationEvent(
+-                    mIfaceName, mFrameworkNetworkId, mSsid, depth, cert);
++                    mIfaceName, mFrameworkNetworkId, mSsid, depth,
++                    new CertificateEventInfo(cert, certHash));
+         }
+     }
+ 
+diff --git a/service/java/com/android/server/wifi/WifiConfigManager.java b/service/java/com/android/server/wifi/WifiConfigManager.java
+index f2a39dada..aa9329364 100644
+--- a/service/java/com/android/server/wifi/WifiConfigManager.java
++++ b/service/java/com/android/server/wifi/WifiConfigManager.java
+@@ -4074,16 +4074,17 @@ public class WifiConfigManager {
+     }
+ 
+     /**
+-     * This method updates the Root CA certifiate and the domain name of the
++     * This method updates the Root CA certificate and the domain name of the
+      * server in the internal network.
+      *
+      * @param networkId networkId corresponding to the network to be updated.
+      * @param caCert Root CA certificate to be updated.
+      * @param serverCert Server certificate to be updated.
++     * @param certHash Server certificate hash (for TOFU case with no Root CA)
+      * @return true if updating Root CA certificate successfully; otherwise, false.
+      */
+     public boolean updateCaCertificate(int networkId, @NonNull X509Certificate caCert,
+-            @NonNull X509Certificate serverCert) {
++            @NonNull X509Certificate serverCert, String certHash) {
+         WifiConfiguration internalConfig = getInternalConfiguredNetwork(networkId);
+         if (internalConfig == null) {
+             Log.e(TAG, "No network for network ID " + networkId);
+@@ -4115,11 +4116,15 @@ public class WifiConfigManager {
+         WifiConfiguration newConfig = new WifiConfiguration(internalConfig);
+         try {
+             if (newConfig.enterpriseConfig.isTrustOnFirstUseEnabled()) {
+-                newConfig.enterpriseConfig.setCaCertificateForTrustOnFirstUse(caCert);
+-                // setCaCertificate will mark that this CA certificate should be removed on
+-                // removing this configuration.
++                if (TextUtils.isEmpty(certHash)) {
++                    newConfig.enterpriseConfig.setCaCertificateForTrustOnFirstUse(caCert);
++                } else {
++                    newConfig.enterpriseConfig.setServerCertificateHash(certHash);
++                }
+                 newConfig.enterpriseConfig.enableTrustOnFirstUse(false);
+             } else {
++                // setCaCertificate will mark that this CA certificate should be removed on
++                // removing this configuration.
+                 newConfig.enterpriseConfig.setCaCertificate(caCert);
+             }
+         } catch (IllegalArgumentException ex) {
+@@ -4141,7 +4146,7 @@ public class WifiConfigManager {
+             newConfig.enterpriseConfig.setDomainSuffixMatch(serverCertInfo.commonName);
+         }
+         newConfig.enterpriseConfig.setUserApproveNoCaCert(false);
+-        // Trigger an update to install CA certifiate and the corresponding configuration.
++        // Trigger an update to install CA certificate and the corresponding configuration.
+         NetworkUpdateResult result = addOrUpdateNetwork(newConfig, internalConfig.creatorUid);
+         if (!result.isSuccess()) {
+             Log.e(TAG, "Failed to install CA cert for network " + internalConfig.SSID);
+diff --git a/service/java/com/android/server/wifi/WifiMonitor.java b/service/java/com/android/server/wifi/WifiMonitor.java
+index 0fdb69b89..101fd2e56 100644
+--- a/service/java/com/android/server/wifi/WifiMonitor.java
++++ b/service/java/com/android/server/wifi/WifiMonitor.java
+@@ -40,7 +40,6 @@ import com.android.server.wifi.hotspot2.WnmData;
+ 
+ import java.lang.annotation.Retention;
+ import java.lang.annotation.RetentionPolicy;
+-import java.security.cert.X509Certificate;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+@@ -109,8 +108,8 @@ public class WifiMonitor {
+     /* Transition Disable Indication */
+     public static final int TRANSITION_DISABLE_INDICATION        = BASE + 72;
+ 
+-    /* Trust On First Use Root CA Certification */
+-    public static final int TOFU_ROOT_CA_CERTIFICATE             = BASE + 73;
++    /* Trust On First Use incoming certificate event */
++    public static final int TOFU_CERTIFICATE_EVENT               = BASE + 73;
+ 
+     /* Auxiliary supplicant event */
+     public static final int AUXILIARY_SUPPLICANT_EVENT           = BASE + 74;
+@@ -619,11 +618,11 @@ public class WifiMonitor {
+      * @param networkId ID of the network in wpa_supplicant.
+      * @param ssid SSID of the network.
+      * @param depth the depth of this cert in the chain, 0 is the leaf, i.e. the server cert.
+-     * @param cert the certificate data.
++     * @param certificateEventInfo the certificate data.
+      */
+     public void broadcastCertificationEvent(String iface, int networkId, String ssid,
+-            int depth, X509Certificate cert) {
+-        sendMessage(iface, TOFU_ROOT_CA_CERTIFICATE, networkId, depth, cert);
++            int depth, CertificateEventInfo certificateEventInfo) {
++        sendMessage(iface, TOFU_CERTIFICATE_EVENT, networkId, depth, certificateEventInfo);
+     }
+ 
+     /**
+diff --git a/service/tests/wifitests/Android.bp b/service/tests/wifitests/Android.bp
+index 479e3d944..03f30b6ad 100644
+--- a/service/tests/wifitests/Android.bp
++++ b/service/tests/wifitests/Android.bp
+@@ -114,6 +114,9 @@ android_test {
+             "com.android.server.wifi.ByteBufferReader",
+             "com.android.server.wifi.ByteBufferReader$*",
+             "com.android.server.wifi.ByteBufferReader.**",
++            "com.android.server.wifi.CertificateEventInfo",
++            "com.android.server.wifi.CertificateEventInfo*",
++            "com.android.server.wifi.CertificateEventInfo.**",
+             "com.android.server.wifi.ClientMode",
+             "com.android.server.wifi.ClientMode$*",
+             "com.android.server.wifi.ClientMode.**",
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/CertificateEventInfoTest.java b/service/tests/wifitests/src/com/android/server/wifi/CertificateEventInfoTest.java
+new file mode 100644
+index 000000000..4c2662eac
+--- /dev/null
++++ b/service/tests/wifitests/src/com/android/server/wifi/CertificateEventInfoTest.java
+@@ -0,0 +1,58 @@
++/*
++ * Copyright (C) 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.wifi;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++import static org.mockito.Mockito.mock;
++
++import org.junit.Test;
++
++import java.security.cert.X509Certificate;
++
++public class CertificateEventInfoTest extends WifiBaseTest {
++    private static final String TEST_CERT_HASH = "1234567890";
++    CertificateEventInfo mCertificateEventInfo;
++
++    /**
++     * test the getCert() and getCertHash() methods
++     */
++    @Test
++    public void testGetMethods() throws Exception {
++        X509Certificate cert = mock(X509Certificate.class);
++        mCertificateEventInfo = new CertificateEventInfo(cert, TEST_CERT_HASH);
++        assertEquals(mCertificateEventInfo.getCert(), cert);
++        assertTrue(TEST_CERT_HASH.equals(mCertificateEventInfo.getCertHash()));
++    }
++
++    /**
++     * test that a null certificate throws an exception
++     */
++    @Test(expected = NullPointerException.class)
++    public void testCertNullInitializer() throws Exception {
++        mCertificateEventInfo = new CertificateEventInfo(null, TEST_CERT_HASH);
++    }
++
++    /**
++     * test that a null certificate hash throws an exception
++     */
++    @Test(expected = NullPointerException.class)
++    public void testCertHashNullInitializer() throws Exception {
++        X509Certificate cert = mock(X509Certificate.class);
++        mCertificateEventInfo = new CertificateEventInfo(cert, null);
++    }
++}
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/ClientModeImplTest.java b/service/tests/wifitests/src/com/android/server/wifi/ClientModeImplTest.java
+index cef996fef..bb16f499b 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/ClientModeImplTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/ClientModeImplTest.java
+@@ -7885,11 +7885,13 @@ public class ClientModeImplTest extends WifiBaseTest {
+                             SupplicantState.ASSOCIATED));
+             mLooper.dispatchAll();
+ 
+-            mCmi.sendMessage(WifiMonitor.TOFU_ROOT_CA_CERTIFICATE,
+-                    FRAMEWORK_NETWORK_ID, 0, FakeKeys.CA_CERT0);
++            CertificateEventInfo certificateEventInfo =
++                    spy(new CertificateEventInfo(FakeKeys.CA_CERT0, "1234"));
++            mCmi.sendMessage(WifiMonitor.TOFU_CERTIFICATE_EVENT,
++                    FRAMEWORK_NETWORK_ID, 0, certificateEventInfo);
+             mLooper.dispatchAll();
+             verify(mInsecureEapNetworkHandler).addPendingCertificate(
+-                    eq(eapTlsConfig.SSID), eq(0), eq(FakeKeys.CA_CERT0));
++                    eq(eapTlsConfig.SSID), eq(0), eq(certificateEventInfo));
+ 
+             // Adding a certificate in depth 0 will cause a disconnection when TOFU is supported
+             DisconnectEventInfo disconnectEventInfo =
+@@ -7918,9 +7920,16 @@ public class ClientModeImplTest extends WifiBaseTest {
+         assumeTrue(SdkLevel.isAtLeastT());
+         WifiConfiguration testConfig = setupTrustOnFirstUse(true, true, true);
+ 
+-        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID);
++        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID,
++                testConfig.networkId);
+         mLooper.dispatchAll();
+-        verify(mWifiConnectivityManager).forceConnectivityScan(eq(ClientModeImpl.WIFI_WORK_SOURCE));
++        ArgumentCaptor<WifiConfiguration> wifiConfigurationArgumentCaptor =
++                ArgumentCaptor.forClass(WifiConfiguration.class);
++
++        // TOFU will first connect to get the certificates, and then connect once approved
++        verify(mWifiNative, times(2)).connectToNetwork(eq(WIFI_IFACE_NAME),
++                wifiConfigurationArgumentCaptor.capture());
++        assertEquals(testConfig.networkId, wifiConfigurationArgumentCaptor.getValue().networkId);
+     }
+ 
+     /**
+@@ -7942,6 +7951,14 @@ public class ClientModeImplTest extends WifiBaseTest {
+                 eq(WifiMetricsProto.ConnectionEvent.HLF_NONE),
+                 eq(WifiMetricsProto.ConnectionEvent.FAILURE_REASON_UNKNOWN),
+                 anyInt());
++        ArgumentCaptor<WifiConfiguration> wifiConfigurationArgumentCaptor =
++                ArgumentCaptor.forClass(WifiConfiguration.class);
++
++        // TOFU will connect only once to get the certificates, but will not proceed
++        verify(mWifiNative).connectToNetwork(eq(WIFI_IFACE_NAME),
++                wifiConfigurationArgumentCaptor.capture());
++        assertEquals(testConfig.networkId, wifiConfigurationArgumentCaptor.getValue().networkId);
++
+     }
+ 
+     /**
+@@ -7976,9 +7993,16 @@ public class ClientModeImplTest extends WifiBaseTest {
+         assumeTrue(SdkLevel.isAtLeastT());
+         WifiConfiguration testConfig = setupTrustOnFirstUse(true, true, false);
+ 
+-        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID);
++        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID,
++                testConfig.networkId);
+         mLooper.dispatchAll();
+-        verify(mWifiConnectivityManager).forceConnectivityScan(eq(ClientModeImpl.WIFI_WORK_SOURCE));
++        ArgumentCaptor<WifiConfiguration> wifiConfigurationArgumentCaptor =
++                ArgumentCaptor.forClass(WifiConfiguration.class);
++
++        // TOFU will first connect to get the certificates, and then connect once approved
++        verify(mWifiNative, times(2)).connectToNetwork(eq(WIFI_IFACE_NAME),
++                wifiConfigurationArgumentCaptor.capture());
++        assertEquals(testConfig.networkId, wifiConfigurationArgumentCaptor.getValue().networkId);
+     }
+ 
+     /**
+@@ -8001,6 +8025,13 @@ public class ClientModeImplTest extends WifiBaseTest {
+                 eq(WifiMetricsProto.ConnectionEvent.HLF_NONE),
+                 eq(WifiMetricsProto.ConnectionEvent.FAILURE_REASON_UNKNOWN),
+                 anyInt());
++        ArgumentCaptor<WifiConfiguration> wifiConfigurationArgumentCaptor =
++                ArgumentCaptor.forClass(WifiConfiguration.class);
++
++        // TOFU will connect only once to get the certificates, but will not proceed
++        verify(mWifiNative).connectToNetwork(eq(WIFI_IFACE_NAME),
++                wifiConfigurationArgumentCaptor.capture());
++        assertEquals(testConfig.networkId, wifiConfigurationArgumentCaptor.getValue().networkId);
+     }
+ 
+     /**
+@@ -8034,7 +8065,8 @@ public class ClientModeImplTest extends WifiBaseTest {
+         assumeFalse(SdkLevel.isAtLeastT());
+         WifiConfiguration testConfig = setupLegacyEapNetworkTest(true);
+ 
+-        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID);
++        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID,
++                testConfig.networkId);
+         mLooper.dispatchAll();
+         verify(mWifiMetrics, never()).endConnectionEvent(
+                 any(), anyInt(), anyInt(), anyInt(), anyInt());
+@@ -8067,7 +8099,8 @@ public class ClientModeImplTest extends WifiBaseTest {
+         assumeFalse(SdkLevel.isAtLeastT());
+         WifiConfiguration testConfig = setupLegacyEapNetworkTest(false);
+ 
+-        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID);
++        mCmi.mInsecureEapNetworkHandlerCallbacksImpl.onAccept(testConfig.SSID,
++                testConfig.networkId);
+         mLooper.dispatchAll();
+         verify(mWifiMetrics, never()).endConnectionEvent(
+                 any(), anyInt(), anyInt(), anyInt(), anyInt());
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/InsecureEapNetworkHandlerTest.java b/service/tests/wifitests/src/com/android/server/wifi/InsecureEapNetworkHandlerTest.java
+index b83f6e7e6..356737ffb 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/InsecureEapNetworkHandlerTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/InsecureEapNetworkHandlerTest.java
+@@ -35,6 +35,7 @@ import static org.mockito.Mockito.spy;
+ import static org.mockito.Mockito.validateMockitoUsage;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.withSettings;
+ 
+ import android.app.Notification;
+ import android.content.BroadcastReceiver;
+@@ -42,12 +43,13 @@ import android.content.Intent;
+ import android.net.wifi.WifiConfiguration;
+ import android.net.wifi.WifiContext;
+ import android.net.wifi.WifiEnterpriseConfig;
+-import android.net.wifi.util.HexEncoding;
+ import android.os.Handler;
+ import android.text.TextUtils;
++import android.text.format.DateFormat;
+ 
+ import androidx.test.filters.SmallTest;
+ 
++import com.android.dx.mockito.inline.extended.ExtendedMockito;
+ import com.android.modules.utils.build.SdkLevel;
+ import com.android.server.wifi.util.CertificateSubjectInfo;
+ import com.android.wifi.resources.R;
+@@ -60,13 +62,14 @@ import org.mockito.ArgumentCaptor;
+ import org.mockito.Captor;
+ import org.mockito.Mock;
+ import org.mockito.MockitoAnnotations;
++import org.mockito.MockitoSession;
+ import org.mockito.stubbing.Answer;
+ 
+-import java.nio.charset.StandardCharsets;
++import java.io.ByteArrayInputStream;
++import java.io.InputStream;
++import java.security.cert.CertificateFactory;
+ import java.security.cert.X509Certificate;
+ 
+-import javax.security.auth.x500.X500Principal;
+-
+ /**
+  * Unit tests for {@link com.android.server.wifi.InsecureEapNetworkHandlerTest}.
+  */
+@@ -81,8 +84,192 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+     private static final String TEST_SSID = "\"test_ssid\"";
+     private static final String TEST_IDENTITY = "userid";
+     private static final String TEST_PASSWORD = "myPassWord!";
+-    private static final String TEST_EXPECTED_SHA_256_SIGNATURE = "78:A6:27:31:03:D1:7C:39:A0:B6:12"
+-            + ":6E:22:6C:EC:70:E3:33:37:F4:BC:6A:38:06:74:01:B5:4A:33:E7:8E:AD";
++    private static final String TEST_EXPECTED_SHA_256_SIGNATURE = "54:59:5D:FC:64:9C:17:72:C0:59:"
++            + "9D:25:BD:1F:04:18:E6:00:AB:F4:0A:F0:78:D8:9A:FF:56:C0:7C:89:96:2F";
++    private static final int TEST_GEN_CA_CERT = 0;
++    private static final int TEST_GEN_CA2_CERT = 1;
++    private static final int TEST_GEN_SERVER_CERT = 2;
++    private static final int TEST_GEN_SELF_SIGNED_CERT = 3;
++    private static final int TEST_GEN_FAKE_CA_CERT = 4;
++
++    private static final String TEST_SERVER_CERTIFICATE = "-----BEGIN CERTIFICATE-----\n"
++            + "MIIGPjCCBCagAwIBAgIUN2Ss1JmvjveRe97iWoNh4V+Y5LYwDQYJKoZIhvcNAQEM\n"
++            + "BQAwgZcxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMRswGQYDVQQK\n"
++            + "DBJBbmRyb2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJvaWR3aWZpLm9lbTE8\n"
++            + "MDoGA1UEAwwzQW5kcm9pZCBQYXJ0bmVyIFJvb3QgQ0EgZm9yIHRlc3RpbmcgYW5k\n"
++            + "IGRldmVsb3BtZW50MB4XDTIzMDQxMzAyMTYwMVoXDTQzMDQwODAyMTYwMVowgYMx\n"
++            + "CzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMR0wGwYDVQQKDBRBbmRy\n"
++            + "b2lkIFdpLUZpIFRlc3RlcjEYMBYGA1UECwwPYW5kcm9pZHdpZmkub2VtMSYwJAYD\n"
++            + "VQQDDB1BbmRyb2lkIFdpLUZpIE9FTSBUZXN0IFNlcnZlcjCCAiIwDQYJKoZIhvcN\n"
++            + "AQEBBQADggIPADCCAgoCggIBAKveC9QnsxvM2TMzkUINabtM2Bi5M5gzV4v1MN0h\n"
++            + "n1XjXhfRXwwLMK9xtV05r91YQaOTPkHNgA6nhjmL7agcquGPlR7nuS04oxCaqfo4\n"
++            + "unbroyyqDMaXd8U6B1VlvWSbWAAhBEEAPYDhFXF9V83XHEGcp61Hs4VetGmlC3tW\n"
++            + "W1CLIk+o9JRYsZeK4Q1DurAY7YPU8U84QNxPG7OXg+ensGtspuLLNFEdnd9tSi45\n"
++            + "u5KyPpnSwTdRGSCfMVocxj0EINpdrLnWZyf9NX8Uo7tg/D0TFVBo+MbKjgItIdMg\n"
++            + "STLQwceOdOGHZTPiItzpFcP9EA5ug5gXobPjzDTJO2S3NhUt5NURfGr/wyepxR25\n"
++            + "PDRhBgc/xwc7JrtDGaqmknguZuf7Zai/m4iquC0Wh38bWKms8R0ND/H923aFppxp\n"
++            + "vzX/sWotsTYWiGMehh7v6iwIYADifsXBlJXTUhTZt6cnwttZYfp5oqymCsIhXKVU\n"
++            + "IXOE/PLcU71G9U+jCa7PNs5X5LgqorNPABOpkVL+fDpvopNCdhOEVvwCAIl4tIxl\n"
++            + "M0goFbBmY1wnFFYIUki91UfbeUimCUbBq/RSxuXn3liVB/X+dnyjJ3RnNxJ3Wy1m\n"
++            + "mcHFIVV5VxN6tC7XTXYgZAv0EJGCcVn0RN3ldPWGRLTEIQu7cXRSfqs89N4S31Et\n"
++            + "SjaxAgMBAAGjgZMwgZAwHQYDVR0OBBYEFHh9fcIU3LHamK7PdpasvHmzyRoLMB8G\n"
++            + "A1UdIwQYMBaAFH7ro7AWsBlMNpyRXHGW1hG4c1ocMAkGA1UdEwQCMAAwCwYDVR0P\n"
++            + "BAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMCEGA1UdEQQaMBiCFnNlcnZlci5h\n"
++            + "bmRyb2lkd2lmaS5vZW0wDQYJKoZIhvcNAQEMBQADggIBAOIkOLyF8mmYvj8TeM2V\n"
++            + "d4YMj4sWf7L5C2lq9OGBJwZad1xytymWWZ7PpNf1MopabfUzxPjw5EfMC94MJmpf\n"
++            + "gqYOwFAye5fXQ8CLC39tb681u44tv/B5vqP74TKVhCR8O1YCsIssa8t8e5nIwcYr\n"
++            + "fj3SBu7iOLtL7zjfEXFo3oSEwVYnvS3lhZL8NTrrHscy/ZLFE3nGRq2d3jPbyuoH\n"
++            + "1FJwenxnD6a/AztERPkRNGk2oSFkWecNU9PC9w3bI5wF4I2AIaFgBOj20S7pVtq7\n"
++            + "7nhKnQFrZYVeWbqbInQcRAcSopI6D6tB/F/T9R1WCWBxvpwdciv7BeNgOtGKAszA\n"
++            + "z0sOxI6O4U77R+tFeb0vCwC0OhVL3W0zX3Fy2835D/hC2P1jmMBlxLVKYHY48RBC\n"
++            + "sG1I1qAMD4eXle8rG9MkB9cE5KfncjCrzSQjT8gs7QBTafb6B3WDdwzfaCaQTOOF\n"
++            + "Tsyrdq0TTJP71bt5qWTr6UZIBE5Tjel+DPpvQlPZPYygXPrI3WBcT12VLhti0II6\n"
++            + "1jgkS8fPLR0VypHR02V5fqCRmy9ln0rSyHXFwL3JpeXYD92eLOKdS1MhIUN4bDxZ\n"
++            + "fiXXVKpKU4gqqWAan2RjbBzQjsi6Eh3yuDm2SAqNZVacpOt7BIslqEZ+Og6KhTTk\n"
++            + "DCzyEOB87ySrUWu3PN3r2sJN\n"
++            + "-----END CERTIFICATE-----";
++
++    private static final String TEST_CA_CERTIFICATE = "-----BEGIN CERTIFICATE-----\n"
++            + "MIIGADCCA+igAwIBAgIUFkmrYCj/UYNrizDdMATu6dE3lBIwDQYJKoZIhvcNAQEM\n"
++            + "BQAwgZcxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMRswGQYDVQQK\n"
++            + "DBJBbmRyb2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJvaWR3aWZpLm9lbTE8\n"
++            + "MDoGA1UEAwwzQW5kcm9pZCBQYXJ0bmVyIFJvb3QgQ0EgZm9yIHRlc3RpbmcgYW5k\n"
++            + "IGRldmVsb3BtZW50MB4XDTIzMDQxMzAyMTYwMVoXDTQzMDQwODAyMTYwMVowgZcx\n"
++            + "CzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMRswGQYDVQQKDBJBbmRy\n"
++            + "b2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJvaWR3aWZpLm9lbTE8MDoGA1UE\n"
++            + "AwwzQW5kcm9pZCBQYXJ0bmVyIFJvb3QgQ0EgZm9yIHRlc3RpbmcgYW5kIGRldmVs\n"
++            + "b3BtZW50MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA9JERd2HVp/PI\n"
++            + "3WmaaHDKHDuWZoxUDlyVrTDd1Vu2zhH3A5KJ232QOMxJiLdZ/KxgcpGlAEllijae\n"
++            + "xihxhkHEYr7ff2/p6ZhUWr+0vuk8f4TZsKDAE0SoZoDBHTIbrJf8hHM5/+R//sx1\n"
++            + "/fTf8abOj20zyeWmXqvUNXoVKiRvjiZD69tcRHmfmTOMX0lAirOel8ZwwDFamH8d\n"
++            + "wov0IIyd58m6CV91WnScgg7TOzw/IGpccft73RbDw7cHU5i3G3KhOqamwJbErgya\n"
++            + "x97AsSVCqjBz7rEwm6pHjUagbgVAk9ULmI1McQzMINIrOWRF0Q8awWpvDNwPu86J\n"
++            + "W/LfyzAruWtriimycpl7wv0b/f7JhKerG0+44JUI0sgTz/kobAsU8nfYSyVu8+cX\n"
++            + "HwnDE2jBGB6co2Y00eVKxy6+gWTekpQTyHuPoCieNDukC/38Mj+U0KUZkgGv4CL7\n"
++            + "zaVBGzjSjtnAp47aXciaDvDbpST23ICS7TN5cUnXQ1fWfNUMNkEbIPy2mrlRoCxg\n"
++            + "OJ67UEvGIygE0IUvwDfFvF21+1yKk6D/kU9gMgd6DKtvWj1CIyKXWf+rQ01OHNhX\n"
++            + "YcOTkF5aF2WU558DuS+utGBzXWFsLxqBRe9nDb9W/SlrT2jajfwLelMddvtZmVsY\n"
++            + "NG8IeY8lDs5hcFBvm/BDr0SvBDhs9H0CAwEAAaNCMEAwHQYDVR0OBBYEFH7ro7AW\n"
++            + "sBlMNpyRXHGW1hG4c1ocMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGG\n"
++            + "MA0GCSqGSIb3DQEBDAUAA4ICAQBINF6auWUhCO0l/AqO5pLgOqZ7BjAzHGDNapW+\n"
++            + "3nn2YicDD/X2eJASfsd3jN5JluBlbLqRBBWnIsNG/fyKxY8I4+IrR1x8ovwBjeJ3\n"
++            + "McQeCW2zedluVp2SW3LaNQS+aptXHATJ6O8EOny2LDM+obEtFyLuDC89a1TXjEdj\n"
++            + "XGIYmSJ8RwpKAi4u6ff4jhtNTSEa/eIUE5zUREV0916xtmu5y1vlmsEbpLEquOph\n"
++            + "ZWxpUVTqGEyc0hHaivAWyBG1dtRgov5olzHchM2TsEq/VufiRAw5uzRQ/sAyVjj4\n"
++            + "pcvWnLDLTYk/+uIG1zmbc0rNpAC7b3tplA4OqTtFb3yX0ppPFUg4OaxhMyu4WqS3\n"
++            + "roNiXc8BmtfzMqyWAG21QUfosLa8heiiHgnvkiUa9V2oJ4kWAhOTmLdU70aocu4N\n"
++            + "pcN5jcT5hSl/A91Lvfht0C9BLOrXU+RDCNAVIUnnWSrgduUPTydKVdUkLxau4G/+\n"
++            + "G8fKAyeCouFNq7bp4DEMkgqAWpx96Qe6FLxAS59Ig3tI8MZSieBZezJyjP4GWtuq\n"
++            + "QsnARbwD7z73FWQ+eqXOhkoqDoQc8E2lQGe8OGbacGuUwXo3PUgGaJobz+2Hqa9g\n"
++            + "6AnBkH6AbvooUwSWSCyYIf2LA+GvZotI+PXWuQL7dqWtkaNf98qqfnlZXjp51e+h\n"
++            + "B8nquw==\n"
++            + "-----END CERTIFICATE-----";
++
++    private static final String TEST_CA2_CERTIFICATE = "-----BEGIN CERTIFICATE-----\n"
++            + "MIIGADCCA+igAwIBAgIUGm2nmrZw4ADU7h/TGKd67Uz5bJIwDQYJKoZIhvcNAQEM\n"
++            + "BQAwgZcxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMRswGQYDVQQK\n"
++            + "DBJBbmRyb2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJvaWR3aWZpLm9lbTE8\n"
++            + "MDoGA1UEAwwzQW5vdGhlciBBbmRyb2lkIFJvb3QgQ0EgZm9yIHRlc3RpbmcgYW5k\n"
++            + "IGRldmVsb3BtZW50MB4XDTIzMDQxMzAyMTkxOVoXDTQzMDQwODAyMTkxOVowgZcx\n"
++            + "CzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMRswGQYDVQQKDBJBbmRy\n"
++            + "b2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJvaWR3aWZpLm9lbTE8MDoGA1UE\n"
++            + "AwwzQW5vdGhlciBBbmRyb2lkIFJvb3QgQ0EgZm9yIHRlc3RpbmcgYW5kIGRldmVs\n"
++            + "b3BtZW50MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvv7PYhFHK+nC\n"
++            + "KoDiQI7dhDFTNU4RxTTsxMRSt1n/FJGZX/r8nnr76gB+oofFVjKQusYhuquKGPGq\n"
++            + "ZfrfmtsNhcVBMnNRjZkBWpNb3XO+7F+Qd/gT7yoiZ0L3Ef4QMCGqNrf10EWmXvVQ\n"
++            + "tpaM7RrkmlW6Zu2VbfP/iQQ7EVFrFWmnZfkCxpkLT+LK+pxwNxtJz5l7VRYkXelw\n"
++            + "9vFdq81C+obBpLWg62mNVNa25g6y46YrSOPyxhiemiRih+avIZ9Z6/7qRoVu7t8U\n"
++            + "NpxzMdsDL5bJREadsjpQWZr7A+umm0nlod1DB204K18Y5Z4GuOEGifdHIUmb+3c4\n"
++            + "Kz14FzBahyc3xsZL73AsGEVWLHIQQ/kjepomVl8HuSHdgw6SZR30JhWgU/bcVl01\n"
++            + "8qc6qH7x3e64Ip9xHdng42oPJHEKYipRed3AXzlCQ7Lc9MeAeR+nB9JuSNc6HW0L\n"
++            + "eh9Po0cDJa194UfNeqJ7SG2uNpeg/OUbM+M3iO3dmCRcV3GzirbT8eHZk3Cor3gb\n"
++            + "h9AzmJnHyRaRc9Xtj7AE8swJRvAoWVlCzcBcvaLAW0hn2DWXbWXHDf63Q8n5F4J5\n"
++            + "pf//2eXWaOXFLvkm9wYUj6kXOehcibB2O1F1YvqWE3XZ5GTDq/+E5wK55aifq+bz\n"
++            + "l1Mb1ILIB3cEEL9w+0ClHCno+2XGMOkCAwEAAaNCMEAwHQYDVR0OBBYEFH0KeaUK\n"
++            + "koS2PMYfpcanoTkRBTzmMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGG\n"
++            + "MA0GCSqGSIb3DQEBDAUAA4ICAQCnnL83fEA3g8fiJHpeSNSVZ4R3VunQU2BDkwUj\n"
++            + "NgFWPMsZNQcKoChUA5mb8wOM/fk9tdjMsQR5fRO30B94Eoo9NM39HztBcvvLV9i7\n"
++            + "qNQCTjFE7zf4weX6K3tZICR8nZ1Ogccp3itEDkNpOylFLdQxkc29RrKcuculb3PM\n"
++            + "C7IMREKROKFzrAwWkFAaxJGfByTRfjOqWJFgdRq/GHU2yCKkCLN4zRLjr5ZaAk2J\n"
++            + "+8b+Y1/pIW4j2FAB7ebmq0ZbMbdc+EFdVf36WrsWf54L3DsZOuoaC+2wTsyWQ0b/\n"
++            + "8tqJ/XS39I4uo8KpI5//aQpM1usxP0/pWUm9sTXE618Yf2Ynh64eDQHPIAmt+Xoh\n"
++            + "BfIx+nXVkCl4DGGdwvOURUULdHN9wf6YPOXxaMEYxQRGMwmBAlmiDaH41xeaht/A\n"
++            + "+iv3y918rJFDAXWKvGia8oDi1xIL+IDZ1AGVByNp+C/AE5BTV2m9UHZyXsXrMiQA\n"
++            + "ezUrVpiWB6h4C4rUuaucQv1gO6gEPZGEDdvIG8TGJg8wvLL0oZiyaL3gQxlGs0CZ\n"
++            + "tbDGqugtlh4RLeJ1N/TTFkLzf4CAgDTxfqhMKXkFvpMvO6ZHOT7xC0sdaD2FbZRj\n"
++            + "h5ziC9nvWEdTA8RLr0i/r5nFb6GsxmEk6NYFmpnyo5pvlxf5xqOhsJZlcKnUJ8SQ\n"
++            + "NIGLmw==\n"
++            + "-----END CERTIFICATE-----";
++
++    private static final String TEST_SELF_SIGNED_CERTIFICATE = "-----BEGIN CERTIFICATE-----\n"
++            + "MIIFxzCCA6+gAwIBAgIUB8Kqwhhhs1liW23ve7pZsFlv0zAwDQYJKoZIhvcNAQEM\n"
++            + "BQAwezELMAkGA1UEBhMCVVMxEzARBgNVBAgMCkNhbGlmb3JuaWExGzAZBgNVBAoM\n"
++            + "EkFuZHJvaWQgV2ktRmkgVGVzdDEYMBYGA1UECwwPYW5kcm9pZHdpZmkuZGV2MSAw\n"
++            + "HgYDVQQDDBdTZWxmLXNpZ25lZCBjZXJ0aWZpY2F0ZTAeFw0yMzA0MTMwMjE0MTda\n"
++            + "Fw00MzA0MDgwMjE0MTdaMHsxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9y\n"
++            + "bmlhMRswGQYDVQQKDBJBbmRyb2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJv\n"
++            + "aWR3aWZpLmRldjEgMB4GA1UEAwwXU2VsZi1zaWduZWQgY2VydGlmaWNhdGUwggIi\n"
++            + "MA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDD0oI2c+1D4D2wc4PnhkXbtA7g\n"
++            + "64Mp/JSbnVbl7PseJKnFD/pdos5joFXFbySFqu60S905T1a3AWNwbucKc7C7IwQw\n"
++            + "gtO7uMEPr35j7MhItyAbmj89dY729yXJ8gBnNnqc8PyYEIfZmnBvSry0Tsm60298\n"
++            + "GGZ9yCQfOOb4TJFX/CIKjniI170eLCiGybOrBvG11Rx6BwwHnk1cjkDspejrkhb0\n"
++            + "13RfkQ1S0cEnylrgnn/nRDAAnOscpHRerJ6Ud2vM64iIJy206ZyU/CrhcGeBWwi9\n"
++            + "C1F4ojzvgoFW7bJahXiyEaC5R3G5WdvX5qOr/eu/yMaCAner0LHUibHc5XA02F/c\n"
++            + "LO0LpN59tTT4dx9sLJVjZQGSUxyXnKHiR5TKkoAMWAZSO5hbE4drgivKLnYmYnhC\n"
++            + "Z1rGM5R0D0gB2llAvecItmynDJNApY6L1F8wnNA9NfGUYFpeqJ8uEOn7RxAvyYmB\n"
++            + "trmUFOqL7W84d1/XzORPGQ7n1wyPfBG3xyGIm2MMvanVsLs0/9NXAYAz2ZAHJPnS\n"
++            + "DsiV+7OHtMCdgTI5BJFmiJpXKgVE+IaewQdSjXDU7bgMlll3lTVoVAiKJmxpOmZ6\n"
++            + "FFz7mkd0pYhsO5jQpNGMfl+IaoIiTx4Zg9ZjwjTcPn9eGunBLJJ8SofkhM4boLrC\n"
++            + "KSen8NYuHVDPwAOwpQIDAQABo0MwQTAdBgNVHQ4EFgQU2IB1Q35ysx0HpRttAqMU\n"
++            + "FO9OhIAwCwYDVR0PBAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMA0GCSqGSIb3\n"
++            + "DQEBDAUAA4ICAQBqf4zbooJ4hHeZs7Nd31G7i2WEr6/8OWTuEuDAmJkGW8WBeyUG\n"
++            + "JMrxF3U+kGxVGops4mSxMwVpcsqQa+IwkrP807dSqkuntLVGFqVo7rcQ+l8OcNUv\n"
++            + "oNQIFGPLlWPyMnjXvmWbfvgbgFoY9yUFoxFlHqsVf+1mEvTmW9ya4BGT2hlfvtb6\n"
++            + "Jfvrrocg9zGSnBs9oyI+GzP4Xdqd0riXfk6OuFH3R05/cQj7SlPm8LU1J7ZML/4H\n"
++            + "1AuMg+Ql8vxql4IzIk93CDR8Hq1jb3MhF/ae9UfttuNnHT4vu5X/6qLqWNKMs3zP\n"
++            + "DQQaYkqxWTUWiNlWV7i7pXn8e2J8ZkRHVELvrpdXLKIfL6RxjzKWY+TKiHY+F48I\n"
++            + "JwCAbL1FX+NzB2dS0RxXk/RTAxagenfmDcY1notHNsnDZB54cP9nv+N3wqkDoaKg\n"
++            + "nqOZTlIRWJ4agygqGaxieUuZRgy/AE/dSGpetlXAScKUvhCcO22qXL2jSjBAg5+k\n"
++            + "AynUuiZxdogXbvXrAwSWAVwlz8qEOK3NPFYnEKcjgNbTxiUHp3P/ULBgHQo55o9K\n"
++            + "DdUEbIurd02xG6usEDWxR5ds/RPy6VZ5c6bFUiTEsfMMmQotPL/btuPVXsSdJUR4\n"
++            + "xcxpcV7zx9IjFs/IylyQ1YEYDKWV+nH7iiOigO5WiZ5ck2Wa/Tk3uXg1Ew==\n"
++            + "-----END CERTIFICATE-----\n";
++
++    private static final String TEST_FAKE_CA_CERTIFICATE = "-----BEGIN CERTIFICATE-----\n"
++            + "MIIGADCCA+igAwIBAgIUIxVGWM5Wrs86DpDA2+fo53UryqMwDQYJKoZIhvcNAQEM\n"
++            + "BQAwgZcxCzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMRswGQYDVQQK\n"
++            + "DBJBbmRyb2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJvaWR3aWZpLm9lbTE8\n"
++            + "MDoGA1UEAwwzQW5kcm9pZCBQYXJ0bmVyIFJvb3QgQ0EgZm9yIHRlc3RpbmcgYW5k\n"
++            + "IGRldmVsb3BtZW50MB4XDTIzMDQxMzE1MzkyM1oXDTQzMDQwODE1MzkyM1owgZcx\n"
++            + "CzAJBgNVBAYTAlVTMRMwEQYDVQQIDApDYWxpZm9ybmlhMRswGQYDVQQKDBJBbmRy\n"
++            + "b2lkIFdpLUZpIFRlc3QxGDAWBgNVBAsMD2FuZHJvaWR3aWZpLm9lbTE8MDoGA1UE\n"
++            + "AwwzQW5kcm9pZCBQYXJ0bmVyIFJvb3QgQ0EgZm9yIHRlc3RpbmcgYW5kIGRldmVs\n"
++            + "b3BtZW50MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAhTF8MJsucR5P\n"
++            + "6oN/Nho92EYz9b3m7n52m9KgI/G6/9bK9PSDZ6Z6U3qNxpG7nFML+5qyk+qeBHP8\n"
++            + "39lGNNoH1c2dQDXw3oLjOmd1UoN+zSZBznLwkDD8YQYafz1GWRcI34FYDgiPuSx7\n"
++            + "o4+O4hxcimrelhoNRQcRsrZFoUyJZjtPy2Z5DTZTB7udg1QwZ+7+pHCme3DB2Im/\n"
++            + "Eszsmm2TAG6yM3G/lxphLZMhUFy6kjeeIiuar56ED6dg7qEqdeIznt2gGKolXRWs\n"
++            + "vPW4a5NX1RUjsQxOcKEQnrXZXJ9mATptY1hOxuP6kg8Jzh0tN/NzyyERGFvnvhGz\n"
++            + "sN7CkTUhPOKUW3dVrKl9ZJ9PbYZ6xbpbOWOR/5znYQ/f3+bxxibbFI3WN/89VO50\n"
++            + "WEzwfmiGiWC6Bz0iBoAmGjCxySbJg8iDCjrbRexkFsOJ84jlY0fDrfaqY1+WuyYu\n"
++            + "vdk+w4lzk0wYRbp+oRuIXplMyZDsS15CPq+svoYeNCCOXlkRiMLuq/SpkdM8lRKp\n"
++            + "Mrsc1AckI+BGVqh8S9lyJoP67uDmba1FUw7X3IMCkZQwvFduLkJLNYwO6QDV2M6R\n"
++            + "nUCVCx+vxJdlIOLNQIAeKW9jzfASom4ehZY2HHErbUYGKzFQJJ/2+uQLLYn7PsaE\n"
++            + "gYTYA1naakQegCgbD2UsbKqrEfOiHEECAwEAAaNCMEAwHQYDVR0OBBYEFBiYeS/E\n"
++            + "IQ5+IoQ3bsXoibK3QuMzMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGG\n"
++            + "MA0GCSqGSIb3DQEBDAUAA4ICAQACOOZdfcQ53BF43glA/0VuFeXQ+VS+keR9aFBX\n"
++            + "caKrIbFXSns9EsnvKj1L/IoHem5k4LkMFoNgE1Skit2iktPYs6unV83p99PG6EQo\n"
++            + "RG1CeZ50cHzZK6N56MbwZUGRy/p6Zr9ak9d6XE8GpvSwMW8XebrLPtgSBvpI+WIZ\n"
++            + "epMVg7v8AIIRQuoR2VtZ7RZF/X1kwfU5t2aASVBnxTjlSy6KtBLuL+Vu4Aefa+Z0\n"
++            + "d9Ma2jZV+hwWp0X6piSrVKkMZIR5tlvwJootNBlO0J1Jn4J0ecGNEGXmFwz4adnK\n"
++            + "eYfpuNBJI4CKq7mv2Aszsvg0rQxfKlN8LV7gSNu3H6BjjkNUtHI6uwsajJfEmGKD\n"
++            + "YRpAFgZq7FzRwoI8uWr0Bucz6+qxpISi48t0pmceSVpn6UV1UdSebLo8CX5P283F\n"
++            + "yUqlw2hMpo22Gm3uW8GfPyHfMfsqfMU+7BCP38DDnhcGUO3CTINjREXUGtn6CuWS\n"
++            + "ImhmATld6KJNtRCql3zQnaEO84IvKdFVOkm5q9qQjNWDr1oYsLhxoZJZjKK2rP5F\n"
++            + "GRbMvqDhmzrV0yG+sIyW+aEjBl44bVjWQnFhGjtNr1BOOftSyjnseYiioLbiiaYG\n"
++            + "9Mqu78VmTWJzfxyOP2QPK5K00jnVBZ+jQH0NyIE9yf2Cg/llfYRoHsz80cfY/DNt\n"
++            + "jUR49A==\n"
++            + "-----END CERTIFICATE-----";
+ 
+     @Mock WifiContext mContext;
+     @Mock WifiConfigManager mWifiConfigManager;
+@@ -95,12 +282,14 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+ 
+     @Mock(answer = Answers.RETURNS_DEEP_STUBS) private Notification.Builder mNotificationBuilder;
+     @Mock private WifiDialogManager.DialogHandle mTofuAlertDialog;
+-
++    @Mock private java.text.DateFormat mDateFormat;
+     @Captor ArgumentCaptor<BroadcastReceiver> mBroadcastReceiverCaptor;
+ 
+     MockResources mResources;
+     InsecureEapNetworkHandler mInsecureEapNetworkHandler;
+ 
++    private MockitoSession mSession;
++
+     /**
+      * Sets up for unit test
+      */
+@@ -142,11 +331,19 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+ 
+         when(mFrameworkFacade.makeNotificationBuilder(any(), any()))
+                 .thenReturn(mNotificationBuilder);
++
++        // static mocking
++        mSession = ExtendedMockito.mockitoSession()
++                .mockStatic(DateFormat.class, withSettings().lenient())
++                .startMocking();
++        when(DateFormat.getMediumDateFormat(any())).thenReturn(mDateFormat);
++        when(mDateFormat.format(any())).thenReturn("April 12, 2023");
+     }
+ 
+     @After
+     public void cleanUp() throws Exception {
+         validateMockitoUsage();
++        mSession.finishMocking();
+     }
+ 
+     /**
+@@ -354,35 +551,70 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+                 isTrustOnFirstUseSupported, isUserSelected, needUserApproval);
+     }
+ 
+-    private X509Certificate generateMockCert(String subject, String issuer, boolean isCa) {
+-        X509Certificate mockCert = mock(X509Certificate.class);
+-        X500Principal mockSubjectPrincipal = mock(X500Principal.class);
+-        when(mockCert.getSubjectX500Principal()).thenReturn(mockSubjectPrincipal);
+-        when(mockSubjectPrincipal.getName()).thenReturn("C=TW,ST=Taiwan,L=Taipei"
+-                + ",O=" + subject + " Organization"
+-                + ",CN=" + subject
+-                + ",1.2.840.113549.1.9.1=#1614" + String.valueOf(HexEncoding.encode(
+-                        (subject + "@email.com").getBytes(StandardCharsets.UTF_8))));
+-        try {
+-            when(mockCert.getEncoded()).thenReturn(new byte[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10});
+-        } catch (Exception e) {
+-            // nothing
+-        }
+-        X500Principal mockIssuerX500Principal = mock(X500Principal.class);
+-        when(mockCert.getIssuerX500Principal()).thenReturn(mockIssuerX500Principal);
+-        when(mockIssuerX500Principal.getName()).thenReturn("C=TW,ST=Taiwan,L=Taipei"
+-                + ",O=" + issuer + " Organization"
+-                + ",CN=" + issuer
+-                + ",1.2.840.113549.1.9.1=#1614" + String.valueOf(HexEncoding.encode(
+-                (issuer + "@email.com").getBytes(StandardCharsets.UTF_8))));
++    /**
++     * Verify Trust On First Use flow with server certificate pinning
++     * - Single depth server certificate by signed by some unknown issuer, CA flag not set
++     * - This network is selected by a user.
++     * - Accept the connection.
++     */
++    @Test
++    public void verifyTrustOnFirstUseFlowWithServerCertPinning1() throws Exception {
++        assumeTrue(SdkLevel.isAtLeastT());
++        runServerCertPinningTest(TEST_GEN_SERVER_CERT);
++    }
+ 
+-        when(mockCert.getSignature()).thenReturn(new byte[]{
+-                (byte) 0xde, (byte) 0xad, (byte) 0xbe, (byte) 0xef,
+-                (byte) 0x12, (byte) 0x34, (byte) 0x56, (byte) 0x78,
+-                (byte) 0x90, (byte) 0xab, (byte) 0xcd, (byte) 0xef});
++    /**
++     * Verify Trust On First Use flow with server certificate pinning
++     * - Single depth server certificate by signed by some unknown issuer, CA flag set
++     * - This network is selected by a user.
++     * - Accept the connection.
++     */
++    @Test
++    public void verifyTrustOnFirstUseFlowWithServerCertPinning2() throws Exception {
++        assumeTrue(SdkLevel.isAtLeastT());
++        runServerCertPinningTest(TEST_GEN_CA_CERT);
++    }
++
++    private void runServerCertPinningTest(int type)
++            throws Exception {
++        WifiConfiguration config = prepareWifiConfiguration(true);
++        setupTest(config, true, true);
+ 
+-        when(mockCert.getBasicConstraints()).thenReturn(isCa ? 99 : -1);
+-        return mockCert;
++        CertificateEventInfo mockServerCert = generateMockCertEventInfo(type);
++        mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockServerCert);
++        verifyTrustOnFirstUseFlow(config, ACTION_ACCEPT, true,
++                true, false, null, mockServerCert.getCert());
++    }
++
++    private CertificateEventInfo generateMockCertEventInfo(int type) throws Exception {
++        CertificateEventInfo certificateEventInfo = mock(CertificateEventInfo.class);
++        X509Certificate cert = getCertificate(type);
++
++        when(certificateEventInfo.getCert()).thenReturn(cert);
++        when(certificateEventInfo.getCertHash()).thenReturn("12345678");
++        return certificateEventInfo;
++    }
++
++    private X509Certificate getCertificate(int type) throws Exception {
++        String certString;
++
++        if (type == TEST_GEN_CA_CERT) {
++            certString = TEST_CA_CERTIFICATE;
++        } else if (type == TEST_GEN_CA2_CERT) {
++            certString = TEST_CA2_CERTIFICATE;
++        } else if (type == TEST_GEN_SERVER_CERT) {
++            certString = TEST_SERVER_CERTIFICATE;
++        } else if (type == TEST_GEN_SELF_SIGNED_CERT) {
++            certString = TEST_SELF_SIGNED_CERTIFICATE;
++        } else if (type == TEST_GEN_FAKE_CA_CERT) {
++            certString = TEST_FAKE_CA_CERTIFICATE;
++        } else {
++            throw (new Exception());
++        }
++
++        CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
++        InputStream in = new ByteArrayInputStream(certString.getBytes());
++        return (X509Certificate) certFactory.generateCertificate(in);
+     }
+ 
+     private WifiConfiguration prepareWifiConfiguration(boolean isAtLeastT) {
+@@ -475,35 +707,13 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+         WifiConfiguration config = prepareWifiConfiguration(isAtLeastT);
+         setupTest(config, isAtLeastT, isTrustOnFirstUseSupported);
+ 
+-        X509Certificate mockCaCert = generateMockCert("ca", "ca", true);
+-        X509Certificate mockServerCert = generateMockCert("server", "ca", false);
++        CertificateEventInfo mockCaCert = generateMockCertEventInfo(TEST_GEN_CA_CERT);
++        CertificateEventInfo mockServerCert = generateMockCertEventInfo(TEST_GEN_SERVER_CERT);
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 1, mockCaCert);
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockServerCert);
+ 
+         verifyTrustOnFirstUseFlow(config, ACTION_ACCEPT, isTrustOnFirstUseSupported,
+-                isUserSelected, needUserApproval, mockCaCert, mockServerCert);
+-    }
+-
+-    /**
+-     * Verify Trust On First Use flow with a self-signed CA cert.
+-     * - This network is selected by a user.
+-     * - Accept the connection.
+-     */
+-    @Test
+-    public void verifyTrustOnFirstUseAcceptWhenConnectByUserWithSelfSignedCaCert()
+-            throws Exception {
+-        assumeTrue(SdkLevel.isAtLeastT());
+-        boolean isAtLeastT = true, isTrustOnFirstUseSupported = true, isUserSelected = true;
+-        boolean needUserApproval = true;
+-
+-        WifiConfiguration config = prepareWifiConfiguration(isAtLeastT);
+-        setupTest(config, isAtLeastT, isTrustOnFirstUseSupported);
+-
+-        X509Certificate mockSelfSignedCert = generateMockCert("self", "self", false);
+-        mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockSelfSignedCert);
+-
+-        verifyTrustOnFirstUseFlow(config, ACTION_ACCEPT, isTrustOnFirstUseSupported,
+-                isUserSelected, needUserApproval, mockSelfSignedCert, mockSelfSignedCert);
++                isUserSelected, needUserApproval, mockCaCert.getCert(), mockServerCert.getCert());
+     }
+ 
+     /**
+@@ -544,9 +754,9 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+         setupTest(config, isAtLeastT, isTrustOnFirstUseSupported);
+ 
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 1,
+-                generateMockCert("ca", "ca", true));
++                generateMockCertEventInfo(TEST_GEN_CA_CERT));
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0,
+-                generateMockCert("server", "ca", false));
++                generateMockCertEventInfo(TEST_GEN_SERVER_CERT));
+ 
+         mInsecureEapNetworkHandler.startUserApprovalIfNecessary(isUserSelected);
+         assertTrue(config.enterpriseConfig.isTrustOnFirstUseEnabled());
+@@ -572,28 +782,30 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+                 isInsecureEnterpriseConfigurationAllowed);
+ 
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 1,
+-                generateMockCert("ca", "ca", true));
++                generateMockCertEventInfo(TEST_GEN_CA_CERT));
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0,
+-                generateMockCert("server", "ca", false));
++                generateMockCertEventInfo(TEST_GEN_SERVER_CERT));
+ 
+         mInsecureEapNetworkHandler.startUserApprovalIfNecessary(isUserSelected);
+         verify(mCallbacks, never()).onError(any());
+     }
+ 
+     /**
+-     * Verify that it reports errors if the cert chain is headless.
++     * Verify that is reports errors if the server cert issuer does not match the parent subject.
+      */
+     @Test
+-    public void verifyOnErrorWithHeadlessCertChain() throws Exception {
++    public void verifyOnErrorWithIncompleteChain() throws Exception {
+         assumeTrue(SdkLevel.isAtLeastT());
+         boolean isAtLeastT = true, isTrustOnFirstUseSupported = true, isUserSelected = true;
+ 
+         WifiConfiguration config = prepareWifiConfiguration(isAtLeastT);
+         setupTest(config, isAtLeastT, isTrustOnFirstUseSupported);
+ 
+-        // Missing root CA cert.
+-        mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0,
+-                generateMockCert("server", "ca", false));
++        CertificateEventInfo mockCaCert = generateMockCertEventInfo(TEST_GEN_CA2_CERT);
++        // Missing intermediate cert.
++        CertificateEventInfo mockServerCert = generateMockCertEventInfo(TEST_GEN_SERVER_CERT);
++        mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 1, mockCaCert);
++        mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockServerCert);
+ 
+         mInsecureEapNetworkHandler.startUserApprovalIfNecessary(isUserSelected);
+         verify(mCallbacks).onError(eq(config.SSID));
+@@ -603,19 +815,21 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+     }
+ 
+     /**
+-     * Verify that is reports errors if the server cert issuer does not match the parent subject.
++     * Verify that it reports errors if the issuer is a fake Root CA with the same subject of the
++     * real Root CA. Simulates an attack where the leaf is copied from the real server but a fake
++     * Root CA that an attacker controls is attached.
+      */
+     @Test
+-    public void verifyOnErrorWithIncompleteChain() throws Exception {
++    public void verifyOnErrorWithFakeRootCaCertInTheChain() throws Exception {
+         assumeTrue(SdkLevel.isAtLeastT());
+         boolean isAtLeastT = true, isTrustOnFirstUseSupported = true, isUserSelected = true;
+ 
+         WifiConfiguration config = prepareWifiConfiguration(isAtLeastT);
+         setupTest(config, isAtLeastT, isTrustOnFirstUseSupported);
+ 
+-        X509Certificate mockCaCert = generateMockCert("ca", "ca", true);
+-        // Missing intermediate cert.
+-        X509Certificate mockServerCert = generateMockCert("server", "intermediate", false);
++        // Fake Root CA that didn't sign the server cert
++        CertificateEventInfo mockCaCert = generateMockCertEventInfo(TEST_GEN_FAKE_CA_CERT);
++        CertificateEventInfo mockServerCert = generateMockCertEventInfo(TEST_GEN_SERVER_CERT);
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 1, mockCaCert);
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockServerCert);
+ 
+@@ -645,7 +859,8 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+                 mCallbacks,
+                 WIFI_IFACE_NAME,
+                 mHandler);
+-        X509Certificate mockSelfSignedCert = generateMockCert("self", "self", false);
++        CertificateEventInfo mockSelfSignedCert =
++                generateMockCertEventInfo(TEST_GEN_SELF_SIGNED_CERT);
+         mInsecureEapNetworkHandler.addPendingCertificate("NotExist", 0, mockSelfSignedCert);
+     }
+ 
+@@ -659,12 +874,13 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+ 
+         // Missing root CA cert.
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0,
+-                generateMockCert("server", "ca", false));
++                generateMockCertEventInfo(TEST_GEN_SERVER_CERT));
+ 
+         // The wrong cert chain should be cleared after this call.
+         mInsecureEapNetworkHandler.prepareConnection(config);
+ 
+-        X509Certificate mockSelfSignedCert = generateMockCert("self", "self", false);
++        CertificateEventInfo mockSelfSignedCert =
++                generateMockCertEventInfo(TEST_GEN_SELF_SIGNED_CERT);
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockSelfSignedCert);
+ 
+         mInsecureEapNetworkHandler.startUserApprovalIfNecessary(isUserSelected);
+@@ -679,7 +895,8 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+         WifiConfiguration config = prepareWifiConfiguration(isAtLeastT);
+         setupTest(config, isAtLeastT, isTrustOnFirstUseSupported);
+ 
+-        X509Certificate mockSelfSignedCert = generateMockCert("self", "self", false);
++        CertificateEventInfo mockSelfSignedCert =
++                generateMockCertEventInfo(TEST_GEN_SELF_SIGNED_CERT);
+         mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockSelfSignedCert);
+ 
+         // Pass another PSK config which is not the same as the current one.
+@@ -701,16 +918,14 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+     private void verifyTrustOnFirstUseFlowWithDefaultCerts(WifiConfiguration config,
+             int action, boolean isTrustOnFirstUseSupported, boolean isUserSelected,
+             boolean needUserApproval) throws Exception {
+-        X509Certificate mockCaCert = generateMockCert("ca", "ca", true);
+-        X509Certificate mockServerCert = generateMockCert("server", "middle", false);
++        CertificateEventInfo mockCaCert = generateMockCertEventInfo(TEST_GEN_CA_CERT);
++        CertificateEventInfo mockServerCert = generateMockCertEventInfo(TEST_GEN_SERVER_CERT);
+         if (isTrustOnFirstUseSupported) {
+-            mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 2, mockCaCert);
+-            mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 1,
+-                    generateMockCert("middle", "ca", false));
++            mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 1, mockCaCert);
+             mInsecureEapNetworkHandler.addPendingCertificate(config.SSID, 0, mockServerCert);
+         }
+         verifyTrustOnFirstUseFlow(config, action, isTrustOnFirstUseSupported,
+-                isUserSelected, needUserApproval, mockCaCert, mockServerCert);
++                isUserSelected, needUserApproval, mockCaCert.getCert(), mockServerCert.getCert());
+     }
+ 
+     private void verifyTrustOnFirstUseFlow(WifiConfiguration config,
+@@ -727,7 +942,7 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+                     any(), dialogMessageCaptor.capture(), any(), anyInt(), anyInt(), any(), any(),
+                     any(), dialogCallbackCaptor.capture(), any());
+             if (isTrustOnFirstUseSupported) {
+-                assertTofuDialogMessage(expectedCaCert, expectedServerCert,
++                assertTofuDialogMessage(expectedServerCert,
+                         dialogMessageCaptor.getValue());
+             }
+             if (action == ACTION_ACCEPT) {
+@@ -752,7 +967,7 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+                 verify(mWifiDialogManager).createSimpleDialogWithUrl(
+                         any(), dialogMessageCaptor.capture(), any(), anyInt(), anyInt(), any(),
+                         any(), any(), dialogCallbackCaptor.capture(), any());
+-                assertTofuDialogMessage(expectedCaCert, expectedServerCert,
++                assertTofuDialogMessage(expectedServerCert,
+                         dialogMessageCaptor.getValue());
+                 if (action == ACTION_ACCEPT) {
+                     dialogCallbackCaptor.getValue().onPositiveButtonClicked();
+@@ -777,14 +992,7 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+         if (action == ACTION_ACCEPT) {
+             verify(mWifiConfigManager).updateNetworkSelectionStatus(eq(config.networkId),
+                     eq(WifiConfiguration.NetworkSelectionStatus.DISABLED_NONE));
+-            if (isTrustOnFirstUseSupported) {
+-                verify(mWifiConfigManager).updateCaCertificate(
+-                        eq(config.networkId), eq(expectedCaCert), eq(expectedServerCert));
+-            } else {
+-                verify(mWifiConfigManager, never()).updateCaCertificate(
+-                        anyInt(), any(), any());
+-            }
+-            verify(mCallbacks).onAccept(eq(config.SSID));
++            verify(mCallbacks).onAccept(eq(config.SSID), eq(config.networkId));
+         } else if (action == ACTION_REJECT) {
+             verify(mWifiConfigManager, atLeastOnce())
+                     .updateNetworkSelectionStatus(eq(config.networkId),
+@@ -800,7 +1008,6 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+     }
+ 
+     private void assertTofuDialogMessage(
+-            X509Certificate rootCaCert,
+             X509Certificate serverCert,
+             String message) {
+         CertificateSubjectInfo serverCertSubjectInfo =
+@@ -838,8 +1045,8 @@ public class InsecureEapNetworkHandlerTest extends WifiBaseTest {
+      */
+     @Test
+     public void verifyGetDigest() throws Exception {
+-        X509Certificate mockServerCert = generateMockCert("server", "ca", false);
+-        assertEquals(mInsecureEapNetworkHandler.getDigest(mockServerCert, "SHA256"),
+-                TEST_EXPECTED_SHA_256_SIGNATURE);
++        CertificateEventInfo mockServerCert = generateMockCertEventInfo(TEST_GEN_SERVER_CERT);
++        assertEquals(TEST_EXPECTED_SHA_256_SIGNATURE,
++                mInsecureEapNetworkHandler.getDigest(mockServerCert.getCert(), "SHA256"));
+     }
+ }
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImplTest.java b/service/tests/wifitests/src/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImplTest.java
+index 78b9316f0..2c52db920 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImplTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/SupplicantStaNetworkCallbackAidlImplTest.java
+@@ -15,6 +15,8 @@
+  */
+ package com.android.server.wifi;
+ 
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
+ import static org.mockito.Matchers.eq;
+ import static org.mockito.Mockito.any;
+ import static org.mockito.Mockito.anyInt;
+@@ -32,6 +34,7 @@ import com.android.dx.mockito.inline.extended.ExtendedMockito;
+ import org.junit.After;
+ import org.junit.Before;
+ import org.junit.Test;
++import org.mockito.ArgumentCaptor;
+ import org.mockito.Mock;
+ import org.mockito.MockitoAnnotations;
+ import org.mockito.MockitoSession;
+@@ -92,9 +95,14 @@ public class SupplicantStaNetworkCallbackAidlImplTest extends WifiBaseTest {
+     public void testOnCertificateSuccess() throws Exception {
+         mSupplicantStaNetworkCallbackAidlImpl.onServerCertificateAvailable(
+                 0, "subject".getBytes(), "certHash".getBytes(), "cert".getBytes());
++        ArgumentCaptor<CertificateEventInfo> certificateEventInfoArgumentCaptor =
++                ArgumentCaptor.forClass(CertificateEventInfo.class);
+         verify(mWifiMonitor).broadcastCertificationEvent(
+-                eq(TEST_INTERFACE), eq(TEST_NETWORK_ID),
+-                eq(TEST_SSID), eq(0), eq(mX509Certificate));
++                eq(TEST_INTERFACE), eq(TEST_NETWORK_ID), eq(TEST_SSID), eq(0),
++                certificateEventInfoArgumentCaptor.capture());
++
++        assertEquals(mX509Certificate, certificateEventInfoArgumentCaptor.getValue().getCert());
++        assertTrue("certHash".equals(certificateEventInfoArgumentCaptor.getValue().getCertHash()));
+     }
+ 
+     /** verify onServerCertificateAvailable with illegal arguments. */
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java
+index 20baf931e..08bc38fa2 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiConfigManagerTest.java
+@@ -102,8 +102,6 @@ import org.xmlpull.v1.XmlPullParserException;
+ import java.io.FileDescriptor;
+ import java.io.PrintWriter;
+ import java.io.StringWriter;
+-import java.security.Principal;
+-import java.security.cert.X509Certificate;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+@@ -7394,171 +7392,10 @@ public class WifiConfigManagerTest extends WifiBaseTest {
+         return result.getNetworkId();
+     }
+ 
+-    @Test
+-    public void testUpdateCaCertificateSuccess() throws Exception {
+-        when(mPrimaryClientModeManager.getSupportedFeatures()).thenReturn(
+-                WifiManager.WIFI_FEATURE_TRUST_ON_FIRST_USE);
+-
+-        int openNetId = verifyAddNetwork(WifiConfigurationTestUtil.createOpenNetwork(), true);
+-        int eapPeapNetId = verifyAddNetwork(prepareTofuEapConfig(
+-                WifiEnterpriseConfig.Eap.PEAP, WifiEnterpriseConfig.Phase2.NONE), true);
+-        int eapSimNetId = verifyAddNetwork(WifiConfigurationTestUtil.createEapNetwork(
+-                WifiEnterpriseConfig.Eap.SIM, WifiEnterpriseConfig.Phase2.NONE), true);
+-        assertTrue(mWifiConfigManager.updateCaCertificate(eapPeapNetId, FakeKeys.CA_CERT0,
+-                FakeKeys.CA_CERT1));
+-        WifiConfiguration config = mWifiConfigManager.getConfiguredNetwork(eapPeapNetId);
+-        assertFalse(config.enterpriseConfig.isTrustOnFirstUseEnabled());
+-        assertFalse(config.enterpriseConfig.isUserApproveNoCaCert());
+-        assertEquals(FakeKeys.CA_CERT0, config.enterpriseConfig.getCaCertificate());
+-    }
+-
+-    @Test
+-    public void testUpdateCaCertificateWithoutAltSubjectNames() throws Exception {
+-        when(mPrimaryClientModeManager.getSupportedFeatures()).thenReturn(
+-                WifiManager.WIFI_FEATURE_TRUST_ON_FIRST_USE);
+-
+-        verifyAddNetwork(WifiConfigurationTestUtil.createOpenNetwork(), true);
+-        int eapPeapNetId = verifyAddNetwork(prepareTofuEapConfig(
+-                WifiEnterpriseConfig.Eap.PEAP, WifiEnterpriseConfig.Phase2.NONE), true);
+-        verifyAddNetwork(WifiConfigurationTestUtil.createEapNetwork(
+-                WifiEnterpriseConfig.Eap.SIM, WifiEnterpriseConfig.Phase2.NONE), true);
+-
+-        X509Certificate mockServerCert = mock(X509Certificate.class);
+-        Principal mockSubjectDn = mock(Principal.class);
+-        when(mockServerCert.getSubjectDN()).thenReturn(mockSubjectDn);
+-        when(mockSubjectDn.getName()).thenReturn(
+-                "C=TW,ST=Taiwan,L=Taipei,O=Google,CN=mockServerCert");
+-
+-        assertTrue(mWifiConfigManager.updateCaCertificate(eapPeapNetId, FakeKeys.CA_CERT0,
+-                mockServerCert));
+-        WifiConfiguration config = mWifiConfigManager.getConfiguredNetwork(eapPeapNetId);
+-        assertFalse(config.enterpriseConfig.isTrustOnFirstUseEnabled());
+-        assertFalse(config.enterpriseConfig.isUserApproveNoCaCert());
+-        assertEquals("mockServerCert", config.enterpriseConfig.getDomainSuffixMatch());
+-        assertEquals("", config.enterpriseConfig.getAltSubjectMatch());
+-    }
+-
+-    @Test
+-    public void testUpdateCaCertificateWithAltSubjectNames() throws Exception {
+-        when(mPrimaryClientModeManager.getSupportedFeatures()).thenReturn(
+-                WifiManager.WIFI_FEATURE_TRUST_ON_FIRST_USE);
+-
+-        verifyAddNetwork(WifiConfigurationTestUtil.createOpenNetwork(), true);
+-        int eapPeapNetId = verifyAddNetwork(prepareTofuEapConfig(
+-                WifiEnterpriseConfig.Eap.PEAP, WifiEnterpriseConfig.Phase2.NONE), true);
+-        verifyAddNetwork(WifiConfigurationTestUtil.createEapNetwork(
+-                WifiEnterpriseConfig.Eap.SIM, WifiEnterpriseConfig.Phase2.NONE), true);
+-
+-        X509Certificate mockServerCert = mock(X509Certificate.class);
+-        Principal mockSubjectDn = mock(Principal.class);
+-        when(mockServerCert.getSubjectDN()).thenReturn(mockSubjectDn);
+-        when(mockSubjectDn.getName()).thenReturn(
+-                "C=TW,ST=Taiwan,L=Taipei,O=Google,CN=mockServerCert");
+-        List<List<?>> altNames = new ArrayList<>();
+-        // DNS name 1 with type 2
+-        altNames.add(Arrays.asList(new Object[]{2, "wifi.android"}));
+-        // EMail with type 1
+-        altNames.add(Arrays.asList(new Object[]{1, "test@wifi.com"}));
+-        // DNS name 2 with type 2
+-        altNames.add(Arrays.asList(new Object[]{2, "network.android"}));
+-        // RID name 2 with type 8, this one should be ignored.
+-        altNames.add(Arrays.asList(new Object[]{8, "1.2.3.4"}));
+-        // URI name with type 6
+-        altNames.add(Arrays.asList(new Object[]{6, "http://test.android.com"}));
+-        when(mockServerCert.getSubjectAlternativeNames()).thenReturn(altNames);
+-
+-        assertTrue(mWifiConfigManager.updateCaCertificate(eapPeapNetId, FakeKeys.CA_CERT0,
+-                mockServerCert));
+-        WifiConfiguration config = mWifiConfigManager.getConfiguredNetwork(eapPeapNetId);
+-        assertFalse(config.enterpriseConfig.isTrustOnFirstUseEnabled());
+-        assertFalse(config.enterpriseConfig.isUserApproveNoCaCert());
+-        assertEquals("", config.enterpriseConfig.getDomainSuffixMatch());
+-        assertEquals("DNS:wifi.android;EMAIL:test@wifi.com;DNS:network.android;"
+-                + "URI:http://test.android.com",
+-                config.enterpriseConfig.getAltSubjectMatch());
+-    }
+-
+-    @Test
+-    public void testUpdateCaCertificateFaiulreInvalidArgument() throws Exception {
+-        when(mPrimaryClientModeManager.getSupportedFeatures()).thenReturn(
+-                WifiManager.WIFI_FEATURE_TRUST_ON_FIRST_USE);
+-
+-        int openNetId = verifyAddNetwork(WifiConfigurationTestUtil.createOpenNetwork(), true);
+-        int eapPeapNetId = verifyAddNetwork(prepareTofuEapConfig(
+-                WifiEnterpriseConfig.Eap.PEAP, WifiEnterpriseConfig.Phase2.NONE), true);
+-        int eapSimNetId = verifyAddNetwork(WifiConfigurationTestUtil.createEapNetwork(
+-                WifiEnterpriseConfig.Eap.SIM, WifiEnterpriseConfig.Phase2.NONE), true);
+-
+-        // Invalid network id
+-        assertFalse(mWifiConfigManager.updateCaCertificate(-1, FakeKeys.CA_CERT0,
+-                FakeKeys.CA_CERT1));
+-
+-        // Not an enterprise network
+-        assertFalse(mWifiConfigManager.updateCaCertificate(openNetId, FakeKeys.CA_CERT0,
+-                FakeKeys.CA_CERT1));
+-
+-        // Not a certificate baseed enterprise network
+-        assertFalse(mWifiConfigManager.updateCaCertificate(eapSimNetId, FakeKeys.CA_CERT0,
+-                FakeKeys.CA_CERT1));
+-
+-        // No cert
+-        assertFalse(mWifiConfigManager.updateCaCertificate(eapPeapNetId, null, null));
+-
+-        // No valid subject
+-        X509Certificate mockServerCert = mock(X509Certificate.class);
+-        Principal mockSubjectDn = mock(Principal.class);
+-        when(mockServerCert.getSubjectDN()).thenReturn(mockSubjectDn);
+-        when(mockSubjectDn.getName()).thenReturn("");
+-        assertFalse(mWifiConfigManager.updateCaCertificate(eapPeapNetId, FakeKeys.CA_CERT0,
+-                mockServerCert));
+-    }
+-
+-    @Test
+-    public void testUpdateCaCertificateSuccessWithSelfSignedCertificate() throws Exception {
+-        when(mPrimaryClientModeManager.getSupportedFeatures()).thenReturn(
+-                WifiManager.WIFI_FEATURE_TRUST_ON_FIRST_USE);
+-
+-        int openNetId = verifyAddNetwork(WifiConfigurationTestUtil.createOpenNetwork(), true);
+-        int eapPeapNetId = verifyAddNetwork(prepareTofuEapConfig(
+-                WifiEnterpriseConfig.Eap.PEAP, WifiEnterpriseConfig.Phase2.NONE), true);
+-        int eapSimNetId = verifyAddNetwork(WifiConfigurationTestUtil.createEapNetwork(
+-                WifiEnterpriseConfig.Eap.SIM, WifiEnterpriseConfig.Phase2.NONE), true);
+-
+-        X509Certificate mockCaCert = mock(X509Certificate.class);
+-        when(mockCaCert.getBasicConstraints()).thenReturn(-1);
+-        assertTrue(mWifiConfigManager.updateCaCertificate(eapPeapNetId, mockCaCert,
+-                FakeKeys.CA_CERT1));
+-        WifiConfiguration config = mWifiConfigManager.getConfiguredNetwork(eapPeapNetId);
+-        assertFalse(config.enterpriseConfig.isTrustOnFirstUseEnabled());
+-        assertFalse(config.enterpriseConfig.isUserApproveNoCaCert());
+-        assertEquals(mockCaCert, config.enterpriseConfig.getCaCertificate());
+-    }
+-
+-    @Test
+-    public void testUpdateCaCertificateFailureWithSelfSignedCertificateAndTofuNotEnabled()
+-            throws Exception {
+-        when(mPrimaryClientModeManager.getSupportedFeatures()).thenReturn(
+-                WifiManager.WIFI_FEATURE_TRUST_ON_FIRST_USE);
+-
+-        int openNetId = verifyAddNetwork(WifiConfigurationTestUtil.createOpenNetwork(), true);
+-        int eapPeapNetId = verifyAddNetwork(WifiConfigurationTestUtil.createEapNetwork(
+-                WifiEnterpriseConfig.Eap.PEAP, WifiEnterpriseConfig.Phase2.NONE), true);
+-        int eapSimNetId = verifyAddNetwork(WifiConfigurationTestUtil.createEapNetwork(
+-                WifiEnterpriseConfig.Eap.SIM, WifiEnterpriseConfig.Phase2.NONE), true);
+-
+-        X509Certificate mockCaCert = mock(X509Certificate.class);
+-        when(mockCaCert.getBasicConstraints()).thenReturn(-1);
+-        assertFalse(mWifiConfigManager.updateCaCertificate(eapPeapNetId, mockCaCert,
+-                FakeKeys.CA_CERT1));
+-        WifiConfiguration config = mWifiConfigManager.getConfiguredNetwork(eapPeapNetId);
+-        assertEquals(null, config.enterpriseConfig.getCaCertificate());
+-    }
+-
+     @Test
+     public void testUpdateNetworkWithCreatorOverride() {
+         WifiConfiguration config = WifiConfigurationTestUtil.createOpenNetwork();
+         int openNetId = verifyAddNetwork(WifiConfigurationTestUtil.createOpenNetwork(), true);
+-
+         assertEquals(TEST_CREATOR_UID, mWifiConfigManager
+                 .getConfiguredNetwork(openNetId).creatorUid);
+         config.networkId = openNetId;
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiMonitorTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiMonitorTest.java
+index d6454b4c7..2a6404e13 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiMonitorTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiMonitorTest.java
+@@ -51,7 +51,6 @@ import org.junit.Before;
+ import org.junit.Test;
+ import org.mockito.ArgumentCaptor;
+ 
+-import java.security.cert.X509Certificate;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -747,18 +746,20 @@ public class WifiMonitorTest extends WifiBaseTest {
+     public void testBroadcastCertificateEvent() {
+         final int depth = 2;
+         mWifiMonitor.registerHandler(
+-                WLAN_IFACE_NAME, WifiMonitor.TOFU_ROOT_CA_CERTIFICATE, mHandlerSpy);
++                WLAN_IFACE_NAME, WifiMonitor.TOFU_CERTIFICATE_EVENT, mHandlerSpy);
+         mWifiMonitor.broadcastCertificationEvent(
+-                WLAN_IFACE_NAME, NETWORK_ID, SSID, depth, FakeKeys.CA_CERT0);
++                WLAN_IFACE_NAME, NETWORK_ID, SSID, depth,
++                new CertificateEventInfo(FakeKeys.CA_CERT0, "1234"));
+         mLooper.dispatchAll();
+ 
+         ArgumentCaptor<Message> messageCaptor = ArgumentCaptor.forClass(Message.class);
+         verify(mHandlerSpy).handleMessage(messageCaptor.capture());
+-        assertEquals(WifiMonitor.TOFU_ROOT_CA_CERTIFICATE, messageCaptor.getValue().what);
++        assertEquals(WifiMonitor.TOFU_CERTIFICATE_EVENT, messageCaptor.getValue().what);
+         assertEquals(NETWORK_ID, messageCaptor.getValue().arg1);
+         assertEquals(depth, messageCaptor.getValue().arg2);
+-        X509Certificate cert = (X509Certificate) messageCaptor.getValue().obj;
+-        assertEquals(FakeKeys.CA_CERT0, cert);
++        CertificateEventInfo certEventInfo = (CertificateEventInfo) messageCaptor.getValue().obj;
++        assertEquals(FakeKeys.CA_CERT0, certEventInfo.getCert());
++        assertEquals("1234", certEventInfo.getCertHash());
+     }
+ 
+     /**
+-- 
+2.41.0.255.g8b1d071c50-goog
+
