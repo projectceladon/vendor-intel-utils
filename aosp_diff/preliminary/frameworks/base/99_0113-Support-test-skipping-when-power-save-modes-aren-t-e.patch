@@ -1,0 +1,187 @@
+From ef3e85c561ea34f38730439d1a393416cde03028 Mon Sep 17 00:00:00 2001
+From: "Reddy, Alavala Srinivasa" <alavala.srinivasa.reddy@intel.com>
+Date: Tue, 8 Aug 2023 21:50:59 +0530
+Subject: [PATCH] Support test skipping when power save modes aren't enabled.
+
+Some classes of devices will not have auto power save modes enabled. On
+those devices, we should skip tests that require the modes be enabled.
+
+Bug: 240108412
+Bug: 240630396
+Test: Manually go through CTS-V "Ignore Battery Optimizations Test"
+Test: atest CtsUsageStatsTestCases:UsageStatsTest
+Change-Id: Icc64fbe75213386a1f41fae258e50c4032920b0a
+(cherry picked from commit ba3b5d7e53428b8259abe22e7b3f86ed43e8fe33)
+Merged-In: Icc64fbe75213386a1f41fae258e50c4032920b0a
+author Kweku Adams <kwekua@google.com>	Fri Jul 29 18:05:16 2022 +0000
+
+Ported the above patch, Resloved the STS-CVE-2023-2118 Testcase issue .
+Failed details
+STS Module -x86_64 CtsSecurityBulletinHostTestCases
+STS Testcase -android.security.cts.CVE_2023_21128#testPocCVE_2023_21128
+After porting this patch , The STS testcase was Passed.
+
+Signed-off-by: Reddy, Alavala Srinivasa <alavala.srinivasa.reddy@intel.com>
+---
+ .../server/usage/AppStandbyController.java        |  6 ++++--
+ core/api/test-current.txt                         |  2 ++
+ .../android/app/usage/IUsageStatsManager.aidl     |  1 +
+ .../java/android/app/usage/UsageStatsManager.java | 13 +++++++++++++
+ core/java/android/os/IPowerManager.aidl           |  1 +
+ core/java/android/os/PowerManager.java            | 15 +++++++++++++++
+ .../android/server/power/PowerManagerService.java | 11 +++++++++++
+ .../android/server/usage/UsageStatsService.java   |  5 +++++
+ 8 files changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java b/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java
+index b27ff411dd58..d62db082866d 100644
+--- a/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java
++++ b/apex/jobscheduler/service/java/com/android/server/usage/AppStandbyController.java
+@@ -1565,8 +1565,10 @@ public class AppStandbyController
+     @Override
+     @StandbyBuckets public int getAppStandbyBucket(String packageName, int userId,
+             long elapsedRealtime, boolean shouldObfuscateInstantApps) {
+-        if (!mAppIdleEnabled || (shouldObfuscateInstantApps
+-                && mInjector.isPackageEphemeral(userId, packageName))) {
++	if (!mAppIdleEnabled) {
++            return STANDBY_BUCKET_EXEMPTED;
++        }
++        if (shouldObfuscateInstantApps && mInjector.isPackageEphemeral(userId, packageName)) {	
+             return STANDBY_BUCKET_ACTIVE;
+         }
+ 
+diff --git a/core/api/test-current.txt b/core/api/test-current.txt
+index 650d51ce39f5..31ab85c5aa05 100644
+--- a/core/api/test-current.txt
++++ b/core/api/test-current.txt
+@@ -671,6 +671,7 @@ package android.app.usage {
+ 
+   public final class UsageStatsManager {
+     method public void forceUsageSourceSettingRead();
++    method public boolean isAppStandbyEnabled();
+   }
+ 
+ }
+@@ -1793,6 +1794,7 @@ package android.os {
+   }
+ 
+   public final class PowerManager {
++    method public boolean areAutoPowerSaveModesEnabled();
+     method @RequiresPermission(anyOf={android.Manifest.permission.MANAGE_LOW_POWER_STANDBY, android.Manifest.permission.DEVICE_POWER}) public void forceLowPowerStandbyActive(boolean);
+     field public static final String ACTION_ENHANCED_DISCHARGE_PREDICTION_CHANGED = "android.os.action.ENHANCED_DISCHARGE_PREDICTION_CHANGED";
+     field @RequiresPermission(android.Manifest.permission.DEVICE_POWER) public static final int SYSTEM_WAKELOCK = -2147483648; // 0x80000000
+diff --git a/core/java/android/app/usage/IUsageStatsManager.aidl b/core/java/android/app/usage/IUsageStatsManager.aidl
+index d4fbdc6850a4..dc173132a58d 100644
+--- a/core/java/android/app/usage/IUsageStatsManager.aidl
++++ b/core/java/android/app/usage/IUsageStatsManager.aidl
+@@ -44,6 +44,7 @@ interface IUsageStatsManager {
+     UsageEvents queryEventsForPackageForUser(long beginTime, long endTime, int userId, String pkg, String callingPackage);
+     @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
+     void setAppInactive(String packageName, boolean inactive, int userId);
++    boolean isAppStandbyEnabled();
+     @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
+     boolean isAppInactive(String packageName, int userId, String callingPackage);
+     void onCarrierPrivilegedAppsChanged();
+diff --git a/core/java/android/app/usage/UsageStatsManager.java b/core/java/android/app/usage/UsageStatsManager.java
+index 1dfc7d48640e..1e7fb7aba35c 100644
+--- a/core/java/android/app/usage/UsageStatsManager.java
++++ b/core/java/android/app/usage/UsageStatsManager.java
+@@ -642,6 +642,19 @@ public final class UsageStatsManager {
+     }
+ 
+     /**
++     * Returns whether the app standby bucket feature is enabled.
++     * @hide
++     */
++    @TestApi
++    public boolean isAppStandbyEnabled() {
++	try {
++	    return mService.isAppStandbyEnabled();
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /**    
+      * Returns whether the specified app is currently considered inactive. This will be true if the
+      * app hasn't been used directly or indirectly for a period of time defined by the system. This
+      * could be of the order of several hours or days. Apps are not considered inactive when the
+diff --git a/core/java/android/os/IPowerManager.aidl b/core/java/android/os/IPowerManager.aidl
+index 4fe6524dee27..f1e3ab07686b 100644
+--- a/core/java/android/os/IPowerManager.aidl
++++ b/core/java/android/os/IPowerManager.aidl
+@@ -53,6 +53,7 @@ interface IPowerManager
+     float getBrightnessConstraint(int constraint);
+     @UnsupportedAppUsage
+     boolean isInteractive();
++    boolean areAutoPowerSaveModesEnabled();
+     boolean isPowerSaveMode();
+     PowerSaveState getPowerSaveState(int serviceType);
+     boolean setPowerSaveModeEnabled(boolean mode);
+diff --git a/core/java/android/os/PowerManager.java b/core/java/android/os/PowerManager.java
+index 132bd667f6db..30a1c4e10107 100644
+--- a/core/java/android/os/PowerManager.java
++++ b/core/java/android/os/PowerManager.java
+@@ -1866,6 +1866,21 @@ public final class PowerManager {
+     }
+ 
+     /**
++     * Returns true if the platform has auto power save modes (eg. Doze & app standby) enabled.
++     * This doesn't necessarily mean that the individual features are enabled. For example, if this
++     * returns true, Doze might be enabled while app standby buckets remain disabled.
++     * @hide
++     */
++    @TestApi
++    public boolean areAutoPowerSaveModesEnabled() {
++	try {
++            return mService.areAutoPowerSaveModesEnabled();
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++    
++    /** 
+      * Returns true if the device is currently in power save mode.  When in this mode,
+      * applications should reduce their functionality in order to conserve battery as
+      * much as possible.  You can monitor for changes to this state with
+diff --git a/services/core/java/com/android/server/power/PowerManagerService.java b/services/core/java/com/android/server/power/PowerManagerService.java
+index 651bb930c49b..b91d4af282ad 100644
+--- a/services/core/java/com/android/server/power/PowerManagerService.java
++++ b/services/core/java/com/android/server/power/PowerManagerService.java
+@@ -5828,6 +5828,17 @@ public final class PowerManagerService extends SystemService
+         }
+ 
+         @Override // Binder call
++	public boolean areAutoPowerSaveModesEnabled() {
++	    final long ident = Binder.clearCallingIdentity();
++            try {
++	        return mContext.getResources().getBoolean(
++		        com.android.internal.R.bool.config_enableAutoPowerModes);
++            } finally {
++                Binder.restoreCallingIdentity(ident);
++            }
++        }
++
++        @Override // Binder call	
+         public boolean isPowerSaveMode() {
+             final long ident = Binder.clearCallingIdentity();
+             try {
+diff --git a/services/usage/java/com/android/server/usage/UsageStatsService.java b/services/usage/java/com/android/server/usage/UsageStatsService.java
+index 71644d08e720..1ee98fb0c85b 100644
+--- a/services/usage/java/com/android/server/usage/UsageStatsService.java
++++ b/services/usage/java/com/android/server/usage/UsageStatsService.java
+@@ -2276,6 +2276,11 @@ public class UsageStatsService extends SystemService implements
+         }
+ 
+         @Override
++	public boolean isAppStandbyEnabled() {
++            return mAppStandby.isAppIdleEnabled();
++        }
++
++        @Override	
+         public boolean isAppInactive(String packageName, int userId, String callingPackage) {
+             final int callingUid = Binder.getCallingUid();
+             try {
+-- 
+2.17.1
+
