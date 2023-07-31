@@ -45,15 +45,17 @@ class Sensors : public BnSensors, public ISensorsEventCallback {
           mReadWakeLockQueueRun(false),
           mAutoReleaseWakeLockTime(0),
           mHasWakeLock(false) {
+#if SENSOR_LIST_ENABLED
         AddSensor<AccelSensor>();
         AddSensor<GyroSensor>();
-        AddSensor<AmbientTempSensor>();
-        AddSensor<PressureSensor>();
         AddSensor<MagnetometerSensor>();
         AddSensor<LightSensor>();
-        AddSensor<ProximitySensor>();
-        AddSensor<RelativeHumiditySensor>();
-        AddSensor<HingeAngleSensor>();
+        AddSensor<GravitySensor>();
+        AddSensor<RotationVector>();
+        AddSensor<GeomagnaticRotationVector>();
+        AddSensor<OrientationSensor>();
+        AddSensor<InclinometerSensor>();
+#endif  
     }
 
     virtual ~Sensors() {

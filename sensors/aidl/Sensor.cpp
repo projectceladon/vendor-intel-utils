@@ -16,9 +16,11 @@
 
 #include "sensors-impl/Sensor.h"
 
+#include <log/log.h>
 #include "utils/SystemClock.h"
 
 #include <cmath>
+#include <vector>
 
 using ::ndk::ScopedAStatus;
 
@@ -27,7 +29,7 @@ namespace android {
 namespace hardware {
 namespace sensors {
 
-static constexpr int32_t kDefaultMaxDelayUs = 10 * 1000 * 1000;
+static constexpr float kDefaultMaxDelayUs = 10 * 1000 * 1000;
 
 Sensor::Sensor(ISensorsEventCallback* callback)
     : mIsEnabled(false),
@@ -35,6 +37,7 @@ Sensor::Sensor(ISensorsEventCallback* callback)
       mLastSampleTimeNs(0),
       mCallback(callback),
       mMode(OperationMode::NORMAL) {
+      iioc = iioClient::get_iioClient();
     mRunThread = std::thread(startThread, this);
 }
 
@@ -51,16 +54,19 @@ const SensorInfo& Sensor::getSensorInfo() const {
     return mSensorInfo;
 }
 
-void Sensor::batch(int64_t samplingPeriodNs) {
-    if (samplingPeriodNs < mSensorInfo.minDelayUs * 1000LL) {
-        samplingPeriodNs = mSensorInfo.minDelayUs * 1000LL;
-    } else if (samplingPeriodNs > mSensorInfo.maxDelayUs * 1000LL) {
-        samplingPeriodNs = mSensorInfo.maxDelayUs * 1000LL;
+void Sensor::batch(int32_t samplingPeriodNs) {
+    if (samplingPeriodNs < mSensorInfo.minDelayUs * 1000) {
+        samplingPeriodNs = mSensorInfo.minDelayUs * 1000;
+    } else if (samplingPeriodNs > mSensorInfo.maxDelayUs * 1000) {
+        samplingPeriodNs = mSensorInfo.maxDelayUs * 1000;
     }
 
     if (mSamplingPeriodNs != samplingPeriodNs) {
         mSamplingPeriodNs = samplingPeriodNs;
         // Wake up the 'run' thread to check if a new event should be generated now
+	
+	if (iioc)
+	   iioc->batch(mSensorInfo.sensorHandle, mSamplingPeriodNs);
         mWaitCV.notify_all();
     }
 }
@@ -69,6 +75,9 @@ void Sensor::activate(bool enable) {
     if (mIsEnabled != enable) {
         std::unique_lock<std::mutex> lock(mRunMutex);
         mIsEnabled = enable;
+	
+	if (iioc)
+            iioc->activate(mSensorInfo.sensorHandle, enable);
         mWaitCV.notify_all();
     }
 }
@@ -84,7 +93,7 @@ ScopedAStatus Sensor::flush() {
 
     // Note: If a sensor supports batching, write all of the currently batched events for the sensor
     // to the Event FMQ prior to writing the flush complete event.
-    Event ev;
+    Event ev{};
     ev.sensorHandle = mSensorInfo.sensorHandle;
     ev.sensorType = SensorType::META_DATA;
     EventPayload::MetaData meta = {
@@ -112,7 +121,7 @@ void Sensor::run() {
             });
         } else {
             timespec curTime;
-            clock_gettime(CLOCK_BOOTTIME, &curTime);
+            clock_gettime(CLOCK_REALTIME, &curTime);
             int64_t now = (curTime.tv_sec * kNanosecondsInSeconds) + curTime.tv_nsec;
             int64_t nextSampleTime = mLastSampleTimeNs + mSamplingPeriodNs;
 
@@ -138,8 +147,39 @@ std::vector<Event> Sensor::readEvents() {
     event.sensorType = mSensorInfo.type;
     event.timestamp = ::android::elapsedRealtimeNano();
     memset(&event.payload, 0, sizeof(event.payload));
-    readEventPayload(event.payload);
+    EventPayload::Vec3 vec3 ;
+    if (iioc && iioc->is_iioc_initialized) {
+        vec3 = {
+              .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
+              .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
+              .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
+              .status = SensorStatus::ACCURACY_HIGH,
+            };
+    } else {
+        if (event.sensorHandle == 1) {
+            vec3 = {
+              .x = 0,
+              .y = 0,
+              .z = -9.8,
+              .status = SensorStatus::ACCURACY_HIGH,
+        };
+        }
+        else {
+            vec3 = {
+              .x = 0,
+              .y = 0,
+              .z = 0,
+              .status = SensorStatus::ACCURACY_HIGH,
+        };
+        }
+    }
+    event.payload.set<EventPayload::Tag::vec3>(vec3);
     events.push_back(event);
+#if 1  // Probing data to debug
+    ALOGD("readEvents: handle(%d) name -> %s data[%f, %f, %f]",
+           mSensorInfo.sensorHandle, mSensorInfo.name.c_str(),
+           vec3.x, vec3.y, vec3.z);
+#endif
     return events;
 }
 
@@ -192,7 +232,7 @@ std::vector<Event> OnChangeSensor::readEvents() {
     for (auto iter = events.begin(); iter != events.end(); ++iter) {
         Event ev = *iter;
         if (!mPreviousEventSet ||
-            memcmp(&mPreviousEvent.payload, &ev.payload, sizeof(ev.payload)) != 0) {
+              memcmp(&mPreviousEvent.payload, &ev.payload, sizeof(ev.payload)) != 0) {
             outputEvents.push_back(ev);
             mPreviousEvent = ev;
             mPreviousEventSet = true;
@@ -204,163 +244,122 @@ std::vector<Event> OnChangeSensor::readEvents() {
 AccelSensor::AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Accel Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::ACCELEROMETER;
     mSensorInfo.typeAsString = "";
     mSensorInfo.maxRange = 78.4f;  // +/- 8g
     mSensorInfo.resolution = 1.52e-5;
-    mSensorInfo.power = 0.001f;          // mA
+    mSensorInfo.power = 0.001f;        // mA
     mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
-};
 
-void AccelSensor::readEventPayload(EventPayload& payload) {
-    EventPayload::Vec3 vec3 = {
-            .x = 0,
-            .y = 0,
-            .z = 9.8,
-            .status = SensorStatus::ACCURACY_HIGH,
-    };
-    payload.set<EventPayload::Tag::vec3>(vec3);
 }
 
 PressureSensor::PressureSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Pressure Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::PRESSURE;
     mSensorInfo.typeAsString = "";
-    mSensorInfo.maxRange = 1100.0f;       // hPa
-    mSensorInfo.resolution = 0.005f;      // hPa
-    mSensorInfo.power = 0.001f;           // mA
+    mSensorInfo.maxRange = 1100.0f;     // hPa
+    mSensorInfo.resolution = 0.005f;    // hPa
+    mSensorInfo.power = 0.001f;         // mA
     mSensorInfo.minDelayUs = 100 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.maxDelayUs = 100 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = 0;
-};
-
-void PressureSensor::readEventPayload(EventPayload& payload) {
-    payload.set<EventPayload::Tag::scalar>(1013.25f);
 }
 
 MagnetometerSensor::MagnetometerSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Magnetic Field Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::MAGNETIC_FIELD;
     mSensorInfo.typeAsString = "";
     mSensorInfo.maxRange = 1300.0f;
     mSensorInfo.resolution = 0.01f;
-    mSensorInfo.power = 0.001f;          // mA
-    mSensorInfo.minDelayUs = 20 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.power = 0.001f;        // mA
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = 0;
-};
-
-void MagnetometerSensor::readEventPayload(EventPayload& payload) {
-    EventPayload::Vec3 vec3 = {
-            .x = 100.0,
-            .y = 0,
-            .z = 50.0,
-            .status = SensorStatus::ACCURACY_HIGH,
-    };
-    payload.set<EventPayload::Tag::vec3>(vec3);
 }
 
 LightSensor::LightSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : OnChangeSensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Light Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::LIGHT;
     mSensorInfo.typeAsString = "";
     mSensorInfo.maxRange = 43000.0f;
     mSensorInfo.resolution = 10.0f;
-    mSensorInfo.power = 0.001f;           // mA
+    mSensorInfo.power = 0.001f;         // mA
     mSensorInfo.minDelayUs = 200 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.maxDelayUs = 200 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE);
-};
-
-void LightSensor::readEventPayload(EventPayload& payload) {
-    payload.set<EventPayload::Tag::scalar>(80.0f);
 }
 
 ProximitySensor::ProximitySensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : OnChangeSensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Proximity Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::PROXIMITY;
     mSensorInfo.typeAsString = "";
     mSensorInfo.maxRange = 5.0f;
     mSensorInfo.resolution = 1.0f;
-    mSensorInfo.power = 0.012f;           // mA
+    mSensorInfo.power = 0.012f;         // mA
     mSensorInfo.minDelayUs = 200 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.maxDelayUs = 200 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE |
                                               SensorInfo::SENSOR_FLAG_BITS_WAKE_UP);
-};
-
-void ProximitySensor::readEventPayload(EventPayload& payload) {
-    payload.set<EventPayload::Tag::scalar>(2.5f);
 }
 
 GyroSensor::GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Gyro Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
-    mSensorInfo.type = SensorType::GYROSCOPE;
+    mSensorInfo.type = SensorType::GYROSCOPE_UNCALIBRATED;
     mSensorInfo.typeAsString = "";
     mSensorInfo.maxRange = 1000.0f * M_PI / 180.0f;
     mSensorInfo.resolution = 1000.0f * M_PI / (180.0f * 32768.0f);
     mSensorInfo.power = 0.001f;
     mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = 0;
-};
-
-void GyroSensor::readEventPayload(EventPayload& payload) {
-    EventPayload::Vec3 vec3 = {
-            .x = 0,
-            .y = 0,
-            .z = 0,
-            .status = SensorStatus::ACCURACY_HIGH,
-    };
-    payload.set<EventPayload::Tag::vec3>(vec3);
 }
 
 AmbientTempSensor::AmbientTempSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : OnChangeSensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Ambient Temp Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::AMBIENT_TEMPERATURE;
     mSensorInfo.typeAsString = "";
@@ -368,15 +367,31 @@ AmbientTempSensor::AmbientTempSensor(int32_t sensorHandle, ISensorsEventCallback
     mSensorInfo.resolution = 0.01f;
     mSensorInfo.power = 0.001f;
     mSensorInfo.minDelayUs = 40 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.maxDelayUs = 40 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE);
-};
+}
 
-void AmbientTempSensor::readEventPayload(EventPayload& payload) {
-    payload.set<EventPayload::Tag::scalar>(40.0f);
+DeviceTempSensor::DeviceTempSensor(int32_t sensorHandle,
+        ISensorsEventCallback* callback)
+    : OnChangeSensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "Device Temp Sensor";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::AMBIENT_TEMPERATURE;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 80.0f;
+    mSensorInfo.resolution = 0.01f;
+    mSensorInfo.power = 0.001f;
+    mSensorInfo.minDelayUs = 40 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 40 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE);
 }
 
 RelativeHumiditySensor::RelativeHumiditySensor(int32_t sensorHandle,
@@ -384,7 +399,7 @@ RelativeHumiditySensor::RelativeHumiditySensor(int32_t sensorHandle,
     : OnChangeSensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Relative Humidity Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::RELATIVE_HUMIDITY;
     mSensorInfo.typeAsString = "";
@@ -392,22 +407,114 @@ RelativeHumiditySensor::RelativeHumiditySensor(int32_t sensorHandle,
     mSensorInfo.resolution = 0.1f;
     mSensorInfo.power = 0.001f;
     mSensorInfo.minDelayUs = 40 * 1000;  // microseconds
-    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
+    mSensorInfo.maxDelayUs = 40 * 1000 * 10;  // microseconds
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
     mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE);
 }
 
-void RelativeHumiditySensor::readEventPayload(EventPayload& payload) {
-    payload.set<EventPayload::Tag::scalar>(50.0f);
+GravitySensor::GravitySensor(int32_t sensorHandle,
+        ISensorsEventCallback* callback) : Sensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "Gravity Sensor";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::GRAVITY;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 1300.0f;
+    mSensorInfo.resolution = 0.01f;
+    mSensorInfo.power = 0.001f;
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = 0;
+}
+
+RotationVector::RotationVector(int32_t sensorHandle,
+        ISensorsEventCallback* callback) : Sensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "Rotation Vector";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::ROTATION_VECTOR;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 1300.0f;
+    mSensorInfo.resolution = 0.01f;
+    mSensorInfo.power = 0.001f;
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = 0;
+}
+
+GeomagnaticRotationVector::GeomagnaticRotationVector(int32_t sensorHandle,
+        ISensorsEventCallback* callback) : Sensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "Geomagnatic Rotation Vector";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::GEOMAGNETIC_ROTATION_VECTOR;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 1300.0f;
+    mSensorInfo.resolution = 0.01f;
+    mSensorInfo.power = 0.001f;
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = 0;
+}
+
+OrientationSensor::OrientationSensor(int32_t sensorHandle,
+        ISensorsEventCallback* callback) : Sensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "Orientation Sensor";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::ORIENTATION;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 1300.0f;
+    mSensorInfo.resolution = 0.01f;
+    mSensorInfo.power = 0.001f;
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = 0;
+}
+
+InclinometerSensor::InclinometerSensor(int32_t sensorHandle,
+        ISensorsEventCallback* callback)
+    : Sensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "Inclinometer 3D Sensor";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::ORIENTATION;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 1300.0f;
+    mSensorInfo.resolution = 0.01f;
+    mSensorInfo.power = 0.001f;        // mA
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = 0;
 }
 
 HingeAngleSensor::HingeAngleSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : OnChangeSensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Hinge Angle Sensor";
-    mSensorInfo.vendor = "Vendor String";
+    mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
     mSensorInfo.type = SensorType::HINGE_ANGLE;
     mSensorInfo.typeAsString = "";
@@ -424,9 +531,6 @@ HingeAngleSensor::HingeAngleSensor(int32_t sensorHandle, ISensorsEventCallback* 
                                               SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
 }
 
-void HingeAngleSensor::readEventPayload(EventPayload& payload) {
-    payload.set<EventPayload::Tag::scalar>(180.0f);
-}
 
 }  // namespace sensors
 }  // namespace hardware

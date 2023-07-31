@@ -15,7 +15,7 @@
  */
 
 #include <thread>
-
+#include "iioClient.h"
 #include <aidl/android/hardware/sensors/BnSensors.h>
 
 namespace aidl {
@@ -40,12 +40,14 @@ class Sensor {
     using SensorType = ::aidl::android::hardware::sensors::SensorType;
     using MetaDataEventType =
             ::aidl::android::hardware::sensors::Event::EventPayload::MetaData::MetaDataEventType;
+    
+    iioClient *iioc;
 
     Sensor(ISensorsEventCallback* callback);
     virtual ~Sensor();
 
     const SensorInfo& getSensorInfo() const;
-    void batch(int64_t samplingPeriodNs);
+    void batch(int32_t samplingPeriodNs);
     virtual void activate(bool enable);
     ndk::ScopedAStatus flush();
 
@@ -56,7 +58,6 @@ class Sensor {
   protected:
     void run();
     virtual std::vector<Event> readEvents();
-    virtual void readEventPayload(EventPayload&) = 0;
     static void startThread(Sensor* sensor);
 
     bool isWakeUpSensor();
@@ -93,73 +94,76 @@ class OnChangeSensor : public Sensor {
 class AccelSensor : public Sensor {
   public:
     AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
-
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
 };
 
 class GyroSensor : public Sensor {
   public:
     GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
-
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
 };
 
 class AmbientTempSensor : public OnChangeSensor {
   public:
     AmbientTempSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
 
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
+class DeviceTempSensor : public OnChangeSensor {
+ public:
+    DeviceTempSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
 };
 
 class PressureSensor : public Sensor {
   public:
     PressureSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
-
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
 };
 
 class MagnetometerSensor : public Sensor {
   public:
     MagnetometerSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
-
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
 };
 
 class LightSensor : public OnChangeSensor {
   public:
     LightSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
-
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
 };
 
 class ProximitySensor : public OnChangeSensor {
   public:
     ProximitySensor(int32_t sensorHandle, ISensorsEventCallback* callback);
-
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
 };
 
 class RelativeHumiditySensor : public OnChangeSensor {
   public:
     RelativeHumiditySensor(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
 
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
+class GravitySensor : public Sensor {
+ public:
+    GravitySensor(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
+
+class RotationVector : public Sensor {
+ public:
+    RotationVector(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
+
+class GeomagnaticRotationVector : public Sensor {
+ public:
+    GeomagnaticRotationVector(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
+
+class OrientationSensor : public Sensor {
+ public:
+    OrientationSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
+
+class InclinometerSensor : public Sensor {
+ public:
+    InclinometerSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
 };
 
 class HingeAngleSensor : public OnChangeSensor {
   public:
     HingeAngleSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
-
-  protected:
-    virtual void readEventPayload(EventPayload& payload) override;
 };
 
 }  // namespace sensors
