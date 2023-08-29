@@ -1,0 +1,297 @@
+From 52585fe81f725e62738ac30ce9bffe16d4d864c4 Mon Sep 17 00:00:00 2001
+From: Beth Thibodeau <ethibodeau@google.com>
+Date: Thu, 22 Jun 2023 18:26:44 -0500
+Subject: [PATCH] Improve user handling when querying for resumable media
+
+- Before trying to query recent media from a saved component, check
+  whether the current user actually has that component installed
+- Track user when creating the MediaBrowser, in case the user changes
+  before the MBS returns a result
+
+Test: atest MediaResumeListenerTest
+Bug: 284297711
+(cherry picked from commit e566a250ad61e269119b475c7ebdae6ca962c4a7)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:684492a0dfb0c045a07906a2a79d5e785e3b794d)
+Merged-In: I838ff0e125acadabc8436a00dbff707cc4be6249
+Change-Id: I838ff0e125acadabc8436a00dbff707cc4be6249
+---
+ .../systemui/media/MediaResumeListener.kt     | 46 ++++++++---
+ .../systemui/media/ResumeMediaBrowser.java    | 15 +++-
+ .../media/ResumeMediaBrowserFactory.java      |  7 +-
+ .../systemui/media/MediaResumeListenerTest.kt | 81 ++++++++++++++++++-
+ 4 files changed, 134 insertions(+), 15 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/media/MediaResumeListener.kt b/packages/SystemUI/src/com/android/systemui/media/MediaResumeListener.kt
+index 936db8735ad8..833a51ea66b8 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/MediaResumeListener.kt
++++ b/packages/SystemUI/src/com/android/systemui/media/MediaResumeListener.kt
+@@ -90,9 +90,16 @@ class MediaResumeListener @Inject constructor(
+                 Log.e(TAG, "Error getting package information", e)
+             }
+ 
+-            Log.d(TAG, "Adding resume controls $desc")
+-            mediaDataManager.addResumptionControls(currentUserId, desc, resumeAction, token,
+-                appName.toString(), appIntent, component.packageName)
++            Log.d(TAG, "Adding resume controls for ${browser.userId}: $desc")
++            mediaDataManager.addResumptionControls(
++                browser.userId,
++                desc,
++                resumeAction,
++                token,
++                appName.toString(),
++                appIntent,
++                component.packageName
++            )
+         }
+     }
+ 
+@@ -133,7 +140,11 @@ class MediaResumeListener @Inject constructor(
+             val component = ComponentName(packageName, className)
+             resumeComponents.add(component)
+         }
+-        Log.d(TAG, "loaded resume components ${resumeComponents.toArray().contentToString()}")
++        Log.d(
++            TAG,
++            "loaded resume components for $currentUserId: " +
++                "${resumeComponents.toArray().contentToString()}"
++        )
+     }
+ 
+     /**
+@@ -143,10 +154,20 @@ class MediaResumeListener @Inject constructor(
+         if (!useMediaResumption) {
+             return
+         }
+-
++        
++        val pm = context.packageManager
+         resumeComponents.forEach {
+-            val browser = mediaBrowserFactory.create(mediaBrowserCallback, it)
+-            browser.findRecentMedia()
++            // Verify that the service exists for this user
++            val intent = Intent(MediaBrowserService.SERVICE_INTERFACE)
++            intent.component = it
++            val inf = pm.resolveServiceAsUser(intent, 0, currentUserId)
++            if (inf != null) {
++                val browser =
++                        mediaBrowserFactory.create(mediaBrowserCallback, it, currentUserId)
++                browser.findRecentMedia()
++            } else {
++                Log.d(TAG, "User $currentUserId does not have component $it")
++            }
+         }
+     }
+ 
+@@ -160,7 +181,7 @@ class MediaResumeListener @Inject constructor(
+                 Log.d(TAG, "Checking for service component for " + data.packageName)
+                 val pm = context.packageManager
+                 val serviceIntent = Intent(MediaBrowserService.SERVICE_INTERFACE)
+-                val resumeInfo = pm.queryIntentServices(serviceIntent, 0)
++                val resumeInfo = pm.queryIntentServicesAsUser(serviceIntent, 0, currentUserId)
+ 
+                 val inf = resumeInfo?.filter {
+                     it.serviceInfo.packageName == data.packageName
+@@ -210,7 +231,9 @@ class MediaResumeListener @Inject constructor(
+                         mediaBrowser = null
+                     }
+                 },
+-                componentName)
++                componentName,
++                currentUserId
++            )
+         mediaBrowser?.testConnection()
+     }
+ 
+@@ -267,8 +290,9 @@ class MediaResumeListener @Inject constructor(
+                         mediaBrowser = null
+                     }
+                 },
+-                componentName)
++                componentName,
++                currentUserId)
+             mediaBrowser?.restart()
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowser.java b/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowser.java
+index a4d44367be73..0b4838fb8847 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowser.java
++++ b/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowser.java
+@@ -16,6 +16,7 @@
+ 
+ package com.android.systemui.media;
+ 
++import android.annotation.UserIdInt;
+ import android.app.PendingIntent;
+ import android.content.ComponentName;
+ import android.content.Context;
+@@ -49,6 +50,8 @@ public class ResumeMediaBrowser {
+     private final Context mContext;
+     private final Callback mCallback;
+     private MediaBrowserFactory mBrowserFactory;
++    @UserIdInt private final int mUserId;
++
+     private MediaBrowser mMediaBrowser;
+     private ComponentName mComponentName;
+ 
+@@ -57,13 +60,15 @@ public class ResumeMediaBrowser {
+      * @param context the context
+      * @param callback used to report media items found
+      * @param componentName Component name of the MediaBrowserService this browser will connect to
++     * @param userId ID of the current user
+      */
+     public ResumeMediaBrowser(Context context, Callback callback, ComponentName componentName,
+-            MediaBrowserFactory browserFactory) {
++            MediaBrowserFactory browserFactory, @UserIdInt int userId) {
+         mContext = context;
+         mCallback = callback;
+         mComponentName = componentName;
+         mBrowserFactory = browserFactory;
++	mUserId = userId;
+     }
+ 
+     /**
+@@ -224,6 +229,14 @@ public class ResumeMediaBrowser {
+         return new MediaController(mContext, token);
+     }
+ 
++    /**
++     * Get the ID of the user associated with this broswer
++     * @return the user ID
++     */
++    public @UserIdInt int getUserId() {
++        return mUserId;
++    }
++
+     /**
+      * Get the media session token
+      * @return the token, or null if the MediaBrowser is null or disconnected
+diff --git a/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowserFactory.java b/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowserFactory.java
+index 2261aa5ac265..1b791fabb87e 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowserFactory.java
++++ b/packages/SystemUI/src/com/android/systemui/media/ResumeMediaBrowserFactory.java
+@@ -16,6 +16,7 @@
+ 
+ package com.android.systemui.media;
+ 
++import android.annotation.UserIdInt;
+ import android.content.ComponentName;
+ import android.content.Context;
+ 
+@@ -39,10 +40,12 @@ public class ResumeMediaBrowserFactory {
+      *
+      * @param callback will be called on connection or error, and addTrack when media item found
+      * @param componentName component to browse
++     * @param userId ID of the current user
+      * @return
+      */
+     public ResumeMediaBrowser create(ResumeMediaBrowser.Callback callback,
+-            ComponentName componentName) {
+-        return new ResumeMediaBrowser(mContext, callback, componentName, mBrowserFactory);
++            ComponentName componentName, @UserIdInt int userId) {
++        return new ResumeMediaBrowser(mContext, callback, componentName, mBrowserFactory,
++	     	userId);
+     }
+ }
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/media/MediaResumeListenerTest.kt b/packages/SystemUI/tests/src/com/android/systemui/media/MediaResumeListenerTest.kt
+index 5d81de6bce00..ebce5bdaadea 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/media/MediaResumeListenerTest.kt
++++ b/packages/SystemUI/tests/src/com/android/systemui/media/MediaResumeListenerTest.kt
+@@ -87,6 +87,7 @@ class MediaResumeListenerTest : SysuiTestCase() {
+     @Mock private lateinit var pendingIntent: PendingIntent
+ 
+     @Captor lateinit var callbackCaptor: ArgumentCaptor<ResumeMediaBrowser.Callback>
++    @Captor lateinit var userIdCaptor: ArgumentCaptor<Int>
+ 
+     private lateinit var executor: FakeExecutor
+     private lateinit var data: MediaData
+@@ -255,4 +256,82 @@ class MediaResumeListenerTest : SysuiTestCase() {
+         verify(mediaDataManager, times(3)).addResumptionControls(anyInt(),
+                 any(), any(), any(), any(), any(), eq(PACKAGE_NAME))
+     }
+-}
+\ No newline at end of file
++
++    @Test
++    fun testUserUnlocked_userChangeWhileQuerying() {
++        val firstUserId = context.userId
++        val secondUserId = firstUserId + 1
++        val description = MediaDescription.Builder().setTitle(TITLE).build()
++        val component = ComponentName(PACKAGE_NAME, CLASS_NAME)
++
++        setUpMbsWithValidResolveInfo()
++        whenever(resumeBrowser.token).thenReturn(token)
++        whenever(resumeBrowser.appIntent).thenReturn(pendingIntent)
++
++        val unlockIntent =
++            Intent(Intent.ACTION_USER_UNLOCKED).apply {
++                putExtra(Intent.EXTRA_USER_HANDLE, firstUserId)
++            }
++
++        // When the first user unlocks and we query their recent media
++        resumeListener.userChangeReceiver.onReceive(context, unlockIntent)
++        whenever(resumeBrowser.userId).thenReturn(userIdCaptor.value)
++        verify(resumeBrowser, times(3)).findRecentMedia()
++
++        // And the user changes before the MBS response is received
++        val changeIntent =
++            Intent(Intent.ACTION_USER_SWITCHED).apply {
++                putExtra(Intent.EXTRA_USER_HANDLE, secondUserId)
++            }
++        resumeListener.userChangeReceiver.onReceive(context, changeIntent)
++        callbackCaptor.value.addTrack(description, component, resumeBrowser)
++
++        // Then the loaded media is correctly associated with the first user
++        verify(mediaDataManager)
++            .addResumptionControls(
++                eq(firstUserId),
++                eq(description),
++                any(),
++                eq(token),
++                eq(PACKAGE_NAME),
++                eq(pendingIntent),
++                eq(PACKAGE_NAME)
++            )
++    }
++
++    @Test
++    fun testUserUnlocked_noComponent_doesNotQuery() {
++        // Set up a valid MBS, but user does not have the service available
++        setUpMbsWithValidResolveInfo()
++        val pm = mock(PackageManager::class.java)
++        whenever(mockContext.packageManager).thenReturn(pm)
++        whenever(pm.resolveServiceAsUser(any(), anyInt(), anyInt())).thenReturn(null)
++
++        val unlockIntent =
++            Intent(Intent.ACTION_USER_UNLOCKED).apply {
++                putExtra(Intent.EXTRA_USER_HANDLE, context.userId)
++            }
++
++        // When the user is unlocked, but does not have the component installed
++        resumeListener.userChangeReceiver.onReceive(context, unlockIntent)
++
++        // Then we never attempt to connect to it
++        verify(resumeBrowser, never()).findRecentMedia()
++    }
++
++    /** Sets up mocks to successfully find a MBS that returns valid media. */
++    private fun setUpMbsWithValidResolveInfo() {
++        val pm = mock(PackageManager::class.java)
++        whenever(mockContext.packageManager).thenReturn(pm)
++        val resolveInfo = ResolveInfo()
++        val serviceInfo = ServiceInfo()
++        serviceInfo.packageName = PACKAGE_NAME
++        resolveInfo.serviceInfo = serviceInfo
++        resolveInfo.serviceInfo.name = CLASS_NAME
++        val resumeInfo = listOf(resolveInfo)
++        whenever(pm.queryIntentServicesAsUser(any(), anyInt(), anyInt())).thenReturn(resumeInfo)
++        whenever(pm.resolveServiceAsUser(any(), anyInt(), anyInt())).thenReturn(resolveInfo)
++        whenever(pm.getApplicationLabel(any())).thenReturn(PACKAGE_NAME)
++    }
++  
++}
+-- 
+2.17.1
+
