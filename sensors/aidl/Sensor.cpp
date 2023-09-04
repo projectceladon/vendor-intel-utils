@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <vector>
+#define DEBUG 0
 
 using ::ndk::ScopedAStatus;
 
@@ -175,7 +176,7 @@ std::vector<Event> Sensor::readEvents() {
     }
     event.payload.set<EventPayload::Tag::vec3>(vec3);
     events.push_back(event);
-#if 1  // Probing data to debug
+#ifdef DEBUG   // Probing data to debug
     ALOGD("readEvents: handle(%d) name -> %s data[%f, %f, %f]",
            mSensorInfo.sensorHandle, mSensorInfo.name.c_str(),
            vec3.x, vec3.y, vec3.z);
