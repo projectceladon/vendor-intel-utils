@@ -123,20 +123,16 @@ if [[ $# -gt 1 || $# -lt 0 ]]; then
 	exit -1
 fi
 
-if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
     echo -e "\nApply utils/aosp_diff/preliminary patches:"
     fpnat "$patch_dir_aosp/preliminary"
-fi
 
 if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_aosp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils/aosp_diff Target ${TARGET_PRODUCT} Patches:"
         fpnat "${patch_dir_aosp}/${TARGET_PRODUCT}"
 fi
 
-if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
     echo -e "\nApply utils/bsp_diff/common Patches:"
     fpnat "${patch_dir_bsp}/common"
-fi
 
 if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_bsp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils/bsp_diff Target ${TARGET_PRODUCT} Patches:"
@@ -164,20 +160,16 @@ if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
         echo "Embargoed Patches Found"
         echo "============================="
 
-    if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
         echo -e "\nApply utils_priv/aosp_diff/preliminary Patches:"
         fpnat "${private_patch_dir_aosp}/preliminary"
-    fi
 
     if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils_priv/aosp_diff Target ${TARGET_PRODUCT} Patches:"
         fpnat "${private_patch_dir_aosp}/${TARGET_PRODUCT}"
     fi
 
-    if [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
         echo -e "\nApply utils_priv/bsp_diff/common Patches:"
         fpnat "${private_patch_dir_bsp}/common"
-    fi
 
     if [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${private_patch_dir_bsp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils_priv/bsp_diff Target ${TARGET_PRODUCT} Patches:"

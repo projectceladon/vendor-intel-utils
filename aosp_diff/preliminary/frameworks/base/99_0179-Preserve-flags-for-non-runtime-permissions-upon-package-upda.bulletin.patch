@@ -1,0 +1,139 @@
+From 5f15749ff3c3e3eb697b7f4f132116a6cc7be2b3 Mon Sep 17 00:00:00 2001
+From: Hai Zhang <zhanghai@google.com>
+Date: Wed, 17 May 2023 01:30:20 -0700
+Subject: [PATCH] Preserve flags for non-runtime permissions upon package
+ update.
+
+PermissionManagerServiceImpl.restorePermissionState() creates a new
+UID permission state for non-shared-UID packages that have been
+updated (i.e. replaced), however the existing logic for non-runtime
+permission never carried over the flags from the old state. This
+wasn't an issue for much older platforms because permission flags
+weren't used for non-runtime permissions, however since we are
+starting to use them for role protected permissions (ROLE_GRANTED) and
+app op permissions (USER_SET), we do need to preserver the permission
+flags.
+
+This change merges the logic for granting and revoking a non-runtime
+permission in restorePermissionState() into a single if branch, and
+appends the logic to copy the flag from the old state in that branch.
+
+Bug: 283006437
+Test: PermissionFlagsTest#nonRuntimePermissionFlagsPreservedAfterReinstall
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:0e1ebd84e27f5d4fa8bc6577705293251bcbac4f)
+Merged-In: Iea3c66710e7d28c6fc730b1939da64f1172b08db
+Change-Id: Iea3c66710e7d28c6fc730b1939da64f1172b08db
+---
+ .../permission/PermissionManagerService.java  | 88 +++++++++++--------
+ 1 file changed, 50 insertions(+), 38 deletions(-)
+
+diff --git a/services/core/java/com/android/server/pm/permission/PermissionManagerService.java b/services/core/java/com/android/server/pm/permission/PermissionManagerService.java
+index 9d0b2543e5ef..dd8b96eab3d7 100644
+--- a/services/core/java/com/android/server/pm/permission/PermissionManagerService.java
++++ b/services/core/java/com/android/server/pm/permission/PermissionManagerService.java
+@@ -2882,29 +2882,55 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                                 + pkg.getPackageName());
+                     }
+ 
+-                    if ((bp.isNormal() && shouldGrantNormalPermission)
+-                            || (bp.isSignature()
+-                                    && (!bp.isPrivileged() || CollectionUtils.contains(
+-                                            isPrivilegedPermissionAllowlisted, permName))
+-                                    && (CollectionUtils.contains(shouldGrantSignaturePermission,
+-                                            permName)
+-                                            || (((bp.isPrivileged() && CollectionUtils.contains(
+-                                                    shouldGrantPrivilegedPermissionIfWasGranted,
+-                                                    permName)) || bp.isDevelopment() || bp.isRole())
+-                                                    && origState.isPermissionGranted(permName))))
+-                            || (bp.isInternal()
+-                                    && (!bp.isPrivileged() || CollectionUtils.contains(
+-                                            isPrivilegedPermissionAllowlisted, permName))
+-                                    && (CollectionUtils.contains(shouldGrantInternalPermission,
+-                                            permName)
+-                                            || (((bp.isPrivileged() && CollectionUtils.contains(
+-                                                    shouldGrantPrivilegedPermissionIfWasGranted,
+-                                                    permName)) || bp.isDevelopment() || bp.isRole())
+-                                                    && origState.isPermissionGranted(permName))))) {
+-                        // Grant an install permission.
+-                        if (uidState.grantPermission(bp)) {
+-                            changedInstallPermission = true;
++                    if (bp.isNormal() || bp.isSignature() || bp.isInternal()) {
++                        if ((bp.isNormal() && shouldGrantNormalPermission)
++                                || (bp.isSignature()
++                                        && (!bp.isPrivileged() || CollectionUtils.contains(
++                                                isPrivilegedPermissionAllowlisted, permName))
++                                        && (CollectionUtils.contains(shouldGrantSignaturePermission,
++                                                permName)
++                                                || (((bp.isPrivileged() && CollectionUtils.contains(
++                                                        shouldGrantPrivilegedPermissionIfWasGranted,
++                                                        permName)) || bp.isDevelopment()
++                                                                || bp.isRole())
++                                                        && origState.isPermissionGranted(
++                                                                permName))))
++                                || (bp.isInternal()
++                                        && (!bp.isPrivileged() || CollectionUtils.contains(
++                                                isPrivilegedPermissionAllowlisted, permName))
++                                        && (CollectionUtils.contains(shouldGrantInternalPermission,
++                                                permName)
++                                                || (((bp.isPrivileged() && CollectionUtils.contains(
++                                                        shouldGrantPrivilegedPermissionIfWasGranted,
++                                                        permName)) || bp.isDevelopment()
++                                                                || bp.isRole())
++                                                        && origState.isPermissionGranted(
++                                                                permName))))) {
++                            // Grant an install permission.
++                            if (uidState.grantPermission(bp)) {
++                                changedInstallPermission = true;
++                            }
++                        } else {
++                            if (DEBUG_PERMISSIONS) {
++                                boolean wasGranted = uidState.isPermissionGranted(bp.getName());
++                                if (wasGranted || bp.isAppOp()) {
++                                    Slog.i(TAG, (wasGranted ? "Un-granting" : "Not granting")
++                                            + " permission " + perm
++                                            + " from package " + friendlyName
++                                            + " (protectionLevel=" + bp.getProtectionLevel()
++                                            + " flags=0x"
++                                            + Integer.toHexString(PackageInfoUtils.appInfoFlags(pkg,
++                                            ps))
++                                            + ")");
++                                }
++                            }
++                            if (uidState.revokePermission(bp)) {
++                                changedInstallPermission = true;
++                            }
+                         }
++                        PermissionState origPermState = origState.getPermissionState(perm);
++                        int flags = origPermState != null ? origPermState.getFlags() : 0;
++                        uidState.updatePermissionFlags(bp, MASK_PERMISSION_FLAGS_ALL, flags);
+                     } else if (bp.isRuntime()) {
+                         boolean hardRestricted = bp.isHardRestricted();
+                         boolean softRestricted = bp.isSoftRestricted();
+@@ -3018,22 +3044,8 @@ public class PermissionManagerService extends IPermissionManager.Stub {
+                         uidState.updatePermissionFlags(bp, MASK_PERMISSION_FLAGS_ALL,
+                                 flags);
+                     } else {
+-                        if (DEBUG_PERMISSIONS) {
+-                            boolean wasGranted = uidState.isPermissionGranted(bp.getName());
+-                            if (wasGranted || bp.isAppOp()) {
+-                                Slog.i(TAG, (wasGranted ? "Un-granting" : "Not granting")
+-                                        + " permission " + perm
+-                                        + " from package " + friendlyName
+-                                        + " (protectionLevel=" + bp.getProtectionLevel()
+-                                        + " flags=0x"
+-                                        + Integer.toHexString(PackageInfoUtils.appInfoFlags(pkg,
+-                                                ps))
+-                                        + ")");
+-                            }
+-                        }
+-                        if (uidState.removePermissionState(bp.getName())) {
+-                            changedInstallPermission = true;
+-                        }
++                        Slog.wtf(LOG_TAG, "Unknown permission protection " + bp.getProtection()
++                                + " for permission " + bp.getName());
+                     }
+                 }
+ 
+-- 
+2.41.0.255.g8b1d071c50-goog
+
