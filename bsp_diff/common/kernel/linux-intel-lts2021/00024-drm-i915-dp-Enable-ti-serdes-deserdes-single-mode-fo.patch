@@ -1,0 +1,1959 @@
+From b56e8a6b10ddcb5711d05fd0150543d960eff4db Mon Sep 17 00:00:00 2001
+From: "Jia, Lin A" <lin.a.jia@intel.com>
+Date: Mon, 18 Sep 2023 10:27:18 +0800
+Subject: [PATCH] drm/i915/dp: Enable ti serdes/deserdes single mode for 1080p
+ timing.
+
+---
+ drivers/gpu/drm/i915/Makefile                 |    3 +-
+ drivers/gpu/drm/i915/display/intel_ddi.c      |    4 +
+ drivers/gpu/drm/i915/display/intel_dp.c       |   10 +
+ .../gpu/drm/i915/display/intel_dp_ser_drv.c   | 1677 +++++++++++++++++
+ .../gpu/drm/i915/display/intel_dp_ser_drv.h   |  166 ++
+ 5 files changed, 1859 insertions(+), 1 deletion(-)
+ create mode 100755 drivers/gpu/drm/i915/display/intel_dp_ser_drv.c
+ create mode 100755 drivers/gpu/drm/i915/display/intel_dp_ser_drv.h
+
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index e202ea8a86bb..923f7f2f1885 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -331,7 +331,8 @@ i915-y += \
+ 	display/intel_vdsc.o \
+ 	display/intel_vrr.o \
+ 	display/vlv_dsi.o \
+-	display/vlv_dsi_pll.o
++	display/vlv_dsi_pll.o \
++	display/intel_dp_ser_drv.o
+ 
+ i915-y += i915_perf.o
+ 
+diff --git a/drivers/gpu/drm/i915/display/intel_ddi.c b/drivers/gpu/drm/i915/display/intel_ddi.c
+index caee701f6100..bffd0e3f688b 100644
+--- a/drivers/gpu/drm/i915/display/intel_ddi.c
++++ b/drivers/gpu/drm/i915/display/intel_ddi.c
+@@ -66,6 +66,7 @@
+ #include "intel_vrr.h"
+ #include "skl_scaler.h"
+ #include "skl_universal_plane.h"
++#include "intel_dp_ser_drv.h"
+ 
+ static const u8 index_to_dp_signal_levels[] = {
+ 	[0] = DP_TRAIN_VOLTAGE_SWING_LEVEL_0 | DP_TRAIN_PRE_EMPH_LEVEL_0,
+@@ -4493,6 +4494,8 @@ void intel_ddi_init(struct drm_i915_private *dev_priv, enum port port)
+ 	dig_port->ddi_io_power_domain = intel_display_power_ddi_io_domain(dev_priv, port);
+ 
+ 	if (init_dp) {
++		intel_dp_ser_module_init();
++
+ 		if (!intel_ddi_init_dp_connector(dig_port))
+ 			goto err;
+ 
+@@ -4500,6 +4503,7 @@ void intel_ddi_init(struct drm_i915_private *dev_priv, enum port port)
+ 
+ 		if (dig_port->dp.mso_link_count)
+ 			encoder->pipe_mask = intel_ddi_splitter_pipe_mask(dev_priv);
++
+ 	}
+ 
+ 	/* In theory we don't need the encoder->type check, but leave it just in
+diff --git a/drivers/gpu/drm/i915/display/intel_dp.c b/drivers/gpu/drm/i915/display/intel_dp.c
+index 959440ead901..5799273698eb 100644
+--- a/drivers/gpu/drm/i915/display/intel_dp.c
++++ b/drivers/gpu/drm/i915/display/intel_dp.c
+@@ -75,6 +75,7 @@
+ #include "intel_tc.h"
+ #include "intel_vdsc.h"
+ #include "intel_vrr.h"
++#include "intel_dp_ser_drv.h"
+ 
+ /* DP DSC throughput values used for slice count calculations KPixels/s */
+ #define DP_DSC_PEAK_PIXEL_RATE			2720000
+@@ -4820,6 +4821,8 @@ void intel_dp_encoder_flush_work(struct drm_encoder *encoder)
+ 	intel_pps_vdd_off_sync(intel_dp);
+ 
+ 	intel_dp_aux_fini(intel_dp);
++
++	intel_dp_ser_module_exit();
+ }
+ 
+ void intel_dp_encoder_suspend(struct intel_encoder *intel_encoder)
+@@ -5308,6 +5311,8 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
+ 	enum port port = intel_encoder->port;
+ 	enum phy phy = intel_port_to_phy(dev_priv, port);
+ 	int type;
++	/* FIXME figure out what we actually want here */
++	//const struct drm_display_mode *fixed_mode;
+ 
+ 	/* Initialize the work for modeset in case of link train failure */
+ 	INIT_WORK(&intel_connector->modeset_retry_work,
+@@ -5411,6 +5416,11 @@ intel_dp_init_connector(struct intel_digital_port *dig_port,
+ 
+ 	intel_psr_init(intel_dp);
+ 
++	//fixed_mode = intel_panel_preferred_fixed_mode(intel_dp->attached_connector);
++
++	//intel_dp_ser_init(fixed_mode);
++	intel_dp_ser_init1();
++
+ 	return true;
+ 
+ fail:
+diff --git a/drivers/gpu/drm/i915/display/intel_dp_ser_drv.c b/drivers/gpu/drm/i915/display/intel_dp_ser_drv.c
+new file mode 100755
+index 000000000000..6e9b80edc2bf
+--- /dev/null
++++ b/drivers/gpu/drm/i915/display/intel_dp_ser_drv.c
+@@ -0,0 +1,1677 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include "intel_dp_ser_drv.h"
++
++struct i2c_client       *fpd_dp_client[FPD_DP_ARRAY_SIZE];
++struct fpd_dp_ser_priv *fpd_dp_priv;
++
++static struct i2c_board_info fpd_dp_i2c_board_info[] = {
++    {
++        I2C_BOARD_INFO("DS90UB983", FPD_DP_SER_TX_ADD),
++    },
++    {
++        I2C_BOARD_INFO("DS90UB984A", FPD_DP_SER_RX_ADD_A),
++    },
++    {
++        I2C_BOARD_INFO("DS90UB98B", FPD_DP_SER_RX_ADD_B),
++    },
++};
++
++char fpd_dp_ser_read_reg(struct i2c_client *client, u8 reg_addr, u8 *val)
++{
++    //u8 buf[2];
++    u8 buf[1];
++    int ret = 0;
++
++    struct i2c_msg msg[2];
++
++    //buf[0] = reg_addr >> 8;
++    buf[0] = reg_addr & 0xff;
++
++    msg[0].addr = client->addr;
++    //msg[0].flags = client->flags;
++    msg[0].flags = 0;
++    msg[0].buf = &buf[0];
++    msg[0].len = 1;//sizeof(buf);
++
++    msg[1].addr = client->addr;
++    //msg[1].flags = client->flags | I2C_M_RD;
++    msg[1].flags = I2C_M_RD;
++    msg[1].buf = val;
++    msg[1].len = 1;
++
++    i2c_transfer(client->adapter, msg, 2);
++    if (ret < 0) {
++        pr_debug("[FDP_DP] [-%s-%s-%d-], fail reg_addr=0x%x, val=%u\n",
++               __FILE__, __func__, __LINE__, reg_addr, *val);
++        return -ENODEV;
++    } else {
++        pr_debug("[FDP_DP] 0x%02x, 0x%02x, 0x%02x\n", client->addr,reg_addr, *val);
++    }
++    return 0;
++}
++
++bool fpd_dp_ser_write_reg(struct i2c_client *client, unsigned int reg_addr, u8 val)
++{
++    int ret= 0;
++    struct i2c_msg msg;
++    u8 buf[2];
++    //u8 read_val;
++
++    //buf[0] = (reg_addr&0xff00) >> 8;
++    //buf[1] = reg_addr & 0xff;
++    //buf[2] = val;
++    //buf[0] = (reg_addr&0xff00) >> 8;
++    buf[0] = reg_addr & 0xff;
++    buf[1] = val;
++
++    msg.addr = client->addr;
++    //msg.flags = client->flags;
++    msg.flags = 0;
++    msg.buf = &buf[0];
++    msg.len = 2;//sizeof(buf);
++
++    ret=i2c_transfer(client->adapter, &msg, 1);
++    if (ret < 0) {
++        pr_debug("[FDP_DP] [-%s-%s-%d-], fail client->addr=0x%02x, reg_addr=0x%02x, val=0x%02x\n",
++         __FILE__, __func__, __LINE__, client->addr, reg_addr, val);
++        return false;
++    }  else {
++        pr_debug("[FDP_DP] write successful:  0x%02x, 0x%02x, 0x%02x\n",
++        client->addr, reg_addr, val);
++        //fpd_dp_ser_read_reg(client, reg_addr, &read_val);
++        return true;
++    }
++}
++
++void fpd_dp_ser_update(struct i2c_client *client,
++        u32 reg, u32 mask, u8 val)
++{
++    u8 update_val;
++
++    fpd_dp_ser_read_reg(client, reg, &update_val);
++    update_val = ((update_val & (~mask)) | (val & mask));
++    fpd_dp_ser_write_reg(client, reg, update_val);
++}
++
++int fpd_dp_ser_prepare(const struct drm_display_mode *fixed_mode, struct i2c_client *client)
++{
++    //int SSCG_FDEV_STRAP = 0;
++    //int SSCG_FMOD_STRAP = 0;
++    //char *SSCG_TYPE_STRAP = "none";
++    u8 TX_MODE_STS;
++    u8 GENERAL_CFG;
++    u8 read_val;
++
++    pr_debug("[FDP_DP] %s: hdisplay =%d, vdisplay = %d\n", __func__, fixed_mode->hdisplay, fixed_mode->vdisplay);
++
++    fpd_dp_ser_write_reg(client, 0x70, FPD_DP_SER_RX_ADD_A);
++    fpd_dp_ser_write_reg(client, 0x78, FPD_DP_SER_RX_ADD_A);
++    fpd_dp_ser_write_reg(client, 0x88, 0x0);
++    fpd_dp_ser_write_reg(client, 0x71, FPD_DP_SER_RX_ADD_B);
++    fpd_dp_ser_write_reg(client, 0x79, FPD_DP_SER_RX_ADD_B+1);
++    fpd_dp_ser_write_reg(client, 0x89, 0x0);
++
++    // Check MODE Strapping
++    fpd_dp_ser_read_reg(client, 0x27, &read_val);
++    TX_MODE_STS = read_val;
++
++    if (TX_MODE_STS == 0)
++      pr_debug("Error: No Serializer Detected\n");
++
++    fpd_dp_ser_read_reg(client, 0x27, &read_val);
++
++    GENERAL_CFG = read_val;
++    if ((GENERAL_CFG & 0x01) == 1) {
++        pr_debug("MODE Strapped for FPD III Mode\n");
++        fpd_dp_priv->FPD4_Strap_Rate_P0 = 0;
++        fpd_dp_priv->FPD4_Strap_Rate_P1 = 0;
++    } else {
++        if ((TX_MODE_STS & 0x0F) == 0x0F) {
++            pr_debug("MODE Strapped for FPD III Mode");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_0;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_0;
++        }
++        if (((TX_MODE_STS & 0x0F) == 0x08) || (TX_MODE_STS & 0x0F) == 0x09) {
++            pr_debug("MODE Strapped for FPD IV 10.8Gbps");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_10_8;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_10_8;
++        }
++        if (((TX_MODE_STS & 0x0F) == 0x0A || (TX_MODE_STS & 0x0F) == 0x0B)) {
++            pr_debug("MODE Strapped for FPD IV 13.5Gbps\n");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_13_5;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_13_5;
++        }
++        if (((TX_MODE_STS & 0x0F) == 0x0C || (TX_MODE_STS & 0x0F) == 0x0D)) {
++            pr_debug("MODE Strapped for FPD IV 6.75Gbps\n");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_6_75;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_6_75;
++        }
++        if ((TX_MODE_STS & 0x0F) == 0x0E) {
++            pr_debug("MODE Strapped for FPD IV 3.375Gbps\n");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_3_375;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_3_375;
++        }
++    }
++
++    fpd_dp_priv->FPDConf = 8;
++
++    if ((fixed_mode->hdisplay / fixed_mode->vdisplay) > 16/9)
++        fpd_dp_priv->split_mode = true;
++    else
++        fpd_dp_priv->split_mode = false;
++
++    if (fpd_dp_priv->split_mode == true)
++    {
++        fpd_dp_priv->Thw    = fixed_mode->htotal/2;
++        fpd_dp_priv->Ahw    = fixed_mode->hdisplay / 2;
++        fpd_dp_priv->Hfp    = (fixed_mode->hsync_start - fixed_mode->hdisplay) / 2;
++        fpd_dp_priv->Hsw    = (fixed_mode->hsync_end- fixed_mode->hsync_start) / 2;
++        fpd_dp_priv->Hbp    = (fixed_mode->htotal - fixed_mode->hsync_end) / 2;
++        fpd_dp_priv->Hwords = (fixed_mode->hdisplay *24/32) - 4;
++        fpd_dp_priv->Mvid   = (fixed_mode->clock/1000)*32768/(2*270);
++    }
++    else
++    {
++        fpd_dp_priv->Thw    = fixed_mode->htotal;
++        fpd_dp_priv->Ahw    = fixed_mode->hdisplay;
++        fpd_dp_priv->Hfp    = fixed_mode->hsync_start - fixed_mode->hdisplay;
++        fpd_dp_priv->Hsw    = fixed_mode->hsync_end- fixed_mode->hsync_start;
++        fpd_dp_priv->Hbp    = fixed_mode->htotal - fixed_mode->hsync_end;
++        fpd_dp_priv->Hsp    = (fixed_mode->flags & 0x2) |
++                              ((fixed_mode->flags & 0x8) >> 3);
++        fpd_dp_priv->Hwords = (fixed_mode->hdisplay*24/16) -4;
++        fpd_dp_priv->Mvid   = (fixed_mode->clock/1000)*32768/270;
++     }
++
++    fpd_dp_priv->Tvw    = fixed_mode->vtotal;
++    fpd_dp_priv->Avw   = fixed_mode->vdisplay;
++    fpd_dp_priv->Vfp   = fixed_mode->vsync_start - fixed_mode->vdisplay;
++    fpd_dp_priv->Vsw   = fixed_mode->vsync_end- fixed_mode->vsync_start;
++    fpd_dp_priv->Vbp   = fixed_mode->vtotal - fixed_mode->vsync_end;
++    fpd_dp_priv->Hsp   = (fixed_mode->flags & 0x2) |
++                          ((fixed_mode->flags & 0x8) >> 3);
++
++    pr_debug("[FDP_DP] %s: split_mode = %d\n", __func__, fpd_dp_priv->split_mode);
++    pr_debug("[FDP_DP] %s: fpd_dp_priv->Hwords =%d, fpd_dp_priv->Mvid = %d\n", __func__, fpd_dp_priv->Hwords, fpd_dp_priv->Mvid);
++    pr_debug("[FDP_DP] %s: fpd_dp_priv->Hsp =%d\n", __func__, fpd_dp_priv->Hsp);
++
++    return 0;
++}
++
++int fpd_dp_ser_prepare1(struct i2c_client *client)
++{
++    //int SSCG_FDEV_STRAP = 0;
++    //int SSCG_FMOD_STRAP = 0;
++    //char *SSCG_TYPE_STRAP = "none";
++    u8 TX_MODE_STS;
++    u8 GENERAL_CFG;
++    u8 read_val;
++
++    pr_debug("[FDP_DP] %s:\n", __func__);
++
++    fpd_dp_ser_write_reg(client, 0x70, FPD_DP_SER_RX_ADD_A);
++    fpd_dp_ser_write_reg(client, 0x78, FPD_DP_SER_RX_ADD_A);
++    fpd_dp_ser_write_reg(client, 0x88, 0x0);
++    fpd_dp_ser_write_reg(client, 0x71, FPD_DP_SER_RX_ADD_B);
++    fpd_dp_ser_write_reg(client, 0x79, FPD_DP_SER_RX_ADD_B+1);
++    fpd_dp_ser_write_reg(client, 0x89, 0x0);
++
++    // Check MODE Strapping
++    fpd_dp_ser_read_reg(client, 0x27, &read_val);
++    TX_MODE_STS = read_val;
++
++    if (TX_MODE_STS == 0)
++      pr_debug("Error: No Serializer Detected\n");
++
++    fpd_dp_ser_read_reg(client, 0x7, &read_val);
++
++    GENERAL_CFG = read_val;
++    if ((GENERAL_CFG & 0x01) == 1) {
++        pr_debug("MODE Strapped for FPD III Mode\n");
++        fpd_dp_priv->FPD4_Strap_Rate_P0 = 0;
++        fpd_dp_priv->FPD4_Strap_Rate_P1 = 0;
++    } else {
++        if ((TX_MODE_STS & 0x0F) == 0x0F) {
++            pr_debug("MODE Strapped for FPD III Mode");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_0;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_0;
++        }
++        if (((TX_MODE_STS & 0x0F) == 0x08) || (TX_MODE_STS & 0x0F) == 0x09) {
++            pr_debug("MODE Strapped for FPD IV 10.8Gbps");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_10_8;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_10_8;
++        }
++        if (((TX_MODE_STS & 0x0F) == 0x0A || (TX_MODE_STS & 0x0F) == 0x0B)) {
++            pr_debug("MODE Strapped for FPD IV 13.5Gbps\n");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_13_5;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_13_5;
++        }
++        if (((TX_MODE_STS & 0x0F) == 0x0C || (TX_MODE_STS & 0x0F) == 0x0D)) {
++            pr_debug("MODE Strapped for FPD IV 6.75Gbps\n");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_6_75;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_6_75;
++        }
++        if ((TX_MODE_STS & 0x0F) == 0x0E) {
++            pr_debug("MODE Strapped for FPD IV 3.375Gbps\n");
++            fpd_dp_priv->FPD4_Strap_Rate_P0 = FPD4_Strap_Rate_3_375;
++            fpd_dp_priv->FPD4_Strap_Rate_P1 = FPD4_Strap_Rate_3_375;
++        }
++    }
++
++    fpd_dp_priv->FPDConf = 8;
++
++    return 0;
++}
++
++
++bool fpd_dp_ser_set_config(struct i2c_client *client)
++{
++    // Enable APB Interface
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++
++    // Force HPD low to configure 983 DP settings
++    fpd_dp_ser_write_reg(client, 0x49, 0x0);
++    pr_debug("[FDP_DP] Pull HPD low to configure DP settings\n");
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    // Set max advertised link rate = 2.7Gbps
++    fpd_dp_ser_write_reg(client, 0x49, 0x74);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4b, 0xa);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    // Set max advertised lane count = 4
++    fpd_dp_ser_write_reg(client, 0x49, 0x70);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x4);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    // Request min VOD swing of 0x02
++    fpd_dp_ser_write_reg(client, 0x49, 0x14);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x2);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x2);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    // Set SST/MST mode and DP/eDP Mode
++    fpd_dp_ser_write_reg(client, 0x49, 0x18);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x14);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    // Force HPD high to trigger link training
++    fpd_dp_ser_write_reg(client, 0x49, 0x0);
++    pr_debug("[FDP_DP] Pull HPD High to start link training\n");
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    return true;
++}
++
++bool fpd_dp_ser_set_port_config(struct i2c_client *client)
++{
++    u8 read_val;
++    u8 GENERAL_CFG;
++    u8 GENERAL_CFG_REG;
++    u8 FPD3Mask;
++    u8 FPD4_CFG;
++    u8 TX_MODE_MASK;
++    u8 FPD4_CFG_REG;
++
++    fpd_dp_ser_read_reg(client, 0x7, &read_val);
++    GENERAL_CFG = read_val;
++    FPD3Mask = 0x01;
++    GENERAL_CFG_REG = GENERAL_CFG | FPD3Mask;
++    // Set FPD III Mode
++    fpd_dp_ser_write_reg(client, 0x07,GENERAL_CFG_REG);
++
++    fpd_dp_ser_read_reg(client, 0x5, &read_val);
++    FPD4_CFG = read_val;
++    TX_MODE_MASK = 0xC3;
++    FPD4_CFG_REG = FPD4_CFG & TX_MODE_MASK;
++    // Set FPD III Mode
++    fpd_dp_ser_write_reg(client, 0x05, FPD4_CFG_REG);
++    // Set FPD3_TX_MODE to FPD III Independent
++    fpd_dp_ser_write_reg(client, 0x59, 0x5);
++
++    return true;
++}
++
++
++bool fpd_dp_ser_prog_plls(struct i2c_client *client)
++{
++    // Set HALFRATE_MODE Override
++    fpd_dp_ser_write_reg(client, 0x2, 0x11);
++    // Set HALFRATE_MODE
++    fpd_dp_ser_write_reg(client, 0x2, 0xd1);
++    // Unset HALFRATE_MODE Override
++    fpd_dp_ser_write_reg(client, 0x2, 0xd0);
++
++    //Program PLL for Port 0: FPD III Mode 5197.5Mbps
++    fpd_dp_ser_write_reg(client, 0x40, 0x8);
++    fpd_dp_ser_write_reg(client, 0x41, 0x4);
++
++    // Set fractional mash order
++    fpd_dp_ser_write_reg(client, 0x42, 0x9);
++    fpd_dp_ser_write_reg(client, 0x41, 0x13);
++    // Set VCO Post Div = 2, VCO Auto Sel for CS2.0
++    fpd_dp_ser_write_reg(client, 0x42, 0xd0);
++    // Set auto increment
++    fpd_dp_ser_write_reg(client, 0x40, 0xa);
++    fpd_dp_ser_write_reg(client, 0x41, 0x5);
++    // Set Ndiv = 96
++    fpd_dp_ser_write_reg(client, 0x42, 0x60);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    fpd_dp_ser_write_reg(client, 0x41, 0x18);
++    // Set denominator = 16777204
++    fpd_dp_ser_write_reg(client, 0x42, 0xf4);
++    fpd_dp_ser_write_reg(client, 0x42, 0xff);
++    fpd_dp_ser_write_reg(client, 0x42, 0xff);
++    fpd_dp_ser_write_reg(client, 0x41, 0x1e);
++    // Set numerator = 4194301
++    fpd_dp_ser_write_reg(client, 0x42, 0xfd);
++    fpd_dp_ser_write_reg(client, 0x42, 0xff);
++    fpd_dp_ser_write_reg(client, 0x42, 0x3f);
++
++    // Program PLL for Port 1: FPD III Mode 5197.5Mbps
++    fpd_dp_ser_write_reg(client, 0x40, 0x8);
++    fpd_dp_ser_write_reg(client, 0x41, 0x44);
++    // Set fractional mash order
++    fpd_dp_ser_write_reg(client, 0x42, 0x9);
++    fpd_dp_ser_write_reg(client, 0x41, 0x53);
++    // Set VCO Post Div = 2, VCO Auto Sel for CS2.0
++    fpd_dp_ser_write_reg(client, 0x42, 0xd0);
++    // Set auto increment
++    fpd_dp_ser_write_reg(client, 0x40, 0xa);
++    fpd_dp_ser_write_reg(client, 0x41, 0x45);
++    // Set Ndiv = 96
++    fpd_dp_ser_write_reg(client, 0x42, 0x60);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    fpd_dp_ser_write_reg(client, 0x41, 0x58);
++    // Set denominator = 16777204
++    fpd_dp_ser_write_reg(client, 0x42, 0xf4);
++    fpd_dp_ser_write_reg(client, 0x42, 0xff);
++    fpd_dp_ser_write_reg(client, 0x42, 0xff);
++    fpd_dp_ser_write_reg(client, 0x41, 0x5e);
++    // Set numerator = 4194301
++    fpd_dp_ser_write_reg(client, 0x42, 0xfd);
++    fpd_dp_ser_write_reg(client, 0x42, 0xff);
++    fpd_dp_ser_write_reg(client, 0x42, 0x3f);
++
++    if (fpd_dp_priv->FPD4_Strap_Rate_P0 != FPD4_Strap_Rate_0 ||
++        fpd_dp_priv->FPD4_Strap_Rate_P1 != FPD4_Strap_Rate_0)
++    {
++        // Set FPD Page to configure BC Settings for Port 0 and Port 1
++        fpd_dp_ser_write_reg(client, 0x40, 0x4);
++        fpd_dp_ser_write_reg(client, 0x41, 0x6);
++        fpd_dp_ser_write_reg(client, 0x42, 0xff);
++        fpd_dp_ser_write_reg(client, 0x41, 0xd);
++        fpd_dp_ser_write_reg(client, 0x42, 0x70);
++        fpd_dp_ser_write_reg(client, 0x41, 0xe);
++        fpd_dp_ser_write_reg(client, 0x42, 0x70);
++        fpd_dp_ser_write_reg(client, 0x41, 0x26);
++        fpd_dp_ser_write_reg(client, 0x42, 0xff);
++        fpd_dp_ser_write_reg(client, 0x41, 0x2d);
++        fpd_dp_ser_write_reg(client, 0x42, 0x70);
++        fpd_dp_ser_write_reg(client, 0x41, 0x2e);
++        fpd_dp_ser_write_reg(client, 0x42, 0x70);
++    }
++
++    // Reset PLLs
++    fpd_dp_ser_write_reg(client, 0x1, 0x30);
++    /* Wait ~2ms for powerup to complete */
++    usleep_range(20000, 22000);
++
++    return true;
++}
++
++bool fpd_dp_ser_enable_I2c_passthrough(struct i2c_client *client)
++{
++    u8 read_val;
++    u8 I2C_PASS_THROUGH;
++    u8 I2C_PASS_THROUGH_MASK;
++    u8 I2C_PASS_THROUGH_REG;
++
++    pr_debug("[FDP_DP] Enable I2C Passthrough\n");
++
++    fpd_dp_ser_read_reg(client, 0x7, &read_val);
++    I2C_PASS_THROUGH = read_val;
++    I2C_PASS_THROUGH_MASK = 0x08;
++    I2C_PASS_THROUGH_REG = I2C_PASS_THROUGH | I2C_PASS_THROUGH_MASK;
++    // Enable I2C Passthrough
++    fpd_dp_ser_write_reg(client, 0x07, I2C_PASS_THROUGH_REG);
++
++    return true;
++}
++
++
++bool fpd_dp_ser_prog_vp_configs(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Configure Video Processors\n");
++    // Configure VP 0
++    fpd_dp_ser_write_reg(client, 0x40, 0x32);
++    fpd_dp_ser_write_reg(client, 0x41, 0x1);
++    // Set VP_SRC_SELECT to Stream 0 for SST Mode
++    fpd_dp_ser_write_reg(client, 0x42, 0xa8);
++    fpd_dp_ser_write_reg(client, 0x41, 0x2);
++    // VID H Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    fpd_dp_ser_write_reg(client, 0x41, 0x10);
++    // Horizontal Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    // Horizontal Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x94);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Total
++    fpd_dp_ser_write_reg(client, 0x42, 0x98);
++    fpd_dp_ser_write_reg(client, 0x42, 0x8);
++    // Vertical Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x38);
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    // Vertical Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x24);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x5);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Front Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    fpd_dp_ser_write_reg(client, 0x41, 0x27);
++    // HSYNC Polarity = +, VSYNC Polarity = +
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++
++    // Configure VP 1
++    fpd_dp_ser_write_reg(client, 0x40, 0x32);
++    fpd_dp_ser_write_reg(client, 0x41, 0x41);
++    // Set VP_SRC_SELECT to Stream 0 for SST Mode
++    fpd_dp_ser_write_reg(client, 0x42, 0xa8);
++    fpd_dp_ser_write_reg(client, 0x41, 0x42);
++    // VID H Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    fpd_dp_ser_write_reg(client, 0x41, 0x50);
++    // Horizontal Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    // Horizontal Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x94);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Total
++    fpd_dp_ser_write_reg(client, 0x42, 0x98);
++    fpd_dp_ser_write_reg(client, 0x42, 0x8);
++    // Vertical Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x38);
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    // Vertical Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x24);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x5);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Front Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    fpd_dp_ser_write_reg(client, 0x41, 0x67);
++    // HSYNC Polarity = +, VSYNC Polarity = +
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++
++    return true;
++}
++
++bool fpd_dp_ser_prog_vp_configs1(struct i2c_client *client)
++{
++    if (((fpd_dp_priv->Thw % 4) != 0) || ((fpd_dp_priv->Hbp % 4) != 0) || ((fpd_dp_priv->Hsw % 4) != 0))
++         pr_debug("[FDP_DP] Warning! - HSW, HBP, and THW must each be divisible by 4.\
++         Reconfiguration of the video parameters is recommended\n");
++    if ((fpd_dp_priv->Hsw < 12) && (fpd_dp_priv->FPDConf < 5))
++         pr_debug("[FDP_DP] Warning! - HSW must be > 12 pixels for FPD IV mode.\
++         Reconfiguration of the video parameters is recommended\n");
++    if ((fpd_dp_priv->Hsw < 8) && (fpd_dp_priv->FPDConf > 4))
++         pr_debug("[FDP_DP] Warning! - HSW must be > 8 pixels for FPD III mode.\
++         Reconfiguration of the video parameters is recommended\n");
++    if ((fpd_dp_priv->Vfp) < 1)
++         pr_debug("[FDP_DP] Warning! - Number of VFP lines is invalid.\
++         VFP is calculated as TVW - VACT - VBP - VSW.\
++         Double check timing parameters to ensure vertical blanking is correct\n");
++    if ((fpd_dp_priv->Hfp) < 1)
++         pr_debug("[FDP_DP] Warning! - Number of HFP pixels is invalid.\
++         HFP is calculated as THW - HACT - HBP - HSW.\
++         Double check timing parameters to ensure horizontal blanking is correct\n");
++
++    pr_debug("[FDP_DP] Configure Video Processors\n");
++    // Configure VP 0
++    fpd_dp_ser_write_reg(client, 0x40, 0x32);
++    fpd_dp_ser_write_reg(client, 0x41, 0x1);
++    // Set VP_SRC_SELECT to Stream 0 for SST Mode
++    fpd_dp_ser_write_reg(client, 0x42, 0xa8);
++    fpd_dp_ser_write_reg(client, 0x41, 0x2);
++    // VID H Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    fpd_dp_ser_write_reg(client, 0x41, 0x10);
++    // Horizontal Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    // Horizontal Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x94);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Total
++    fpd_dp_ser_write_reg(client, 0x42, 0x98);
++    fpd_dp_ser_write_reg(client, 0x42, 0x8);
++    // Vertical Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x38);
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    // Vertical Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x24);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x5);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Front Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    fpd_dp_ser_write_reg(client, 0x41, 0x27);
++    // HSYNC Polarity = +, VSYNC Polarity = +
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++
++    // Configure VP 1
++    fpd_dp_ser_write_reg(client, 0x40, 0x32);
++    fpd_dp_ser_write_reg(client, 0x41, 0x41);
++    // Set VP_SRC_SELECT to Stream 0 for SST Mode
++    fpd_dp_ser_write_reg(client, 0x42, 0xa8);
++    fpd_dp_ser_write_reg(client, 0x41, 0x42);
++    // VID H Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    fpd_dp_ser_write_reg(client, 0x41, 0x50);
++    // Horizontal Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x42, 0x7);
++    // Horizontal Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x94);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Horizontal Total
++    fpd_dp_ser_write_reg(client, 0x42, 0x98);
++    fpd_dp_ser_write_reg(client, 0x42, 0x8);
++    // Vertical Active
++    fpd_dp_ser_write_reg(client, 0x42, 0x38);
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    // Vertical Back Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x24);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Sync
++    fpd_dp_ser_write_reg(client, 0x42, 0x5);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    // Vertical Front Porch
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++    fpd_dp_ser_write_reg(client, 0x41, 0x67);
++    // HSYNC Polarity = +, VSYNC Polarity = +
++    fpd_dp_ser_write_reg(client, 0x42, 0x0);
++
++    return true;
++}
++
++
++
++bool fpd_dp_ser_enable_vps(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Enable Video Processors\n");
++    // Set number of VPs used = 2
++    fpd_dp_ser_write_reg(client, 0x43, 0x1);
++    // Enable video processors
++    fpd_dp_ser_write_reg(client, 0x44, 0x3);
++
++    return true;
++}
++
++bool fpd_dp_ser_stream_mapping(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Set FPD3 Stream Mappingn\n");
++    // Select FPD TX Port 0
++    fpd_dp_ser_write_reg(client, 0x2d, 0x1);
++    // Set FPD TX Port 0 Stream Source = VP1
++    fpd_dp_ser_write_reg(client, 0x57, 0x1);
++    // Select FPD TX Port 1
++    fpd_dp_ser_write_reg(client, 0x2d, 0x12);
++    // Set FPD TX Port 1 Stream Source = VP0
++    fpd_dp_ser_write_reg(client, 0x57, 0x0);
++    // Enable FPD III FIFO
++    fpd_dp_ser_write_reg(client, 0x5b, 0x2b);
++
++    return true;
++}
++
++bool fpd_dp_ser_clear_crc(struct i2c_client *client)
++{
++    u8 Reg_value;
++
++    pr_debug("[FDP_DP] Clear CRC errors from initial link process\n");
++
++    fpd_dp_ser_read_reg(client, 0x2, &Reg_value);
++    Reg_value = Reg_value | 0x20;
++    // CRC Error Reset
++    fpd_dp_ser_write_reg(client, 0x2,Reg_value);
++
++    fpd_dp_ser_read_reg(client, 0x2, &Reg_value);
++    Reg_value = Reg_value & 0xdf;
++    // CRC Error Reset Clear
++    fpd_dp_ser_write_reg(client, 0x2,Reg_value);
++
++    fpd_dp_ser_write_reg(client, 0x2d, 0x1);
++    usleep_range(20000, 22000);
++
++    return true;
++}
++
++
++bool fpd_dp_ser_setup(struct i2c_client *client)
++{
++
++    fpd_dp_ser_set_config(client);
++
++    fpd_dp_ser_set_port_config(client);
++
++    fpd_dp_ser_prog_plls(client);
++
++    fpd_dp_ser_enable_I2c_passthrough(client);
++
++    fpd_dp_ser_prog_vp_configs(client);
++
++    fpd_dp_ser_enable_vps(client);
++
++    // Check if VP is synchronized to DP input
++    queue_delayed_work(fpd_dp_priv->wq, &fpd_dp_priv->delay_work, msecs_to_jiffies(100));
++
++    //fpd_dp_ser_stream_mapping(struct i2c_client *client);
++
++    //fpd_dp_ser_clear_crc(struct i2c_client *client);
++
++    return true;
++}
++
++int fpd_dp_deser_setup(struct i2c_client *client)
++{
++    // Link Rate
++    fpd_dp_ser_write_reg(client, 0xE790, 0x0A);
++    fpd_dp_ser_write_reg(client, 0xE791, 0x00);
++    // Lane Count
++    fpd_dp_ser_write_reg(client, 0xE792, 0x04);
++    fpd_dp_ser_write_reg(client, 0xE793, 0x00);
++    // Hres
++    fpd_dp_ser_write_reg(client, 0xE794, fpd_dp_priv->Ahw & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE795, fpd_dp_priv->Ahw >> 8);
++    // Hfp
++    fpd_dp_ser_write_reg(client, 0xE796, fpd_dp_priv->Hfp & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE797, fpd_dp_priv->Hfp >> 8);
++    // Hsw
++    fpd_dp_ser_write_reg(client, 0xE798, fpd_dp_priv->Hsw & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE799, fpd_dp_priv->Hsw >> 8);
++    // Hbp
++    fpd_dp_ser_write_reg(client, 0xE79A, fpd_dp_priv->Hbp & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE79B, fpd_dp_priv->Hbp >> 8);
++    // Vres
++    fpd_dp_ser_write_reg(client, 0xE79C, fpd_dp_priv->Avw & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE79D, fpd_dp_priv->Avw >> 8);
++    // Vfp
++    fpd_dp_ser_write_reg(client, 0xE79E, fpd_dp_priv->Vfp & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE79F, fpd_dp_priv->Vfp >> 8);
++    // Vsw
++    fpd_dp_ser_write_reg(client, 0xE7A0, fpd_dp_priv->Vsw & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE7A1, fpd_dp_priv->Vsw >> 8);
++    // Vbp
++    fpd_dp_ser_write_reg(client, 0xE7A2, fpd_dp_priv->Vbp & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE7A3, fpd_dp_priv->Vbp >> 8);
++    // Hwords
++    fpd_dp_ser_write_reg(client, 0xE7A4, fpd_dp_priv->Hwords & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE7A5, fpd_dp_priv->Hwords >> 8);
++    // Mvid PCLK
++    fpd_dp_ser_write_reg(client, 0xE7A6, fpd_dp_priv->Mvid & 0xFF);
++    fpd_dp_ser_write_reg(client, 0xE7A7, fpd_dp_priv->Mvid >> 8);
++    // Nvid Line Rate
++    fpd_dp_ser_write_reg(client, 0xE7A8, 0x00);
++    fpd_dp_ser_write_reg(client, 0xE7A9, 0x80);
++    // TUC_Value
++    fpd_dp_ser_write_reg(client, 0xE7AA, 0x40);
++    fpd_dp_ser_write_reg(client, 0xE7AB, 0x00);
++    // HVPOL
++    fpd_dp_ser_write_reg(client, 0xE7AC, fpd_dp_priv->Hsp & 0x3);
++    fpd_dp_ser_write_reg(client, 0xE7AD, 0x00);
++    // SSC Enable
++    fpd_dp_ser_write_reg(client, 0xE7B0, 0x01);
++    fpd_dp_ser_write_reg(client, 0xE7B1, 0x00);
++    // Spread Bit Ratio
++    fpd_dp_ser_write_reg(client, 0x6003, 0x82);
++    // CLK_REF_BLOCK
++    fpd_dp_ser_write_reg(client, 0xE7B2, 0x50);
++    fpd_dp_ser_write_reg(client, 0xE7B3, 0x00);
++    fpd_dp_ser_write_reg(client, 0xE7B4, 0x00);
++    fpd_dp_ser_write_reg(client, 0xE7B5, 0x40);
++    fpd_dp_ser_write_reg(client, 0xE7B6, 0x6C);
++    fpd_dp_ser_write_reg(client, 0xE7B7, 0x20);
++    fpd_dp_ser_write_reg(client, 0xE7B8, 0x07);
++    fpd_dp_ser_write_reg(client, 0xE7B9, 0x00);
++    fpd_dp_ser_write_reg(client, 0xE7BA, 0x01);
++    fpd_dp_ser_write_reg(client, 0xE7BB, 0x00);
++    fpd_dp_ser_write_reg(client, 0xE7BC, 0x00);
++    fpd_dp_ser_write_reg(client, 0xE7BD, 0x00);
++    fpd_dp_ser_write_reg(client, 0xE7BE, 0x52);
++    fpd_dp_ser_write_reg(client, 0xE7BF, 0x00);
++    // Send eDP Controller Command - Start Link Training
++    fpd_dp_ser_write_reg(client, 0xE776, 0x02);
++    fpd_dp_ser_write_reg(client, 0xE777, 0x80);
++
++    return 0;
++}
++
++static int max_read_lock(struct i2c_client *client, unsigned int reg_addr,
++              u32 mask, u32 expected_value)
++{
++    u8 reg_data;
++
++    fpd_dp_ser_read_reg(client, reg_addr, &reg_data);
++    if ((reg_data & mask) == expected_value)
++        return 0;
++
++    return -1;
++}
++
++bool fpd_dp_ser_enable(const struct drm_display_mode *fixed_mode)
++{
++    fpd_dp_ser_prepare(fixed_mode, fpd_dp_priv->priv_dp_client[0]);
++    if (false == fpd_dp_ser_setup(fpd_dp_priv->priv_dp_client[0]))
++    {
++        pr_debug("[FDP_DP] DS90UB983 enable fail\n");
++        return false;
++    }
++    return true;
++}
++
++bool fpd_dp_ser_enable1(void)
++{
++    fpd_dp_ser_prepare1(fpd_dp_priv->priv_dp_client[0]);
++    if (false == fpd_dp_ser_setup(fpd_dp_priv->priv_dp_client[0]))
++    {
++        pr_debug("[FDP_DP] DS90UB983 enable fail\n");
++        return false;
++    }
++    return true;
++}
++
++static void fpd_poll_deser_lock(struct work_struct *work)
++{
++    int ret1_1 = 0;
++    int ret1_2 = 0;
++    int ret1_3 = 0;
++    int ret2_1 = 0;
++    int ret2_2 = 0;
++    int ret2_3 = 0;
++    static int count = 0;
++
++    ret1_1 = max_read_lock(fpd_dp_priv->priv_dp_client[1], MAX_DP_DESER_SS_B0,
++            MAX_DP_DESER_SS_B0_LOCK_MASK,
++            MAX_DP_DESER_SS_B0_LOCK_VAL);
++    if (ret1_1 < 0) {
++        pr_debug("[FDP_DP]1 GMSL subsystem b0 statue is not set 0x01\n");
++    }
++
++    ret1_2 = max_read_lock(fpd_dp_priv->priv_dp_client[1], MAX_DP_DESER_SS_B1,
++            MAX_DP_DESER_SS_B1_LOCK_MASK,
++            MAX_DP_DESER_SS_B1_LOCK_VAL);
++    if (ret1_2 < 0) {
++        pr_debug("[FDP_DP]1 GMSL subsystem b1 statue is not set 0x00\n");
++    }
++
++    ret1_3 = max_read_lock(fpd_dp_priv->priv_dp_client[1], MAX_DP_DESER_VID,
++            MAX_DP_DESER_VID_LOCK_MASK,
++            MAX_DP_DESER_VID_LOCK_VAL);
++    if (ret1_3 < 0) {
++        pr_debug("[FDP_DP]1 GMSL video CLk is not set 0x01\n");
++    }
++
++    if (fpd_dp_priv->split_mode == true) {
++        ret2_1 = max_read_lock(fpd_dp_priv->priv_dp_client[2], MAX_DP_DESER_SS_B0,
++                MAX_DP_DESER_SS_B0_LOCK_MASK,
++                MAX_DP_DESER_SS_B0_LOCK_VAL);
++        if (ret2_1 < 0) {
++            pr_debug("[FDP_DP]2 GMSL subsystem b0 statue is not set 0x01\n");
++        }
++
++        ret2_2 = max_read_lock(fpd_dp_priv->priv_dp_client[2], MAX_DP_DESER_SS_B1,
++                MAX_DP_DESER_SS_B1_LOCK_MASK,
++                MAX_DP_DESER_SS_B1_LOCK_VAL);
++        if (ret2_2 < 0) {
++            pr_debug("[FDP_DP]2 GMSL subsystem b1 statue is not set 0x00\n");
++        }
++
++        ret2_3 = max_read_lock(fpd_dp_priv->priv_dp_client[2], MAX_DP_DESER_VID,
++                MAX_DP_DESER_VID_LOCK_MASK,
++                MAX_DP_DESER_VID_LOCK_VAL);
++        if (ret2_3 < 0) {
++            pr_debug("[FDP_DP]2 GMSL video CLk is not set 0x01\n");
++        }
++
++        if (ret1_1 < 0 || ret1_2 < 0 || ret1_3 < 0 ||
++            ret2_1 < 0 || ret2_2 < 0 || ret2_3 < 0) {
++            pr_debug("[FDP_DP] deser rescheule\n");
++            goto reschedule;
++        }
++    }
++    else
++    {
++        if (ret1_1 < 0 || ret1_2 < 0 || ret1_3 < 0 ) {
++            pr_debug("[FDP_DP]1 deser rescheule\n");
++            goto reschedule;
++        }
++    }
++
++    pr_debug("[FDP_DP] DP deser lock completed, count = %d\n", count);
++    count = 0;
++    return;
++
++reschedule:
++    count++;
++    queue_delayed_work(fpd_dp_priv->deser_wq, &fpd_dp_priv->deser_work, msecs_to_jiffies(100));
++}
++
++void fpd_dp_deser_override_efuse(struct i2c_client *client)
++{
++    u8 DES_READBACK;
++    u8 UNIQUEID_Reg0xC;
++
++    fpd_dp_ser_read_reg(client, 0x0, &DES_READBACK);
++    if (DES_READBACK == 0)
++      pr_debug("[FDP_DP] Error - no DES detected\n");
++    else
++      pr_debug("[FDP_DP] Deserializer detected successfuly\n");
++
++    fpd_dp_ser_write_reg(client, 0x49, 0xc);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x48, 0x1b);
++
++    fpd_dp_ser_read_reg(client, 0x4b, &UNIQUEID_Reg0xC);
++    if (UNIQUEID_Reg0xC != 0x19)
++    {
++        pr_debug("[FDP_DP] Non-Final DES Silicon Detected - Overriding DES eFuse\n");
++        fpd_dp_ser_write_reg(client, 0xe, 0x3);
++        fpd_dp_ser_write_reg(client, 0x61, 0x0);
++        fpd_dp_ser_write_reg(client, 0x5a, 0x74);
++        fpd_dp_ser_write_reg(client, 0x5f, 0x4);
++        fpd_dp_ser_write_reg(client, 0x40, 0x3c);
++        fpd_dp_ser_write_reg(client, 0x41, 0xf5);
++        fpd_dp_ser_write_reg(client, 0x42, 0x21);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x43);
++        fpd_dp_ser_write_reg(client, 0x42, 0x3);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x43);
++        fpd_dp_ser_write_reg(client, 0x42, 0x3);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x5);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x5);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x6);
++        fpd_dp_ser_write_reg(client, 0x42, 0x1);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x6);
++        fpd_dp_ser_write_reg(client, 0x42, 0x1);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x37);
++        fpd_dp_ser_write_reg(client, 0x42, 0x32);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x37);
++        fpd_dp_ser_write_reg(client, 0x42, 0x32);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x8d);
++        fpd_dp_ser_write_reg(client, 0x42, 0xff);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x8d);
++        fpd_dp_ser_write_reg(client, 0x42, 0xff);
++        fpd_dp_ser_write_reg(client, 0x40, 0x5c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x20);
++        fpd_dp_ser_write_reg(client, 0x42, 0x3c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x5c);
++        fpd_dp_ser_write_reg(client, 0x41, 0xa0);
++        fpd_dp_ser_write_reg(client, 0x42, 0x3c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x24);
++        fpd_dp_ser_write_reg(client, 0x42, 0x61);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x54);
++        fpd_dp_ser_write_reg(client, 0x42, 0x61);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x42, 0x19);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x5c);
++        fpd_dp_ser_write_reg(client, 0x42, 0x19);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x2e);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x5e);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x18);
++        fpd_dp_ser_write_reg(client, 0x42, 0x4b);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x38);
++        fpd_dp_ser_write_reg(client, 0x42, 0x4b);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x15);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x15);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x4a);
++        fpd_dp_ser_write_reg(client, 0x42, 0x1);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x4a);
++        fpd_dp_ser_write_reg(client, 0x42, 0x1);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0xaa);
++        fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0xaa);
++        fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0xab);
++        fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0xab);
++        fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0xac);
++        fpd_dp_ser_write_reg(client, 0x42, 0x4c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0xac);
++        fpd_dp_ser_write_reg(client, 0x42, 0x4c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0xad);
++        fpd_dp_ser_write_reg(client, 0x42, 0x4c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0xad);
++        fpd_dp_ser_write_reg(client, 0x42, 0x4c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0xae);
++        fpd_dp_ser_write_reg(client, 0x42, 0xac);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0xae);
++        fpd_dp_ser_write_reg(client, 0x42, 0xac);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0xaf);
++        fpd_dp_ser_write_reg(client, 0x42, 0xac);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0xaf);
++        fpd_dp_ser_write_reg(client, 0x42, 0xac);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x5);
++        fpd_dp_ser_write_reg(client, 0x42, 0xa);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x25);
++        fpd_dp_ser_write_reg(client, 0x42, 0xa);
++        fpd_dp_ser_write_reg(client, 0x40, 0x54);
++        fpd_dp_ser_write_reg(client, 0x41, 0x89);
++        fpd_dp_ser_write_reg(client, 0x42, 0x38);
++        fpd_dp_ser_write_reg(client, 0x40, 0x58);
++        fpd_dp_ser_write_reg(client, 0x41, 0x89);
++        fpd_dp_ser_write_reg(client, 0x42, 0x38);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x1a);
++        fpd_dp_ser_write_reg(client, 0x42, 0x8);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x3a);
++        fpd_dp_ser_write_reg(client, 0x42, 0x8);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x6f);
++        fpd_dp_ser_write_reg(client, 0x42, 0x54);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x70);
++        fpd_dp_ser_write_reg(client, 0x42, 0x5);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x80);
++        fpd_dp_ser_write_reg(client, 0x42, 0x55);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x81);
++        fpd_dp_ser_write_reg(client, 0x42, 0x44);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x82);
++        fpd_dp_ser_write_reg(client, 0x42, 0x3);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x86);
++        fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x87);
++        fpd_dp_ser_write_reg(client, 0x42, 0x6);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x18);
++        fpd_dp_ser_write_reg(client, 0x42, 0x32);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x48);
++        fpd_dp_ser_write_reg(client, 0x42, 0x32);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x19);
++        fpd_dp_ser_write_reg(client, 0x42, 0xe);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x49);
++        fpd_dp_ser_write_reg(client, 0x42, 0xe);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x17);
++        fpd_dp_ser_write_reg(client, 0x42, 0x72);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x47);
++        fpd_dp_ser_write_reg(client, 0x42, 0x72);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x26);
++        fpd_dp_ser_write_reg(client, 0x42, 0x87);
++        fpd_dp_ser_write_reg(client, 0x40, 0x38);
++        fpd_dp_ser_write_reg(client, 0x41, 0x56);
++        fpd_dp_ser_write_reg(client, 0x42, 0x87);
++        fpd_dp_ser_write_reg(client, 0x40, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x3d);
++        fpd_dp_ser_write_reg(client, 0x42, 0xd5);
++        fpd_dp_ser_write_reg(client, 0x40, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x3e);
++        fpd_dp_ser_write_reg(client, 0x42, 0x15);
++        fpd_dp_ser_write_reg(client, 0x40, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x7d);
++        fpd_dp_ser_write_reg(client, 0x42, 0xd5);
++        fpd_dp_ser_write_reg(client, 0x40, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x7e);
++        fpd_dp_ser_write_reg(client, 0x42, 0x15);
++        fpd_dp_ser_write_reg(client, 0x40, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x82);
++        fpd_dp_ser_write_reg(client, 0x42, 0x1);
++        fpd_dp_ser_write_reg(client, 0x40, 0x2c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x29);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x41);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x42);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x24);
++        fpd_dp_ser_write_reg(client, 0x41, 0x20);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x24);
++        fpd_dp_ser_write_reg(client, 0x41, 0x21);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x24);
++        fpd_dp_ser_write_reg(client, 0x41, 0x23);
++        fpd_dp_ser_write_reg(client, 0x42, 0x30);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x14);
++        fpd_dp_ser_write_reg(client, 0x42, 0x78);
++        fpd_dp_ser_write_reg(client, 0x40, 0x10);
++        fpd_dp_ser_write_reg(client, 0x41, 0x35);
++        fpd_dp_ser_write_reg(client, 0x42, 0x7e);
++        fpd_dp_ser_write_reg(client, 0x40, 0x6c);
++        fpd_dp_ser_write_reg(client, 0x41, 0xd);
++        fpd_dp_ser_write_reg(client, 0x42, 0x0);
++        fpd_dp_ser_write_reg(client, 0x40, 0x1c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x8);
++        fpd_dp_ser_write_reg(client, 0x42, 0x13);
++        fpd_dp_ser_write_reg(client, 0x40, 0x1c);
++        fpd_dp_ser_write_reg(client, 0x41, 0x28);
++        fpd_dp_ser_write_reg(client, 0x42, 0x13);
++        fpd_dp_ser_write_reg(client, 0x40, 0x14);
++        fpd_dp_ser_write_reg(client, 0x41, 0x62);
++        fpd_dp_ser_write_reg(client, 0x42, 0x31);
++        fpd_dp_ser_write_reg(client, 0x40, 0x14);
++        fpd_dp_ser_write_reg(client, 0x41, 0x72);
++        fpd_dp_ser_write_reg(client, 0x42, 0x31);
++        fpd_dp_ser_write_reg(client, 0x40, 0x14);
++        fpd_dp_ser_write_reg(client, 0x41, 0x61);
++        fpd_dp_ser_write_reg(client, 0x42, 0x26);
++        // Soft Reset DES
++        fpd_dp_ser_write_reg(client, 0x1, 0x1);
++        usleep_range(40000, 42000);
++    }
++    usleep_range(20000, 22000);
++}
++
++void fpd_dp_deser_hold_dtg_reset(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    fpd_dp_ser_write_reg(client, 0x40, 0x50); // Select DTG Page
++    fpd_dp_ser_write_reg(client, 0x41, 0x32);
++    fpd_dp_ser_write_reg(client, 0x42, 0x6); // Hold Local Display Output Port 0 DTG in Reset
++    fpd_dp_ser_write_reg(client, 0x41, 0x62);
++    fpd_dp_ser_write_reg(client, 0x42, 0x6); // Hold Local Display Output Port 1 DTG in Reset
++}
++
++void fpd_dp_deser_disalbe_stream_mapping(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    fpd_dp_ser_write_reg(client, 0xe, 0x3); // Select both Output Ports
++    fpd_dp_ser_write_reg(client, 0xd0, 0x0); // Disable FPD4 video forward to Output Port
++    fpd_dp_ser_write_reg(client, 0xd7, 0x0); // Disable FPD3 video forward to Output Port
++}
++
++void fpd_dp_deser_force_rate(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    fpd_dp_ser_write_reg(client, 0x40, 0x2c); // Select DP Page
++    fpd_dp_ser_write_reg(client, 0x41, 0x81);
++    fpd_dp_ser_write_reg(client, 0x42, 0x60); // Set DP Rate to 2.7Gbps
++    fpd_dp_ser_write_reg(client, 0x41, 0x82);
++    fpd_dp_ser_write_reg(client, 0x42, 0x3); // Enable force DP rate with calibration disabled
++    fpd_dp_ser_write_reg(client, 0x40, 0x2c); // Select DP Page
++    fpd_dp_ser_write_reg(client, 0x41, 0x91);
++    fpd_dp_ser_write_reg(client, 0x42, 0xc); // Force 4 lanes
++    fpd_dp_ser_write_reg(client, 0x40, 0x30); // Disable DP SSCG
++    fpd_dp_ser_write_reg(client, 0x41, 0xf);
++    fpd_dp_ser_write_reg(client, 0x42, 0x1);
++    fpd_dp_ser_write_reg(client, 0x1, 0x40);
++}
++
++void fpd_dp_deser_setup_ports(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    // Select Port 1 registers
++    fpd_dp_ser_write_reg(client, 0xe, 0x12);
++    // Disable DP Port 1
++    fpd_dp_ser_write_reg(client, 0x46, 0x0);
++    // Select Port 0 registers
++    fpd_dp_ser_write_reg(client, 0xe, 0x1);
++    // DP-TX-PLL RESET Applied
++    fpd_dp_ser_write_reg(client, 0x1, 0x40);
++}
++
++void fpd_dp_deser_map_output(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    // Select both Output Ports
++    fpd_dp_ser_write_reg(client, 0xe, 0x3);
++    // Disable FPD4 video forward to local display output
++    fpd_dp_ser_write_reg(client, 0xd0, 0x0);
++    // Disable stream forwarding on DC
++    fpd_dp_ser_write_reg(client, 0xd1, 0x0);
++    fpd_dp_ser_write_reg(client, 0xd6, 0x0);
++    // Enable FPD3 to local display output mapping
++    fpd_dp_ser_write_reg(client, 0xd7, 0xc);
++    // Select Port 0
++    fpd_dp_ser_write_reg(client, 0xe, 0x1);
++}
++
++void fpd_dp_deser_prog_pclk(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    // Select Port0 registers
++    fpd_dp_ser_write_reg(client, 0xe, 0x1);
++    // Enable clock divider
++    fpd_dp_ser_write_reg(client, 0xb1, 0x1);
++    // Enable clock divider
++    fpd_dp_ser_write_reg(client, 0xb2, 0x14);
++    // Program M value middle byte
++    fpd_dp_ser_write_reg(client, 0xb3, 0x44);
++     // Program M value middle byte
++    fpd_dp_ser_write_reg(client, 0xb4, 0x2);
++     // Program N value lower byte
++    fpd_dp_ser_write_reg(client, 0xb5, 0xc0);
++     // Program N value middle byte
++    fpd_dp_ser_write_reg(client, 0xb6, 0x7a);
++     // Program N value upper byte
++    fpd_dp_ser_write_reg(client, 0xb7, 0x10);
++     // Select Port 0 registers
++    fpd_dp_ser_write_reg(client, 0xe, 0x1);
++}
++
++void fpd_dp_deser_setup_dtg(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    // Select DTG Page
++    fpd_dp_ser_write_reg(client, 0x40, 0x50);
++    fpd_dp_ser_write_reg(client, 0x41, 0x20);
++    // Set up Local Display DTG BPP, Sync Polarities, and Measurement Type
++    fpd_dp_ser_write_reg(client, 0x42, 0x93);
++    // Set Hstart
++    fpd_dp_ser_write_reg(client, 0x41, 0x29);
++    // Hstart upper byte
++    fpd_dp_ser_write_reg(client, 0x42, 0x80);
++    fpd_dp_ser_write_reg(client, 0x41, 0x2a);
++    // Hstart lower byte
++    fpd_dp_ser_write_reg(client, 0x42, 0xc0);
++    // Set HSW
++    fpd_dp_ser_write_reg(client, 0x41, 0x2f);
++    // HSW upper byte
++    fpd_dp_ser_write_reg(client, 0x42, 0x40);
++    fpd_dp_ser_write_reg(client, 0x41, 0x30);
++    // HSW lower byte
++    fpd_dp_ser_write_reg(client, 0x42, 0x2c);
++}
++
++void fpd_dp_deser_setup_dptx(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Hold Des 0 DTG in reset and configure video settings\n");
++    // Enable APB interface
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set bit per color
++    fpd_dp_ser_write_reg(client, 0x49, 0xa4);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x20);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++ 
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set pixel width
++    fpd_dp_ser_write_reg(client, 0x49, 0xb8);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x4);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set DP Mvid
++    fpd_dp_ser_write_reg(client, 0x49, 0xac);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x66);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x46);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set DP Nvid
++    fpd_dp_ser_write_reg(client, 0x49, 0xb4);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x80);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set TU Mode
++    fpd_dp_ser_write_reg(client, 0x49, 0xc8);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set TU Size
++    fpd_dp_ser_write_reg(client, 0x49, 0xb0);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x40);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x1a);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x8);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set FIFO Size
++    fpd_dp_ser_write_reg(client, 0x49, 0xc8);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x6);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x40);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set data count
++    fpd_dp_ser_write_reg(client, 0x49, 0xbc);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0xa0);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x5);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Disable STREAM INTERLACED
++    fpd_dp_ser_write_reg(client, 0x49, 0xc0);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set SYNC polarity
++    fpd_dp_ser_write_reg(client, 0x49, 0xc4);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0xc);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++}
++
++void fpd_dp_deser_release_dtg_reset(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] Release Des 0 DTG reset and enable video output\n");
++    // Select DTG Page
++    fpd_dp_ser_write_reg(client, 0x40, 0x50);
++    fpd_dp_ser_write_reg(client, 0x41, 0x32);
++    // Select DTG Page
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++    fpd_dp_ser_write_reg(client, 0x41, 0x62);
++    // Release Local Display Output Port 1 DTG
++    fpd_dp_ser_write_reg(client, 0x42, 0x4);
++
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Set Htotal
++    fpd_dp_ser_write_reg(client, 0x49, 0x80);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x98);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x8);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++
++}
++
++void fpd_dp_deser_enable_output(struct i2c_client *client)
++{
++    fpd_dp_ser_write_reg(client, 0x48, 0x1);
++    // Enable DP output
++    fpd_dp_ser_write_reg(client, 0x49, 0x84);
++    fpd_dp_ser_write_reg(client, 0x4a, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4b, 0x1);
++    fpd_dp_ser_write_reg(client, 0x4c, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4d, 0x0);
++    fpd_dp_ser_write_reg(client, 0x4e, 0x0);
++}
++
++void fpd_dp_deser_enable(void)
++{
++    pr_debug("[FDP_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    // Enable I2C Passthrough - Comment this out if the intent is to communicate locally with the DES
++    fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x3, 0x9a);
++
++    fpd_dp_deser_override_efuse(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_hold_dtg_reset(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_disalbe_stream_mapping(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_force_rate(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_setup_ports(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_map_output(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_prog_pclk(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_setup_dtg(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_setup_dptx(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_release_dtg_reset(fpd_dp_priv->priv_dp_client[1]);
++
++    fpd_dp_deser_enable_output(fpd_dp_priv->priv_dp_client[1]);
++
++}
++
++static void fpd_poll_training_lock(struct work_struct *work)
++{
++    u8 PATGEN_VP0 =0;
++    u8 VP0sts = 0;
++    u8 PATGEN_VP1 =0;
++    u8 VP1sts = 0;
++    int retry = 0;
++    static int count = 0;
++
++    pr_debug("[FDP_DP] Check if VP is synchronized to DP input\n");
++
++    // Delay for VPs to sync to DP source
++    usleep_range(20000, 22000);
++    //time.sleep(0.1);
++
++    // Select VP Page
++    fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x40, 0x31);
++    fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x41, 0x28);
++    fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[0], 0x42, &PATGEN_VP0);
++    fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x41, 0x30);
++    fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[0], 0x42, &VP0sts);
++    pr_debug("[FDP_DP] VP0sts = 0x%02x\n",(VP0sts & 0x01));
++
++    while (((VP0sts & 0x01) == 0) && retry < 10 && ((PATGEN_VP0 & 0x01) == 0))
++    {
++        pr_debug("[FDP_DP] VP0 Not Synced - Delaying 100ms. Retry = %d\n", retry);
++        usleep_range(20000, 22000);
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x41, 0x30);
++        fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[0], 0x42, &VP0sts);;
++        retry = retry + 1;
++    }
++
++    if (((VP0sts & 0x01) == 1) && retry < 10 && ((PATGEN_VP0 & 0x01) == 0))
++        pr_debug("[FDP_DP] VP0 Syned\n");
++    else
++        pr_debug("[FDP_DP] Unable to achieve VP0 sync\n");
++    if ((PATGEN_VP0 & 0x01) == 1)
++        pr_debug("[FDP_DP] VP0 sync status bypassed since PATGEN is enabled\n");
++
++    retry = 0;
++    fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x41, 0x68);
++    fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[0], 0x42, &PATGEN_VP1);
++    fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x41, 0x70);
++    fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[0], 0x42, &VP1sts);
++    pr_debug("[FDP_DP] VP1sts = 0x%02x\n",(VP1sts & 0x01));
++
++    while (((VP1sts & 0x01) == 0) && retry < 10 && ((PATGEN_VP1 & 0x01) == 0))
++    {
++        pr_debug("[FDP_DP]  VP1 Not Synced - Delaying 100ms. Retry =%d \n", retry);
++        usleep_range(20000, 22000);
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x41, 0x70);
++        fpd_dp_ser_read_reg(fpd_dp_priv->priv_dp_client[0], 0x42, &VP1sts);
++        retry = retry + 1;
++    }
++
++    if (((VP1sts & 0x01) == 1) && retry < 10 && ((PATGEN_VP1 & 0x01) == 0))
++        pr_debug("[FDP_DP]  VP1 Syned\n");
++    else
++        pr_debug("[FDP_DP]  Unable to achieve VP1 sync\n");
++    if ((PATGEN_VP1 & 0x01) == 1)
++        pr_debug("[FDP_DP]  VP1 sync status bypassed since PATGEN is enabled\n");
++
++    if (((VP0sts & 0x01) == 0) || ((VP1sts & 0x01) == 0))
++    {
++        pr_debug("[FDP_DP]  VPs not synchronized - performing video input reset\n");
++        // Video Input Reset if VP is not syncronized
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x49, 0x54);
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4a, 0x0);
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4b, 0x1);
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4c, 0x0);
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4d, 0x0);
++        fpd_dp_ser_write_reg(fpd_dp_priv->priv_dp_client[0], 0x4e, 0x0);
++        goto reschedule;
++    }
++
++    pr_debug("[FDP_DP] ser training lock completed, count = %d\n", count);
++    count = 0;
++    fpd_dp_ser_stream_mapping(fpd_dp_priv->priv_dp_client[0]);
++
++    fpd_dp_ser_clear_crc(fpd_dp_priv->priv_dp_client[0]);
++
++    fpd_dp_deser_enable();
++
++    return;
++
++reschedule:
++    count++;
++    if (count > 4) {
++        pr_debug("[FDP_DP] ser training lock failed, count = %d\n", count);
++        return;
++    }
++
++    queue_delayed_work(fpd_dp_priv->wq, &fpd_dp_priv->delay_work, msecs_to_jiffies(100));
++}
++
++static int fpd_dp_ser_probe(struct i2c_client *client,
++        const struct i2c_device_id *idt)
++{
++    unsigned long type;
++    type = idt->driver_data;
++
++    if (fpd_dp_priv == NULL){
++        fpd_dp_priv = devm_kzalloc(&client->dev, sizeof(struct fpd_dp_ser_priv),
++                       GFP_KERNEL);
++        if (fpd_dp_priv == NULL)
++            return -ENOMEM;
++
++        fpd_dp_priv->wq = alloc_workqueue("fpd_poll_training_lock",
++                WQ_HIGHPRI, 0);
++
++        INIT_DELAYED_WORK(&fpd_dp_priv->delay_work,
++                fpd_poll_training_lock);
++
++        fpd_dp_priv->deser_wq = alloc_workqueue("fpd_poll_deser_lock",
++                WQ_HIGHPRI, 0);
++
++        INIT_DELAYED_WORK(&fpd_dp_priv->deser_work,
++                fpd_poll_deser_lock);
++    }
++
++    if (type == DS90UB983) {
++        fpd_dp_priv->priv_dp_client[0] = client;
++        pr_debug("[FDP_DP] [-%s-%s-%d-] DS90UB983\n", __FILE__, __func__, __LINE__);
++    } else if (type == DS90UB984A) {
++        fpd_dp_priv->priv_dp_client[1] = client;
++        pr_debug("[FDP_DP] [-%s-%s-%d-] DS90UB984A\n", __FILE__, __func__, __LINE__);
++    } else if (type == DS90UB984B) {
++        fpd_dp_priv->priv_dp_client[2] = client;
++        pr_debug("[FDP_DP] [-%s-%s-%d-] DS90UB984B\n", __FILE__, __func__, __LINE__);
++    } else {
++        pr_debug("[FDP_DP] fail [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    }
++
++    return 0;
++}
++
++static int fpd_dp_ser_remove(struct i2c_client *client)
++{
++    pr_debug("[FDP_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    return 0;
++}
++
++static const struct i2c_device_id fpd_dp_ser_i2c_id_table[] = {
++    { "DS90UB983",  DS90UB983 },
++    { "DS90UB984A", DS90UB984A },
++    { "DS90UB984B", DS90UB984B },
++    { },
++};
++
++struct i2c_driver fpd_dp_ser_drv = {
++    .probe = fpd_dp_ser_probe,
++    .remove= fpd_dp_ser_remove,
++    .driver= {
++    .name = "DS90UB983",
++    },
++    .id_table = fpd_dp_ser_i2c_id_table,
++};
++
++static int fpd_dp_ser_client_init(void)
++{
++    int i = 0;
++    struct i2c_adapter *i2c_adap;
++
++    i2c_adap = i2c_get_adapter(BUS_DP_NUMBER);
++    if (!i2c_adap) {
++        pr_debug("[FDP_DP] Cannot find a valid i2c bus for max serdes\n");
++        return -ENOMEM;
++    }
++
++    for(i = 0; i < NUM_DP_DEVICE; i++)
++        fpd_dp_client[i]=i2c_new_client_device(i2c_adap, &fpd_dp_i2c_board_info[i]);
++
++    i2c_put_adapter(i2c_adap);
++
++    return 0;
++}
++
++static void fpd_dp_ser_client_exit(void)
++{
++    int i = 0;
++    for (i = 0; i < NUM_DP_DEVICE; i++)
++        i2c_unregister_device(fpd_dp_client[i]);
++    pr_debug("[FDP_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++int intel_dp_ser_init(const struct drm_display_mode *fixed_mode)
++{
++    fpd_dp_ser_enable(fixed_mode);
++    //queue_delayed_work(fpd_dp_priv->wq, &fpd_dp_priv->delay_work, msecs_to_jiffies(500));
++
++    return 0;
++}
++
++int intel_dp_ser_init1(void)
++{
++    fpd_dp_ser_enable1();
++    //queue_delayed_work(fpd_dp_priv->wq, &fpd_dp_priv->delay_work, msecs_to_jiffies(500));
++
++    return 0;
++}
++
++
++void intel_dp_ser_module_exit(void)
++{
++    fpd_dp_ser_client_exit();
++    i2c_del_driver(&fpd_dp_ser_drv);
++    pr_debug("[FDP_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++int intel_dp_ser_module_init(void)
++{
++    pr_debug("[FDP_DP] [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    fpd_dp_ser_client_init();
++    return i2c_add_driver(&fpd_dp_ser_drv);
++
++    return 0;
++}
+diff --git a/drivers/gpu/drm/i915/display/intel_dp_ser_drv.h b/drivers/gpu/drm/i915/display/intel_dp_ser_drv.h
+new file mode 100755
+index 000000000000..2c693e232948
+--- /dev/null
++++ b/drivers/gpu/drm/i915/display/intel_dp_ser_drv.h
+@@ -0,0 +1,166 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef __INTEL_DP_SER_DEV_h__
++#define __INTEL_DP_SER_DEV_h__
++
++#define DEBUG
++
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/i2c.h>
++#include <linux/platform_device.h>
++#include <linux/delay.h>
++#include <linux/workqueue.h>
++#include <drm/drm_modes.h>
++
++#define FPD_DP_SER_TX_ADD                  0x0C
++#define FPD_DP_SER_RX_ADD_A                0x30
++#define FPD_DP_SER_RX_ADD_B                0x2C
++#define FPD_DP_ARRAY_SIZE                  4
++
++#define MAX_DSI_SER_CTRL3                   0x13
++#define MAX_DSI_SER_CTRL3_LOCK_MASK         (1 << 3)
++#define MAX_DSI_SER_CTRL3_LOCK_VAL          (1 << 3)
++
++#define MAX_DSI_SER_LCTRL2_A                0x2A
++#define MAX_DSI_SER_LCTRL2_B                0x34
++#define MAX_DSI_SER_LCTRL2_LOCK_MASK        (1 << 0)
++#define MAX_DSI_SER_LCTRL2_LOCK_VAL         0x1
++
++#define MAX_DSI_SER_VID_TX_MASK             (1 << 0)
++#define MAX_DSI_SER_VID_TX_LINK_MASK        (3 << 1)
++#define MAX_DSI_SER_LINK_SEL_SHIFT_VAL      0x1
++
++#define MAX_DSI_SER_DPRX_TRAIN              0x641A
++#define MAX_DSI_SER_DPRX_TRAIN_STATE_MASK   (0xF << 4)
++#define MAX_DSI_SER_DPRX_TRAIN_STATE_VAL    0xF0
++
++#define MAX_DSI_SER_LINK_CTRL_PHY_A         0x29
++#define MAX_DSI_SER_LINK_CTRL_A_MASK        (1 << 0)
++
++#define MAX_DSI_SER_LCTRL2_A                0x2A
++#define MAX_DSI_SER_LCTRL2_B                0x34
++#define MAX_DSI_SER_LCTRL2_LOCK_MASK        (1 << 0)
++#define MAX_DSI_SER_LCTRL2_LOCK_VAL         0x1
++
++#define MAX_DSI_SER_LINK_CTRL_PHY_B         0x33
++#define MAX_DSI_SER_LINK_CTRL_B_MASK        (1 << 0)
++
++#define MAX_DSI_SER_PCLK                    0x102
++#define MAX_DSI_SER_PCLK_LOCK_MASK          (0x45 << 1)
++#define MAX_DSI_SER_PCLK_LOCK_VAL           0x8A
++
++#define MAX_DSI_SER_ERR                     0x3A0
++#define MAX_DSI_SER_ERR_LOCK_MASK           0xFF
++#define MAX_DSI_SER_ERR_LOCK_VAL            0x00
++
++#define MAX_DSI_SER_HS_VS                   0x55D
++#define MAX_DSI_SER_HS_VS_LOCK_MASK         0x73
++#define MAX_DSI_SER_HS_VS_LOCK_VAL          0x73
++
++#define MAX_DP_DESER_VID                    0x1DC
++#define MAX_DP_DESER_VID_LOCK_MASK          (1 << 0)
++#define MAX_DP_DESER_VID_LOCK_VAL           0x1
++
++#define MAX_DP_DESER_SS_B0                  0x7F0
++#define MAX_DP_DESER_SS_B0_LOCK_MASK        (1 << 0)
++#define MAX_DP_DESER_SS_B0_LOCK_VAL         0x1
++
++#define MAX_DP_DESER_SS_B1                  0x7F1
++#define MAX_DP_DESER_SS_B1_LOCK_MASK        0xFF
++#define MAX_DP_DESER_SS_B1_LOCK_VAL         0x00
++
++#define MAX_DSI_SER_VID_TX_X                0x100
++#define MAX_DSI_SER_VID_TX_Y                0x110
++#define MAX_DSI_SER_VID_TX_Z                0x120
++#define MAX_DSI_SER_VID_TX_U                0x130
++
++#define DS90UB983                           0
++#define DS90UB984A                          1
++#define DS90UB984B                          2
++
++#define NUM_DP_DEVICE                       3
++#define BUS_DP_NUMBER                       2
++
++    enum fdp_dp_ser_strap_rate {
++        FPD4_Strap_Rate_0,
++        FPD4_Strap_Rate_3_375,
++        FPD4_Strap_Rate_6_75,
++        FPD4_Strap_Rate_10_8,
++        FPD4_Strap_Rate_13_5,
++    };
++
++enum max_dsi_ser_current_mode {
++    MAX_MODE_DSI_480,
++    MAX_MODE_DSI_768,
++    MAX_MODE_DSI_720P,
++    MAX_MODE_DSI_1080P,
++};
++
++struct fpd_dp_ser_priv {
++    struct gpio_desc *gpiod_pwrdn;
++    u8 dprx_lane_count;
++    u8 dprx_link_rate;
++    struct mutex mutex;
++    int ser_errb;
++    unsigned int ser_irq;
++    bool enable_mst;
++    u8 mst_payload_ids[FPD_DP_ARRAY_SIZE];
++    u8 gmsl_stream_ids[FPD_DP_ARRAY_SIZE];
++    u8 gmsl_link_select[FPD_DP_ARRAY_SIZE];
++    bool link_a_is_enabled;
++    bool link_b_is_enabled;
++    bool dsc;
++    bool split_mode;
++    u8 FPDConf;
++    u16 Thw;
++    u16 Ahw;
++    u16 Hfp;
++    u16 Hsw;
++    u16 Hbp;
++    u16 Tvw;
++    u16 Avw;
++    u16 Vfp;
++    u16 Vsw;
++    u16 Vbp;
++    u16 Hwords;
++    u16 Mvid;
++    u8 Hsp;
++    u8 FPD4_Strap_Rate_P0;
++    u8 FPD4_Strap_Rate_P1;
++    struct i2c_client *priv_dp_client[NUM_DP_DEVICE];
++    struct delayed_work delay_work;
++    struct workqueue_struct *wq;
++    struct delayed_work deser_work;
++    struct workqueue_struct *deser_wq;
++};
++
++void intel_dp_ser_module_exit(void);
++int intel_dp_ser_module_init(void);
++
++void intel_dp_ser_exit(void);
++int intel_dp_ser_init(const struct drm_display_mode *fixed_mode);
++int intel_dp_ser_init1(void);
++
++#endif /* __INTEL_DP_SER_DRV__ */
+-- 
+2.34.1
+
