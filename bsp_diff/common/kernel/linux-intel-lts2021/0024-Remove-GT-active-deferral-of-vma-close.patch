@@ -1,0 +1,246 @@
+From 8065caf177563091c506e1584fe9c9d5ccdac1bb Mon Sep 17 00:00:00 2001
+From: Chris Wilson <chris.p.wilson@linux.intel.com>
+Date: Mon, 24 Jul 2023 08:02:52 +0000
+Subject: [PATCH] Remove GT active deferral of vma close
+
+In "Decouple GT parking and vma close", there was a race condition in
+vma lookup by execbuf and closing that was temporarily closed by
+deferring the closure until the GT was idle (as was previously the
+case). However, this deferral make last for an eternity effectively
+leaking memory for an always active system, such as a high tenancy
+system. Let's see if the root cause was truly found and fixed by
+switching back to a pure time based vma open cache.
+
+v2: Close the race between lookup+open and close with a semaphore. This
+focuses on the execbuffer path, i.e. where vma are lookup+open, as the
+race should only be present here.
+
+Jira: gsd-5291 / vlk-48924
+Fixes: "Decouple GT parking and vma close" [DII_6777]
+Acked-by: Nirmoy Das <nirmoy.das@intel.com>
+---
+ .../gpu/drm/i915/gem/i915_gem_execbuffer.c    | 25 ++++++-----
+ drivers/gpu/drm/i915/gt/intel_gt.c            |  2 +-
+ drivers/gpu/drm/i915/gt/intel_gt_pm.c         |  2 -
+ drivers/gpu/drm/i915/i915_vma.c               | 41 +++++++++----------
+ drivers/gpu/drm/i915/i915_vma.h               |  4 +-
+ drivers/gpu/drm/i915/i915_vma_types.h         |  1 +
+ 6 files changed, 36 insertions(+), 39 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+index cd8b30fd97d1..03ac6bcb2066 100644
+--- a/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
++++ b/drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
+@@ -995,11 +995,14 @@ static struct i915_vma *eb_lookup_vma(struct i915_execbuffer *eb, u32 handle)
+ 
+ static int eb_lookup_vmas(struct i915_execbuffer *eb)
+ {
++	struct i915_vma_clock *clock = &eb->context->vm->gt->vma_clock;
+ 	unsigned int i, current_batch = 0;
++	struct i915_vma *vma = NULL;
+ 	int err = 0;
+ 
+ 	INIT_LIST_HEAD(&eb->relocs);
+ 
++	down_read(&clock->sem);
+ 	for (i = 0; i < eb->buffer_count; i++) {
+ 		struct drm_i915_gem_exec_object2 *entry = &eb->exec[i];
+ 		u32 handle = entry->handle;
+@@ -1008,26 +1011,26 @@ static int eb_lookup_vmas(struct i915_execbuffer *eb)
+ 		vma = eb_check_for_persistent_vma(eb, entry);
+ 		if (!vma)
+ 			vma = eb_lookup_vma(eb, handle);
+-
+ 		if (IS_ERR(vma)) {
+ 			err = PTR_ERR(vma);
+-			goto err;
++			vma = NULL;
++			break;
+ 		}
+ 
+ 		err = eb_validate_vma(eb, entry, vma);
+-		if (unlikely(err)) {
+-			i915_vma_put(vma);
+-			goto err;
+-		}
++		if (unlikely(err))
++			break;
+ 
+ 		err = eb_add_vma(eb, &current_batch, i, vma);
+-		if (err)
+-			return err;
+-	}
++		if (unlikely(err))
++			break;
+ 
+-	return 0;
++		vma = NULL;
++	}
++	up_read(&clock->sem);
+ 
+-err:
++	if (vma)
++		i915_vma_put(vma);
+ 	eb->vma[i].vma = NULL;
+ 	return err;
+ }
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt.c b/drivers/gpu/drm/i915/gt/intel_gt.c
+index 52baeee32c9c..c571629f1a5c 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt.c
+@@ -1114,7 +1114,7 @@ void intel_gt_driver_remove(struct intel_gt *gt)
+ {
+ 	intel_gt_fini_clock_frequency(gt);
+ 
+-	i915_vma_clock_flush(&gt->vma_clock);
++	i915_vma_clock_fini(&gt->vma_clock);
+ 	intel_flat_ppgtt_pool_fini(&gt->fpp);
+ 	intel_iov_fini_hw(&gt->iov);
+ 
+diff --git a/drivers/gpu/drm/i915/gt/intel_gt_pm.c b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+index 781651394f04..afa25c764c38 100644
+--- a/drivers/gpu/drm/i915/gt/intel_gt_pm.c
++++ b/drivers/gpu/drm/i915/gt/intel_gt_pm.c
+@@ -113,7 +113,6 @@ static int __gt_unpark(struct intel_wakeref *wf)
+ 	gt->awake = intel_display_power_get(i915, POWER_DOMAIN_GT_IRQ);
+ 	GEM_BUG_ON(!gt->awake);
+ 
+-	i915_vma_unpark(gt);
+ 	intel_rc6_unpark(&gt->rc6);
+ 	intel_rps_unpark(&gt->rps);
+ 	i915_pmu_gt_unparked(gt);
+@@ -143,7 +142,6 @@ static int __gt_park(struct intel_wakeref *wf)
+ 	i915_pmu_gt_parked(gt);
+ 	intel_rps_park(&gt->rps);
+ 	intel_rc6_park(&gt->rc6);
+-	i915_vma_park(gt);
+ 
+ 	intel_gt_park_ccs_mode(gt, NULL);
+ 
+diff --git a/drivers/gpu/drm/i915/i915_vma.c b/drivers/gpu/drm/i915/i915_vma.c
+index de3177b6216f..6eaf91b571d8 100644
+--- a/drivers/gpu/drm/i915/i915_vma.c
++++ b/drivers/gpu/drm/i915/i915_vma.c
+@@ -1457,8 +1457,10 @@ void i915_vma_close(struct i915_vma *vma)
+ 			!i915_vma_is_persistent(vma) &&
+ 			i915_gem_object_inuse(obj) &&
+ 			!i915_is_ggtt_or_dpt(vm);
++		bool first = false;
+ 
+ 		if (inuse) {
++			first = list_empty(&clock->age[0]);
+ 			list_add(&vma->closed_link, &clock->age[0]);
+ 			__i915_vma_get(vma);
+ 		}
+@@ -1467,6 +1469,10 @@ void i915_vma_close(struct i915_vma *vma)
+ 
+ 		i915_vm_close(vm);
+ 		i915_gem_object_put(obj);
++
++		if (first)
++			queue_delayed_work(vm->i915->wq, &clock->work,
++					   round_jiffies_up_relative(HZ));
+ 	}
+ }
+ 
+@@ -1573,6 +1579,7 @@ static void i915_vma_clock(struct work_struct *w)
+ 	 * https://en.wikipedia.org/wiki/Page_replacement_algorithm#Clock
+ 	 */
+ 
++	down_write(&clock->sem);
+ 	spin_lock_irq(&clock->lock);
+ 	while ((vma = list_first_entry_or_null(&clock->age[1],
+ 					       typeof(*vma),
+@@ -1591,36 +1598,19 @@ static void i915_vma_clock(struct work_struct *w)
+ 	}
+ 	list_replace_init(&clock->age[0], &clock->age[1]);
+ 	spin_unlock_irq(&clock->lock);
++	up_write(&clock->sem);
+ 
+-	if (!list_empty(&clock->age[1]) && !intel_gt_pm_is_awake(gt))
+-		schedule_delayed_work(&clock->work,
+-				      round_jiffies_up_relative(HZ));
+-}
+-
+-void i915_vma_unpark(struct intel_gt *gt)
+-{
+-	struct i915_vma_clock *clock = &gt->vma_clock;
+-
+-	cancel_delayed_work_sync(&clock->work);
++	if (!list_empty(&clock->age[1]))
++		queue_delayed_work(gt->i915->wq, &clock->work,
++				   round_jiffies_up_relative(HZ));
+ }
+ 
+-void i915_vma_park(struct intel_gt *gt)
+-{
+-	struct i915_vma_clock *clock = &gt->vma_clock;
+-
+-	if (list_empty(&clock->age[0]) && list_empty(&clock->age[1]))
+-		return;
+-
+-	mod_delayed_work(system_wq,
+-			 &clock->work, round_jiffies_up_relative(HZ));
+-}
+-
+-
+ void i915_vma_clock_init_early(struct i915_vma_clock *clock)
+ {
+ 	spin_lock_init(&clock->lock);
+ 	INIT_LIST_HEAD(&clock->age[0]);
+ 	INIT_LIST_HEAD(&clock->age[1]);
++	init_rwsem(&clock->sem);
+ 
+ 	INIT_DELAYED_WORK(&clock->work, i915_vma_clock);
+ }
+@@ -1633,6 +1623,13 @@ void i915_vma_clock_flush(struct i915_vma_clock *clock)
+        } while (delayed_work_pending(&clock->work));
+ }
+ 
++void i915_vma_clock_fini(struct i915_vma_clock *clock)
++{
++	i915_vma_clock_flush(clock);
++	GEM_BUG_ON(!list_empty(&clock->age[1]));
++	GEM_BUG_ON(!list_empty(&clock->age[0]));
++}
++
+ static void __i915_vma_iounmap(struct i915_vma *vma)
+ {
+ 	GEM_BUG_ON(i915_vma_is_pinned(vma));
+diff --git a/drivers/gpu/drm/i915/i915_vma.h b/drivers/gpu/drm/i915/i915_vma.h
+index 8e15af2b0baf..41ffe10d53ca 100644
+--- a/drivers/gpu/drm/i915/i915_vma.h
++++ b/drivers/gpu/drm/i915/i915_vma.h
+@@ -280,9 +280,6 @@ struct i915_vma *i915_vma_open(struct i915_vma *vma);
+ void i915_vma_close(struct i915_vma *vma);
+ void i915_vma_unpublish(struct i915_vma *vma);
+ 
+-void i915_vma_park(struct intel_gt *gt);
+-void i915_vma_unpark(struct intel_gt *gt);
+-
+ static inline struct i915_vma *__i915_vma_get(struct i915_vma *vma)
+ {
+ 	if (kref_get_unless_zero(&vma->ref))
+@@ -482,6 +479,7 @@ void i915_vma_free(struct i915_vma *vma);
+ 
+ void i915_vma_clock_init_early(struct i915_vma_clock *clock);
+ void i915_vma_clock_flush(struct i915_vma_clock *clock);
++void i915_vma_clock_fini(struct i915_vma_clock *clock);
+ 
+ struct i915_vma *i915_vma_make_unshrinkable(struct i915_vma *vma);
+ void i915_vma_make_shrinkable(struct i915_vma *vma);
+diff --git a/drivers/gpu/drm/i915/i915_vma_types.h b/drivers/gpu/drm/i915/i915_vma_types.h
+index bf675d1f060f..419b3a60a716 100644
+--- a/drivers/gpu/drm/i915/i915_vma_types.h
++++ b/drivers/gpu/drm/i915/i915_vma_types.h
+@@ -171,6 +171,7 @@ struct i915_ggtt_view {
+ struct i915_vma_clock {
+ 	spinlock_t lock;
+ 	struct list_head age[2];
++	struct rw_semaphore sem;
+ 	struct delayed_work work;
+ };
+ 
+-- 
+2.40.0
+
