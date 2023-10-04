@@ -1,0 +1,248 @@
+From 9ea1568b6a1628f0598bbe9fd21f59fd18b0ebdf Mon Sep 17 00:00:00 2001
+From: Sergey Nikolaienkov <sergeynv@google.com>
+Date: Tue, 28 Mar 2023 12:22:31 +0200
+Subject: [PATCH] Fix path traversal vulnerabilities in MediaProvider
+
+Canonicalize filepath provided by the caller when hanling SCAN_FILE_CALL
+method call in MediaProvider.
+Additionally, make sure to check access permission in SCAN_FILE_CALL
+(using enforceCallingPermissionInternal()).
+
+Preemptively canonicalize Files provided as an arguments to the public
+API methods in ModernMediaScanner (scanFile(), scanDirectory() and
+onDirectoryDirty()) to prevent path traversal attacks.
+
+Bug: 262244882
+Test: atest MediaProviderTests
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:c934d394d3dfa56ad9bb41faeb0b49001785f0fe)
+Merged-In: I61e77d69ae857984b819fa0ea27bec5c26a34842
+Change-Id: I61e77d69ae857984b819fa0ea27bec5c26a34842
+---
+ .../providers/media/MediaProvider.java        | 54 +++++++++++--------
+ .../media/scan/ModernMediaScanner.java        | 33 ++++++++++--
+ .../providers/media/util/FileUtils.java       | 47 +++++++++++-----
+ 3 files changed, 96 insertions(+), 38 deletions(-)
+
+diff --git a/src/com/android/providers/media/MediaProvider.java b/src/com/android/providers/media/MediaProvider.java
+index 705d7ecc..31bdf893 100644
+--- a/src/com/android/providers/media/MediaProvider.java
++++ b/src/com/android/providers/media/MediaProvider.java
+@@ -5549,38 +5549,48 @@ public class MediaProvider extends ContentProvider {
+                 BackgroundThread.waitForIdle();
+                 return null;
+             }
+-            case MediaStore.SCAN_FILE_CALL:
+-            case MediaStore.SCAN_VOLUME_CALL: {
+-                final int userId = Binder.getCallingUid() / PER_USER_RANGE;
++            case MediaStore.SCAN_FILE_CALL: {
+                 final LocalCallingIdentity token = clearLocalCallingIdentity();
+                 final CallingIdentity providerToken = clearCallingIdentity();
++
++                final String filePath = arg;
++                final Uri uri;
+                 try {
+-                    final Bundle res = new Bundle();
+-                    switch (method) {
+-                        case MediaStore.SCAN_FILE_CALL: {
+-                            final File file = new File(arg);
+-                            res.putParcelable(Intent.EXTRA_STREAM, scanFile(file, REASON_DEMAND));
+-                            break;
+-                        }
+-                        case MediaStore.SCAN_VOLUME_CALL: {
+-                            final String volumeName = arg;
+-                            try {
+-                                MediaVolume volume = mVolumeCache.findVolume(volumeName,
+-                                        UserHandle.of(userId));
+-                                MediaService.onScanVolume(getContext(), volume, REASON_DEMAND);
+-                            } catch (FileNotFoundException e) {
+-                                Log.w(TAG, "Failed to find volume " + volumeName, e);
+-                            }
+-                            break;
+-                        }
++                    File file;
++                    try {
++                        file = FileUtils.getCanonicalFile(filePath);
++                    } catch (IOException e) {
++                        file = null;
+                     }
+-                    return res;
++
++                    uri = file != null ? scanFile(file, REASON_DEMAND) : null;
++                } finally {
++                    restoreCallingIdentity(providerToken);
++                    restoreLocalCallingIdentity(token);
++                }
++
++                final Bundle res = new Bundle();
++                res.putParcelable(Intent.EXTRA_STREAM, uri);
++                return res;
++            }
++            case MediaStore.SCAN_VOLUME_CALL: {
++                final UserHandle user = UserHandle.of(Binder.getCallingUid() / PER_USER_RANGE);
++                final LocalCallingIdentity token = clearLocalCallingIdentity();
++                final CallingIdentity providerToken = clearCallingIdentity();
++
++                final String volumeName = arg;
++                try {
++                    final MediaVolume volume = mVolumeCache.findVolume(volumeName, user);
++                    MediaService.onScanVolume(getContext(), volume, REASON_DEMAND);
++                } catch (FileNotFoundException e) {
++                    Log.w(TAG, "Failed to find volume " + volumeName, e);
+                 } catch (IOException e) {
+                     throw new RuntimeException(e);
+                 } finally {
+                     restoreCallingIdentity(providerToken);
+                     restoreLocalCallingIdentity(token);
+                 }
++                return Bundle.EMPTY;
+             }
+             case MediaStore.GET_VERSION_CALL: {
+                 final String volumeName = extras.getString(Intent.EXTRA_TEXT);
+diff --git a/src/com/android/providers/media/scan/ModernMediaScanner.java b/src/com/android/providers/media/scan/ModernMediaScanner.java
+index 8927bfa5..5087c19a 100644
+--- a/src/com/android/providers/media/scan/ModernMediaScanner.java
++++ b/src/com/android/providers/media/scan/ModernMediaScanner.java
+@@ -50,6 +50,8 @@ import static android.text.format.DateUtils.MINUTE_IN_MILLIS;
+ 
+ import static com.android.providers.media.util.Metrics.translateReason;
+ 
++import static java.util.Objects.requireNonNull;
++
+ import android.content.ContentProviderClient;
+ import android.content.ContentProviderOperation;
+ import android.content.ContentProviderResult;
+@@ -243,7 +245,15 @@ public class ModernMediaScanner implements MediaScanner {
+     }
+ 
+     @Override
+-    public void scanDirectory(File file, int reason) {
++    public void scanDirectory(@NonNull File file, int reason) {
++        requireNonNull(file);
++        try {
++            file = file.getCanonicalFile();
++        } catch (IOException e) {
++            Log.e(TAG, "Couldn't canonicalize directory to scan" + file, e);
++            return;
++        }
++
+         try (Scan scan = new Scan(file, reason, /*ownerPackage*/ null)) {
+             scan.run();
+         } catch (OperationCanceledException ignored) {
+@@ -253,12 +263,21 @@ public class ModernMediaScanner implements MediaScanner {
+     }
+ 
+     @Override
+-    public Uri scanFile(File file, int reason) {
++    @Nullable
++    public Uri scanFile(@NonNull File file, int reason) {
+        return scanFile(file, reason, /*ownerPackage*/ null);
+     }
+ 
+     @Override
+     public Uri scanFile(File file, int reason, @Nullable String ownerPackage) {
++        requireNonNull(file);
++        try {
++            file = file.getCanonicalFile();
++        } catch (IOException e) {
++            Log.e(TAG, "Couldn't canonicalize file to scan" + file, e);
++            return null;
++        }
++
+         try (Scan scan = new Scan(file, reason, ownerPackage)) {
+             scan.run();
+             return scan.getFirstResult();
+@@ -294,9 +313,17 @@ public class ModernMediaScanner implements MediaScanner {
+ 
+     @Override
+     public void onDirectoryDirty(File dir) {
++        requireNonNull(dir);
++        try {
++            dir = dir.getCanonicalFile();
++        } catch (IOException e) {
++            Log.e(TAG, "Couldn't canonicalize directory" + dir, e);
++            return;
++        }
++
+         synchronized (mPendingCleanDirectories) {
+             mPendingCleanDirectories.remove(dir.getPath());
+-            FileUtils.setDirectoryDirty(dir, /*isDirty*/ true);
++            FileUtils.setDirectoryDirty(dir, /* isDirty */ true);
+         }
+     }
+ 
+diff --git a/src/com/android/providers/media/util/FileUtils.java b/src/com/android/providers/media/util/FileUtils.java
+index a0f666fb..e5c62d16 100644
+--- a/src/com/android/providers/media/util/FileUtils.java
++++ b/src/com/android/providers/media/util/FileUtils.java
+@@ -1101,18 +1101,25 @@ public class FileUtils {
+     }
+ 
+     public static @Nullable String extractRelativePath(@Nullable String data) {
+-        data = getCanonicalPath(data);
+         if (data == null) return null;
+ 
+-        final Matcher matcher = PATTERN_RELATIVE_PATH.matcher(data);
++        final String path;
++        try {
++            path = getCanonicalPath(data);
++        } catch (IOException e) {
++            Log.d(TAG, "Unable to get canonical path from invalid data path: " + data, e);
++            return null;
++        }
++
++        final Matcher matcher = PATTERN_RELATIVE_PATH.matcher(path);
+         if (matcher.find()) {
+-            final int lastSlash = data.lastIndexOf('/');
++            final int lastSlash = path.lastIndexOf('/');
+             if (lastSlash == -1 || lastSlash < matcher.end()) {
+                 // This is a file in the top-level directory, so relative path is "/"
+                 // which is different than null, which means unknown path
+                 return "/";
+             } else {
+-                return data.substring(matcher.end(), lastSlash + 1);
++                return path.substring(matcher.end(), lastSlash + 1);
+             }
+         } else {
+             return null;
+@@ -1667,15 +1674,29 @@ public class FileUtils {
+         return null;
+     }
+ 
+-    @Nullable
+-    private static String getCanonicalPath(@Nullable String path) {
+-        if (path == null) return null;
++    /**
++     * Returns the canonical {@link File} for the provided abstract pathname.
++     *
++     * @return The canonical pathname string denoting the same file or directory as this abstract
++     *         pathname
++     * @see File#getCanonicalFile()
++     */
++    @NonNull
++    public static File getCanonicalFile(@NonNull String path) throws IOException {
++        Objects.requireNonNull(path);
++        return new File(path).getCanonicalFile();
++    }
+ 
+-        try {
+-            return new File(path).getCanonicalPath();
+-        } catch (IOException e) {
+-            Log.d(TAG, "Unable to get canonical path from invalid data path: " + path, e);
+-            return null;
+-        }
++    /**
++     * Returns the canonical pathname string of the provided abstract pathname.
++     *
++     * @return The canonical pathname string denoting the same file or directory as this abstract
++     *         pathname.
++     * @see File#getCanonicalPath()
++     */
++    @NonNull
++    public static String getCanonicalPath(@NonNull String path) throws IOException {
++        Objects.requireNonNull(path);
++        return new File(path).getCanonicalPath();
+     }
+ }
+-- 
+2.42.0.rc2.253.gd59a3bf2b4-goog
+
