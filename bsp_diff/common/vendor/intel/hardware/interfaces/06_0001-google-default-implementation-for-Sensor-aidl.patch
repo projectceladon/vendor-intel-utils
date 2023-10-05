@@ -1,0 +1,1182 @@
+From f831cb53a8308226814e7993225fac4194750e70 Mon Sep 17 00:00:00 2001
+From: "Ranjan, Rajani" <rajani.ranjan@intel.com>
+Date: Mon, 31 Jul 2023 15:13:16 +0530
+Subject: [PATCH] google default implementation for Sensor aidl.
+
+to implement the Sensors AIDL HAL, an object must extend
+the ISensors interface and implement all functions defined
+in hardware/interfaces/sensors/aidl/android/hardware/sensors/ISensors.aidl
+
+Tracked-On: OAM-110600
+Signed-off-by: Ranjan, Rajani <rajani.ranjan@intel.com>
+---
+ sensors/aidl/Android.bp                     |  77 ++++
+ sensors/aidl/Sensor.cpp                     | 434 ++++++++++++++++++++
+ sensors/aidl/Sensors.cpp                    | 157 +++++++
+ sensors/aidl/include/sensors-impl/Sensor.h  | 168 ++++++++
+ sensors/aidl/include/sensors-impl/Sensors.h | 216 ++++++++++
+ sensors/aidl/main.cpp                       |  37 ++
+ sensors/aidl/sensors-default.rc             |   5 +
+ sensors/aidl/sensors-default.xml            |   7 +
+ 8 files changed, 1101 insertions(+)
+ create mode 100644 sensors/aidl/Android.bp
+ create mode 100644 sensors/aidl/Sensor.cpp
+ create mode 100644 sensors/aidl/Sensors.cpp
+ create mode 100644 sensors/aidl/include/sensors-impl/Sensor.h
+ create mode 100644 sensors/aidl/include/sensors-impl/Sensors.h
+ create mode 100644 sensors/aidl/main.cpp
+ create mode 100644 sensors/aidl/sensors-default.rc
+ create mode 100644 sensors/aidl/sensors-default.xml
+
+diff --git a/sensors/aidl/Android.bp b/sensors/aidl/Android.bp
+new file mode 100644
+index 0000000..16b4d35
+--- /dev/null
++++ b/sensors/aidl/Android.bp
+@@ -0,0 +1,77 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package {
++    // See: http://go/android-license-faq
++    // A large-scale-change added 'default_applicable_licenses' to import
++    // all of the 'license_kinds' from "hardware_interfaces_license"
++    // to get the below license kinds:
++    //   SPDX-license-identifier-Apache-2.0
++    default_applicable_licenses: ["hardware_interfaces_license"],
++}
++
++filegroup {
++    name: "sensors-default.rc",
++    srcs: ["sensors-default.rc"],
++}
++
++filegroup {
++    name: "sensors-default.xml",
++    srcs: ["sensors-default.xml"],
++}
++
++cc_library_static {
++    name: "libsensorsexampleimpl",
++    vendor: true,
++    shared_libs: [
++        "libbase",
++        "libfmq",
++        "libpower",
++        "libbinder_ndk",
++        "android.hardware.sensors-V2-ndk",
++    ],
++    export_include_dirs: ["include"],
++    srcs: [
++        "Sensors.cpp",
++        "Sensor.cpp",
++    ],
++    visibility: [
++        ":__subpackages__",
++        "//hardware/interfaces/tests/extension/sensors:__subpackages__",
++    ],
++}
++
++cc_binary {
++    name: "android.hardware.sensors-service.example",
++    relative_install_path: "hw",
++    init_rc: [":sensors-default.rc"],
++    vintf_fragments: [":sensors-default.xml"],
++    vendor: true,
++    shared_libs: [
++        "libbase",
++        "libbinder_ndk",
++        "libfmq",
++        "libpower",
++        "libcutils",
++        "liblog",
++        "libutils",
++        "android.hardware.sensors-V2-ndk",
++    ],
++    static_libs: [
++        "libsensorsexampleimpl",
++    ],
++    srcs: ["main.cpp"],
++}
+diff --git a/sensors/aidl/Sensor.cpp b/sensors/aidl/Sensor.cpp
+new file mode 100644
+index 0000000..3bdd8b6
+--- /dev/null
++++ b/sensors/aidl/Sensor.cpp
+@@ -0,0 +1,434 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "sensors-impl/Sensor.h"
++
++#include "utils/SystemClock.h"
++
++#include <cmath>
++
++using ::ndk::ScopedAStatus;
++
++namespace aidl {
++namespace android {
++namespace hardware {
++namespace sensors {
++
++static constexpr int32_t kDefaultMaxDelayUs = 10 * 1000 * 1000;
++
++Sensor::Sensor(ISensorsEventCallback* callback)
++    : mIsEnabled(false),
++      mSamplingPeriodNs(0),
++      mLastSampleTimeNs(0),
++      mCallback(callback),
++      mMode(OperationMode::NORMAL) {
++    mRunThread = std::thread(startThread, this);
++}
++
++Sensor::~Sensor() {
++    std::unique_lock<std::mutex> lock(mRunMutex);
++    mStopThread = true;
++    mIsEnabled = false;
++    mWaitCV.notify_all();
++    lock.release();
++    mRunThread.join();
++}
++
++const SensorInfo& Sensor::getSensorInfo() const {
++    return mSensorInfo;
++}
++
++void Sensor::batch(int64_t samplingPeriodNs) {
++    if (samplingPeriodNs < mSensorInfo.minDelayUs * 1000LL) {
++        samplingPeriodNs = mSensorInfo.minDelayUs * 1000LL;
++    } else if (samplingPeriodNs > mSensorInfo.maxDelayUs * 1000LL) {
++        samplingPeriodNs = mSensorInfo.maxDelayUs * 1000LL;
++    }
++
++    if (mSamplingPeriodNs != samplingPeriodNs) {
++        mSamplingPeriodNs = samplingPeriodNs;
++        // Wake up the 'run' thread to check if a new event should be generated now
++        mWaitCV.notify_all();
++    }
++}
++
++void Sensor::activate(bool enable) {
++    if (mIsEnabled != enable) {
++        std::unique_lock<std::mutex> lock(mRunMutex);
++        mIsEnabled = enable;
++        mWaitCV.notify_all();
++    }
++}
++
++ScopedAStatus Sensor::flush() {
++    // Only generate a flush complete event if the sensor is enabled and if the sensor is not a
++    // one-shot sensor.
++    if (!mIsEnabled ||
++        (mSensorInfo.flags & static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ONE_SHOT_MODE))) {
++        return ScopedAStatus::fromServiceSpecificError(
++                static_cast<int32_t>(BnSensors::ERROR_BAD_VALUE));
++    }
++
++    // Note: If a sensor supports batching, write all of the currently batched events for the sensor
++    // to the Event FMQ prior to writing the flush complete event.
++    Event ev;
++    ev.sensorHandle = mSensorInfo.sensorHandle;
++    ev.sensorType = SensorType::META_DATA;
++    EventPayload::MetaData meta = {
++            .what = MetaDataEventType::META_DATA_FLUSH_COMPLETE,
++    };
++    ev.payload.set<EventPayload::Tag::meta>(meta);
++    std::vector<Event> evs{ev};
++    mCallback->postEvents(evs, isWakeUpSensor());
++
++    return ScopedAStatus::ok();
++}
++
++void Sensor::startThread(Sensor* sensor) {
++    sensor->run();
++}
++
++void Sensor::run() {
++    std::unique_lock<std::mutex> runLock(mRunMutex);
++    constexpr int64_t kNanosecondsInSeconds = 1000 * 1000 * 1000;
++
++    while (!mStopThread) {
++        if (!mIsEnabled || mMode == OperationMode::DATA_INJECTION) {
++            mWaitCV.wait(runLock, [&] {
++                return ((mIsEnabled && mMode == OperationMode::NORMAL) || mStopThread);
++            });
++        } else {
++            timespec curTime;
++            clock_gettime(CLOCK_BOOTTIME, &curTime);
++            int64_t now = (curTime.tv_sec * kNanosecondsInSeconds) + curTime.tv_nsec;
++            int64_t nextSampleTime = mLastSampleTimeNs + mSamplingPeriodNs;
++
++            if (now >= nextSampleTime) {
++                mLastSampleTimeNs = now;
++                nextSampleTime = mLastSampleTimeNs + mSamplingPeriodNs;
++                mCallback->postEvents(readEvents(), isWakeUpSensor());
++            }
++
++            mWaitCV.wait_for(runLock, std::chrono::nanoseconds(nextSampleTime - now));
++        }
++    }
++}
++
++bool Sensor::isWakeUpSensor() {
++    return mSensorInfo.flags & static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_WAKE_UP);
++}
++
++std::vector<Event> Sensor::readEvents() {
++    std::vector<Event> events;
++    Event event;
++    event.sensorHandle = mSensorInfo.sensorHandle;
++    event.sensorType = mSensorInfo.type;
++    event.timestamp = ::android::elapsedRealtimeNano();
++    memset(&event.payload, 0, sizeof(event.payload));
++    readEventPayload(event.payload);
++    events.push_back(event);
++    return events;
++}
++
++void Sensor::setOperationMode(OperationMode mode) {
++    if (mMode != mode) {
++        std::unique_lock<std::mutex> lock(mRunMutex);
++        mMode = mode;
++        mWaitCV.notify_all();
++    }
++}
++
++bool Sensor::supportsDataInjection() const {
++    return mSensorInfo.flags & static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
++}
++
++ScopedAStatus Sensor::injectEvent(const Event& event) {
++    if (event.sensorType == SensorType::ADDITIONAL_INFO) {
++        return ScopedAStatus::ok();
++        // When in OperationMode::NORMAL, SensorType::ADDITIONAL_INFO is used to push operation
++        // environment data into the device.
++    }
++
++    if (!supportsDataInjection()) {
++        return ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    }
++
++    if (mMode == OperationMode::DATA_INJECTION) {
++        mCallback->postEvents(std::vector<Event>{event}, isWakeUpSensor());
++        return ScopedAStatus::ok();
++    }
++
++    return ScopedAStatus::fromServiceSpecificError(
++            static_cast<int32_t>(BnSensors::ERROR_BAD_VALUE));
++}
++
++OnChangeSensor::OnChangeSensor(ISensorsEventCallback* callback)
++    : Sensor(callback), mPreviousEventSet(false) {}
++
++void OnChangeSensor::activate(bool enable) {
++    Sensor::activate(enable);
++    if (!enable) {
++        mPreviousEventSet = false;
++    }
++}
++
++std::vector<Event> OnChangeSensor::readEvents() {
++    std::vector<Event> events = Sensor::readEvents();
++    std::vector<Event> outputEvents;
++
++    for (auto iter = events.begin(); iter != events.end(); ++iter) {
++        Event ev = *iter;
++        if (!mPreviousEventSet ||
++            memcmp(&mPreviousEvent.payload, &ev.payload, sizeof(ev.payload)) != 0) {
++            outputEvents.push_back(ev);
++            mPreviousEvent = ev;
++            mPreviousEventSet = true;
++        }
++    }
++    return outputEvents;
++}
++
++AccelSensor::AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Accel Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::ACCELEROMETER;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 78.4f;  // +/- 8g
++    mSensorInfo.resolution = 1.52e-5;
++    mSensorInfo.power = 0.001f;          // mA
++    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
++};
++
++void AccelSensor::readEventPayload(EventPayload& payload) {
++    EventPayload::Vec3 vec3 = {
++            .x = 0,
++            .y = 0,
++            .z = 9.8,
++            .status = SensorStatus::ACCURACY_HIGH,
++    };
++    payload.set<EventPayload::Tag::vec3>(vec3);
++}
++
++PressureSensor::PressureSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
++    : Sensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Pressure Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::PRESSURE;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 1100.0f;       // hPa
++    mSensorInfo.resolution = 0.005f;      // hPa
++    mSensorInfo.power = 0.001f;           // mA
++    mSensorInfo.minDelayUs = 100 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = 0;
++};
++
++void PressureSensor::readEventPayload(EventPayload& payload) {
++    payload.set<EventPayload::Tag::scalar>(1013.25f);
++}
++
++MagnetometerSensor::MagnetometerSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
++    : Sensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Magnetic Field Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::MAGNETIC_FIELD;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 1300.0f;
++    mSensorInfo.resolution = 0.01f;
++    mSensorInfo.power = 0.001f;          // mA
++    mSensorInfo.minDelayUs = 20 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = 0;
++};
++
++void MagnetometerSensor::readEventPayload(EventPayload& payload) {
++    EventPayload::Vec3 vec3 = {
++            .x = 100.0,
++            .y = 0,
++            .z = 50.0,
++            .status = SensorStatus::ACCURACY_HIGH,
++    };
++    payload.set<EventPayload::Tag::vec3>(vec3);
++}
++
++LightSensor::LightSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
++    : OnChangeSensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Light Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::LIGHT;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 43000.0f;
++    mSensorInfo.resolution = 10.0f;
++    mSensorInfo.power = 0.001f;           // mA
++    mSensorInfo.minDelayUs = 200 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE);
++};
++
++void LightSensor::readEventPayload(EventPayload& payload) {
++    payload.set<EventPayload::Tag::scalar>(80.0f);
++}
++
++ProximitySensor::ProximitySensor(int32_t sensorHandle, ISensorsEventCallback* callback)
++    : OnChangeSensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Proximity Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::PROXIMITY;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 5.0f;
++    mSensorInfo.resolution = 1.0f;
++    mSensorInfo.power = 0.012f;           // mA
++    mSensorInfo.minDelayUs = 200 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE |
++                                              SensorInfo::SENSOR_FLAG_BITS_WAKE_UP);
++};
++
++void ProximitySensor::readEventPayload(EventPayload& payload) {
++    payload.set<EventPayload::Tag::scalar>(2.5f);
++}
++
++GyroSensor::GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Gyro Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::GYROSCOPE;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 1000.0f * M_PI / 180.0f;
++    mSensorInfo.resolution = 1000.0f * M_PI / (180.0f * 32768.0f);
++    mSensorInfo.power = 0.001f;
++    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = 0;
++};
++
++void GyroSensor::readEventPayload(EventPayload& payload) {
++    EventPayload::Vec3 vec3 = {
++            .x = 0,
++            .y = 0,
++            .z = 0,
++            .status = SensorStatus::ACCURACY_HIGH,
++    };
++    payload.set<EventPayload::Tag::vec3>(vec3);
++}
++
++AmbientTempSensor::AmbientTempSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
++    : OnChangeSensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Ambient Temp Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::AMBIENT_TEMPERATURE;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 80.0f;
++    mSensorInfo.resolution = 0.01f;
++    mSensorInfo.power = 0.001f;
++    mSensorInfo.minDelayUs = 40 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE);
++};
++
++void AmbientTempSensor::readEventPayload(EventPayload& payload) {
++    payload.set<EventPayload::Tag::scalar>(40.0f);
++}
++
++RelativeHumiditySensor::RelativeHumiditySensor(int32_t sensorHandle,
++                                               ISensorsEventCallback* callback)
++    : OnChangeSensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Relative Humidity Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::RELATIVE_HUMIDITY;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 100.0f;
++    mSensorInfo.resolution = 0.1f;
++    mSensorInfo.power = 0.001f;
++    mSensorInfo.minDelayUs = 40 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE);
++}
++
++void RelativeHumiditySensor::readEventPayload(EventPayload& payload) {
++    payload.set<EventPayload::Tag::scalar>(50.0f);
++}
++
++HingeAngleSensor::HingeAngleSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
++    : OnChangeSensor(callback) {
++    mSensorInfo.sensorHandle = sensorHandle;
++    mSensorInfo.name = "Hinge Angle Sensor";
++    mSensorInfo.vendor = "Vendor String";
++    mSensorInfo.version = 1;
++    mSensorInfo.type = SensorType::HINGE_ANGLE;
++    mSensorInfo.typeAsString = "";
++    mSensorInfo.maxRange = 360.0f;
++    mSensorInfo.resolution = 1.0f;
++    mSensorInfo.power = 0.001f;
++    mSensorInfo.minDelayUs = 40 * 1000;  // microseconds
++    mSensorInfo.maxDelayUs = kDefaultMaxDelayUs;
++    mSensorInfo.fifoReservedEventCount = 0;
++    mSensorInfo.fifoMaxEventCount = 0;
++    mSensorInfo.requiredPermission = "";
++    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_ON_CHANGE_MODE |
++                                              SensorInfo::SENSOR_FLAG_BITS_WAKE_UP |
++                                              SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
++}
++
++void HingeAngleSensor::readEventPayload(EventPayload& payload) {
++    payload.set<EventPayload::Tag::scalar>(180.0f);
++}
++
++}  // namespace sensors
++}  // namespace hardware
++}  // namespace android
++}  // namespace aidl
+diff --git a/sensors/aidl/Sensors.cpp b/sensors/aidl/Sensors.cpp
+new file mode 100644
+index 0000000..65dd304
+--- /dev/null
++++ b/sensors/aidl/Sensors.cpp
+@@ -0,0 +1,157 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "sensors-impl/Sensors.h"
++
++#include <aidl/android/hardware/common/fmq/SynchronizedReadWrite.h>
++
++using ::aidl::android::hardware::common::fmq::MQDescriptor;
++using ::aidl::android::hardware::common::fmq::SynchronizedReadWrite;
++using ::aidl::android::hardware::sensors::Event;
++using ::aidl::android::hardware::sensors::ISensors;
++using ::aidl::android::hardware::sensors::ISensorsCallback;
++using ::aidl::android::hardware::sensors::SensorInfo;
++using ::ndk::ScopedAStatus;
++
++namespace aidl {
++namespace android {
++namespace hardware {
++namespace sensors {
++
++ScopedAStatus Sensors::activate(int32_t in_sensorHandle, bool in_enabled) {
++    auto sensor = mSensors.find(in_sensorHandle);
++    if (sensor != mSensors.end()) {
++        sensor->second->activate(in_enabled);
++        return ScopedAStatus::ok();
++    }
++
++    return ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++}
++
++ScopedAStatus Sensors::batch(int32_t in_sensorHandle, int64_t in_samplingPeriodNs,
++                             int64_t /* in_maxReportLatencyNs */) {
++    auto sensor = mSensors.find(in_sensorHandle);
++    if (sensor != mSensors.end()) {
++        sensor->second->batch(in_samplingPeriodNs);
++        return ScopedAStatus::ok();
++    }
++
++    return ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++}
++
++ScopedAStatus Sensors::configDirectReport(int32_t /* in_sensorHandle */,
++                                          int32_t /* in_channelHandle */,
++                                          ISensors::RateLevel /* in_rate */,
++                                          int32_t* _aidl_return) {
++    *_aidl_return = EX_UNSUPPORTED_OPERATION;
++
++    return ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++}
++
++ScopedAStatus Sensors::flush(int32_t in_sensorHandle) {
++    auto sensor = mSensors.find(in_sensorHandle);
++    if (sensor != mSensors.end()) {
++        return sensor->second->flush();
++    }
++
++    return ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++}
++
++ScopedAStatus Sensors::getSensorsList(std::vector<SensorInfo>* _aidl_return) {
++    for (const auto& sensor : mSensors) {
++        _aidl_return->push_back(sensor.second->getSensorInfo());
++    }
++    return ScopedAStatus::ok();
++}
++
++ScopedAStatus Sensors::initialize(
++        const MQDescriptor<Event, SynchronizedReadWrite>& in_eventQueueDescriptor,
++        const MQDescriptor<int32_t, SynchronizedReadWrite>& in_wakeLockDescriptor,
++        const std::shared_ptr<::aidl::android::hardware::sensors::ISensorsCallback>&
++                in_sensorsCallback) {
++    ScopedAStatus result = ScopedAStatus::ok();
++
++    mEventQueue = std::make_unique<AidlMessageQueue<Event, SynchronizedReadWrite>>(
++            in_eventQueueDescriptor, true /* resetPointers */);
++
++    // Ensure that all sensors are disabled.
++    for (auto sensor : mSensors) {
++        sensor.second->activate(false);
++    }
++
++    // Stop the Wake Lock thread if it is currently running
++    if (mReadWakeLockQueueRun.load()) {
++        mReadWakeLockQueueRun = false;
++        mWakeLockThread.join();
++    }
++
++    // Save a reference to the callback
++    mCallback = in_sensorsCallback;
++
++    // Ensure that any existing EventFlag is properly deleted
++    deleteEventFlag();
++
++    // Create the EventFlag that is used to signal to the framework that sensor events have been
++    // written to the Event FMQ
++    if (EventFlag::createEventFlag(mEventQueue->getEventFlagWord(), &mEventQueueFlag) != OK) {
++        result = ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++    }
++
++    // Create the Wake Lock FMQ that is used by the framework to communicate whenever WAKE_UP
++    // events have been successfully read and handled by the framework.
++    mWakeLockQueue = std::make_unique<AidlMessageQueue<int32_t, SynchronizedReadWrite>>(
++            in_wakeLockDescriptor, true /* resetPointers */);
++
++    if (!mCallback || !mEventQueue || !mWakeLockQueue || mEventQueueFlag == nullptr) {
++        result = ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++    }
++
++    // Start the thread to read events from the Wake Lock FMQ
++    mReadWakeLockQueueRun = true;
++    mWakeLockThread = std::thread(startReadWakeLockThread, this);
++    return result;
++}
++
++ScopedAStatus Sensors::injectSensorData(const Event& in_event) {
++    auto sensor = mSensors.find(in_event.sensorHandle);
++    if (sensor != mSensors.end()) {
++        return sensor->second->injectEvent(in_event);
++    }
++    return ScopedAStatus::fromServiceSpecificError(static_cast<int32_t>(ERROR_BAD_VALUE));
++}
++
++ScopedAStatus Sensors::registerDirectChannel(const ISensors::SharedMemInfo& /* in_mem */,
++                                             int32_t* _aidl_return) {
++    *_aidl_return = EX_UNSUPPORTED_OPERATION;
++
++    return ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++}
++
++ScopedAStatus Sensors::setOperationMode(OperationMode in_mode) {
++    for (auto sensor : mSensors) {
++        sensor.second->setOperationMode(in_mode);
++    }
++    return ScopedAStatus::ok();
++}
++
++ScopedAStatus Sensors::unregisterDirectChannel(int32_t /* in_channelHandle */) {
++    return ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++}
++
++}  // namespace sensors
++}  // namespace hardware
++}  // namespace android
++}  // namespace aidl
+diff --git a/sensors/aidl/include/sensors-impl/Sensor.h b/sensors/aidl/include/sensors-impl/Sensor.h
+new file mode 100644
+index 0000000..e6cd3e6
+--- /dev/null
++++ b/sensors/aidl/include/sensors-impl/Sensor.h
+@@ -0,0 +1,168 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <thread>
++
++#include <aidl/android/hardware/sensors/BnSensors.h>
++
++namespace aidl {
++namespace android {
++namespace hardware {
++namespace sensors {
++
++class ISensorsEventCallback {
++  public:
++    using Event = ::aidl::android::hardware::sensors::Event;
++
++    virtual ~ISensorsEventCallback(){};
++    virtual void postEvents(const std::vector<Event>& events, bool wakeup) = 0;
++};
++
++class Sensor {
++  public:
++    using OperationMode = ::aidl::android::hardware::sensors::ISensors::OperationMode;
++    using Event = ::aidl::android::hardware::sensors::Event;
++    using EventPayload = ::aidl::android::hardware::sensors::Event::EventPayload;
++    using SensorInfo = ::aidl::android::hardware::sensors::SensorInfo;
++    using SensorType = ::aidl::android::hardware::sensors::SensorType;
++    using MetaDataEventType =
++            ::aidl::android::hardware::sensors::Event::EventPayload::MetaData::MetaDataEventType;
++
++    Sensor(ISensorsEventCallback* callback);
++    virtual ~Sensor();
++
++    const SensorInfo& getSensorInfo() const;
++    void batch(int64_t samplingPeriodNs);
++    virtual void activate(bool enable);
++    ndk::ScopedAStatus flush();
++
++    void setOperationMode(OperationMode mode);
++    bool supportsDataInjection() const;
++    ndk::ScopedAStatus injectEvent(const Event& event);
++
++  protected:
++    void run();
++    virtual std::vector<Event> readEvents();
++    virtual void readEventPayload(EventPayload&) = 0;
++    static void startThread(Sensor* sensor);
++
++    bool isWakeUpSensor();
++
++    bool mIsEnabled;
++    int64_t mSamplingPeriodNs;
++    int64_t mLastSampleTimeNs;
++    SensorInfo mSensorInfo;
++
++    std::atomic_bool mStopThread;
++    std::condition_variable mWaitCV;
++    std::mutex mRunMutex;
++    std::thread mRunThread;
++
++    ISensorsEventCallback* mCallback;
++
++    OperationMode mMode;
++};
++
++class OnChangeSensor : public Sensor {
++  public:
++    OnChangeSensor(ISensorsEventCallback* callback);
++
++    virtual void activate(bool enable) override;
++
++  protected:
++    virtual std::vector<Event> readEvents() override;
++
++  protected:
++    Event mPreviousEvent;
++    bool mPreviousEventSet;
++};
++
++class AccelSensor : public Sensor {
++  public:
++    AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class GyroSensor : public Sensor {
++  public:
++    GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class AmbientTempSensor : public OnChangeSensor {
++  public:
++    AmbientTempSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class PressureSensor : public Sensor {
++  public:
++    PressureSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class MagnetometerSensor : public Sensor {
++  public:
++    MagnetometerSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class LightSensor : public OnChangeSensor {
++  public:
++    LightSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class ProximitySensor : public OnChangeSensor {
++  public:
++    ProximitySensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class RelativeHumiditySensor : public OnChangeSensor {
++  public:
++    RelativeHumiditySensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++class HingeAngleSensor : public OnChangeSensor {
++  public:
++    HingeAngleSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
++
++  protected:
++    virtual void readEventPayload(EventPayload& payload) override;
++};
++
++}  // namespace sensors
++}  // namespace hardware
++}  // namespace android
++}  // namespace aidl
+diff --git a/sensors/aidl/include/sensors-impl/Sensors.h b/sensors/aidl/include/sensors-impl/Sensors.h
+new file mode 100644
+index 0000000..e270d96
+--- /dev/null
++++ b/sensors/aidl/include/sensors-impl/Sensors.h
+@@ -0,0 +1,216 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <aidl/android/hardware/common/fmq/SynchronizedReadWrite.h>
++#include <aidl/android/hardware/sensors/BnSensors.h>
++#include <fmq/AidlMessageQueue.h>
++#include <hardware_legacy/power.h>
++#include <map>
++#include "Sensor.h"
++
++namespace aidl {
++namespace android {
++namespace hardware {
++namespace sensors {
++
++using aidl::android::hardware::common::fmq::SynchronizedReadWrite;
++using ::android::AidlMessageQueue;
++using ::android::OK;
++using ::android::status_t;
++using ::android::hardware::EventFlag;
++
++class Sensors : public BnSensors, public ISensorsEventCallback {
++    static constexpr const char* kWakeLockName = "SensorsHAL_WAKEUP";
++
++  public:
++    Sensors()
++        : mEventQueueFlag(nullptr),
++          mNextHandle(1),
++          mOutstandingWakeUpEvents(0),
++          mReadWakeLockQueueRun(false),
++          mAutoReleaseWakeLockTime(0),
++          mHasWakeLock(false) {
++        AddSensor<AccelSensor>();
++        AddSensor<GyroSensor>();
++        AddSensor<AmbientTempSensor>();
++        AddSensor<PressureSensor>();
++        AddSensor<MagnetometerSensor>();
++        AddSensor<LightSensor>();
++        AddSensor<ProximitySensor>();
++        AddSensor<RelativeHumiditySensor>();
++        AddSensor<HingeAngleSensor>();
++    }
++
++    virtual ~Sensors() {
++        deleteEventFlag();
++        mReadWakeLockQueueRun = false;
++        mWakeLockThread.join();
++    }
++
++    ::ndk::ScopedAStatus activate(int32_t in_sensorHandle, bool in_enabled) override;
++    ::ndk::ScopedAStatus batch(int32_t in_sensorHandle, int64_t in_samplingPeriodNs,
++                               int64_t in_maxReportLatencyNs) override;
++    ::ndk::ScopedAStatus configDirectReport(
++            int32_t in_sensorHandle, int32_t in_channelHandle,
++            ::aidl::android::hardware::sensors::ISensors::RateLevel in_rate,
++            int32_t* _aidl_return) override;
++    ::ndk::ScopedAStatus flush(int32_t in_sensorHandle) override;
++    ::ndk::ScopedAStatus getSensorsList(
++            std::vector<::aidl::android::hardware::sensors::SensorInfo>* _aidl_return) override;
++    ::ndk::ScopedAStatus initialize(
++            const ::aidl::android::hardware::common::fmq::MQDescriptor<
++                    ::aidl::android::hardware::sensors::Event,
++                    ::aidl::android::hardware::common::fmq::SynchronizedReadWrite>&
++                    in_eventQueueDescriptor,
++            const ::aidl::android::hardware::common::fmq::MQDescriptor<
++                    int32_t, ::aidl::android::hardware::common::fmq::SynchronizedReadWrite>&
++                    in_wakeLockDescriptor,
++            const std::shared_ptr<::aidl::android::hardware::sensors::ISensorsCallback>&
++                    in_sensorsCallback) override;
++    ::ndk::ScopedAStatus injectSensorData(
++            const ::aidl::android::hardware::sensors::Event& in_event) override;
++    ::ndk::ScopedAStatus registerDirectChannel(
++            const ::aidl::android::hardware::sensors::ISensors::SharedMemInfo& in_mem,
++            int32_t* _aidl_return) override;
++    ::ndk::ScopedAStatus setOperationMode(
++            ::aidl::android::hardware::sensors::ISensors::OperationMode in_mode) override;
++    ::ndk::ScopedAStatus unregisterDirectChannel(int32_t in_channelHandle) override;
++
++    void postEvents(const std::vector<Event>& events, bool wakeup) override {
++        std::lock_guard<std::mutex> lock(mWriteLock);
++        if (mEventQueue == nullptr) {
++            return;
++        }
++        if (mEventQueue->write(&events.front(), events.size())) {
++            mEventQueueFlag->wake(
++                    static_cast<uint32_t>(BnSensors::EVENT_QUEUE_FLAG_BITS_READ_AND_PROCESS));
++
++            if (wakeup) {
++                // Keep track of the number of outstanding WAKE_UP events in order to properly hold
++                // a wake lock until the framework has secured a wake lock
++                updateWakeLock(events.size(), 0 /* eventsHandled */);
++            }
++        }
++    }
++
++  protected:
++    // Add a new sensor
++    template <class SensorType>
++    void AddSensor() {
++        std::shared_ptr<SensorType> sensor =
++                std::make_shared<SensorType>(mNextHandle++ /* sensorHandle */, this /* callback */);
++        mSensors[sensor->getSensorInfo().sensorHandle] = sensor;
++    }
++
++    // Utility function to delete the Event Flag
++    void deleteEventFlag() {
++        if (mEventQueueFlag != nullptr) {
++            status_t status = EventFlag::deleteEventFlag(&mEventQueueFlag);
++            if (status != OK) {
++                ALOGI("Failed to delete event flag: %d", status);
++            }
++        }
++    }
++
++    static void startReadWakeLockThread(Sensors* sensors) { sensors->readWakeLockFMQ(); }
++
++    // Function to read the Wake Lock FMQ and release the wake lock when appropriate
++    void readWakeLockFMQ() {
++        while (mReadWakeLockQueueRun.load()) {
++            constexpr int64_t kReadTimeoutNs = 500 * 1000 * 1000;  // 500 ms
++            int32_t eventsHandled = 0;
++
++            // Read events from the Wake Lock FMQ. Timeout after a reasonable amount of time to
++            // ensure that any held wake lock is able to be released if it is held for too long.
++            mWakeLockQueue->readBlocking(
++                    &eventsHandled, 1 /* count */, 0 /* readNotification */,
++                    static_cast<uint32_t>(WAKE_LOCK_QUEUE_FLAG_BITS_DATA_WRITTEN), kReadTimeoutNs);
++            updateWakeLock(0 /* eventsWritten */, eventsHandled);
++        }
++    }
++
++    /**
++     * Responsible for acquiring and releasing a wake lock when there are unhandled WAKE_UP events
++     */
++    void updateWakeLock(int32_t eventsWritten, int32_t eventsHandled) {
++        std::lock_guard<std::mutex> lock(mWakeLockLock);
++        int32_t newVal = mOutstandingWakeUpEvents + eventsWritten - eventsHandled;
++        if (newVal < 0) {
++            mOutstandingWakeUpEvents = 0;
++        } else {
++            mOutstandingWakeUpEvents = newVal;
++        }
++
++        if (eventsWritten > 0) {
++            // Update the time at which the last WAKE_UP event was sent
++            mAutoReleaseWakeLockTime = ::android::uptimeMillis() +
++                                       static_cast<uint32_t>(WAKE_LOCK_TIMEOUT_SECONDS) * 1000;
++        }
++
++        if (!mHasWakeLock && mOutstandingWakeUpEvents > 0 &&
++            acquire_wake_lock(PARTIAL_WAKE_LOCK, kWakeLockName) == 0) {
++            mHasWakeLock = true;
++        } else if (mHasWakeLock) {
++            // Check if the wake lock should be released automatically if
++            // SensorTimeout::WAKE_LOCK_SECONDS has elapsed since the last WAKE_UP event was written
++            // to the Wake Lock FMQ.
++            if (::android::uptimeMillis() > mAutoReleaseWakeLockTime) {
++                ALOGD("No events read from wake lock FMQ for %d seconds, auto releasing wake lock",
++                      WAKE_LOCK_TIMEOUT_SECONDS);
++                mOutstandingWakeUpEvents = 0;
++            }
++
++            if (mOutstandingWakeUpEvents == 0 && release_wake_lock(kWakeLockName) == 0) {
++                mHasWakeLock = false;
++            }
++        }
++    }
++
++  private:
++    // The Event FMQ where sensor events are written
++    std::unique_ptr<AidlMessageQueue<Event, SynchronizedReadWrite>> mEventQueue;
++    // The Wake Lock FMQ that is read to determine when the framework has handled WAKE_UP events
++    std::unique_ptr<AidlMessageQueue<int32_t, SynchronizedReadWrite>> mWakeLockQueue;
++    // Event Flag to signal to the framework when sensor events are available to be read
++    EventFlag* mEventQueueFlag;
++    // Callback for asynchronous events, such as dynamic sensor connections.
++    std::shared_ptr<::aidl::android::hardware::sensors::ISensorsCallback> mCallback;
++    // A map of the available sensors.
++    std::map<int32_t, std::shared_ptr<Sensor>> mSensors;
++    // The next available sensor handle.
++    int32_t mNextHandle;
++    // Lock to protect writes to the FMQs.
++    std::mutex mWriteLock;
++    // Lock to protect acquiring and releasing the wake lock
++    std::mutex mWakeLockLock;
++    // Track the number of WAKE_UP events that have not been handled by the framework
++    uint32_t mOutstandingWakeUpEvents;
++    // A thread to read the Wake Lock FMQ
++    std::thread mWakeLockThread;
++    // Flag to indicate that the Wake Lock Thread should continue to run
++    std::atomic_bool mReadWakeLockQueueRun;
++    // Track the time when the wake lock should automatically be released
++    int64_t mAutoReleaseWakeLockTime;
++    // Flag to indicate if a wake lock has been acquired
++    bool mHasWakeLock;
++};
++
++}  // namespace sensors
++}  // namespace hardware
++}  // namespace android
++}  // namespace aidl
+diff --git a/sensors/aidl/main.cpp b/sensors/aidl/main.cpp
+new file mode 100644
+index 0000000..8a5a7de
+--- /dev/null
++++ b/sensors/aidl/main.cpp
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (C) 2021 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "sensors-impl/Sensors.h"
++
++#include <android-base/logging.h>
++#include <android/binder_manager.h>
++#include <android/binder_process.h>
++
++using aidl::android::hardware::sensors::Sensors;
++
++int main() {
++    ABinderProcess_setThreadPoolMaxThreadCount(0);
++
++    // Make a default sensors service
++    auto sensor = ndk::SharedRefBase::make<Sensors>();
++    const std::string sensorName = std::string() + Sensors::descriptor + "/default";
++    binder_status_t status =
++            AServiceManager_addService(sensor->asBinder().get(), sensorName.c_str());
++    CHECK_EQ(status, STATUS_OK);
++
++    ABinderProcess_joinThreadPool();
++    return EXIT_FAILURE;  // should not reach
++}
+diff --git a/sensors/aidl/sensors-default.rc b/sensors/aidl/sensors-default.rc
+new file mode 100644
+index 0000000..96da85d
+--- /dev/null
++++ b/sensors/aidl/sensors-default.rc
+@@ -0,0 +1,5 @@
++service vendor.sensors-default /vendor/bin/hw/android.hardware.sensors-service.example
++    class hal
++    user system
++    group system
++    rlimit rtprio 10 10
+diff --git a/sensors/aidl/sensors-default.xml b/sensors/aidl/sensors-default.xml
+new file mode 100644
+index 0000000..36b28ed
+--- /dev/null
++++ b/sensors/aidl/sensors-default.xml
+@@ -0,0 +1,7 @@
++<manifest version="1.0" type="device">
++    <hal format="aidl">
++        <name>android.hardware.sensors</name>
++        <version>2</version>
++        <fqname>ISensors/default</fqname>
++    </hal>
++</manifest>
+-- 
+2.41.0
+
