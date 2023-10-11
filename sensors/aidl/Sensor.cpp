@@ -21,7 +21,7 @@
 
 #include <cmath>
 #include <vector>
-#define DEBUG 0
+#undef DEBUG
 
 using ::ndk::ScopedAStatus;
 
