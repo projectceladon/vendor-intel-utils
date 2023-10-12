@@ -33,8 +33,8 @@ function apply()
             echo "Applying ${name}"
             patch=${root}/${proj}/${name}
             change_id=`grep -w "^Change-Id:" ${patch} | awk '{print $2}'`
-            # we limit the log to 200 commits, or it can be very slow
-            applied=`git log -200 | grep -w "^    Change-Id: ${change_id}" 2>/dev/null`
+            # we limit the log to 250 commits, or it can be very slow
+            applied=`git log -250 | grep -w "^    Change-Id: ${change_id}" 2>/dev/null`
             if [[ -z "${applied}" ]]; then
                 git am -k -3 --ignore-space-change --ignore-whitespace ${patch}
                 if [[ $? -ne 0 ]]; then
