@@ -1,0 +1,220 @@
+From b815470d7949738a870001ab79d3a87bbac69cf2 Mon Sep 17 00:00:00 2001
+From: Austin Sun <austin.sun@intel.com>
+Date: Fri, 2 Jun 2023 16:21:57 +0800
+Subject: [PATCH] feat: Add power silentmode sysfs
+
+Tracked-On: OAM-111068
+Signed-off-by: Austin Sun <austin.sun@intel.com>
+---
+ kernel/power/Kconfig      |  6 +++
+ kernel/power/Makefile     |  1 +
+ kernel/power/main.c       | 47 +++++++++++++++++++++++
+ kernel/power/power.h      | 14 +++++++
+ kernel/power/silentmode.c | 78 +++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 146 insertions(+)
+ create mode 100644 kernel/power/silentmode.c
+
+diff --git a/kernel/power/Kconfig b/kernel/power/Kconfig
+index a12779650f15..100737a02fde 100644
+--- a/kernel/power/Kconfig
++++ b/kernel/power/Kconfig
+@@ -331,3 +331,9 @@ config ENERGY_MODEL
+ 	  The exact usage of the energy model is subsystem-dependent.
+ 
+ 	  If in doubt, say N.
++
++config PM_SILENTMODE
++	def_bool y
++	help
++	  This config is enabled when android silent mode is needed in
++	  Android Automotive system.
+diff --git a/kernel/power/Makefile b/kernel/power/Makefile
+index 97705757f9c6..34c59a82d0fd 100644
+--- a/kernel/power/Makefile
++++ b/kernel/power/Makefile
+@@ -19,3 +19,4 @@ obj-$(CONFIG_MAGIC_SYSRQ)	+= poweroff.o
+ 
+ obj-$(CONFIG_SUSPEND)		+= wakeup_reason.o
+ obj-$(CONFIG_ENERGY_MODEL)	+= energy_model.o
++obj-$(CONFIG_PM_SILENTMODE)	+= silentmode.o
+diff --git a/kernel/power/main.c b/kernel/power/main.c
+index b6219c8f6d76..f4542ae11b41 100644
+--- a/kernel/power/main.c
++++ b/kernel/power/main.c
+@@ -886,6 +886,46 @@ power_attr(pm_freeze_timeout);
+ 
+ #endif	/* CONFIG_FREEZER*/
+ 
++#ifdef CONFIG_PM_SILENTMODE
++
++static ssize_t pm_silentmode_kernel_state_show(struct kobject *kobj,
++					       struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%u\n", pm_silentmode_kernel_state_get());
++}
++
++static ssize_t pm_silentmode_kernel_state_store(struct kobject *kobj,
++						struct kobj_attribute *attr,
++						const char *buf, size_t n)
++{
++	unsigned long val;
++
++	if (kstrtoul(buf, 10, &val))
++		return -EINVAL;
++
++	pm_silentmode_kernel_state_set(val);
++	return n;
++}
++
++power_attr(pm_silentmode_kernel_state);
++
++static ssize_t pm_silentmode_hw_state_show(struct kobject *kobj,
++					   struct kobj_attribute *attr, char *buf)
++{
++	return sprintf(buf, "%u\n", pm_silentmode_hw_state_get());
++}
++
++static ssize_t pm_silentmode_hw_state_store(struct kobject *kobj,
++					   struct kobj_attribute *attr,
++					   const char *buf, size_t n)
++{
++	// Write not supported from userspace
++	return -EINVAL;
++}
++
++power_attr(pm_silentmode_hw_state);
++
++#endif /* CONFIG_PM_SILENTMODE*/
+ static struct attribute * g[] = {
+ 	&state_attr.attr,
+ #ifdef CONFIG_PM_TRACE
+@@ -915,6 +955,10 @@ static struct attribute * g[] = {
+ #endif
+ #ifdef CONFIG_FREEZER
+ 	&pm_freeze_timeout_attr.attr,
++#endif
++#ifdef CONFIG_PM_SILENTMODE
++	&pm_silentmode_kernel_state_attr.attr,
++	&pm_silentmode_hw_state_attr.attr,
+ #endif
+ 	NULL,
+ };
+@@ -949,6 +993,9 @@ static int __init pm_init(void)
+ 	hibernate_image_size_init();
+ 	hibernate_reserved_size_init();
+ 	pm_states_init();
++#ifdef CONFIG_PM_SILENTMODE
++	pm_silentmode_init();
++#endif
+ 	power_kobj = kobject_create_and_add("power", NULL);
+ 	if (!power_kobj)
+ 		return -ENOMEM;
+diff --git a/kernel/power/power.h b/kernel/power/power.h
+index 778bf431ec02..59909381ede1 100644
+--- a/kernel/power/power.h
++++ b/kernel/power/power.h
+@@ -310,3 +310,17 @@ extern int pm_wake_lock(const char *buf);
+ extern int pm_wake_unlock(const char *buf);
+ 
+ #endif /* !CONFIG_PM_WAKELOCKS */
++
++#ifdef CONFIG_PM_SILENTMODE
++enum pm_silentmode {
++	PM_SILENTMODE_NORMAL = 0, // Normal Mode
++	PM_SILENTMODE_SILENT,	   // Silent Mode
++};
++
++extern void __init pm_silentmode_init(void);
++
++extern int pm_silentmode_hw_state_get(void);
++extern void pm_silentmode_hw_state_set(int mode);
++extern void pm_silentmode_kernel_state_set(int mode);
++extern int pm_silentmode_kernel_state_get(void);
++#endif /* !CONFIG_PM_SILENTMODE */
+diff --git a/kernel/power/silentmode.c b/kernel/power/silentmode.c
+new file mode 100644
+index 000000000000..f1e2114116b0
+--- /dev/null
++++ b/kernel/power/silentmode.c
+@@ -0,0 +1,78 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * silentmode.c - for automative silentmode support
++ *
++ * Copyright (C) 2023, Intel Corporation.
++ * Austin Sun <austin.sun@intel.com>
++ */
++#include "asm/cmdline.h"
++#include "power.h"
++#include "linux/kernel.h"
++#include "linux/init.h"
++#include "linux/string.h"
++
++#ifdef CONFIG_PM_SILENTMODE
++#define MAX_PARA_LEN 32
++static atomic_t pm_silentmode_kernel_state = ATOMIC_INIT(PM_SILENTMODE_NORMAL);
++static atomic_t pm_silentmode_hw_state = ATOMIC_INIT(PM_SILENTMODE_NORMAL);
++static char pm_sm_bootstr[] = "silentmode";
++
++
++void pm_silentmode_kernel_state_set(int mode)
++{
++	atomic_set(&pm_silentmode_kernel_state, mode);
++	sysfs_notify(power_kobj, NULL, "pm_silentmode_kernel_state");
++}
++
++EXPORT_SYMBOL(pm_silentmode_kernel_state_set);
++
++int pm_silentmode_kernel_state_get(void)
++{
++	return atomic_read(&pm_silentmode_kernel_state);
++}
++
++EXPORT_SYMBOL(pm_silentmode_kernel_state_get);
++
++void pm_silentmode_hw_state_set(int mode)
++{
++	atomic_set(&pm_silentmode_hw_state, mode);
++	sysfs_notify(power_kobj, NULL, "pm_silentmode_hw_state");
++}
++
++int pm_silentmode_hw_state_get(void)
++{
++	return atomic_read(&pm_silentmode_hw_state);
++}
++
++EXPORT_SYMBOL(pm_silentmode_hw_state_get);
++
++static int pm_silentmode_get_cmdline(void)
++{
++	int len;
++	char para[MAX_PARA_LEN] = { };
++	len = cmdline_find_option(saved_command_line, pm_sm_bootstr, para, MAX_PARA_LEN);
++	if(len < 0){
++		pr_info("silentmode not specified\n");
++		return PM_SILENTMODE_NORMAL;
++	}
++
++	pr_info("pm_silentmode = %s\n", para);
++	if (strnstr(para, "silent", strlen(para))) {
++		pr_info("pm_silentmode is set to silent\n");
++		pm_silentmode_hw_state_set(PM_SILENTMODE_SILENT);
++		pm_silentmode_kernel_state_set(PM_SILENTMODE_SILENT);
++		return PM_SILENTMODE_SILENT;
++	}
++
++	pr_info("set silentmode normal\n");
++	return PM_SILENTMODE_NORMAL;
++}
++void __init pm_silentmode_init(void)
++{
++	int mode;
++	mode = pm_silentmode_get_cmdline();
++	if (mode == PM_SILENTMODE_SILENT)
++		pr_debug("PM Silent Boot Mode is set\n");
++	pr_info("PM Silent Boot Mode is set normal \n");
++}
++#endif	// CONFIG_PM_SILENTMODE
+-- 
+2.40.0
+
