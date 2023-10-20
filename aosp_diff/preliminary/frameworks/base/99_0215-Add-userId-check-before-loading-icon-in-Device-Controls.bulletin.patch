@@ -1,0 +1,460 @@
+From 78674527c84163dc8d514ccba243debb9f8cf521 Mon Sep 17 00:00:00 2001
+From: Anton Potapov <apotapov@google.com>
+Date: Fri, 7 Jul 2023 12:05:10 +0100
+Subject: [PATCH] Add userId check before loading icon in Device Controls
+
+Test: manual with the steps from the bug
+Test: manual with a normal icon
+Test: atest CanUseIconPredicate
+Test: atest ControlViewHolderTest
+Bug: 272025416
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:ffa97f42dd9496bb404e01727c923292d05a4466)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:2be24a7804701f3dc3e185196a55e4b0add2b79b)
+Merged-In: Ibe4fb69a90904787b9f97a7cd90d318a047d1e11
+Change-Id: Ibe4fb69a90904787b9f97a7cd90d318a047d1e11
+---
+ .../controls/management/ControlAdapter.kt     | 11 ++-
+ .../management/ControlsEditingActivity.kt     |  2 +-
+ .../management/ControlsFavoritingActivity.kt  |  5 +-
+ .../controls/management/StructureAdapter.kt   | 11 +--
+ .../controls/ui/CanUseIconPredicate.kt        | 30 +++++++++
+ .../systemui/controls/ui/ControlViewHolder.kt | 54 +++++++--------
+ .../controls/ui/ControlsUiControllerImpl.kt   |  3 +-
+ .../controls/ui/TemperatureControlBehavior.kt |  2 +-
+ .../systemui/controls/ui/ThumbnailBehavior.kt | 11 ++-
+ .../controls/ui/CanUseIconPredicateTest.kt    | 67 +++++++++++++++++++
+ .../controls/ui/ControlViewHolderTest.kt      |  3 +-
+ 11 files changed, 157 insertions(+), 42 deletions(-)
+ create mode 100644 packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt
+ create mode 100644 packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt
+
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt b/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt
+index 40662536e57e..45916d6e24ab 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt
+@@ -36,6 +36,7 @@ import androidx.recyclerview.widget.GridLayoutManager
+ import androidx.recyclerview.widget.RecyclerView
+ import com.android.systemui.R
+ import com.android.systemui.controls.ControlInterface
++import com.android.systemui.controls.ui.CanUseIconPredicate
+ import com.android.systemui.controls.ui.RenderInfo
+ 
+ private typealias ModelFavoriteChanger = (String, Boolean) -> Unit
+@@ -49,7 +50,8 @@ private typealias ModelFavoriteChanger = (String, Boolean) -> Unit
+  * @property elevation elevation of each control view
+  */
+ class ControlAdapter(
+-    private val elevation: Float
++    private val elevation: Float,
++    private val currentUserId: Int
+ ) : RecyclerView.Adapter<Holder>() {
+ 
+     companion object {
+@@ -84,6 +86,7 @@ class ControlAdapter(
+                         background = parent.context.getDrawable(
+                                 R.drawable.control_background_ripple)
+                     },
++                    currentUserId,
+                     model?.moveHelper // Indicates that position information is needed
+                 ) { id, favorite ->
+                     model?.changeFavoriteStatus(id, favorite)
+@@ -189,6 +192,7 @@ private class ZoneHolder(view: View) : Holder(view) {
+  */
+ internal class ControlHolder(
+     view: View,
++    currentUserId: Int,
+     val moveHelper: ControlsModel.MoveHelper?,
+     val favoriteCallback: ModelFavoriteChanger
+ ) : Holder(view) {
+@@ -205,6 +209,7 @@ internal class ControlHolder(
+         visibility = View.VISIBLE
+     }
+ 
++    private val canUseIconPredicate = CanUseIconPredicate(currentUserId)
+     private val accessibilityDelegate = ControlHolderAccessibilityDelegate(
+         this::stateDescription,
+         this::getLayoutPosition,
+@@ -264,7 +269,9 @@ internal class ControlHolder(
+         val fg = context.getResources().getColorStateList(ri.foreground, context.getTheme())
+ 
+         icon.imageTintList = null
+-        ci.customIcon?.let {
++        ci.customIcon
++                ?.takeIf(canUseIconPredicate)
++                ?.let {
+             icon.setImageIcon(it)
+         } ?: run {
+             icon.setImageDrawable(ri.icon)
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt
+index 6f94943472b1..0ecfa3d1dd27 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt
+@@ -180,7 +180,7 @@ class ControlsEditingActivity @Inject constructor(
+         val elevation = resources.getFloat(R.dimen.control_card_elevation)
+         val recyclerView = requireViewById<RecyclerView>(R.id.list)
+         recyclerView.alpha = 0.0f
+-        val adapter = ControlAdapter(elevation).apply {
++        val adapter = ControlAdapter(elevation, currentUserTracker.currentUserId).apply {
+             registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {
+                 var hasAnimated = false
+                 override fun onChanged() {
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt
+index dca52a9678b9..ab5bc7c707f4 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt
+@@ -164,7 +164,8 @@ class ControlsFavoritingActivity @Inject constructor(
+                 }
+ 
+                 executor.execute {
+-                    structurePager.adapter = StructureAdapter(listOfStructures)
++                    structurePager.adapter = StructureAdapter(listOfStructures,
++                            currentUserTracker.currentUserId)
+                     structurePager.setCurrentItem(structureIndex)
+                     if (error) {
+                         statusText.text = resources.getString(R.string.controls_favorite_load_error,
+@@ -210,7 +211,7 @@ class ControlsFavoritingActivity @Inject constructor(
+         structurePager.alpha = 0.0f
+         pageIndicator.alpha = 0.0f
+         structurePager.apply {
+-            adapter = StructureAdapter(emptyList())
++            adapter = StructureAdapter(emptyList(), currentUserTracker.currentUserId)
+             registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+                 override fun onPageSelected(position: Int) {
+                     super.onPageSelected(position)
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt b/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt
+index cb67454195ec..7524f1cc2226 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt
+@@ -24,13 +24,15 @@ import androidx.recyclerview.widget.RecyclerView
+ import com.android.systemui.R
+ 
+ class StructureAdapter(
+-    private val models: List<StructureContainer>
++    private val models: List<StructureContainer>,
++    private val currentUserId: Int
+ ) : RecyclerView.Adapter<StructureAdapter.StructureHolder>() {
+ 
+     override fun onCreateViewHolder(parent: ViewGroup, p1: Int): StructureHolder {
+         val layoutInflater = LayoutInflater.from(parent.context)
+         return StructureHolder(
+-            layoutInflater.inflate(R.layout.controls_structure_page, parent, false)
++            layoutInflater.inflate(R.layout.controls_structure_page, parent, false),
++            currentUserId
+         )
+     }
+ 
+@@ -40,7 +42,8 @@ class StructureAdapter(
+         holder.bind(models[index].model)
+     }
+ 
+-    class StructureHolder(view: View) : RecyclerView.ViewHolder(view) {
++    class StructureHolder(view: View, currentUserId: Int) :
++            RecyclerView.ViewHolder(view) {
+ 
+         private val recyclerView: RecyclerView
+         private val controlAdapter: ControlAdapter
+@@ -48,7 +51,7 @@ class StructureAdapter(
+         init {
+             recyclerView = itemView.requireViewById<RecyclerView>(R.id.listAll)
+             val elevation = itemView.context.resources.getFloat(R.dimen.control_card_elevation)
+-            controlAdapter = ControlAdapter(elevation)
++            controlAdapter = ControlAdapter(elevation, currentUserId)
+             setUpRecyclerView()
+         }
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt
+new file mode 100644
+index 000000000000..61c21237144d
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (C) 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.controls.ui
++
++import android.content.ContentProvider
++import android.graphics.drawable.Icon
++
++class CanUseIconPredicate(private val currentUserId: Int) : (Icon) -> Boolean {
++
++    override fun invoke(icon: Icon): Boolean =
++        if (icon.type == Icon.TYPE_URI || icon.type == Icon.TYPE_URI_ADAPTIVE_BITMAP) {
++            ContentProvider.getUserIdFromUri(icon.uri, currentUserId) == currentUserId
++        } else {
++            true
++        }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt
+index 47e749cd1185..d79cb7ae8617 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt
+@@ -54,7 +54,6 @@ import com.android.systemui.animation.Interpolators
+ import com.android.systemui.controls.ControlsMetricsLogger
+ import com.android.systemui.controls.controller.ControlsController
+ import com.android.systemui.util.concurrency.DelayableExecutor
+-import kotlin.reflect.KClass
+ 
+ /**
+  * Wraps the widgets that make up the UI representation of a {@link Control}. Updates to the view
+@@ -68,7 +67,8 @@ class ControlViewHolder(
+     val bgExecutor: DelayableExecutor,
+     val controlActionCoordinator: ControlActionCoordinator,
+     val controlsMetricsLogger: ControlsMetricsLogger,
+-    val uid: Int
++    val uid: Int,
++    val currentUserId: Int
+ ) {
+ 
+     companion object {
+@@ -85,27 +85,6 @@ class ControlViewHolder(
+         private val ATTR_DISABLED = intArrayOf(-android.R.attr.state_enabled)
+         const val MIN_LEVEL = 0
+         const val MAX_LEVEL = 10000
+-
+-        fun findBehaviorClass(
+-            status: Int,
+-            template: ControlTemplate,
+-            deviceType: Int
+-        ): KClass<out Behavior> {
+-            return when {
+-                status != Control.STATUS_OK -> StatusBehavior::class
+-                template == ControlTemplate.NO_TEMPLATE -> TouchBehavior::class
+-                template is ThumbnailTemplate -> ThumbnailBehavior::class
+-
+-                // Required for legacy support, or where cameras do not use the new template
+-                deviceType == DeviceTypes.TYPE_CAMERA -> TouchBehavior::class
+-                template is ToggleTemplate -> ToggleBehavior::class
+-                template is StatelessTemplate -> TouchBehavior::class
+-                template is ToggleRangeTemplate -> ToggleRangeBehavior::class
+-                template is RangeTemplate -> ToggleRangeBehavior::class
+-                template is TemperatureControlTemplate -> TemperatureControlBehavior::class
+-                else -> DefaultBehavior::class
+-            }
+-        }
+     }
+ 
+     private val toggleBackgroundIntensity: Float = layout.context.resources
+@@ -146,6 +125,26 @@ class ControlViewHolder(
+         status.setSelected(true)
+     }
+ 
++    fun findBehavior(
++        status: Int,
++        template: ControlTemplate,
++        deviceType: Int
++    ): () -> Behavior {
++        return when {
++            status != Control.STATUS_OK -> { { StatusBehavior() } }
++            template == ControlTemplate.NO_TEMPLATE -> { { TouchBehavior() } }
++            template is ThumbnailTemplate -> { { ThumbnailBehavior(currentUserId) } }
++            // Required for legacy support, or where cameras do not use the new template
++            deviceType == DeviceTypes.TYPE_CAMERA -> { { TouchBehavior() } }
++            template is ToggleTemplate -> { { ToggleBehavior() } }
++            template is StatelessTemplate -> { { TouchBehavior() } }
++            template is ToggleRangeTemplate -> { { ToggleRangeBehavior() } }
++            template is RangeTemplate -> { { ToggleRangeBehavior() } }
++            template is TemperatureControlTemplate -> { { TemperatureControlBehavior() } }
++            else -> { { DefaultBehavior() } }
++        }
++    }
++
+     fun bindData(cws: ControlWithState, isLocked: Boolean) {
+         // If an interaction is in progress, the update may visually interfere with the action the
+         // action the user wants to make. Don't apply the update, and instead assume a new update
+@@ -179,7 +178,7 @@ class ControlViewHolder(
+         val wasLoading = isLoading
+         isLoading = false
+         behavior = bindBehavior(behavior,
+-            findBehaviorClass(controlStatus, controlTemplate, deviceType))
++            findBehavior(controlStatus, controlTemplate, deviceType))
+         updateContentDescription()
+ 
+         // Only log one event per control, at the moment we have determined that the control
+@@ -251,13 +250,14 @@ class ControlViewHolder(
+ 
+     fun bindBehavior(
+         existingBehavior: Behavior?,
+-        clazz: KClass<out Behavior>,
++        createBehaviour: () -> Behavior,
+         offset: Int = 0
+     ): Behavior {
+-        val behavior = if (existingBehavior == null || existingBehavior!!::class != clazz) {
++        val newBehavior = createBehaviour()
++        val behavior = if (existingBehavior == null ||
++                existingBehavior::class != newBehavior::class) {
+             // Behavior changes can signal a change in template from the app or
+             // first time setup
+-            val newBehavior = clazz.java.newInstance()
+             newBehavior.initialize(this)
+ 
+             // let behaviors define their own, if necessary, and clear any existing ones
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt
+index 5a52fd0516ea..267481f889a5 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt
+@@ -412,7 +412,8 @@ class ControlsUiControllerImpl @Inject constructor (
+                     bgExecutor,
+                     controlActionCoordinator,
+                     controlsMetricsLogger,
+-                    selected.uid
++                    selected.uid,
++                    controlsController.get().currentUserId
+                 )
+                 cvh.bindData(it, false /* isLocked, will be ignored on initial load */)
+                 controlViewsById.put(key, cvh)
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/TemperatureControlBehavior.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/TemperatureControlBehavior.kt
+index a7dc09bb17e5..42922441fa30 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/ui/TemperatureControlBehavior.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/TemperatureControlBehavior.kt
+@@ -63,7 +63,7 @@ class TemperatureControlBehavior : Behavior {
+             // interactions (touch, range)
+             subBehavior = cvh.bindBehavior(
+                 subBehavior,
+-                ControlViewHolder.findBehaviorClass(
++                cvh.findBehavior(
+                     control.status,
+                     subTemplate,
+                     control.deviceType
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/ThumbnailBehavior.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/ThumbnailBehavior.kt
+index c2168aa8d9d9..5360eea847ee 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/ui/ThumbnailBehavior.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/ThumbnailBehavior.kt
+@@ -33,7 +33,7 @@ import com.android.systemui.controls.ui.ControlViewHolder.Companion.MIN_LEVEL
+  * Supports display of static images on the background of the tile. When marked active, the title
+  * and subtitle will not be visible. To be used with {@link Thumbnailtemplate} only.
+  */
+-class ThumbnailBehavior : Behavior {
++class ThumbnailBehavior(currentUserId: Int) : Behavior {
+     lateinit var template: ThumbnailTemplate
+     lateinit var control: Control
+     lateinit var cvh: ControlViewHolder
+@@ -42,6 +42,7 @@ class ThumbnailBehavior : Behavior {
+     private var shadowRadius: Float = 0f
+     private var shadowColor: Int = 0
+ 
++    private val canUseIconPredicate = CanUseIconPredicate(currentUserId)
+     private val enabled: Boolean
+         get() = template.isActive()
+ 
+@@ -80,11 +81,15 @@ class ThumbnailBehavior : Behavior {
+             cvh.status.setShadowLayer(shadowOffsetX, shadowOffsetY, shadowRadius, shadowColor)
+ 
+             cvh.bgExecutor.execute {
+-                val drawable = template.getThumbnail().loadDrawable(cvh.context)
++                val drawable = template.thumbnail
++                        .takeIf(canUseIconPredicate)
++                        ?.loadDrawable(cvh.context)
+                 cvh.uiExecutor.execute {
+                     val radius = cvh.context.getResources()
+                         .getDimensionPixelSize(R.dimen.control_corner_radius).toFloat()
+-                    clipLayer.setDrawable(CornerDrawable(drawable, radius))
++                    drawable?.let {
++                        clipLayer.drawable = CornerDrawable(it, radius)
++                    }
+                     clipLayer.setColorFilter(BlendModeColorFilter(cvh.context.resources
+                         .getColor(R.color.control_thumbnail_tint), BlendMode.LUMINOSITY))
+                     cvh.applyRenderInfo(enabled, colorOffset)
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt b/packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt
+new file mode 100644
+index 000000000000..ed17f179eeb0
+--- /dev/null
++++ b/packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (C) 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.controls.ui
++
++import android.graphics.Bitmap
++import android.graphics.drawable.Icon
++import android.net.Uri
++import android.testing.AndroidTestingRunner
++import androidx.test.filters.SmallTest
++import com.android.systemui.SysuiTestCase
++import com.google.common.truth.Truth.assertThat
++import org.junit.Test
++import org.junit.runner.RunWith
++
++@SmallTest
++@RunWith(AndroidTestingRunner::class)
++class CanUseIconPredicateTest : SysuiTestCase() {
++
++    private companion object {
++        const val USER_ID_1 = 1
++        const val USER_ID_2 = 2
++    }
++
++    val underTest: CanUseIconPredicate = CanUseIconPredicate(USER_ID_1)
++
++    @Test
++    fun testReturnsFalseForDifferentUser() {
++        val user2Icon = Icon.createWithContentUri("content://$USER_ID_2@test")
++
++        assertThat(underTest.invoke(user2Icon)).isFalse()
++    }
++
++    @Test
++    fun testReturnsTrueForCorrectUser() {
++        val user1Icon = Icon.createWithContentUri("content://$USER_ID_1@test")
++
++        assertThat(underTest.invoke(user1Icon)).isTrue()
++    }
++
++    @Test
++    fun testReturnsTrueForUriWithoutUser() {
++        val uriIcon = Icon.createWithContentUri(Uri.parse("content://test"))
++
++        assertThat(underTest.invoke(uriIcon)).isTrue()
++    }
++
++    @Test
++    fun testReturnsTrueForNonUriIcon() {
++        val bitmapIcon = Icon.createWithBitmap(Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888))
++
++        assertThat(underTest.invoke(bitmapIcon)).isTrue()
++    }
++}
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/controls/ui/ControlViewHolderTest.kt b/packages/SystemUI/tests/src/com/android/systemui/controls/ui/ControlViewHolderTest.kt
+index 47ab17dd7ed0..26095cda5248 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/controls/ui/ControlViewHolderTest.kt
++++ b/packages/SystemUI/tests/src/com/android/systemui/controls/ui/ControlViewHolderTest.kt
+@@ -63,7 +63,8 @@ class ControlViewHolderTest : SysuiTestCase() {
+                     FakeExecutor(clock),
+                     mock(ControlActionCoordinator::class.java),
+                     mock(ControlsMetricsLogger::class.java),
+-                    uid = 100
++                    uid = 100,
++                    currentUserId = 0
+             )
+ 
+             val cws = ControlWithState(
+-- 
+2.42.0.515.g380fc7ccd1-goog
+
