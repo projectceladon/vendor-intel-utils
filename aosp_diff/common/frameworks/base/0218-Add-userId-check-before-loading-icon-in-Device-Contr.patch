@@ -1,0 +1,321 @@
+From 93674f8f3e04d3384650221f84e08a28b97ddc24 Mon Sep 17 00:00:00 2001
+From: Anton Potapov <apotapov@google.com>
+Date: Tue, 4 Jul 2023 12:15:41 +0100
+Subject: [PATCH] Add userId check before loading icon in Device Controls
+
+Test: manual with the steps from the bug
+Test: manual with a normal icon
+Test: atest CanUseIconPredicate
+Test: atest ControlViewHolderTest
+Bug: 272025416
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:ffa97f42dd9496bb404e01727c923292d05a4466)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:331f2f1baaf7b62e90a7d7cb6d4481925b3d9071)
+Merged-In: I354469a53611c094c7bb695b1c2017c6786dd396
+Change-Id: I354469a53611c094c7bb695b1c2017c6786dd396
+---
+ .../controls/management/ControlAdapter.kt     | 11 ++-
+ .../management/ControlsEditingActivity.kt     |  2 +-
+ .../management/ControlsFavoritingActivity.kt  |  5 +-
+ .../controls/management/StructureAdapter.kt   | 11 +--
+ .../controls/ui/CanUseIconPredicate.kt        | 30 +++++++++
+ .../systemui/controls/ui/ControlViewHolder.kt |  8 ++-
+ .../controls/ui/ControlsUiControllerImpl.kt   |  4 +-
+ .../controls/ui/CanUseIconPredicateTest.kt    | 67 +++++++++++++++++++
+ 8 files changed, 125 insertions(+), 13 deletions(-)
+ create mode 100644 packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt
+ create mode 100644 packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt
+
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt b/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt
+index 40662536e57e..45916d6e24ab 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/ControlAdapter.kt
+@@ -36,6 +36,7 @@ import androidx.recyclerview.widget.GridLayoutManager
+ import androidx.recyclerview.widget.RecyclerView
+ import com.android.systemui.R
+ import com.android.systemui.controls.ControlInterface
++import com.android.systemui.controls.ui.CanUseIconPredicate
+ import com.android.systemui.controls.ui.RenderInfo
+ 
+ private typealias ModelFavoriteChanger = (String, Boolean) -> Unit
+@@ -49,7 +50,8 @@ private typealias ModelFavoriteChanger = (String, Boolean) -> Unit
+  * @property elevation elevation of each control view
+  */
+ class ControlAdapter(
+-    private val elevation: Float
++    private val elevation: Float,
++    private val currentUserId: Int
+ ) : RecyclerView.Adapter<Holder>() {
+ 
+     companion object {
+@@ -84,6 +86,7 @@ class ControlAdapter(
+                         background = parent.context.getDrawable(
+                                 R.drawable.control_background_ripple)
+                     },
++                    currentUserId,
+                     model?.moveHelper // Indicates that position information is needed
+                 ) { id, favorite ->
+                     model?.changeFavoriteStatus(id, favorite)
+@@ -189,6 +192,7 @@ private class ZoneHolder(view: View) : Holder(view) {
+  */
+ internal class ControlHolder(
+     view: View,
++    currentUserId: Int,
+     val moveHelper: ControlsModel.MoveHelper?,
+     val favoriteCallback: ModelFavoriteChanger
+ ) : Holder(view) {
+@@ -205,6 +209,7 @@ internal class ControlHolder(
+         visibility = View.VISIBLE
+     }
+ 
++    private val canUseIconPredicate = CanUseIconPredicate(currentUserId)
+     private val accessibilityDelegate = ControlHolderAccessibilityDelegate(
+         this::stateDescription,
+         this::getLayoutPosition,
+@@ -264,7 +269,9 @@ internal class ControlHolder(
+         val fg = context.getResources().getColorStateList(ri.foreground, context.getTheme())
+ 
+         icon.imageTintList = null
+-        ci.customIcon?.let {
++        ci.customIcon
++                ?.takeIf(canUseIconPredicate)
++                ?.let {
+             icon.setImageIcon(it)
+         } ?: run {
+             icon.setImageDrawable(ri.icon)
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt
+index f68388d5db3f..81ad7d27c4b3 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsEditingActivity.kt
+@@ -176,7 +176,7 @@ class ControlsEditingActivity @Inject constructor(
+         val elevation = resources.getFloat(R.dimen.control_card_elevation)
+         val recyclerView = requireViewById<RecyclerView>(R.id.list)
+         recyclerView.alpha = 0.0f
+-        val adapter = ControlAdapter(elevation).apply {
++        val adapter = ControlAdapter(elevation, currentUserTracker.currentUserId).apply {
+             registerAdapterDataObserver(object : RecyclerView.AdapterDataObserver() {
+                 var hasAnimated = false
+                 override fun onChanged() {
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt
+index b2821579c389..ca06b4ef8843 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/ControlsFavoritingActivity.kt
+@@ -163,7 +163,8 @@ class ControlsFavoritingActivity @Inject constructor(
+                 }
+ 
+                 executor.execute {
+-                    structurePager.adapter = StructureAdapter(listOfStructures)
++                    structurePager.adapter = StructureAdapter(listOfStructures,
++                            currentUserTracker.currentUserId)
+                     structurePager.setCurrentItem(structureIndex)
+                     if (error) {
+                         statusText.text = resources.getString(R.string.controls_favorite_load_error,
+@@ -209,7 +210,7 @@ class ControlsFavoritingActivity @Inject constructor(
+         structurePager.alpha = 0.0f
+         pageIndicator.alpha = 0.0f
+         structurePager.apply {
+-            adapter = StructureAdapter(emptyList())
++            adapter = StructureAdapter(emptyList(), currentUserTracker.currentUserId)
+             registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+                 override fun onPageSelected(position: Int) {
+                     super.onPageSelected(position)
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt b/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt
+index cb67454195ec..7524f1cc2226 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/management/StructureAdapter.kt
+@@ -24,13 +24,15 @@ import androidx.recyclerview.widget.RecyclerView
+ import com.android.systemui.R
+ 
+ class StructureAdapter(
+-    private val models: List<StructureContainer>
++    private val models: List<StructureContainer>,
++    private val currentUserId: Int
+ ) : RecyclerView.Adapter<StructureAdapter.StructureHolder>() {
+ 
+     override fun onCreateViewHolder(parent: ViewGroup, p1: Int): StructureHolder {
+         val layoutInflater = LayoutInflater.from(parent.context)
+         return StructureHolder(
+-            layoutInflater.inflate(R.layout.controls_structure_page, parent, false)
++            layoutInflater.inflate(R.layout.controls_structure_page, parent, false),
++            currentUserId
+         )
+     }
+ 
+@@ -40,7 +42,8 @@ class StructureAdapter(
+         holder.bind(models[index].model)
+     }
+ 
+-    class StructureHolder(view: View) : RecyclerView.ViewHolder(view) {
++    class StructureHolder(view: View, currentUserId: Int) :
++            RecyclerView.ViewHolder(view) {
+ 
+         private val recyclerView: RecyclerView
+         private val controlAdapter: ControlAdapter
+@@ -48,7 +51,7 @@ class StructureAdapter(
+         init {
+             recyclerView = itemView.requireViewById<RecyclerView>(R.id.listAll)
+             val elevation = itemView.context.resources.getFloat(R.dimen.control_card_elevation)
+-            controlAdapter = ControlAdapter(elevation)
++            controlAdapter = ControlAdapter(elevation, currentUserId)
+             setUpRecyclerView()
+         }
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt
+new file mode 100644
+index 000000000000..61c21237144d
+--- /dev/null
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/CanUseIconPredicate.kt
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (C) 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.controls.ui
++
++import android.content.ContentProvider
++import android.graphics.drawable.Icon
++
++class CanUseIconPredicate(private val currentUserId: Int) : (Icon) -> Boolean {
++
++    override fun invoke(icon: Icon): Boolean =
++        if (icon.type == Icon.TYPE_URI || icon.type == Icon.TYPE_URI_ADAPTIVE_BITMAP) {
++            ContentProvider.getUserIdFromUri(icon.uri, currentUserId) == currentUserId
++        } else {
++            true
++        }
++}
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt
+index 0e4f68431c16..e69524da0fb6 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlViewHolder.kt
+@@ -62,7 +62,8 @@ class ControlViewHolder(
+     val controlsController: ControlsController,
+     val uiExecutor: DelayableExecutor,
+     val bgExecutor: DelayableExecutor,
+-    val controlActionCoordinator: ControlActionCoordinator
++    val controlActionCoordinator: ControlActionCoordinator,
++    val currentUserId: Int
+ ) {
+ 
+     companion object {
+@@ -99,6 +100,7 @@ class ControlViewHolder(
+         }
+     }
+ 
++    private val canUseIconPredicate = CanUseIconPredicate(currentUserId)
+     private val toggleBackgroundIntensity: Float = layout.context.resources
+             .getFraction(R.fraction.controls_toggle_bg_intensity, 1, 1)
+     private var stateAnimator: ValueAnimator? = null
+@@ -411,7 +413,9 @@ class ControlViewHolder(
+ 
+         status.setTextColor(color)
+ 
+-        control?.getCustomIcon()?.let {
++        control?.getCustomIcon()
++                ?.takeIf(canUseIconPredicate)
++                ?.let {
+             // do not tint custom icons, assume the intended icon color is correct
+             if (icon.imageTintList != null) {
+                 icon.imageTintList = null
+diff --git a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt
+index 5a525974f3cb..17453230310f 100644
+--- a/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt
++++ b/packages/SystemUI/src/com/android/systemui/controls/ui/ControlsUiControllerImpl.kt
+@@ -400,8 +400,8 @@ class ControlsUiControllerImpl @Inject constructor (
+                     controlsController.get(),
+                     uiExecutor,
+                     bgExecutor,
+-                    controlActionCoordinator
+-                )
++                    controlActionCoordinator,
++                    controlsController.get().currentUserId)
+                 cvh.bindData(it)
+                 controlViewsById.put(key, cvh)
+             }
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt b/packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt
+new file mode 100644
+index 000000000000..ed17f179eeb0
+--- /dev/null
++++ b/packages/SystemUI/tests/src/com/android/systemui/controls/ui/CanUseIconPredicateTest.kt
+@@ -0,0 +1,67 @@
++/*
++ * Copyright (C) 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.systemui.controls.ui
++
++import android.graphics.Bitmap
++import android.graphics.drawable.Icon
++import android.net.Uri
++import android.testing.AndroidTestingRunner
++import androidx.test.filters.SmallTest
++import com.android.systemui.SysuiTestCase
++import com.google.common.truth.Truth.assertThat
++import org.junit.Test
++import org.junit.runner.RunWith
++
++@SmallTest
++@RunWith(AndroidTestingRunner::class)
++class CanUseIconPredicateTest : SysuiTestCase() {
++
++    private companion object {
++        const val USER_ID_1 = 1
++        const val USER_ID_2 = 2
++    }
++
++    val underTest: CanUseIconPredicate = CanUseIconPredicate(USER_ID_1)
++
++    @Test
++    fun testReturnsFalseForDifferentUser() {
++        val user2Icon = Icon.createWithContentUri("content://$USER_ID_2@test")
++
++        assertThat(underTest.invoke(user2Icon)).isFalse()
++    }
++
++    @Test
++    fun testReturnsTrueForCorrectUser() {
++        val user1Icon = Icon.createWithContentUri("content://$USER_ID_1@test")
++
++        assertThat(underTest.invoke(user1Icon)).isTrue()
++    }
++
++    @Test
++    fun testReturnsTrueForUriWithoutUser() {
++        val uriIcon = Icon.createWithContentUri(Uri.parse("content://test"))
++
++        assertThat(underTest.invoke(uriIcon)).isTrue()
++    }
++
++    @Test
++    fun testReturnsTrueForNonUriIcon() {
++        val bitmapIcon = Icon.createWithBitmap(Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888))
++
++        assertThat(underTest.invoke(bitmapIcon)).isTrue()
++    }
++}
+-- 
+2.17.1
+
