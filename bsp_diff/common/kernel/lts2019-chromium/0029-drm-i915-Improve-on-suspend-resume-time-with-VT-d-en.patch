@@ -1,7 +1,11 @@
-From c6e6dd3478460d67196dff584eaf027726307834 Mon Sep 17 00:00:00 2001
-From: Thomas HellstrÃ¶m <thomas.hellstrom@linux.intel.com>
+From fd1fd6f0a39d5625b5883d525d6c879e2479ec77 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Thomas=20Hellstr=C3=83=C2=B6m?=
+ <thomas.hellstrom@linux.intel.com>
 Date: Fri, 17 Jun 2022 17:28:55 +0200
 Subject: [PATCH] drm/i915: Improve on suspend / resume time with VT-d enabled
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 When DMAR / VT-d is enabled, the display engine uses overfetching,
 presumably to deal with the increased latency. To avoid display engine
@@ -56,7 +60,7 @@ index 5a35dca32f88..83b998989949 100644
 @@ -20,6 +20,12 @@
  static int
  i915_get_ggtt_vma_pages(struct i915_vma *vma);
-
+ 
 +static inline bool suspend_retains_ptes(struct i915_address_space *vm)
 +{
 +	return !HAS_LMEM(vm->i915) &&
@@ -69,7 +73,7 @@ index 5a35dca32f88..83b998989949 100644
 @@ -115,6 +121,22 @@ static bool needs_idle_maps(struct drm_i915_private *i915)
  	return false;
  }
-
+ 
 +/*
 + * Return the value of the last GGTT pte cast to an u64, if
 + * the system is supposed to retain ptes across resume. 0 otherwise.
@@ -92,19 +96,19 @@ index 5a35dca32f88..83b998989949 100644
 @@ -131,7 +153,10 @@ void i915_ggtt_suspend_vm(struct i915_address_space *vm)
  	list_for_each_entry(vma, &vm->bound_list, vm_link)
  		i915_vma_wait_for_bind(vma);
-
+ 
 -	vm->clear_range(vm, 0, vm->total);
 +	if (!suspend_retains_ptes(vm))
 +		vm->clear_range(vm, 0, vm->total);
 +	else
 +		i915_vm_to_ggtt(vm)->probed_pte = read_last_pte(vm);
  }
-
+ 
  void i915_ggtt_suspend(struct i915_ggtt *ggtt)
 @@ -504,6 +529,8 @@ static int init_ggtt(struct i915_ggtt *ggtt)
  	struct drm_mm_node *entry;
  	int ret;
-
+ 
 +	ggtt->pte_lost = true;
 +
  	/*
@@ -115,9 +119,9 @@ index 5a35dca32f88..83b998989949 100644
  	bool write_domain_objs = false;
  	int open;
 +	bool retained_ptes;
-
+ 
  	drm_WARN_ON(&vm->i915->drm, !vm->is_ggtt);
-
+ 
 -	/* First fill our portion of the GTT with scratch pages */
 -	vm->clear_range(vm, 0, vm->total);
 +	/*
@@ -130,7 +134,7 @@ index 5a35dca32f88..83b998989949 100644
 +
 +	if (!retained_ptes)
 +		vm->clear_range(vm, 0, vm->total);
-
+ 
  	/* Skip rewriting PTE on VMA unbind. */
  	open = atomic_xchg(&vm->open, 0);
 @@ -1493,3 +1529,8 @@ i915_get_ggtt_vma_pages(struct i915_vma *vma)
@@ -147,9 +151,9 @@ index 184820139aa6..e9d6099d599e 100644
 --- a/drivers/gpu/drm/i915/gt/intel_gtt.h
 +++ b/drivers/gpu/drm/i915/gt/intel_gtt.h
 @@ -323,6 +323,19 @@ struct i915_ggtt {
-
+ 
  	bool do_idle_maps;
-
+ 
 +	/**
 +	 * @pte_lost: Are ptes lost on resume?
 +	 *
@@ -164,12 +168,12 @@ index 184820139aa6..e9d6099d599e 100644
 +	u64 probed_pte;
 +
  	int mtrr;
-
+ 
  	/** Bit 6 swizzling required for X tiling */
 @@ -522,6 +535,17 @@ void cleanup_page_dma(struct i915_address_space *vm, struct i915_page_dma *p);
-
+ 
  #define kmap_atomic_px(px) kmap_atomic(px_base(px)->page)
-
+ 
 +/**
 + * i915_ggtt_mark_pte_lost - Mark ggtt ptes as lost or clear such a marking
 + * @i915 The device private.
@@ -183,34 +187,34 @@ index 184820139aa6..e9d6099d599e 100644
 +
  void
  fill_page_dma(const struct i915_page_dma *p, const u64 val, unsigned int count);
-
+ 
 diff --git a/drivers/gpu/drm/i915/i915_drv.c b/drivers/gpu/drm/i915/i915_drv.c
-index e8685e99633f..7934bb459ded 100644
+index 9edefe9f7724..4fbf2eaff7ac 100644
 --- a/drivers/gpu/drm/i915/i915_drv.c
 +++ b/drivers/gpu/drm/i915/i915_drv.c
-@@ -84,6 +84,9 @@
+@@ -85,6 +85,9 @@
  #include "intel_memory_region.h"
  #include "intel_pm.h"
-
+ 
 +/* Intel Rapid Start Technology ACPI device name */
 +static const char irst_name[] = "INT3392";
 +
  static struct drm_driver driver;
-
+ 
  struct vlv_s0ix_state {
-@@ -2047,6 +2050,8 @@ static int i915_pm_suspend(struct device *kdev)
+@@ -2051,6 +2054,8 @@ static int i915_pm_suspend(struct device *kdev)
  		return -ENODEV;
  	}
-
+ 
 +	i915_ggtt_mark_pte_lost(i915, false);
 +
  	if (i915->drm.switch_power_state == DRM_SWITCH_POWER_OFF)
  		return 0;
-
-@@ -2099,6 +2104,14 @@ static int i915_pm_resume(struct device *kdev)
+ 
+@@ -2103,6 +2108,14 @@ static int i915_pm_resume(struct device *kdev)
  	if (i915->drm.switch_power_state == DRM_SWITCH_POWER_OFF)
  		return 0;
-
+ 
 +	/*
 +	 * If IRST is enabled, or if we can't detect whether it's enabled,
 +	 * then we must assume we lost the GGTT page table entries, since
@@ -221,9 +225,9 @@ index e8685e99633f..7934bb459ded 100644
 +
  	return i915_drm_resume(&i915->drm);
  }
-
-@@ -2158,6 +2171,9 @@ static int i915_pm_restore_early(struct device *kdev)
-
+ 
+@@ -2172,6 +2185,9 @@ static int i915_pm_restore_early(struct device *kdev)
+ 
  static int i915_pm_restore(struct device *kdev)
  {
 +	struct drm_i915_private *i915 = kdev_to_i915(kdev);
@@ -231,7 +235,7 @@ index e8685e99633f..7934bb459ded 100644
 +	i915_ggtt_mark_pte_lost(i915, true);
  	return i915_pm_resume(kdev);
  }
-
---
-2.17.1
+ 
+-- 
+2.40.1
 
