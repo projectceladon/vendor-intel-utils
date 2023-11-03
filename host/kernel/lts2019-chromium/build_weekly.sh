@@ -5,14 +5,15 @@ mkdir -p host_kernel
 cd host_kernel
 git clone https://github.com/projectceladon/linux-intel-lts2019-chromium.git
 cd linux-intel-lts2019-chromium
-git checkout 2ce22f9b8c56810b1aa2f4e75f7701679a5554f3
+git checkout lts-v5.4.259-20231106-r2
+
 cp ../../x86_64_defconfig .config
 patch_list=`find ../../ -iname "*.patch" | sort -u`
 for i in $patch_list
 do
   a=`grep "Date: " $i`
   b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD | grep "$b"`
+  c=`git log --pretty=format:%aD -100 | grep "$b"`
   if [[ "$c" == "" ]] ; then
     git am -3 --keep-cr --whitespace=nowarn $i >& /dev/null
     if [[ $? == 0 ]]; then

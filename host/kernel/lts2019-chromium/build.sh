@@ -3,16 +3,19 @@
 rm -rf host_kernel
 mkdir -p host_kernel
 cd host_kernel
-git clone https://github.com/projectceladon/vendor-intel-utils
-git clone https://github.com/projectceladon/linux-intel-lts2019-chromium.git
+branch=celadon/r/mr0/stable
+
+git clone -b $branch https://github.com/projectceladon/vendor-intel-utils
+git clone -b $branch https://github.com/projectceladon/linux-intel-lts2019-chromium.git
 cd linux-intel-lts2019-chromium
+
 cp ../vendor-intel-utils/host/kernel/lts2019-chromium/x86_64_defconfig .config
 patch_list=`find ../vendor-intel-utils/host/kernel/lts2019-chromium -iname "*.patch" | sort -u`
 for i in $patch_list
 do
   a=`grep "Date: " $i`
   b=`echo ${a#"Date: "}`
-  c=`git log --pretty=format:%aD | grep "$b"`
+  c=`git log --pretty=format:%aD -100 | grep "$b"`
   if [[ "$c" == "" ]] ; then
     git am -3 --keep-cr --whitespace=nowarn $i >& /dev/null
     if [[ $? == 0 ]]; then
