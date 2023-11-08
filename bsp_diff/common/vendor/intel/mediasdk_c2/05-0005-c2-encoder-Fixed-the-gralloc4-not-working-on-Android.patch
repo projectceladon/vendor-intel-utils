@@ -1,0 +1,160 @@
+From f9aa76c2d3e7346d5193032b3e2f78258b6a901c Mon Sep 17 00:00:00 2001
+From: zhangyichix <yichix.zhang@intel.com>
+Date: Mon, 14 Aug 2023 13:35:09 +0800
+Subject: [PATCH] [c2][encoder] Fixed the gralloc4 not working on Android U
+
+From Android U, the get function of IMapper4 will check whether
+the buffer handle is reserved. So we need to call importBuffer
+before getting the buffer's info.
+
+https://chromium-review.googlesource.com/c/chromiumos/platform/minigbm/+/3433121
+
+Tracked-On: OAM-111189
+Signed-off-by: zhangyichix <yichix.zhang@intel.com>
+---
+ .../src/mfx_c2_encoder_component.cpp          |  6 ++++-
+ c2_utils/include/mfx_gralloc1.h               |  2 +-
+ c2_utils/include/mfx_gralloc4.h               |  1 +
+ c2_utils/include/mfx_gralloc_interface.h      |  2 +-
+ c2_utils/src/mfx_gralloc1.cpp                 |  6 +++--
+ c2_utils/src/mfx_gralloc4.cpp                 | 24 ++++++++++++++++++-
+ 6 files changed, 35 insertions(+), 6 deletions(-)
+
+diff --git a/c2_components/src/mfx_c2_encoder_component.cpp b/c2_components/src/mfx_c2_encoder_component.cpp
+index 3912583..5f551b9 100755
+--- a/c2_components/src/mfx_c2_encoder_component.cpp
++++ b/c2_components/src/mfx_c2_encoder_component.cpp
+@@ -27,6 +27,7 @@
+ #include "mfx_c2_utils.h"
+ #include "mfx_defaults.h"
+ #include "C2PlatformSupport.h"
++#include "mfx_gralloc_instance.h"
+ 
+ #include <limits>
+ #include <thread>
+@@ -1244,11 +1245,14 @@ void MfxC2EncoderComponent::DoWork(std::unique_ptr<C2Work>&& work)
+             mfxMemId mem_id = nullptr;
+             bool decode_target = false;
+             native_handle_t *grallocHandle = android::UnwrapNativeCodec2GrallocHandle(c_graph_block->handle());
++            buffer_handle_t importedHandle = MfxGrallocInstance::getInstance()->ImportBuffer(grallocHandle);
+ 
+-            mfxStatus mfx_sts = frame_converter->ConvertGrallocToVa(grallocHandle,
++            mfxStatus mfx_sts = frame_converter->ConvertGrallocToVa(importedHandle,
+                                          decode_target, &mem_id);
+ 
+             native_handle_delete(grallocHandle);
++            native_handle_delete(const_cast<native_handle_t *>(importedHandle));
++            importedHandle = nullptr;
+             grallocHandle = nullptr;
+ 
+             if (MFX_ERR_NONE != mfx_sts) {
+diff --git a/c2_utils/include/mfx_gralloc1.h b/c2_utils/include/mfx_gralloc1.h
+index 3adaa7e..5a981e4 100755
+--- a/c2_utils/include/mfx_gralloc1.h
++++ b/c2_utils/include/mfx_gralloc1.h
+@@ -39,7 +39,7 @@ public:
+     virtual c2_status_t Free(const buffer_handle_t handle);
+     virtual c2_status_t LockFrame(buffer_handle_t handle, uint8_t** data, C2PlanarLayout *layout);
+     virtual c2_status_t UnlockFrame(buffer_handle_t handle);
+-    virtual c2_status_t ImportBuffer(const buffer_handle_t rawHandle, buffer_handle_t *outBuffer);
++    virtual buffer_handle_t ImportBuffer(const buffer_handle_t rawHandle) override;
+ 
+ protected:
+     hw_module_t const* m_hwModule {};
+diff --git a/c2_utils/include/mfx_gralloc4.h b/c2_utils/include/mfx_gralloc4.h
+index 01b938e..d416cbc 100644
+--- a/c2_utils/include/mfx_gralloc4.h
++++ b/c2_utils/include/mfx_gralloc4.h
+@@ -49,6 +49,7 @@ public:
+ 
+     virtual c2_status_t GetBufferDetails(const buffer_handle_t handle, BufferDetails* details) override;
+     virtual c2_status_t GetBackingStore(const buffer_handle_t rawHandle, uint64_t *id) override;
++    virtual buffer_handle_t ImportBuffer(const buffer_handle_t rawHandle) override;
+ 
+     // TODO: not fully tested
+     virtual c2_status_t LockFrame(buffer_handle_t handle, uint8_t** data, C2PlanarLayout *layout);
+diff --git a/c2_utils/include/mfx_gralloc_interface.h b/c2_utils/include/mfx_gralloc_interface.h
+index e5ce356..33b6ced 100644
+--- a/c2_utils/include/mfx_gralloc_interface.h
++++ b/c2_utils/include/mfx_gralloc_interface.h
+@@ -56,5 +56,5 @@ public:
+     virtual c2_status_t GetBufferDetails(const buffer_handle_t handle, BufferDetails* details) = 0;
+     virtual c2_status_t GetBackingStore(const buffer_handle_t rawHandle, uint64_t *id) = 0;
+ 
+-
++    virtual buffer_handle_t ImportBuffer(const buffer_handle_t rawHandle) = 0;
+ };
+\ No newline at end of file
+diff --git a/c2_utils/src/mfx_gralloc1.cpp b/c2_utils/src/mfx_gralloc1.cpp
+index 0dc6036..b3dcdc2 100755
+--- a/c2_utils/src/mfx_gralloc1.cpp
++++ b/c2_utils/src/mfx_gralloc1.cpp
+@@ -273,19 +273,21 @@ c2_status_t MfxGralloc1Module::UnlockFrame(buffer_handle_t handle)
+     return res;
+ }
+ 
+-c2_status_t MfxGralloc1Module::ImportBuffer(const buffer_handle_t rawHandle, buffer_handle_t *outBuffer)
++buffer_handle_t MfxGralloc1Module::ImportBuffer(const buffer_handle_t rawHandle)
+ {
+     MFX_DEBUG_TRACE_FUNC;
+     c2_status_t res = C2_OK;
++    buffer_handle_t *outBuffer = nullptr;
+     int32_t gr1_res = (*m_grImportBufferFunc)(m_gralloc1_dev, rawHandle, outBuffer);
+ 
+     if (GRALLOC1_ERROR_NONE != gr1_res) {
+         MFX_DEBUG_TRACE_I32(gr1_res);
+         res = C2_BAD_STATE;
+     }
++    buffer_handle_t out = const_cast<buffer_handle_t>(*outBuffer);
+ 
+     MFX_DEBUG_TRACE__android_c2_status_t(res);
+-    return res;
++    return out;
+ }
+ 
+ c2_status_t MfxGralloc1Module::GetBackingStore(const buffer_handle_t rawHandle, uint64_t *id)
+diff --git a/c2_utils/src/mfx_gralloc4.cpp b/c2_utils/src/mfx_gralloc4.cpp
+index ba31e28..f9db895 100644
+--- a/c2_utils/src/mfx_gralloc4.cpp
++++ b/c2_utils/src/mfx_gralloc4.cpp
+@@ -98,7 +98,7 @@ c2_status_t MfxGralloc4Module::GetBufferDetails(const buffer_handle_t handle, Bu
+         uint64_t height = 0;
+         gralloc4::decodeHeight(vec, &height);
+         details->height = details->allocHeight = height;
+-        MFX_DEBUG_TRACE_I32(details->width);
++        MFX_DEBUG_TRACE_I32(details->height);
+ 
+         hardware::graphics::common::V1_2::PixelFormat pixelFormat;
+         if (IsFailed(get(handle, gralloc4::MetadataType_PixelFormatRequested, vec)))
+@@ -150,6 +150,28 @@ c2_status_t MfxGralloc4Module::GetBackingStore(const buffer_handle_t handle, uin
+     return res;
+ }
+ 
++buffer_handle_t MfxGralloc4Module::ImportBuffer(const buffer_handle_t rawHandle)
++{
++    MFX_DEBUG_TRACE_FUNC;
++    c2_status_t res = C2_OK;
++    buffer_handle_t outBuffer = nullptr;
++    Error4 err;
++
++    if (nullptr == m_mapper)
++        res = C2_CORRUPTED;
++    if (C2_OK == res)
++    {
++        m_mapper->importBuffer(hardware::hidl_handle(rawHandle), [&](const Error4 & tmpError, void * tmpBuffer) {
++            err = tmpError;
++            outBuffer = static_cast<buffer_handle_t>(tmpBuffer);
++        });
++        if (IsFailed(err))
++            res = C2_CORRUPTED;
++    }
++    MFX_DEBUG_TRACE__android_c2_status_t(res);
++    return outBuffer;
++}
++
+ c2_status_t MfxGralloc4Module::LockFrame(buffer_handle_t handle, uint8_t** data, C2PlanarLayout *layout)
+ {
+     MFX_DEBUG_TRACE_FUNC;
+-- 
+2.40.0
+
