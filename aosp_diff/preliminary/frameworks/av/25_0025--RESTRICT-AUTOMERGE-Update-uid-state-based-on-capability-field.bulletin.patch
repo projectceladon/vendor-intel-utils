@@ -1,0 +1,117 @@
+From f5fbcbadb8497f9446d9304cb84abe100a73b5ed Mon Sep 17 00:00:00 2001
+From: Atneya Nair <atneya@google.com>
+Date: Mon, 12 Jun 2023 15:32:49 -0700
+Subject: [PATCH] [RESTRICT AUTOMERGE] Update uid state based on capability
+ field
+
+Use the passed capability field in the to prevent clients from
+recording in the background.
+
+To work around existing issues in the implementation, the approach is
+ - if we don't hold the capability, simulate an onUidIdle.
+ - if we hold the capability, to simulate an onUidActive and then the
+   existing behavior (update the AM state).
+
+Only update behavior for apps targetSdk > 34.
+
+Bug: 268724205
+Test: OboeTester recording silenced in background for all paths
+Test: OboeTester recording permitted after returning to foreground
+Test: AGSA works
+Test: atest AudioRecordTest
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:7aa76cedc006500e4db1e5084c77b6183d8bac35)
+Merged-In: Ida37fec306417b40006dfac5b5ed04f17418b7c8
+Change-Id: Ida37fec306417b40006dfac5b5ed04f17418b7c8
+---
+ .../service/AudioPolicyService.cpp            | 57 ++++++++++++++++++-
+ 1 file changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/services/audiopolicy/service/AudioPolicyService.cpp b/services/audiopolicy/service/AudioPolicyService.cpp
+index e847f9f9c9..2bfeb61416 100644
+--- a/services/audiopolicy/service/AudioPolicyService.cpp
++++ b/services/audiopolicy/service/AudioPolicyService.cpp
+@@ -21,9 +21,11 @@
+ #undef __STRICT_ANSI__
+ #define __STDINT_LIMITS
+ #define __STDC_LIMIT_MACROS
++#include <map>
+ #include <stdint.h>
+ #include <sys/time.h>
+ 
++#include <android/content/pm/IPackageManagerNative.h>
+ #include <audio_utils/clock.h>
+ #include <binder/IServiceManager.h>
+ #include <utils/Log.h>
+@@ -54,6 +56,37 @@ static const nsecs_t kAudioCommandTimeoutNs = seconds(3); // 3 seconds
+ 
+ static const String16 sManageAudioPolicyPermission("android.permission.MANAGE_AUDIO_POLICY");
+ 
++namespace {
++int getTargetSdkForPackageName(String16 packageName) {
++    const auto binder = defaultServiceManager()->checkService(String16{"package_native"});
++    int targetSdk = -1;
++    if (binder != nullptr) {
++        const auto pm = interface_cast<content::pm::IPackageManagerNative>(binder);
++        if (pm != nullptr) {
++            const auto status = pm->getTargetSdkVersionForPackage(packageName, &targetSdk);
++            ALOGI("Capy check package %s, sdk %d", String8(packageName).string(), targetSdk);
++            return status.isOk() ? targetSdk : -1;
++        }
++    }
++    return targetSdk;
++}
++
++bool doesUidTargetAtLeastU(uid_t uid) {
++    Vector<String16> packages;
++    PermissionController pc;
++    pc.getPackagesForUid(uid, packages);
++    constexpr int ANDROID_API_U = 34;
++    return packages.empty() || (getTargetSdkForPackageName(packages[0]) >= ANDROID_API_U);
++}
++
++bool doesUidTargetAtLeastUCached(uid_t uid) {
++    static std::map<uid_t, bool> cache;
++    const auto it = cache.find(uid);
++    return it == cache.end() ? (cache[uid] = doesUidTargetAtLeastU(uid)) : it->second;
++}
++
++
++} // anonymous
+ // ----------------------------------------------------------------------------
+ 
+ AudioPolicyService::AudioPolicyService()
+@@ -1054,9 +1087,29 @@ void AudioPolicyService::UidPolicy::onUidIdle(uid_t uid, __unused bool disabled)
+ void AudioPolicyService::UidPolicy::onUidStateChanged(uid_t uid,
+                                                       int32_t procState,
+                                                       int64_t procStateSeq __unused,
+-                                                      int32_t capability __unused) {
++                                                      int32_t capability) {
+     if (procState != ActivityManager::PROCESS_STATE_UNKNOWN) {
+-        updateUid(&mCachedUids, uid, true, procState, true);
++        if (doesUidTargetAtLeastUCached(uid)) {
++            // See ActivityManager.java
++            constexpr int32_t PROCESS_CAPABILITY_FOREGROUND_MICROPHONE = 1 << 2;
++            if (capability & PROCESS_CAPABILITY_FOREGROUND_MICROPHONE) {
++                // The implementation relies on the assumption that this callback is preceded by
++                // onUidActive. This may not be the case if we have lost and then regained the
++                // capability, since we simulate onUidIdle below. So, we simulate onUidActive.
++                // In the typical case where we  haven't regained capability, this is a no-op, since
++                // we should've been preceded by an onUidActive callback anyway.
++                updateUid(&mCachedUids, uid, true /* active */,
++                        ActivityManager::PROCESS_STATE_UNKNOWN, true /* insert */);
++                updateUid(&mCachedUids, uid, true /* active */, procState, true /* insert */);
++            } else {
++                // If we have lost the capability (e.g. moving to background), treat as-if we have
++                // gotten onUidIdle.
++                updateUid(&mCachedUids, uid, false /* active */,
++                        ActivityManager::PROCESS_STATE_UNKNOWN, true /* insert */);
++            }
++        } else {
++            updateUid(&mCachedUids, uid, true, procState, true);
++        }
+     }
+ }
+ 
+-- 
+2.42.0.820.g83a721a137-goog
+
