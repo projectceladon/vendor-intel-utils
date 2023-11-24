@@ -1,0 +1,378 @@
+From dc0f6cd0425acb25edbdb27d5a4d637076fe47f8 Mon Sep 17 00:00:00 2001
+From: Beth Thibodeau <ethibodeau@google.com>
+Date: Tue, 8 Aug 2023 16:19:48 -0500
+Subject: [PATCH] Check URI permissions for resumable media artwork
+
+When resumable media is added that has artwork set via URI, check the
+permissions for the URI before attempting to load it
+
+Test: atest MediaDataManagerTest UriGrantsManagerServiceTest
+Test: manual with test app
+Bug: 284297452
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:a3b7a10a15aa41ad75866922d528a4dc02fc8ca3)
+Merged-In: Ie79915d3d1712f08dc2e8dfbd5bc7fd32bb308a3
+Change-Id: Ie79915d3d1712f08dc2e8dfbd5bc7fd32bb308a3
+---
+ core/java/android/app/IUriGrantsManager.aidl  |   2 +
+ .../controls/pipeline/MediaDataManager.kt     |  36 +++++-
+ .../controls/pipeline/MediaDataManagerTest.kt | 115 +++++++++++++++++-
+ .../server/uri/UriGrantsManagerService.java   |  42 +++++++
+ 4 files changed, 186 insertions(+), 9 deletions(-)
+
+diff --git a/core/java/android/app/IUriGrantsManager.aidl b/core/java/android/app/IUriGrantsManager.aidl
+index 9e7f2fecfea0..5f847ce1b992 100644
+--- a/core/java/android/app/IUriGrantsManager.aidl
++++ b/core/java/android/app/IUriGrantsManager.aidl
+@@ -39,4 +39,6 @@ interface IUriGrantsManager {
+     void clearGrantedUriPermissions(in String packageName, int userId);
+     ParceledListSlice getUriPermissions(in String packageName, boolean incoming,
+             boolean persistedOnly);
++    int checkGrantUriPermission_ignoreNonSystem(
++            int sourceUid, String targetPkg, in Uri uri, int modeFlags, int userId);
+ }
+diff --git a/packages/SystemUI/src/com/android/systemui/media/controls/pipeline/MediaDataManager.kt b/packages/SystemUI/src/com/android/systemui/media/controls/pipeline/MediaDataManager.kt
+index 30867b5a1c98..e64084803abe 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/controls/pipeline/MediaDataManager.kt
++++ b/packages/SystemUI/src/com/android/systemui/media/controls/pipeline/MediaDataManager.kt
+@@ -19,11 +19,13 @@ package com.android.systemui.media.controls.pipeline
+ import android.app.Notification
+ import android.app.Notification.EXTRA_SUBSTITUTE_APP_NAME
+ import android.app.PendingIntent
++import android.app.UriGrantsManager
+ import android.app.smartspace.SmartspaceConfig
+ import android.app.smartspace.SmartspaceManager
+ import android.app.smartspace.SmartspaceSession
+ import android.app.smartspace.SmartspaceTarget
+ import android.content.BroadcastReceiver
++import android.content.ContentProvider
+ import android.content.ContentResolver
+ import android.content.Context
+ import android.content.Intent
+@@ -645,10 +647,13 @@ class MediaDataManager(
+             Log.d(TAG, "adding track for $userId from browser: $desc")
+         }
+ 
++	val currentEntry = mediaEntries.get(packageName)
++        val appUid = currentEntry?.appUid ?: Process.INVALID_UID
++
+         // Album art
+         var artworkBitmap = desc.iconBitmap
+         if (artworkBitmap == null && desc.iconUri != null) {
+-            artworkBitmap = loadBitmapFromUri(desc.iconUri!!)
++            artworkBitmap = loadBitmapFromUriForUser(desc.iconUri!!, userId, appUid, packageName)
+         }
+         val artworkIcon =
+             if (artworkBitmap != null) {
+@@ -657,10 +662,8 @@ class MediaDataManager(
+                 null
+             }
+ 
+-        val currentEntry = mediaEntries.get(packageName)
+         val instanceId = currentEntry?.instanceId ?: logger.getNewInstanceId()
+-        val appUid = currentEntry?.appUid ?: Process.INVALID_UID
+-
++        
+         val mediaAction = getResumeMediaAction(resumeAction)
+         val lastActive = systemClock.elapsedRealtime()
+         foregroundExecutor.execute {
+@@ -1176,6 +1179,31 @@ class MediaDataManager(
+             false
+         }
+     }
++
++    /** Returns a bitmap if the user can access the given URI, else null */
++    private fun loadBitmapFromUriForUser(
++        uri: Uri,
++        userId: Int,
++        appUid: Int,
++        packageName: String,
++    ): Bitmap? {
++        try {
++            val ugm = UriGrantsManager.getService()
++            ugm.checkGrantUriPermission_ignoreNonSystem(
++                appUid,
++                packageName,
++                ContentProvider.getUriWithoutUserId(uri),
++                Intent.FLAG_GRANT_READ_URI_PERMISSION,
++                ContentProvider.getUserIdFromUri(uri, userId)
++            )
++            return loadBitmapFromUri(uri)
++        } catch (e: SecurityException) {
++            Log.e(TAG, "Failed to get URI permission: $e")
++        }
++        return null
++    }
++
++
+     /**
+      * Load a bitmap from a URI
+      * @param uri the uri to load
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/media/controls/pipeline/MediaDataManagerTest.kt b/packages/SystemUI/tests/src/com/android/systemui/media/controls/pipeline/MediaDataManagerTest.kt
+index 367a26390c9a..87df6d9334e7 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/media/controls/pipeline/MediaDataManagerTest.kt
++++ b/packages/SystemUI/tests/src/com/android/systemui/media/controls/pipeline/MediaDataManagerTest.kt
+@@ -16,21 +16,25 @@
+ 
+ package com.android.systemui.media.controls.pipeline
+ 
++import android.app.IUriGrantsManager
+ import android.app.Notification
+ import android.app.Notification.MediaStyle
+ import android.app.PendingIntent
++import android.app.UriGrantsManager
+ import android.app.smartspace.SmartspaceAction
+ import android.app.smartspace.SmartspaceConfig
+ import android.app.smartspace.SmartspaceManager
+ import android.app.smartspace.SmartspaceTarget
+ import android.content.Intent
+ import android.graphics.Bitmap
++import android.graphics.ImageDecoder
+ import android.graphics.drawable.Icon
+ import android.media.MediaDescription
+ import android.media.MediaMetadata
+ import android.media.session.MediaController
+ import android.media.session.MediaSession
+ import android.media.session.PlaybackState
++import android.net.Uri
+ import android.os.Bundle
+ import android.provider.Settings
+ import android.service.notification.StatusBarNotification
+@@ -38,6 +42,7 @@ import android.testing.AndroidTestingRunner
+ import android.testing.TestableLooper.RunWithLooper
+ import androidx.media.utils.MediaConstants
+ import androidx.test.filters.SmallTest
++import com.android.dx.mockito.inline.extended.ExtendedMockito
+ import com.android.internal.logging.InstanceId
+ import com.android.systemui.InstanceIdSequenceFake
+ import com.android.systemui.R
+@@ -75,7 +80,9 @@ import org.mockito.Mockito.never
+ import org.mockito.Mockito.reset
+ import org.mockito.Mockito.verify
+ import org.mockito.Mockito.verifyNoMoreInteractions
++import org.mockito.MockitoSession
+ import org.mockito.Mockito.`when` as whenever
++import org.mockito.MockitoSession
+ import org.mockito.junit.MockitoJUnit
+ 
+ private const val KEY = "KEY"
+@@ -135,6 +142,8 @@ class MediaDataManagerTest : SysuiTestCase() {
+     private val clock = FakeSystemClock()
+     @Mock private lateinit var tunerService: TunerService
+     @Captor lateinit var tunableCaptor: ArgumentCaptor<TunerService.Tunable>
++    @Mock private lateinit var ugm: IUriGrantsManager
++    @Mock private lateinit var imageSource: ImageDecoder.Source
+     @Captor lateinit var callbackCaptor: ArgumentCaptor<(String, PlaybackState) -> Unit>
+     @Captor lateinit var smartSpaceConfigBuilderCaptor: ArgumentCaptor<SmartspaceConfig>
+ 
+@@ -143,12 +152,18 @@ class MediaDataManagerTest : SysuiTestCase() {
+     private val originalSmartspaceSetting =
+         Settings.Secure.getInt(
+             context.contentResolver,
+-            Settings.Secure.MEDIA_CONTROLS_RECOMMENDATION,
+-            1
+-        )
++            Settings.Secure.MEDIA_CONTROLS_RECOMMENDATION, 1)
++    private lateinit var staticMockSession: MockitoSession
+ 
+     @Before
+     fun setup() {
++	staticMockSession =
++            ExtendedMockito.mockitoSession()
++                .mockStatic<UriGrantsManager>(UriGrantsManager::class.java)
++                .mockStatic<ImageDecoder>(ImageDecoder::class.java)
++                .strictness(Strictness.LENIENT)
++                .startMocking()
++        whenever(UriGrantsManager.getService()).thenReturn(ugm)
+         foregroundExecutor = FakeExecutor(clock)
+         backgroundExecutor = FakeExecutor(clock)
+         uiExecutor = FakeExecutor(clock)
+@@ -235,7 +250,8 @@ class MediaDataManagerTest : SysuiTestCase() {
+ 
+     @After
+     fun tearDown() {
+-        session.release()
++        staticMockSession.finishMocking()
++	session.release()
+         mediaDataManager.destroy()
+         Settings.Secure.putInt(
+             context.contentResolver,
+@@ -896,7 +912,7 @@ class MediaDataManagerTest : SysuiTestCase() {
+ 
+         // THEN smartspace signal is ignored
+         verify(listener, never())
+-            .onSmartspaceMediaDataLoaded(anyObject(), anyObject(), anyBoolean())
++            verify(listener).onSmartspaceMediaDataRemoved(eq(KEY_MEDIA_SMARTSPACE), eq(true))
+     }
+ 
+     @Test
+@@ -1443,6 +1459,67 @@ class MediaDataManagerTest : SysuiTestCase() {
+         assertThat(mediaDataCaptor.value.semanticActions).isNull()
+     }
+ 
++    @Test
++    fun testResumeMediaLoaded_hasArtPermission_artLoaded() {
++        // When resume media is loaded and user/app has permission to access the art URI,
++        whenever(
++                ugm.checkGrantUriPermission_ignoreNonSystem(
++                    anyInt(),
++                    any(),
++                    any(),
++                    anyInt(),
++                    anyInt()
++                )
++            )
++            .thenReturn(1)
++        val artwork = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
++        val uri = Uri.parse("content://example")
++        whenever(ImageDecoder.createSource(any(), eq(uri))).thenReturn(imageSource)
++        whenever(ImageDecoder.decodeBitmap(any(), any())).thenReturn(artwork)
++
++        val desc =
++            MediaDescription.Builder().run {
++                setTitle(SESSION_TITLE)
++                setIconUri(uri)
++                build()
++            }
++        addResumeControlAndLoad(desc)
++
++        // Then the artwork is loaded
++        assertThat(mediaDataCaptor.value.artwork).isNotNull()
++    }
++
++    @Test
++    fun testResumeMediaLoaded_noArtPermission_noArtLoaded() {
++        // When resume media is loaded and user/app does not have permission to access the art URI
++        whenever(
++                ugm.checkGrantUriPermission_ignoreNonSystem(
++                    anyInt(),
++                    any(),
++                    any(),
++                    anyInt(),
++                    anyInt()
++                )
++            )
++            .thenThrow(SecurityException("Test no permission"))
++        val artwork = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
++        val uri = Uri.parse("content://example")
++        whenever(ImageDecoder.createSource(any(), eq(uri))).thenReturn(imageSource)
++        whenever(ImageDecoder.decodeBitmap(any(), any())).thenReturn(artwork)
++
++        val desc =
++            MediaDescription.Builder().run {
++                setTitle(SESSION_TITLE)
++                setIconUri(uri)
++                build()
++            }
++        addResumeControlAndLoad(desc)
++
++        // Then the artwork is not loaded
++        assertThat(mediaDataCaptor.value.artwork).isNull()
++    }
++
++
+     /** Helper function to add a media notification and capture the resulting MediaData */
+     private fun addNotificationAndLoad() {
+         mediaDataManager.onNotificationAdded(KEY, mediaNotification)
+@@ -1458,4 +1535,32 @@ class MediaDataManagerTest : SysuiTestCase() {
+                 eq(false)
+             )
+     }
++
++    /** Helper function to add a resumption control and capture the resulting MediaData */
++    private fun addResumeControlAndLoad(
++        desc: MediaDescription,
++        packageName: String = PACKAGE_NAME
++    ) {
++        mediaDataManager.addResumptionControls(
++            USER_ID,
++            desc,
++            Runnable {},
++            session.sessionToken,
++            APP_NAME,
++            pendingIntent,
++            packageName
++        )
++        assertThat(backgroundExecutor.runAllReady()).isEqualTo(1)
++        assertThat(foregroundExecutor.runAllReady()).isEqualTo(1)
++
++        verify(listener)
++            .onMediaDataLoaded(
++               eq(packageName),
++                eq(null),
++                capture(mediaDataCaptor),
++                eq(true),
++                eq(0),
++                eq(false)
++            )
++    }
+ }
+diff --git a/services/core/java/com/android/server/uri/UriGrantsManagerService.java b/services/core/java/com/android/server/uri/UriGrantsManagerService.java
+index 6aa06e8ee068..92329cf4a8ff 100644
+--- a/services/core/java/com/android/server/uri/UriGrantsManagerService.java
++++ b/services/core/java/com/android/server/uri/UriGrantsManagerService.java
+@@ -41,6 +41,7 @@ import static org.xmlpull.v1.XmlPullParser.START_TAG;
+ 
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.annotation.RequiresPermission;
+ import android.app.ActivityManager;
+ import android.app.ActivityManagerInternal;
+ import android.app.AppGlobals;
+@@ -62,6 +63,7 @@ import android.os.Handler;
+ import android.os.IBinder;
+ import android.os.Looper;
+ import android.os.Message;
++import android.os.Process;
+ import android.os.RemoteException;
+ import android.os.SystemClock;
+ import android.os.UserHandle;
+@@ -1304,6 +1306,46 @@ public class UriGrantsManagerService extends IUriGrantsManager.Stub implements
+         return false;
+     }
+ 
++    /**
++     * Check if the targetPkg can be granted permission to access uri by
++     * the callingUid using the given modeFlags. See {@link #checkGrantUriPermissionUnlocked}.
++     *
++     * @param callingUid The uid of the grantor app that has permissions to the uri.
++     * @param targetPkg The package name of the granted app that needs permissions to the uri.
++     * @param uri The uri for which permissions should be granted.
++     * @param modeFlags The modes to grant. See {@link Intent#FLAG_GRANT_READ_URI_PERMISSION}, etc.
++     * @param userId The userId in which the uri is to be resolved.
++     * @return uid of the target or -1 if permission grant not required. Returns -1 if the caller
++     *  does not hold INTERACT_ACROSS_USERS_FULL
++     * @throws SecurityException if the grant is not allowed.
++     */
++    @Override
++    @RequiresPermission(android.Manifest.permission.INTERACT_ACROSS_USERS_FULL)
++    public int checkGrantUriPermission_ignoreNonSystem(int callingUid, String targetPkg, Uri uri,
++            int modeFlags, int userId) {
++        if (!isCallerIsSystemOrPrivileged()) {
++            return Process.INVALID_UID;
++        }
++        final long origId = Binder.clearCallingIdentity();
++        try {
++            return checkGrantUriPermissionUnlocked(callingUid, targetPkg, uri, modeFlags,
++                userId);
++        } finally {
++            Binder.restoreCallingIdentity(origId);
++        }
++    }
++
++    private boolean isCallerIsSystemOrPrivileged() {
++        final int uid = Binder.getCallingUid();
++        if (uid == Process.SYSTEM_UID || uid == Process.ROOT_UID) {
++            return true;
++        }
++        return ActivityManager.checkComponentPermission(
++            android.Manifest.permission.INTERACT_ACROSS_USERS_FULL,
++            uid, /* owningUid = */-1, /* exported = */ true)
++            == PackageManager.PERMISSION_GRANTED;
++    }
++
+     @Override
+     public ArrayList<UriPermission> providePersistentUriGrants() {
+         final ArrayList<UriPermission> result = new ArrayList<>();
+-- 
+2.17.1
+
