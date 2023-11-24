@@ -1,0 +1,269 @@
+From 209da1de2da3d18c21d51237ad5cc43af88634f8 Mon Sep 17 00:00:00 2001
+From: Hui Peng <phui@google.com>
+Date: Fri, 22 Sep 2023 06:52:34 +0000
+Subject: [PATCH] Factor out duplicate code for parsing gap data
+
+This change is intended to be used to factor out
+dup code for parsing GapData in StartAdvertisingSet
+and make it easier to be tested.
+
+Backport of Ia39886c415218353b6f9d59d7d3f6d1160477d6c
+
+Bug: 296291440
+Test: atest net_test_main_shim
+Ignore-AOSP-First: security
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:b100ed7d1ec943e84fd96262304f41f87cf6e19f)
+Merged-In: Ia39886c415218353b6f9d59d7d3f6d1160477d6c
+Change-Id: Ia39886c415218353b6f9d59d7d3f6d1160477d6c
+---
+ main/Android.bp                     |  1 +
+ main/shim/Android.bp                |  1 +
+ main/shim/BUILD.gn                  |  1 +
+ main/shim/le_advertising_manager.cc | 78 +++--------------------------
+ main/shim/utils.cc                  | 40 +++++++++++++++
+ main/shim/utils.h                   | 32 ++++++++++++
+ 6 files changed, 82 insertions(+), 71 deletions(-)
+ create mode 100644 main/shim/utils.cc
+ create mode 100644 main/shim/utils.h
+
+diff --git a/main/Android.bp b/main/Android.bp
+index 67cb3eca4..993a4b9a8 100644
+--- a/main/Android.bp
++++ b/main/Android.bp
+@@ -239,6 +239,7 @@ cc_test {
+         "shim/metrics_api.cc",
+         "shim/shim.cc",
+         "shim/stack.cc",
++        "shim/utils.cc",
+         "test/main_shim_test.cc",
+     ],
+     static_libs: [
+diff --git a/main/shim/Android.bp b/main/shim/Android.bp
+index b8aca32fa..b7fd7dfb2 100644
+--- a/main/shim/Android.bp
++++ b/main/shim/Android.bp
+@@ -29,5 +29,6 @@ filegroup {
+         "metrics_api.cc",
+         "shim.cc",
+         "stack.cc",
++        "utils.cc",
+     ]
+ }
+diff --git a/main/shim/BUILD.gn b/main/shim/BUILD.gn
+index 5e6485898..d93a646ba 100644
+--- a/main/shim/BUILD.gn
++++ b/main/shim/BUILD.gn
+@@ -35,6 +35,7 @@ source_set("LibBluetoothShimSources") {
+     "metrics_api.cc",
+     "shim.cc",
+     "stack.cc",
++    "utils.cc",
+   ]
+ 
+   include_dirs = [
+diff --git a/main/shim/le_advertising_manager.cc b/main/shim/le_advertising_manager.cc
+index a91f7426b..850beb866 100644
+--- a/main/shim/le_advertising_manager.cc
++++ b/main/shim/le_advertising_manager.cc
+@@ -17,6 +17,7 @@
+ #define LOG_TAG "bt_shim_advertiser"
+ 
+ #include "le_advertising_manager.h"
++#include "utils.h"
+ 
+ #include <hardware/bluetooth.h>
+ #include <hardware/bt_gatt.h>
+@@ -40,6 +41,7 @@ using bluetooth::hci::AddressType;
+ using bluetooth::hci::ErrorCode;
+ using bluetooth::hci::GapData;
+ using bluetooth::hci::OwnAddressType;
++using bluetooth::shim::parse_gap_data;
+ using std::vector;
+ 
+ class BleAdvertiserInterfaceImpl : public BleAdvertiserInterface,
+@@ -79,22 +81,8 @@ class BleAdvertiserInterfaceImpl : public BleAdvertiserInterface,
+                StatusCallback cb) override {
+     LOG(INFO) << __func__ << " in shim layer";
+ 
+-    size_t offset = 0;
+     std::vector<GapData> advertising_data = {};
+-
+-    while (offset < data.size()) {
+-      GapData gap_data;
+-      uint8_t len = data[offset];
+-      auto begin = data.begin() + offset;
+-      auto end = begin + len + 1;  // 1 byte for len
+-      auto data_copy = std::make_shared<std::vector<uint8_t>>(begin, end);
+-      bluetooth::packet::PacketView<bluetooth::packet::kLittleEndian> packet(
+-          data_copy);
+-      GapData::Parse(&gap_data, packet.begin());
+-      advertising_data.push_back(gap_data);
+-      offset += len + 1;  // 1 byte for len
+-    }
+-
++    parse_gap_data(data, advertising_data);
+     bluetooth::shim::GetAdvertising()->SetData(advertiser_id, set_scan_rsp,
+                                                advertising_data);
+   }
+@@ -135,47 +123,9 @@ class BleAdvertiserInterfaceImpl : public BleAdvertiserInterface,
+         periodic_params.periodic_advertising_properties;
+     config.periodic_advertising_parameters = periodic_parameters;
+ 
+-    size_t offset = 0;
+-    while (offset < advertise_data.size()) {
+-      GapData gap_data;
+-      uint8_t len = advertise_data[offset];
+-      auto begin = advertise_data.begin() + offset;
+-      auto end = begin + len + 1;  // 1 byte for len
+-      auto data_copy = std::make_shared<std::vector<uint8_t>>(begin, end);
+-      bluetooth::packet::PacketView<bluetooth::packet::kLittleEndian> packet(
+-          data_copy);
+-      GapData::Parse(&gap_data, packet.begin());
+-      config.advertisement.push_back(gap_data);
+-      offset += len + 1;  // 1 byte for len
+-    }
+-
+-    offset = 0;
+-    while (offset < scan_response_data.size()) {
+-      GapData gap_data;
+-      uint8_t len = scan_response_data[offset];
+-      auto begin = scan_response_data.begin() + offset;
+-      auto end = begin + len + 1;  // 1 byte for len
+-      auto data_copy = std::make_shared<std::vector<uint8_t>>(begin, end);
+-      bluetooth::packet::PacketView<bluetooth::packet::kLittleEndian> packet(
+-          data_copy);
+-      GapData::Parse(&gap_data, packet.begin());
+-      config.scan_response.push_back(gap_data);
+-      offset += len + 1;  // 1 byte for len
+-    }
+-
+-    offset = 0;
+-    while (offset < periodic_data.size()) {
+-      GapData gap_data;
+-      uint8_t len = periodic_data[offset];
+-      auto begin = periodic_data.begin() + offset;
+-      auto end = begin + len + 1;  // 1 byte for len
+-      auto data_copy = std::make_shared<std::vector<uint8_t>>(begin, end);
+-      bluetooth::packet::PacketView<bluetooth::packet::kLittleEndian> packet(
+-          data_copy);
+-      GapData::Parse(&gap_data, packet.begin());
+-      config.periodic_data.push_back(gap_data);
+-      offset += len + 1;  // 1 byte for len
+-    }
++    parse_gap_data(advertise_data, config.advertisement);
++    parse_gap_data(scan_response_data, config.scan_response);
++    parse_gap_data(periodic_data, config.periodic_data);
+ 
+     bluetooth::hci::AdvertiserId id =
+         bluetooth::shim::GetAdvertising()->ExtendedCreateAdvertiser(
+@@ -202,22 +152,8 @@ class BleAdvertiserInterfaceImpl : public BleAdvertiserInterface,
+                                   StatusCallback cb) override {
+     LOG(INFO) << __func__ << " in shim layer";
+ 
+-    size_t offset = 0;
+     std::vector<GapData> advertising_data = {};
+-
+-    while (offset < data.size()) {
+-      GapData gap_data;
+-      uint8_t len = data[offset];
+-      auto begin = data.begin() + offset;
+-      auto end = begin + len + 1;  // 1 byte for len
+-      auto data_copy = std::make_shared<std::vector<uint8_t>>(begin, end);
+-      bluetooth::packet::PacketView<bluetooth::packet::kLittleEndian> packet(
+-          data_copy);
+-      GapData::Parse(&gap_data, packet.begin());
+-      advertising_data.push_back(gap_data);
+-      offset += len + 1;  // 1 byte for len
+-    }
+-
++    parse_gap_data(data, advertising_data);
+     bluetooth::shim::GetAdvertising()->SetPeriodicData(advertiser_id,
+                                                        advertising_data);
+   }
+diff --git a/main/shim/utils.cc b/main/shim/utils.cc
+new file mode 100644
+index 000000000..dcf1725be
+--- /dev/null
++++ b/main/shim/utils.cc
+@@ -0,0 +1,40 @@
++/*
++ * Copyright 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "utils.h"
++
++namespace bluetooth {
++namespace shim {
++void parse_gap_data(const std::vector<uint8_t> &raw_data,
++                    std::vector<hci::GapData> &output) {
++    size_t offset = 0;
++    while (offset < raw_data.size()) {
++      hci::GapData gap_data;
++      uint8_t len = raw_data[offset];
++
++      auto begin = raw_data.begin() + offset;
++      auto end = begin + len + 1;  // 1 byte for len
++      auto data_copy = std::make_shared<std::vector<uint8_t>>(begin, end);
++      bluetooth::packet::PacketView<bluetooth::packet::kLittleEndian> packet(
++          data_copy);
++      hci::GapData::Parse(&gap_data, packet.begin());
++      output.push_back(gap_data);
++      offset += len + 1;  // 1 byte for len
++    }
++}
++
++}  // namespace shim
++}  // namespace bluetooth
+diff --git a/main/shim/utils.h b/main/shim/utils.h
+new file mode 100644
+index 000000000..56da2a0a0
+--- /dev/null
++++ b/main/shim/utils.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#pragma once
++#include <vector>
++
++#include "hci/hci_packets.h"
++
++namespace bluetooth {
++namespace shim {
++/**
++ * @brief Parsing gap data from raw bytes
++ *
++ * @param raw_data input, raw bytes
++ * @param output vector of GapData
++ */
++void parse_gap_data(const std::vector<uint8_t> &raw_data,
++                    std::vector<hci::GapData> &output);
++}  // namespace shim
++}  // namespace bluetooth
+-- 
+2.42.0.820.g83a721a137-goog
+
