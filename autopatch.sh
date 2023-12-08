@@ -93,8 +93,8 @@ function fpnat() # find patch files and apply them
 {
     local patch_top_dir=$1
     # arg #1 should be the .patch files' top directory,
-    # either aosp_diff/preliminary or aosp_diff/${TARGET_PRODUCT}
-    # and bsp_diff/preliminary bsp_diff/${TARGET_PRODUCT} directories.
+    # either aosp_diff/base_aaos or aosp_diff/${TARGET_PRODUCT}
+    # and bsp_diff/base_aaos bsp_diff/${TARGET_PRODUCT} directories.
     cd ${patch_top_dir}
     patch_file_number=`find ./$git_select -iname "*.patch" 2>/dev/null |wc -l`
     echo "Path: `basename ${patch_top_dir}` has ${patch_file_number} patch file(s) to apply!"
@@ -123,16 +123,16 @@ if [[ $# -gt 1 || $# -lt 0 ]]; then
 	exit -1
 fi
 
-    echo -e "\nApply utils/aosp_diff/preliminary patches:"
-    fpnat "$patch_dir_aosp/preliminary"
+    echo -e "\nApply utils/aosp_diff/base_aaos patches:"
+    fpnat "$patch_dir_aosp/base_aaos"
 
 if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_aosp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils/aosp_diff Target ${TARGET_PRODUCT} Patches:"
         fpnat "${patch_dir_aosp}/${TARGET_PRODUCT}"
 fi
 
-    echo -e "\nApply utils/bsp_diff/common Patches:"
-    fpnat "${patch_dir_bsp}/common"
+    echo -e "\nApply utils/bsp_diff/base_aaos Patches:"
+    fpnat "${patch_dir_bsp}/base_aaos"
 
 if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_bsp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils/bsp_diff Target ${TARGET_PRODUCT} Patches:"
@@ -160,16 +160,16 @@ if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
         echo "Embargoed Patches Found"
         echo "============================="
 
-        echo -e "\nApply utils_priv/aosp_diff/preliminary Patches:"
-        fpnat "${private_patch_dir_aosp}/preliminary"
+        echo -e "\nApply utils_priv/aosp_diff/base_aaos Patches:"
+        fpnat "${private_patch_dir_aosp}/base_aaos"
 
     if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${private_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils_priv/aosp_diff Target ${TARGET_PRODUCT} Patches:"
         fpnat "${private_patch_dir_aosp}/${TARGET_PRODUCT}"
     fi
 
-        echo -e "\nApply utils_priv/bsp_diff/common Patches:"
-        fpnat "${private_patch_dir_bsp}/common"
+        echo -e "\nApply utils_priv/bsp_diff/base_aaos Patches:"
+        fpnat "${private_patch_dir_bsp}/base_aaos"
 
     if [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${private_patch_dir_bsp}/${TARGET_PRODUCT} ]];then
         echo -e "\nApply utils_priv/bsp_diff Target ${TARGET_PRODUCT} Patches:"
@@ -198,9 +198,9 @@ if [[ -e ${vertical_utils_dir} ]] && [[ -d ${vertical_utils_dir} ]];then
         echo "Vertical Patches Found"
         echo "============================="
 
-    if [[ -e ${vertical_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
-        echo -e "\nApply utils_vertical/aosp_diff/preliminary Patches:"
-        fpnat "${vertical_patch_dir_aosp}/preliminary"
+    if [[ -e ${vertical_patch_dir_aosp}/${TARGET_PRODUCT}/include_base_aaos ]];then
+        echo -e "\nApply utils_vertical/aosp_diff/base_aaos Patches:"
+        fpnat "${vertical_patch_dir_aosp}/base_aaos"
     fi
 
     if [[ -e ${vertical_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${vertical_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
@@ -208,9 +208,9 @@ if [[ -e ${vertical_utils_dir} ]] && [[ -d ${vertical_utils_dir} ]];then
         fpnat "${vertical_patch_dir_aosp}/${TARGET_PRODUCT}"
     fi
 
-    if [[ -e ${vertical_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
-        echo -e "\nApply utils_vertical/bsp_diff/common Patches:"
-        fpnat "${vertical_patch_dir_bsp}/common"
+    if [[ -e ${vertical_patch_dir_bsp}/${TARGET_PRODUCT}/include_base_aaos ]];then
+        echo -e "\nApply utils_vertical/bsp_diff/base_aaos Patches:"
+        fpnat "${vertical_patch_dir_bsp}/base_aaos"
     fi
 
     if [[ -e ${vertical_patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${vertical_patch_dir_bsp}/${TARGET_PRODUCT} ]];then
@@ -240,9 +240,9 @@ if [[ -e ${private_vertical_utils_dir} ]] && [[ -d ${private_vertical_utils_dir}
         echo "Vertical Embargoed Patches Found"
         echo "============================="
 
-    if [[ -e ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
-        echo -e "\nApply private_utils_vertical/aosp_diff/preliminary Patches:"
-        fpnat "${private_vertical_patch_dir_aosp}/preliminary"
+    if [[ -e ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT}/include_base_aaos ]];then
+        echo -e "\nApply private_utils_vertical/aosp_diff/base_aaos Patches:"
+        fpnat "${private_vertical_patch_dir_aosp}/base_aaos"
     fi
 
     if [[ -e ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT} ]];then
@@ -250,9 +250,9 @@ if [[ -e ${private_vertical_utils_dir} ]] && [[ -d ${private_vertical_utils_dir}
         fpnat "${private_vertical_patch_dir_aosp}/${TARGET_PRODUCT}"
     fi
 
-    if [[ -e ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
-        echo -e "\nApply private_utils_vertical/bsp_diff/common Patches:"
-        fpnat "${private_vertical_patch_dir_bsp}/common"
+    if [[ -e ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT}/include_base_aaos ]];then
+        echo -e "\nApply private_utils_vertical/bsp_diff/base_aaos Patches:"
+        fpnat "${private_vertical_patch_dir_bsp}/base_aaos"
     fi
 
     if [[ -e ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT} ]] && [[ -d ${private_vertical_patch_dir_bsp}/${TARGET_PRODUCT} ]];then
