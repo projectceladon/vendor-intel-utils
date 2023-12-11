@@ -77,7 +77,7 @@ apply_patch() {
     c=`git log -500 --pretty=format:%aD | grep "$b"`
 
     if [[ "$c" == "" ]] ; then
-      git am -3 --keep-cr --whitespace=nowarn $pd/$i >& /dev/null
+      git am -3 --keep-cr --whitespace=nowarn --ignore-space-change --ignore-whitespace $pd/$i >& /dev/null
       if [[ $? == 0 ]]; then
         echo -e "\tApplying\t\t`basename $i`"
       else
