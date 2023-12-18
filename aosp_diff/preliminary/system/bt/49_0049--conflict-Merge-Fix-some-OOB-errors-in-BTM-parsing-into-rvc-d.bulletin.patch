@@ -1,0 +1,139 @@
+From b652a67787ebc64374955a696ee7d593be0e935c Mon Sep 17 00:00:00 2001
+From: Brian Delwiche <delwiche@google.com>
+Date: Tue, 10 Oct 2023 23:46:17 +0000
+Subject: [PATCH] [conflict] Merge "Fix some OOB errors in BTM parsing" into
+ rvc-dev am: d8ecaf17b4 am: 91f5cb80a3
+
+Original change: https://googleplex-android-review.googlesource.com/c/platform/system/bt/+/23399019
+
+Bug: 279169188
+Signed-off-by: Automerger Merge Worker <android-build-automerger-merge-worker@system.gserviceaccount.com>
+(cherry picked from commit 71b8613d95d78817cda6c49f2a7e849ce4e99339)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:39f169ac20960710c308079236ad3d631e6ef833)
+Merged-In: I294455124fbd06f5742b64f8bae5455f09358fe4
+Change-Id: I294455124fbd06f5742b64f8bae5455f09358fe4
+---
+ stack/btm/btm_ble_gap.cc | 52 +++++++++++++++++++++++++++++-----------
+ stack/btu/btu_hcif.cc    |  6 +++++
+ 2 files changed, 44 insertions(+), 14 deletions(-)
+
+diff --git a/stack/btm/btm_ble_gap.cc b/stack/btm/btm_ble_gap.cc
+index 9f8f7b0b7..ef76910bd 100644
+--- a/stack/btm/btm_ble_gap.cc
++++ b/stack/btm/btm_ble_gap.cc
+@@ -1731,20 +1731,27 @@ void btm_ble_process_ext_adv_pkt(uint8_t data_len, uint8_t* data) {
+       advertising_sid;
+   int8_t rssi, tx_power;
+   uint16_t event_type, periodic_adv_int, direct_address_type;
++  size_t bytes_to_process;
+ 
+   /* Only process the results if the inquiry is still active */
+   if (!btm_cb.ble_ctr_cb.is_ble_scan_active()) return;
+ 
++  bytes_to_process = 1;
++
++  if (data_len < bytes_to_process) {
++    LOG(ERROR) << "Malformed LE extended advertising packet: not enough room "
++                  "for num reports";
++    return;
++  }
++
+   /* Extract the number of reports in this event. */
+   STREAM_TO_UINT8(num_reports, p);
+ 
+-  constexpr int extended_report_header_size = 24;
+   while (num_reports--) {
+-    if (p + extended_report_header_size > data + data_len) {
+-      // TODO(jpawlowski): we should crash the stack here
+-      BTM_TRACE_ERROR(
+-          "Malformed LE Extended Advertising Report Event from controller - "
+-          "can't loop the data");
++    bytes_to_process += 24;
++    if (data_len < bytes_to_process) {
++      LOG(ERROR) << "Malformed LE extended advertising packet: not enough room "
++                    "for metadata";
+       return;
+     }
+ 
+@@ -1764,8 +1771,11 @@ void btm_ble_process_ext_adv_pkt(uint8_t data_len, uint8_t* data) {
+ 
+     uint8_t* pkt_data = p;
+     p += pkt_data_len; /* Advance to the the next packet*/
+-    if (p > data + data_len) {
+-      LOG(ERROR) << "Invalid pkt_data_len: " << +pkt_data_len;
++
++    bytes_to_process += pkt_data_len;
++    if (data_len < bytes_to_process) {
++      LOG(ERROR) << "Malformed LE extended advertising packet: not enough room "
++                    "for packet data";
+       return;
+     }
+ 
+@@ -1794,18 +1804,28 @@ void btm_ble_process_adv_pkt(uint8_t data_len, uint8_t* data) {
+   uint8_t* p = data;
+   uint8_t legacy_evt_type, addr_type, num_reports, pkt_data_len;
+   int8_t rssi;
++  size_t bytes_to_process;
+ 
+   /* Only process the results if the inquiry is still active */
+   if (!btm_cb.ble_ctr_cb.is_ble_scan_active()) return;
+ 
++  bytes_to_process = 1;
++
++  if (data_len < bytes_to_process) {
++    LOG(ERROR)
++        << "Malformed LE advertising packet: not enough room for num reports";
++    return;
++  }
++
+   /* Extract the number of reports in this event. */
+   STREAM_TO_UINT8(num_reports, p);
+ 
+-  constexpr int report_header_size = 10;
+   while (num_reports--) {
+-    if (p + report_header_size > data + data_len) {
+-      // TODO(jpawlowski): we should crash the stack here
+-      BTM_TRACE_ERROR("Malformed LE Advertising Report Event from controller");
++    bytes_to_process += 9;
++
++    if (data_len < bytes_to_process) {
++      LOG(ERROR)
++          << "Malformed LE advertising packet: not enough room for metadata";
+       return;
+     }
+ 
+@@ -1817,8 +1837,12 @@ void btm_ble_process_adv_pkt(uint8_t data_len, uint8_t* data) {
+ 
+     uint8_t* pkt_data = p;
+     p += pkt_data_len; /* Advance to the the rssi byte */
+-    if (p > data + data_len - sizeof(rssi)) {
+-      LOG(ERROR) << "Invalid pkt_data_len: " << +pkt_data_len;
++
++    // include rssi for this check
++    bytes_to_process += pkt_data_len + 1;
++    if (data_len < bytes_to_process) {
++      LOG(ERROR) << "Malformed LE advertising packet: not enough room for "
++                    "packet data and/or RSSI";
+       return;
+     }
+ 
+diff --git a/stack/btu/btu_hcif.cc b/stack/btu/btu_hcif.cc
+index a2d9ef8af..b2a7869a3 100644
+--- a/stack/btu/btu_hcif.cc
++++ b/stack/btu/btu_hcif.cc
+@@ -1765,6 +1765,12 @@ static void btu_ble_data_length_change_evt(uint8_t* p, uint16_t evt_len) {
+     return;
+   }
+ 
++  // 2 bytes each for handle, tx_data_len, TxTimer, rx_data_len
++  if (evt_len < 8) {
++    LOG_ERROR("Event packet too short");
++    return;
++  }
++
+   STREAM_TO_UINT16(handle, p);
+   STREAM_TO_UINT16(tx_data_len, p);
+   p += 2; /* Skip the TxTimer */
+-- 
+2.43.0.rc1.413.gea7ed67945-goog
+
