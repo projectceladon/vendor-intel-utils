@@ -5,6 +5,7 @@
 # Author: Sun, Yi J <yi.j.sun@intel.com>
 #
 # SPDX-License-Identifier: BSD-3-Clause
+# Test
 
 # save the official lunch command to aosp_lunch() and source it
 tmp_lunch=`mktemp`
