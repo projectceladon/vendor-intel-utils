@@ -1,0 +1,350 @@
+From a41773ae3f5ea68c6bb11f73035f8e9126e28485 Mon Sep 17 00:00:00 2001
+From: Caitlin Shkuratov <caitlinshk@google.com>
+Date: Mon, 28 Aug 2023 21:34:43 +0000
+Subject: [PATCH] [SB][Privacy] Fetch current active appops on startup.
+
+This also updates SysUI's chip animation scheduler to ignore an
+`isTooEarly` check if the chip animation is forced to be visible (which
+is true for privacy events).
+
+Bug: 294104969
+Test: start recording, then kill systemui via adb-> verify privacy chip
+reappears after restart. Pull down shade and verify chip is correctly
+attributed. Stop recording and verify chip/dot disappears.
+Test: open camera, then kill systemui via adb -> verify privacy chip
+reappears after restart. Pull down shade and verify chip is correctly
+attributed. Close camera and verify chip/dot disappears.
+Test: smoke test of privacy chip and dot
+Test: atest AppOpsControllerTest SystemStatusAnimationSchedulerImplTest
+
+(cherry picked from commit 084a7afb4bb41e0cdfdbe67bdd60728d940b4331)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:dac02d61f8cf755f733ef6c2fbd0f939ea13ee23)
+Merged-In: I664bb3003a2f6871113406e3257b7118bbdf2ab5
+Change-Id: I664bb3003a2f6871113406e3257b7118bbdf2ab5
+---
+ .../systemui/appops/AppOpsControllerImpl.java |  28 +++
+ .../events/SystemStatusAnimationScheduler.kt  |   5 +-
+ .../systemui/appops/AppOpsControllerTest.java | 217 ++++++++++++++++++
+ 3 files changed, 248 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/appops/AppOpsControllerImpl.java b/packages/SystemUI/src/com/android/systemui/appops/AppOpsControllerImpl.java
+index 9676a57b2df9..bcf3de1c0b97 100644
+--- a/packages/SystemUI/src/com/android/systemui/appops/AppOpsControllerImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/appops/AppOpsControllerImpl.java
+@@ -52,6 +52,7 @@ import java.io.FileDescriptor;
+ import java.io.PrintWriter;
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Set;
+ 
+ import javax.inject.Inject;
+@@ -144,6 +145,10 @@ public class AppOpsControllerImpl extends BroadcastReceiver implements AppOpsCon
+     protected void setListening(boolean listening) {
+         mListening = listening;
+         if (listening) {
++            // System UI could be restarted while ops are active, so fetch the currently active ops
++            // once System UI starts listening again.
++            fetchCurrentActiveOps();
++
+             mAppOps.startWatchingActive(OPS, this);
+             mAppOps.startWatchingNoted(OPS, this);
+             mAudioManager.registerAudioRecordingCallback(mAudioRecordingCallback, mBGHandler);
+@@ -176,6 +181,29 @@ public class AppOpsControllerImpl extends BroadcastReceiver implements AppOpsCon
+         }
+     }
+ 
++    private void fetchCurrentActiveOps() {
++        List<AppOpsManager.PackageOps> packageOps = mAppOps.getPackagesForOps(OPS);
++        for (AppOpsManager.PackageOps op : packageOps) {
++            for (AppOpsManager.OpEntry entry : op.getOps()) {
++                for (Map.Entry<String, AppOpsManager.AttributedOpEntry> attributedOpEntry :
++                        entry.getAttributedOpEntries().entrySet()) {
++                    if (attributedOpEntry.getValue().isRunning()) {
++                        onOpActiveChanged(
++                                entry.getOpStr(),
++                                op.getUid(),
++                                op.getPackageName(),
++                                /* attributionTag= */ attributedOpEntry.getKey(),
++                                /* active= */ true,
++                                // AppOpsManager doesn't have a way to fetch attribution flags or
++                                // chain ID given an op entry, so default them to none.
++                                AppOpsManager.ATTRIBUTION_FLAGS_NONE,
++                                AppOpsManager.ATTRIBUTION_CHAIN_ID_NONE);
++                    }
++                }
++            }
++        }
++    }
++
+     /**
+      * Adds a callback that will get notifified when an AppOp of the type the controller tracks
+      * changes
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/events/SystemStatusAnimationScheduler.kt b/packages/SystemUI/src/com/android/systemui/statusbar/events/SystemStatusAnimationScheduler.kt
+index 5a273294e87c..e58cbb77a18a 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/events/SystemStatusAnimationScheduler.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/events/SystemStatusAnimationScheduler.kt
+@@ -93,8 +93,9 @@ class SystemStatusAnimationScheduler @Inject constructor(
+     }
+ 
+     fun onStatusEvent(event: StatusEvent) {
+-        // Ignore any updates until the system is up and running
+-        if (isTooEarly() || !isImmersiveIndicatorEnabled()) {
++        // Ignore any updates until the system is up and running. However, for important events that
++        // request to be force visible (like privacy), ignore whether it's too early.
++        if ((isTooEarly() && !event.forceVisible) || !isImmersiveIndicatorEnabled()) {
+             return
+         }
+ 
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/appops/AppOpsControllerTest.java b/packages/SystemUI/tests/src/com/android/systemui/appops/AppOpsControllerTest.java
+index 61a651234e0c..e6c36c18342c 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/appops/AppOpsControllerTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/appops/AppOpsControllerTest.java
+@@ -19,6 +19,8 @@ package com.android.systemui.appops;
+ import static android.hardware.SensorPrivacyManager.Sensors.CAMERA;
+ import static android.hardware.SensorPrivacyManager.Sensors.MICROPHONE;
+ 
++import static com.google.common.truth.Truth.assertThat;
++
+ import static junit.framework.TestCase.assertFalse;
+ 
+ import static org.junit.Assert.assertEquals;
+@@ -66,6 +68,7 @@ import org.mockito.MockitoAnnotations;
+ 
+ import java.util.Collections;
+ import java.util.List;
++import java.util.Map;
+ 
+ @SmallTest
+ @RunWith(AndroidTestingRunner.class)
+@@ -157,6 +160,204 @@ public class AppOpsControllerTest extends SysuiTestCase {
+         verify(mSensorPrivacyController, times(1)).removeCallback(mController);
+     }
+ 
++    @Test
++    public void startListening_fetchesCurrentActive_none() {
++        when(mAppOpsManager.getPackagesForOps(AppOpsControllerImpl.OPS))
++                .thenReturn(List.of());
++
++        mController.setListening(true);
++
++        assertThat(mController.getActiveAppOps()).isEmpty();
++    }
++
++    /** Regression test for b/294104969. */
++    @Test
++    public void startListening_fetchesCurrentActive_oneActive() {
++        AppOpsManager.PackageOps packageOps = createPackageOp(
++                "package.test",
++                /* packageUid= */ 2,
++                AppOpsManager.OPSTR_FINE_LOCATION,
++                /* isRunning= */ true);
++        when(mAppOpsManager.getPackagesForOps(AppOpsControllerImpl.OPS))
++                .thenReturn(List.of(packageOps));
++
++        // WHEN we start listening
++        mController.setListening(true);
++
++        // THEN the active list has the op
++        List<AppOpItem> list = mController.getActiveAppOps();
++        assertEquals(1, list.size());
++        AppOpItem first = list.get(0);
++        assertThat(first.getPackageName()).isEqualTo("package.test");
++        assertThat(first.getUid()).isEqualTo(2);
++        assertThat(first.getCode()).isEqualTo(AppOpsManager.OP_FINE_LOCATION);
++    }
++
++    @Test
++    public void startListening_fetchesCurrentActive_multiplePackages() {
++        AppOpsManager.PackageOps packageOps1 = createPackageOp(
++                "package.one",
++                /* packageUid= */ 1,
++                AppOpsManager.OPSTR_FINE_LOCATION,
++                /* isRunning= */ true);
++        AppOpsManager.PackageOps packageOps2 = createPackageOp(
++                "package.two",
++                /* packageUid= */ 2,
++                AppOpsManager.OPSTR_FINE_LOCATION,
++                /* isRunning= */ false);
++        AppOpsManager.PackageOps packageOps3 = createPackageOp(
++                "package.three",
++                /* packageUid= */ 3,
++                AppOpsManager.OPSTR_FINE_LOCATION,
++                /* isRunning= */ true);
++        when(mAppOpsManager.getPackagesForOps(AppOpsControllerImpl.OPS))
++                .thenReturn(List.of(packageOps1, packageOps2, packageOps3));
++
++        // WHEN we start listening
++        mController.setListening(true);
++
++        // THEN the active list has the ops
++        List<AppOpItem> list = mController.getActiveAppOps();
++        assertEquals(2, list.size());
++
++        AppOpItem item0 = list.get(0);
++        assertThat(item0.getPackageName()).isEqualTo("package.one");
++        assertThat(item0.getUid()).isEqualTo(1);
++        assertThat(item0.getCode()).isEqualTo(AppOpsManager.OP_FINE_LOCATION);
++
++        AppOpItem item1 = list.get(1);
++        assertThat(item1.getPackageName()).isEqualTo("package.three");
++        assertThat(item1.getUid()).isEqualTo(3);
++        assertThat(item1.getCode()).isEqualTo(AppOpsManager.OP_FINE_LOCATION);
++    }
++
++    @Test
++    public void startListening_fetchesCurrentActive_multipleEntries() {
++        AppOpsManager.PackageOps packageOps = mock(AppOpsManager.PackageOps.class);
++        when(packageOps.getUid()).thenReturn(1);
++        when(packageOps.getPackageName()).thenReturn("package.one");
++
++        // Entry 1
++        AppOpsManager.OpEntry entry1 = mock(AppOpsManager.OpEntry.class);
++        when(entry1.getOpStr()).thenReturn(AppOpsManager.OPSTR_PHONE_CALL_MICROPHONE);
++        AppOpsManager.AttributedOpEntry attributed1 = mock(AppOpsManager.AttributedOpEntry.class);
++        when(attributed1.isRunning()).thenReturn(true);
++        when(entry1.getAttributedOpEntries()).thenReturn(Map.of("tag", attributed1));
++        // Entry 2
++        AppOpsManager.OpEntry entry2 = mock(AppOpsManager.OpEntry.class);
++        when(entry2.getOpStr()).thenReturn(AppOpsManager.OPSTR_CAMERA);
++        AppOpsManager.AttributedOpEntry attributed2 = mock(AppOpsManager.AttributedOpEntry.class);
++        when(attributed2.isRunning()).thenReturn(true);
++        when(entry2.getAttributedOpEntries()).thenReturn(Map.of("tag", attributed2));
++        // Entry 3
++        AppOpsManager.OpEntry entry3 = mock(AppOpsManager.OpEntry.class);
++        when(entry3.getOpStr()).thenReturn(AppOpsManager.OPSTR_FINE_LOCATION);
++        AppOpsManager.AttributedOpEntry attributed3 = mock(AppOpsManager.AttributedOpEntry.class);
++        when(attributed3.isRunning()).thenReturn(false);
++        when(entry3.getAttributedOpEntries()).thenReturn(Map.of("tag", attributed3));
++
++        when(packageOps.getOps()).thenReturn(List.of(entry1, entry2, entry3));
++        when(mAppOpsManager.getPackagesForOps(AppOpsControllerImpl.OPS))
++                .thenReturn(List.of(packageOps));
++
++        // WHEN we start listening
++        mController.setListening(true);
++
++        // THEN the active list has the ops
++        List<AppOpItem> list = mController.getActiveAppOps();
++        assertEquals(2, list.size());
++
++        AppOpItem first = list.get(0);
++        assertThat(first.getPackageName()).isEqualTo("package.one");
++        assertThat(first.getUid()).isEqualTo(1);
++        assertThat(first.getCode()).isEqualTo(AppOpsManager.OP_PHONE_CALL_MICROPHONE);
++
++        AppOpItem second = list.get(1);
++        assertThat(second.getPackageName()).isEqualTo("package.one");
++        assertThat(second.getUid()).isEqualTo(1);
++        assertThat(second.getCode()).isEqualTo(AppOpsManager.OP_CAMERA);
++    }
++
++    @Test
++    public void startListening_fetchesCurrentActive_multipleAttributes() {
++        AppOpsManager.PackageOps packageOps = mock(AppOpsManager.PackageOps.class);
++        when(packageOps.getUid()).thenReturn(1);
++        when(packageOps.getPackageName()).thenReturn("package.one");
++        AppOpsManager.OpEntry entry = mock(AppOpsManager.OpEntry.class);
++        when(entry.getOpStr()).thenReturn(AppOpsManager.OPSTR_RECORD_AUDIO);
++
++        AppOpsManager.AttributedOpEntry attributed1 = mock(AppOpsManager.AttributedOpEntry.class);
++        when(attributed1.isRunning()).thenReturn(false);
++        AppOpsManager.AttributedOpEntry attributed2 = mock(AppOpsManager.AttributedOpEntry.class);
++        when(attributed2.isRunning()).thenReturn(true);
++        AppOpsManager.AttributedOpEntry attributed3 = mock(AppOpsManager.AttributedOpEntry.class);
++        when(attributed3.isRunning()).thenReturn(true);
++        when(entry.getAttributedOpEntries()).thenReturn(
++                Map.of("attr1", attributed1, "attr2", attributed2, "attr3", attributed3));
++
++        when(packageOps.getOps()).thenReturn(List.of(entry));
++        when(mAppOpsManager.getPackagesForOps(AppOpsControllerImpl.OPS))
++                .thenReturn(List.of(packageOps));
++
++        // WHEN we start listening
++        mController.setListening(true);
++
++        // THEN the active list has the ops
++        List<AppOpItem> list = mController.getActiveAppOps();
++        // Multiple attributes get merged into one entry in the active ops
++        assertEquals(1, list.size());
++
++        AppOpItem first = list.get(0);
++        assertThat(first.getPackageName()).isEqualTo("package.one");
++        assertThat(first.getUid()).isEqualTo(1);
++        assertThat(first.getCode()).isEqualTo(AppOpsManager.OP_RECORD_AUDIO);
++    }
++
++    /** Regression test for b/294104969. */
++    @Test
++    public void addCallback_existingCallbacksNotifiedOfCurrentActive() {
++        AppOpsManager.PackageOps packageOps1 = createPackageOp(
++                "package.one",
++                /* packageUid= */ 1,
++                AppOpsManager.OPSTR_FINE_LOCATION,
++                /* isRunning= */ true);
++        AppOpsManager.PackageOps packageOps2 = createPackageOp(
++                "package.two",
++                /* packageUid= */ 2,
++                AppOpsManager.OPSTR_RECORD_AUDIO,
++                /* isRunning= */ true);
++        AppOpsManager.PackageOps packageOps3 = createPackageOp(
++                "package.three",
++                /* packageUid= */ 3,
++                AppOpsManager.OPSTR_PHONE_CALL_MICROPHONE,
++                /* isRunning= */ true);
++        when(mAppOpsManager.getPackagesForOps(AppOpsControllerImpl.OPS))
++                .thenReturn(List.of(packageOps1, packageOps2, packageOps3));
++
++        // WHEN we start listening
++        mController.addCallback(
++                new int[]{AppOpsManager.OP_RECORD_AUDIO, AppOpsManager.OP_FINE_LOCATION},
++                mCallback);
++        mTestableLooper.processAllMessages();
++
++        // THEN the callback is notified of the current active ops it cares about
++        verify(mCallback).onActiveStateChanged(
++                AppOpsManager.OP_FINE_LOCATION,
++                /* uid= */ 1,
++                "package.one",
++                true);
++        verify(mCallback).onActiveStateChanged(
++                AppOpsManager.OP_RECORD_AUDIO,
++                /* uid= */ 2,
++                "package.two",
++                true);
++        verify(mCallback, never()).onActiveStateChanged(
++                AppOpsManager.OP_PHONE_CALL_MICROPHONE,
++                /* uid= */ 3,
++                "package.three",
++                true);
++    }
++
+     @Test
+     public void addCallback_includedCode() {
+         mController.addCallback(
+@@ -673,6 +874,22 @@ public class AppOpsControllerTest extends SysuiTestCase {
+         assertEquals(AppOpsManager.OP_PHONE_CALL_CAMERA, list.get(cameraIdx).getCode());
+     }
+ 
++    private AppOpsManager.PackageOps createPackageOp(
++            String packageName, int packageUid, String opStr, boolean isRunning) {
++        AppOpsManager.PackageOps packageOps = mock(AppOpsManager.PackageOps.class);
++        when(packageOps.getPackageName()).thenReturn(packageName);
++        when(packageOps.getUid()).thenReturn(packageUid);
++        AppOpsManager.OpEntry entry = mock(AppOpsManager.OpEntry.class);
++        when(entry.getOpStr()).thenReturn(opStr);
++        AppOpsManager.AttributedOpEntry attributed = mock(AppOpsManager.AttributedOpEntry.class);
++        when(attributed.isRunning()).thenReturn(isRunning);
++
++        when(packageOps.getOps()).thenReturn(Collections.singletonList(entry));
++        when(entry.getAttributedOpEntries()).thenReturn(Map.of("tag", attributed));
++
++        return packageOps;
++    }
++
+     private class TestHandler extends AppOpsControllerImpl.H {
+         TestHandler(Looper looper) {
+             mController.super(looper);
+-- 
+2.43.0.rc1.413.gea7ed67945-goog
+
