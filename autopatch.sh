@@ -32,6 +32,10 @@ conflict_list=""
 applied_already=""
 git_select=""
 
+if [[ $TARGET_PRODUCT == "base_aaos" ]]; then
+	TARGET_PRODUCT="base"
+fi
+
 usage() {
 	echo "USAGE"
 	echo "Run below cmd to apply patches only to a specific repo:"
