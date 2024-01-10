@@ -283,3 +283,4 @@ if [[ -e ${private_vertical_utils_dir} ]] && [[ -d ${private_vertical_utils_dir}
       fi
     fi
 fi
+
