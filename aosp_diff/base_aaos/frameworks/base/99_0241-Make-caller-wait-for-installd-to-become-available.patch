@@ -1,0 +1,117 @@
+From 5b36959e30cf077de1716c6490b103f1cffb8fc6 Mon Sep 17 00:00:00 2001
+From: Ankit Agrawal <ankit.agarwal@intel.com>
+Date: Fri, 12 Jan 2024 16:50:12 +0530
+Subject: [PATCH] Fixed for boot to recovery mode after G3 boot and Cold boot.
+
+Make caller wait for installd to become available.
+
+Referenced from below google commits
+Bug: 231262144
+ChangeId I571062806f11b0e9f75d230935e8979f21a413ba
+ChangeId Ief289ff18f5a66b1247d236100686e4839b9e64d
+
+Tests: delay installd binding, observe no crashes and calls eventually
+succeed.
+
+Tracked-On: OAM-114512
+Signed-off-by: Ankit Agrawal <ankit.agarwal@intel.com>
+---
+ .../java/com/android/server/pm/Installer.java | 30 +++++++++++++++----
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/services/core/java/com/android/server/pm/Installer.java b/services/core/java/com/android/server/pm/Installer.java
+index 8fd545f271f3..caa061dd5a12 100644
+--- a/services/core/java/com/android/server/pm/Installer.java
++++ b/services/core/java/com/android/server/pm/Installer.java
+@@ -45,6 +45,8 @@ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
+ 
+ public class Installer extends SystemService {
+     private static final String TAG = "Installer";
+@@ -108,9 +110,13 @@ public class Installer extends SystemService {
+     public static final int FLAG_CLEAR_APP_DATA_KEEP_ART_PROFILES =
+             IInstalld.FLAG_CLEAR_APP_DATA_KEEP_ART_PROFILES;
+ 
++    private static final long CONNECT_RETRY_DELAY_MS = DateUtils.SECOND_IN_MILLIS;
++    private static final long CONNECT_WAIT_MS = 10 * DateUtils.SECOND_IN_MILLIS;
++
+     private final boolean mIsolated;
+ 
+-    private volatile IInstalld mInstalld;
++    private volatile IInstalld mInstalld = null;
++    private volatile CountDownLatch mInstalldLatch = new CountDownLatch(1);
+     private volatile Object mWarnIfHeld;
+ 
+     public Installer(Context context) {
+@@ -139,6 +145,7 @@ public class Installer extends SystemService {
+     public void onStart() {
+         if (mIsolated) {
+             mInstalld = null;
++            mInstalldLatch.countDown();
+         } else {
+             connect();
+         }
+@@ -152,6 +159,7 @@ public class Installer extends SystemService {
+                     @Override
+                     public void binderDied() {
+                         Slog.w(TAG, "installd died; reconnecting");
++                        mInstalldLatch = new CountDownLatch(1);
+                         connect();
+                     }
+                 }, 0);
+@@ -161,7 +169,9 @@ public class Installer extends SystemService {
+         }
+ 
+         if (binder != null) {
+-            mInstalld = IInstalld.Stub.asInterface(binder);
++            IInstalld installd = IInstalld.Stub.asInterface(binder);
++            mInstalld = installd;
++            mInstalldLatch.countDown();
+             try {
+                 invalidateMounts();
+             } catch (InstallerException ignored) {
+@@ -170,7 +180,7 @@ public class Installer extends SystemService {
+             Slog.w(TAG, "installd not found; trying again");
+             BackgroundThread.getHandler().postDelayed(() -> {
+                 connect();
+-            }, DateUtils.SECOND_IN_MILLIS);
++            }, CONNECT_RETRY_DELAY_MS);
+         }
+     }
+ 
+@@ -179,7 +189,7 @@ public class Installer extends SystemService {
+      *
+      * @return if the remote call should continue.
+      */
+-    private boolean checkBeforeRemote() {
++    private boolean checkBeforeRemote() throws InstallerException {
+         if (mWarnIfHeld != null && Thread.holdsLock(mWarnIfHeld)) {
+             Slog.wtf(TAG, "Calling thread " + Thread.currentThread().getName() + " is holding 0x"
+                     + Integer.toHexString(System.identityHashCode(mWarnIfHeld)), new Throwable());
+@@ -187,9 +197,17 @@ public class Installer extends SystemService {
+         if (mIsolated) {
+             Slog.i(TAG, "Ignoring request because this installer is isolated");
+             return false;
+-        } else {
+-            return true;
++	}
++
++        try {
++            if (!mInstalldLatch.await(CONNECT_WAIT_MS, TimeUnit.MILLISECONDS)) {
++                throw new InstallerException("time out waiting for the installer to be ready");
++            }
++        } catch (InterruptedException e) {
++            // Do nothing.
+         }
++
++        return true;
+     }
+ 
+     private static CreateAppDataArgs buildCreateAppDataArgs(String uuid, String packageName,
+-- 
+2.17.1
+
