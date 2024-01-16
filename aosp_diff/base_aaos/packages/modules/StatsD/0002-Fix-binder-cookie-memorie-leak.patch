@@ -1,0 +1,827 @@
+From 4457368e01bb5151ebccf509c6367a45502d8443 Mon Sep 17 00:00:00 2001
+From: Tej Singh <singhtejinder@google.com>
+Date: Tue, 19 Oct 2021 23:40:07 -0700
+Subject: [PATCH] Fix binder cookie memorie leak
+
+Statsd was only deleting cookies for binder deaths when the death
+notifier was invoked. However, it is possible for the binder to get
+overwritten and for the client process to never die.
+
+The fix for now is to not call LinkToDeath and avoid cookies entirely.
+We lazily remove objects from the maps when we receive a dead object
+exception on them.
+
+Other options and more details are at go/statsd-binder-cookie-leak.
+
+Test: atest statsd_test
+Bug: 180471118
+Bug: 202499776
+Change-Id: Ie6ee3176e73a8602ca906396c0afc7df332deed1
+---
+ statsd/src/StatsService.cpp                   |  27 +++--
+ statsd/src/config/ConfigManager.cpp           | 101 ++++--------------
+ statsd/src/config/ConfigManager.h             |  33 +++---
+ statsd/src/external/StatsCallbackPuller.cpp   |  14 ++-
+ statsd/src/external/StatsCallbackPuller.h     |   2 +-
+ statsd/src/external/StatsPuller.cpp           |  14 +--
+ statsd/src/external/StatsPuller.h             |  15 ++-
+ statsd/src/external/StatsPullerManager.cpp    |  64 ++++-------
+ statsd/src/external/StatsPullerManager.h      |   9 --
+ statsd/src/external/TrainInfoPuller.cpp       |   6 +-
+ statsd/src/external/TrainInfoPuller.h         |   2 +-
+ .../external/StatsCallbackPuller_test.cpp     |   6 +-
+ statsd/tests/external/StatsPuller_test.cpp    |  42 ++++----
+ 13 files changed, 128 insertions(+), 207 deletions(-)
+
+diff --git a/statsd/src/StatsService.cpp b/statsd/src/StatsService.cpp
+index 3ecb8532..445048d4 100644
+--- a/statsd/src/StatsService.cpp
++++ b/statsd/src/StatsService.cpp
+@@ -130,13 +130,17 @@ StatsService::StatsService(const sp<Looper>& handlerLooper, shared_ptr<LogEventQ
+                 if (receiver == nullptr) {
+                     VLOG("Could not find a broadcast receiver for %s", key.ToString().c_str());
+                     return false;
+-                } else if (receiver->sendDataBroadcast(
+-                           mProcessor->getLastReportTimeNs(key)).isOk()) {
++                }
++                Status status = receiver->sendDataBroadcast(mProcessor->getLastReportTimeNs(key));
++                if (status.isOk()) {
+                     return true;
+-                } else {
+-                    VLOG("Failed to send a broadcast for receiver %s", key.ToString().c_str());
+-                    return false;
+                 }
++                if (status.getExceptionCode() == EX_TRANSACTION_FAILED &&
++                    status.getStatus() == STATUS_DEAD_OBJECT) {
++                    mConfigManager->RemoveConfigReceiver(key, receiver);
++                }
++                VLOG("Failed to send a broadcast for receiver %s", key.ToString().c_str());
++                return false;
+             },
+             [this](const int& uid, const vector<int64_t>& activeConfigs) {
+                 shared_ptr<IPendingIntentRef> receiver =
+@@ -144,13 +148,18 @@ StatsService::StatsService(const sp<Looper>& handlerLooper, shared_ptr<LogEventQ
+                 if (receiver == nullptr) {
+                     VLOG("Could not find receiver for uid %d", uid);
+                     return false;
+-                } else if (receiver->sendActiveConfigsChangedBroadcast(activeConfigs).isOk()) {
++                }
++                Status status = receiver->sendActiveConfigsChangedBroadcast(activeConfigs);
++                if (status.isOk()) {
+                     VLOG("StatsService::active configs broadcast succeeded for uid %d" , uid);
+                     return true;
+-                } else {
+-                    VLOG("StatsService::active configs broadcast failed for uid %d" , uid);
+-                    return false;
+                 }
++                if (status.getExceptionCode() == EX_TRANSACTION_FAILED &&
++                    status.getStatus() == STATUS_DEAD_OBJECT) {
++                    mConfigManager->RemoveActiveConfigsChangedReceiver(uid, receiver);
++                }
++                VLOG("StatsService::active configs broadcast failed for uid %d", uid);
++                return false;
+             });
+ 
+     mUidMap->setListener(mProcessor);
+diff --git a/statsd/src/config/ConfigManager.cpp b/statsd/src/config/ConfigManager.cpp
+index 13020e06..d839e024 100644
+--- a/statsd/src/config/ConfigManager.cpp
++++ b/statsd/src/config/ConfigManager.cpp
+@@ -42,78 +42,7 @@ using std::vector;
+ using android::base::StringPrintf;
+ using std::unique_ptr;
+ 
+-struct ConfigReceiverDeathCookie {
+-    ConfigReceiverDeathCookie(const wp<ConfigManager>& configManager, const ConfigKey& configKey,
+-                              const shared_ptr<IPendingIntentRef>& pir) :
+-            mConfigManager(configManager), mConfigKey(configKey), mPir(pir) {
+-    }
+-
+-    wp<ConfigManager> mConfigManager;
+-    ConfigKey mConfigKey;
+-    shared_ptr<IPendingIntentRef> mPir;
+-};
+-
+-void ConfigManager::configReceiverDied(void* cookie) {
+-    auto cookie_ = static_cast<ConfigReceiverDeathCookie*>(cookie);
+-    sp<ConfigManager> thiz = cookie_->mConfigManager.promote();
+-    if (!thiz) {
+-        return;
+-    }
+-
+-    ConfigKey& configKey = cookie_->mConfigKey;
+-    shared_ptr<IPendingIntentRef>& pir = cookie_->mPir;
+-
+-    // Erase the mapping from the config key to the config receiver (pir) if the
+-    // mapping still exists.
+-    lock_guard<mutex> lock(thiz->mMutex);
+-    auto it = thiz->mConfigReceivers.find(configKey);
+-    if (it != thiz->mConfigReceivers.end() && it->second == pir) {
+-        thiz->mConfigReceivers.erase(configKey);
+-    }
+-
+-    // The death recipient corresponding to this specific pir can never be
+-    // triggered again, so free up resources.
+-    delete cookie_;
+-}
+-
+-struct ActiveConfigChangedReceiverDeathCookie {
+-    ActiveConfigChangedReceiverDeathCookie(const wp<ConfigManager>& configManager, const int uid,
+-                                           const shared_ptr<IPendingIntentRef>& pir) :
+-            mConfigManager(configManager), mUid(uid), mPir(pir) {
+-    }
+-
+-    wp<ConfigManager> mConfigManager;
+-    int mUid;
+-    shared_ptr<IPendingIntentRef> mPir;
+-};
+-
+-void ConfigManager::activeConfigChangedReceiverDied(void* cookie) {
+-    auto cookie_ = static_cast<ActiveConfigChangedReceiverDeathCookie*>(cookie);
+-    sp<ConfigManager> thiz = cookie_->mConfigManager.promote();
+-    if (!thiz) {
+-        return;
+-    }
+-
+-    int uid = cookie_->mUid;
+-    shared_ptr<IPendingIntentRef>& pir = cookie_->mPir;
+-
+-    // Erase the mapping from the config key to the active config changed
+-    // receiver (pir) if the mapping still exists.
+-    lock_guard<mutex> lock(thiz->mMutex);
+-    auto it = thiz->mActiveConfigsChangedReceivers.find(uid);
+-    if (it != thiz->mActiveConfigsChangedReceivers.end() && it->second == pir) {
+-        thiz->mActiveConfigsChangedReceivers.erase(uid);
+-    }
+-
+-    // The death recipient corresponding to this specific pir can never
+-    // be triggered again, so free up resources.
+-    delete cookie_;
+-}
+-
+-ConfigManager::ConfigManager() :
+-    mConfigReceiverDeathRecipient(AIBinder_DeathRecipient_new(configReceiverDied)),
+-    mActiveConfigChangedReceiverDeathRecipient(
+-            AIBinder_DeathRecipient_new(activeConfigChangedReceiverDied)) {
++ConfigManager::ConfigManager() {
+ }
+ 
+ ConfigManager::~ConfigManager() {
+@@ -189,8 +118,6 @@ void ConfigManager::SetConfigReceiver(const ConfigKey& key,
+                                       const shared_ptr<IPendingIntentRef>& pir) {
+     lock_guard<mutex> lock(mMutex);
+     mConfigReceivers[key] = pir;
+-    AIBinder_linkToDeath(pir->asBinder().get(), mConfigReceiverDeathRecipient.get(),
+-                         new ConfigReceiverDeathCookie(this, key, pir));
+ }
+ 
+ void ConfigManager::RemoveConfigReceiver(const ConfigKey& key) {
+@@ -198,14 +125,19 @@ void ConfigManager::RemoveConfigReceiver(const ConfigKey& key) {
+     mConfigReceivers.erase(key);
+ }
+ 
++void ConfigManager::RemoveConfigReceiver(const ConfigKey& key,
++                                         const shared_ptr<IPendingIntentRef>& pir) {
++    lock_guard<mutex> lock(mMutex);
++    auto it = mConfigReceivers.find(key);
++    if (it != mConfigReceivers.end() && it->second == pir) {
++        mConfigReceivers.erase(key);
++    }
++}
++
+ void ConfigManager::SetActiveConfigsChangedReceiver(const int uid,
+                                                     const shared_ptr<IPendingIntentRef>& pir) {
+-    {
+-        lock_guard<mutex> lock(mMutex);
+-        mActiveConfigsChangedReceivers[uid] = pir;
+-    }
+-    AIBinder_linkToDeath(pir->asBinder().get(), mActiveConfigChangedReceiverDeathRecipient.get(),
+-                         new ActiveConfigChangedReceiverDeathCookie(this, uid, pir));
++    lock_guard<mutex> lock(mMutex);
++    mActiveConfigsChangedReceivers[uid] = pir;
+ }
+ 
+ void ConfigManager::RemoveActiveConfigsChangedReceiver(const int uid) {
+@@ -213,6 +145,15 @@ void ConfigManager::RemoveActiveConfigsChangedReceiver(const int uid) {
+     mActiveConfigsChangedReceivers.erase(uid);
+ }
+ 
++void ConfigManager::RemoveActiveConfigsChangedReceiver(const int uid,
++                                                       const shared_ptr<IPendingIntentRef>& pir) {
++    lock_guard<mutex> lock(mMutex);
++    auto it = mActiveConfigsChangedReceivers.find(uid);
++    if (it != mActiveConfigsChangedReceivers.end() && it->second == pir) {
++        mActiveConfigsChangedReceivers.erase(uid);
++    }
++}
++
+ void ConfigManager::RemoveConfig(const ConfigKey& key) {
+     vector<sp<ConfigListener>> broadcastList;
+     {
+diff --git a/statsd/src/config/ConfigManager.h b/statsd/src/config/ConfigManager.h
+index bef057f9..7401ffde 100644
+--- a/statsd/src/config/ConfigManager.h
++++ b/statsd/src/config/ConfigManager.h
+@@ -82,6 +82,12 @@ public:
+      */
+     void RemoveConfigReceiver(const ConfigKey& key);
+ 
++    /**
++     * Erase the broadcast receiver for this config key if it is equal to the provided broadcast
++     * receiver.
++     */
++    void RemoveConfigReceiver(const ConfigKey& key, const shared_ptr<IPendingIntentRef>& pir);
++
+     /**
+      * Sets the broadcast receiver that is notified whenever the list of active configs
+      * changes for this uid.
+@@ -99,6 +105,13 @@ public:
+      */
+     void RemoveActiveConfigsChangedReceiver(const int uid);
+ 
++    /**
++     * Erase the active configs changed broadcast receiver associated with this uid if it is equal
++     * to the provided broadcast receiver.
++     */
++    void RemoveActiveConfigsChangedReceiver(const int uid,
++                                            const shared_ptr<IPendingIntentRef>& pir);
++
+     /**
+      * A configuration was removed.
+      *
+@@ -150,30 +163,12 @@ private:
+      * Each uid can be subscribed by up to one receiver to notify that the list of active configs
+      * for this uid has changed. The receiver is specified as IPendingIntentRef.
+      */
+-     std::map<int, shared_ptr<IPendingIntentRef>> mActiveConfigsChangedReceivers;
++    std::map<int, shared_ptr<IPendingIntentRef>> mActiveConfigsChangedReceivers;
+ 
+     /**
+      * The ConfigListeners that will be told about changes.
+      */
+     std::vector<sp<ConfigListener>> mListeners;
+-
+-    // Death recipients that are triggered when the host process holding an
+-    // IPendingIntentRef dies.
+-    ::ndk::ScopedAIBinder_DeathRecipient mConfigReceiverDeathRecipient;
+-    ::ndk::ScopedAIBinder_DeathRecipient mActiveConfigChangedReceiverDeathRecipient;
+-
+-    /**
+-     * Death recipient callback that is called when a config receiver dies.
+-     * The cookie is a pointer to a ConfigReceiverDeathCookie.
+-     */
+-    static void configReceiverDied(void* cookie);
+-
+-    /**
+-     * Death recipient callback that is called when an active config changed
+-     * receiver dies. The cookie is a pointer to an
+-     * ActiveConfigChangedReceiverDeathCookie.
+-     */
+-    static void activeConfigChangedReceiverDied(void* cookie);
+ };
+ 
+ }  // namespace statsd
+diff --git a/statsd/src/external/StatsCallbackPuller.cpp b/statsd/src/external/StatsCallbackPuller.cpp
+index 78e6f094..49864710 100644
+--- a/statsd/src/external/StatsCallbackPuller.cpp
++++ b/statsd/src/external/StatsCallbackPuller.cpp
+@@ -42,11 +42,11 @@ StatsCallbackPuller::StatsCallbackPuller(int tagId, const shared_ptr<IPullAtomCa
+     VLOG("StatsCallbackPuller created for tag %d", tagId);
+ }
+ 
+-bool StatsCallbackPuller::PullInternal(vector<shared_ptr<LogEvent>>* data) {
++PullErrorCode StatsCallbackPuller::PullInternal(vector<shared_ptr<LogEvent>>* data) {
+     VLOG("StatsCallbackPuller called for tag %d", mTagId);
+     if(mCallback == nullptr) {
+         ALOGW("No callback registered");
+-        return false;
++        return PULL_FAIL;
+     }
+ 
+     // Shared variables needed in the result receiver.
+@@ -87,7 +87,11 @@ bool StatsCallbackPuller::PullInternal(vector<shared_ptr<LogEvent>>* data) {
+     Status status = mCallback->onPullAtom(mTagId, resultReceiver);
+     if (!status.isOk()) {
+         StatsdStats::getInstance().notePullBinderCallFailed(mTagId);
+-        return false;
++        if (status.getExceptionCode() == EX_TRANSACTION_FAILED &&
++            status.getStatus() == STATUS_DEAD_OBJECT) {
++            return PULL_DEAD_OBJECT;
++        }
++        return PULL_FAIL;
+     }
+ 
+     {
+@@ -99,14 +103,14 @@ bool StatsCallbackPuller::PullInternal(vector<shared_ptr<LogEvent>>* data) {
+             // Note: The parent stats puller will also note that there was a timeout and that the
+             // cache should be cleared. Once we migrate all pullers to this callback, we could
+             // consolidate the logic.
+-            return true;
++            return PULL_SUCCESS;
+         } else {
+             // Only copy the data if we did not timeout and the pull was successful.
+             if (*pullSuccess) {
+                 *data = std::move(*sharedData);
+             }
+             VLOG("StatsCallbackPuller::pull succeeded for %d", mTagId);
+-            return *pullSuccess;
++            return *pullSuccess ? PULL_SUCCESS : PULL_FAIL;
+         }
+     }
+ }
+diff --git a/statsd/src/external/StatsCallbackPuller.h b/statsd/src/external/StatsCallbackPuller.h
+index e82e8bb5..43d35fc1 100644
+--- a/statsd/src/external/StatsCallbackPuller.h
++++ b/statsd/src/external/StatsCallbackPuller.h
+@@ -33,7 +33,7 @@ public:
+                                  const std::vector<int> additiveFields);
+ 
+ private:
+-    bool PullInternal(vector<std::shared_ptr<LogEvent>>* data) override;
++    PullErrorCode PullInternal(vector<std::shared_ptr<LogEvent>>* data) override;
+     const shared_ptr<IPullAtomCallback> mCallback;
+ 
+     FRIEND_TEST(StatsCallbackPullerTest, PullFail);
+diff --git a/statsd/src/external/StatsPuller.cpp b/statsd/src/external/StatsPuller.cpp
+index bb5d0a6b..b8e4abc7 100644
+--- a/statsd/src/external/StatsPuller.cpp
++++ b/statsd/src/external/StatsPuller.cpp
+@@ -42,7 +42,8 @@ StatsPuller::StatsPuller(const int tagId, const int64_t coolDownNs, const int64_
+       mLastEventTimeNs(0) {
+ }
+ 
+-bool StatsPuller::Pull(const int64_t eventTimeNs, std::vector<std::shared_ptr<LogEvent>>* data) {
++PullErrorCode StatsPuller::Pull(const int64_t eventTimeNs,
++                                std::vector<std::shared_ptr<LogEvent>>* data) {
+     lock_guard<std::mutex> lock(mLock);
+     const int64_t elapsedTimeNs = getElapsedRealtimeNs();
+     const int64_t systemUptimeMillis = getSystemUptimeMillis();
+@@ -55,7 +56,7 @@ bool StatsPuller::Pull(const int64_t eventTimeNs, std::vector<std::shared_ptr<Lo
+             StatsdStats::getInstance().notePullFromCache(mTagId);
+ 
+         }
+-        return mHasGoodData;
++        return mHasGoodData ? PULL_SUCCESS : PULL_FAIL;
+     }
+     if (mLastPullTimeNs > 0) {
+         StatsdStats::getInstance().updateMinPullIntervalSec(
+@@ -64,9 +65,10 @@ bool StatsPuller::Pull(const int64_t eventTimeNs, std::vector<std::shared_ptr<Lo
+     mCachedData.clear();
+     mLastPullTimeNs = elapsedTimeNs;
+     mLastEventTimeNs = eventTimeNs;
+-    mHasGoodData = PullInternal(&mCachedData);
++    PullErrorCode status = PullInternal(&mCachedData);
++    mHasGoodData = (status == PULL_SUCCESS);
+     if (!mHasGoodData) {
+-        return mHasGoodData;
++        return status;
+     }
+     const int64_t pullElapsedDurationNs = getElapsedRealtimeNs() - elapsedTimeNs;
+     const int64_t pullSystemUptimeDurationMillis = getSystemUptimeMillis() - systemUptimeMillis;
+@@ -80,7 +82,7 @@ bool StatsPuller::Pull(const int64_t eventTimeNs, std::vector<std::shared_ptr<Lo
+                 mTagId, pullSystemUptimeDurationMillis, NanoToMillis(pullElapsedDurationNs));
+         ALOGW("Pull for atom %d exceeds timeout %lld nano seconds.", mTagId,
+               (long long)pullElapsedDurationNs);
+-        return mHasGoodData;
++        return PULL_FAIL;
+     }
+ 
+     if (mCachedData.size() > 0) {
+@@ -93,7 +95,7 @@ bool StatsPuller::Pull(const int64_t eventTimeNs, std::vector<std::shared_ptr<Lo
+     }
+ 
+     (*data) = mCachedData;
+-    return mHasGoodData;
++    return PULL_SUCCESS;
+ }
+ 
+ int StatsPuller::ForceClearCache() {
+diff --git a/statsd/src/external/StatsPuller.h b/statsd/src/external/StatsPuller.h
+index 470d15e6..d8c7eb3b 100644
+--- a/statsd/src/external/StatsPuller.h
++++ b/statsd/src/external/StatsPuller.h
+@@ -33,6 +33,12 @@ namespace android {
+ namespace os {
+ namespace statsd {
+ 
++enum PullErrorCode {
++    PULL_SUCCESS = 0,
++    PULL_FAIL = 1,
++    PULL_DEAD_OBJECT = 2,
++};
++
+ class StatsPuller : public virtual RefBase {
+ public:
+     explicit StatsPuller(const int tagId,
+@@ -45,13 +51,14 @@ public:
+     // Pulls the most recent data.
+     // The data may be served from cache if consecutive pulls come within
+     // predefined cooldown time.
+-    // Returns true if the pull was successful.
+-    // Returns false when
++    // Returns PULL_SUCCESS if the pull was successful.
++    // Returns PULL_DEAD_OBJECT if a dead object exception occurred when making a pull.
++    // Returns PULL_FAIL when
+     //   1) the pull fails
+     //   2) pull takes longer than mPullTimeoutNs (intrinsic to puller)
+     // If a metric wants to make any change to the data, like timestamps, it
+     // should make a copy as this data may be shared with multiple metrics.
+-    bool Pull(const int64_t eventTimeNs, std::vector<std::shared_ptr<LogEvent>>* data);
++    PullErrorCode Pull(const int64_t eventTimeNs, std::vector<std::shared_ptr<LogEvent>>* data);
+ 
+     // Clear cache immediately
+     int ForceClearCache();
+@@ -77,7 +84,7 @@ private:
+     mutable std::mutex mLock;
+ 
+     // Real puller impl.
+-    virtual bool PullInternal(std::vector<std::shared_ptr<LogEvent>>* data) = 0;
++    virtual PullErrorCode PullInternal(std::vector<std::shared_ptr<LogEvent>>* data) = 0;
+ 
+     bool mHasGoodData = false;
+ 
+diff --git a/statsd/src/external/StatsPullerManager.cpp b/statsd/src/external/StatsPullerManager.cpp
+index 8334b6b4..c8c09b42 100644
+--- a/statsd/src/external/StatsPullerManager.cpp
++++ b/statsd/src/external/StatsPullerManager.cpp
+@@ -41,44 +41,6 @@ namespace android {
+ namespace os {
+ namespace statsd {
+ 
+-// Stores the puller as a wp to avoid holding a reference in case it is unregistered and
+-// pullAtomCallbackDied is never called.
+-struct PullAtomCallbackDeathCookie {
+-    PullAtomCallbackDeathCookie(const wp<StatsPullerManager>& pullerManager,
+-                                const PullerKey& pullerKey, const wp<StatsPuller>& puller) :
+-            mPullerManager(pullerManager), mPullerKey(pullerKey), mPuller(puller) {
+-    }
+-
+-    wp<StatsPullerManager> mPullerManager;
+-    PullerKey mPullerKey;
+-    wp<StatsPuller> mPuller;
+-};
+-
+-void StatsPullerManager::pullAtomCallbackDied(void* cookie) {
+-    PullAtomCallbackDeathCookie* cookie_ = static_cast<PullAtomCallbackDeathCookie*>(cookie);
+-    sp<StatsPullerManager> thiz = cookie_->mPullerManager.promote();
+-    if (!thiz) {
+-        return;
+-    }
+-
+-    const PullerKey& pullerKey = cookie_->mPullerKey;
+-    wp<StatsPuller> puller = cookie_->mPuller;
+-
+-    // Erase the mapping from the puller key to the puller if the mapping still exists.
+-    // Note that we are removing the StatsPuller object, which internally holds the binder
+-    // IPullAtomCallback. However, each new registration creates a new StatsPuller, so this works.
+-    lock_guard<mutex> lock(thiz->mLock);
+-    const auto& it = thiz->kAllPullAtomInfo.find(pullerKey);
+-    if (it != thiz->kAllPullAtomInfo.end() && puller != nullptr && puller == it->second) {
+-        StatsdStats::getInstance().notePullerCallbackRegistrationChanged(pullerKey.atomTag,
+-                                                                         /*registered=*/false);
+-        thiz->kAllPullAtomInfo.erase(pullerKey);
+-    }
+-    // The death recipient corresponding to this specific IPullAtomCallback can never
+-    // be triggered again, so free up resources.
+-    delete cookie_;
+-}
+-
+ // Values smaller than this may require to update the alarm.
+ const int64_t NO_ALARM_UPDATE = INT64_MAX;
+ 
+@@ -87,8 +49,7 @@ StatsPullerManager::StatsPullerManager()
+               // TrainInfo.
+               {{.atomTag = util::TRAIN_INFO, .uid = AID_STATSD}, new TrainInfoPuller()},
+       }),
+-      mNextPullTimeNs(NO_ALARM_UPDATE),
+-      mPullAtomCallbackDeathRecipient(AIBinder_DeathRecipient_new(pullAtomCallbackDied)) {
++      mNextPullTimeNs(NO_ALARM_UPDATE) {
+ }
+ 
+ bool StatsPullerManager::Pull(int tagId, const ConfigKey& configKey, const int64_t eventTimeNs,
+@@ -131,12 +92,20 @@ bool StatsPullerManager::PullLocked(int tagId, const vector<int32_t>& uids,
+         PullerKey key = {.atomTag = tagId, .uid = uid};
+         auto pullerIt = kAllPullAtomInfo.find(key);
+         if (pullerIt != kAllPullAtomInfo.end()) {
+-            bool ret = pullerIt->second->Pull(eventTimeNs, data);
++            PullErrorCode status = pullerIt->second->Pull(eventTimeNs, data);
+             VLOG("pulled %zu items", data->size());
+-            if (!ret) {
++            if (status != PULL_SUCCESS) {
+                 StatsdStats::getInstance().notePullFailed(tagId);
+             }
+-            return ret;
++            // If we received a dead object exception, it means the client process has died.
++            // We can remove the puller from the map.
++            if (status == PULL_DEAD_OBJECT) {
++                StatsdStats::getInstance().notePullerCallbackRegistrationChanged(
++                        tagId,
++                        /*registered=*/false);
++                kAllPullAtomInfo.erase(pullerIt);
++            }
++            return status == PULL_SUCCESS;
+         }
+     }
+     StatsdStats::getInstance().notePullerNotFound(tagId);
+@@ -344,16 +313,19 @@ void StatsPullerManager::RegisterPullAtomCallback(const int uid, const int32_t a
+         return;
+     }
+ 
+-    StatsdStats::getInstance().notePullerCallbackRegistrationChanged(atomTag, /*registered=*/true);
+     int64_t actualCoolDownNs = coolDownNs < kMinCoolDownNs ? kMinCoolDownNs : coolDownNs;
+     int64_t actualTimeoutNs = timeoutNs > kMaxTimeoutNs ? kMaxTimeoutNs : timeoutNs;
+ 
+     sp<StatsCallbackPuller> puller = new StatsCallbackPuller(atomTag, callback, actualCoolDownNs,
+                                                              actualTimeoutNs, additiveFields);
+     PullerKey key = {.atomTag = atomTag, .uid = uid};
+-    AIBinder_linkToDeath(callback->asBinder().get(), mPullAtomCallbackDeathRecipient.get(),
+-                         new PullAtomCallbackDeathCookie(this, key, puller));
++    auto it = kAllPullAtomInfo.find(key);
++    if (it != kAllPullAtomInfo.end()) {
++        StatsdStats::getInstance().notePullerCallbackRegistrationChanged(atomTag,
++                                                                         /*registered=*/false);
++    }
+     kAllPullAtomInfo[key] = puller;
++    StatsdStats::getInstance().notePullerCallbackRegistrationChanged(atomTag, /*registered=*/true);
+ }
+ 
+ void StatsPullerManager::UnregisterPullAtomCallback(const int uid, const int32_t atomTag) {
+diff --git a/statsd/src/external/StatsPullerManager.h b/statsd/src/external/StatsPullerManager.h
+index 7f880324..4e87136b 100644
+--- a/statsd/src/external/StatsPullerManager.h
++++ b/statsd/src/external/StatsPullerManager.h
+@@ -164,15 +164,6 @@ private:
+ 
+     int64_t mNextPullTimeNs;
+ 
+-    // Death recipient that is triggered when the process holding the IPullAtomCallback has died.
+-    ::ndk::ScopedAIBinder_DeathRecipient mPullAtomCallbackDeathRecipient;
+-
+-    /**
+-     * Death recipient callback that is called when a pull atom callback dies.
+-     * The cookie is a pointer to a PullAtomCallbackDeathCookie.
+-     */
+-    static void pullAtomCallbackDied(void* cookie);
+-
+     FRIEND_TEST(GaugeMetricE2eTest, TestRandomSamplePulledEvents);
+     FRIEND_TEST(GaugeMetricE2eTest, TestRandomSamplePulledEvent_LateAlarm);
+     FRIEND_TEST(GaugeMetricE2eTest, TestRandomSamplePulledEventsWithActivation);
+diff --git a/statsd/src/external/TrainInfoPuller.cpp b/statsd/src/external/TrainInfoPuller.cpp
+index 3837f4a1..9273788d 100644
+--- a/statsd/src/external/TrainInfoPuller.cpp
++++ b/statsd/src/external/TrainInfoPuller.cpp
+@@ -36,18 +36,18 @@ TrainInfoPuller::TrainInfoPuller() :
+     StatsPuller(util::TRAIN_INFO) {
+ }
+ 
+-bool TrainInfoPuller::PullInternal(vector<shared_ptr<LogEvent>>* data) {
++PullErrorCode TrainInfoPuller::PullInternal(vector<shared_ptr<LogEvent>>* data) {
+     vector<InstallTrainInfo> trainInfoList =
+         StorageManager::readAllTrainInfo();
+     if (trainInfoList.empty()) {
+         ALOGW("Train info was empty.");
+-        return true;
++        return PULL_SUCCESS;
+     }
+     for (InstallTrainInfo& trainInfo : trainInfoList) {
+         auto event = make_shared<LogEvent>(getWallClockNs(), getElapsedRealtimeNs(), trainInfo);
+         data->push_back(event);
+     }
+-    return true;
++    return PULL_SUCCESS;
+ }
+ 
+ }  // namespace statsd
+diff --git a/statsd/src/external/TrainInfoPuller.h b/statsd/src/external/TrainInfoPuller.h
+index 615d0235..9c205852 100644
+--- a/statsd/src/external/TrainInfoPuller.h
++++ b/statsd/src/external/TrainInfoPuller.h
+@@ -30,7 +30,7 @@ class TrainInfoPuller : public StatsPuller {
+   TrainInfoPuller();
+ 
+  private:
+-  bool PullInternal(vector<std::shared_ptr<LogEvent>>* data) override;
++     PullErrorCode PullInternal(vector<std::shared_ptr<LogEvent>>* data) override;
+ };
+ 
+ }  // namespace statsd
+diff --git a/statsd/tests/external/StatsCallbackPuller_test.cpp b/statsd/tests/external/StatsCallbackPuller_test.cpp
+index 85a60886..d3d1e12d 100644
+--- a/statsd/tests/external/StatsCallbackPuller_test.cpp
++++ b/statsd/tests/external/StatsCallbackPuller_test.cpp
+@@ -128,7 +128,7 @@ TEST_F(StatsCallbackPullerTest, PullSuccess) {
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+     int64_t startTimeNs = getElapsedRealtimeNs();
+-    EXPECT_TRUE(puller.PullInternal(&dataHolder));
++    EXPECT_EQ(puller.PullInternal(&dataHolder), PULL_SUCCESS);
+     int64_t endTimeNs = getElapsedRealtimeNs();
+ 
+     ASSERT_EQ(1, dataHolder.size());
+@@ -148,7 +148,7 @@ TEST_F(StatsCallbackPullerTest, PullFail) {
+     StatsCallbackPuller puller(pullTagId, cb, pullCoolDownNs, pullTimeoutNs, {});
+ 
+     vector<shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_FALSE(puller.PullInternal(&dataHolder));
++    EXPECT_EQ(puller.PullInternal(&dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+@@ -165,7 +165,7 @@ TEST_F(StatsCallbackPullerTest, PullTimeout) {
+     vector<shared_ptr<LogEvent>> dataHolder;
+     int64_t startTimeNs = getElapsedRealtimeNs();
+     // Returns true to let StatsPuller code evaluate the timeout.
+-    EXPECT_TRUE(puller.PullInternal(&dataHolder));
++    EXPECT_EQ(puller.PullInternal(&dataHolder), PULL_SUCCESS);
+     int64_t endTimeNs = getElapsedRealtimeNs();
+     int64_t actualPullDurationNs = endTimeNs - startTimeNs;
+ 
+diff --git a/statsd/tests/external/StatsPuller_test.cpp b/statsd/tests/external/StatsPuller_test.cpp
+index 55a90365..a491d83b 100644
+--- a/statsd/tests/external/StatsPuller_test.cpp
++++ b/statsd/tests/external/StatsPuller_test.cpp
+@@ -51,10 +51,10 @@ public:
+         : StatsPuller(pullTagId, /*coolDownNs=*/MillisToNano(10), /*timeoutNs=*/MillisToNano(5)){};
+ 
+ private:
+-    bool PullInternal(vector<std::shared_ptr<LogEvent>>* data) override {
++    PullErrorCode PullInternal(vector<std::shared_ptr<LogEvent>>* data) override {
+         (*data) = pullData;
+         sleep_for(std::chrono::nanoseconds(pullDelayNs));
+-        return pullSuccess;
++        return pullSuccess ? PULL_SUCCESS : PULL_FAIL;
+     }
+ };
+ 
+@@ -92,7 +92,7 @@ TEST_F(StatsPullerTest, PullSuccess) {
+     pullSuccess = true;
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_TRUE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_SUCCESS);
+     ASSERT_EQ(1, dataHolder.size());
+     EXPECT_EQ(pullTagId, dataHolder[0]->GetTagId());
+     EXPECT_EQ(1111L, dataHolder[0]->GetElapsedTimestampNs());
+@@ -106,7 +106,7 @@ TEST_F(StatsPullerTest, PullSuccess) {
+ 
+     pullSuccess = true;
+ 
+-    EXPECT_TRUE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_SUCCESS);
+     ASSERT_EQ(1, dataHolder.size());
+     EXPECT_EQ(pullTagId, dataHolder[0]->GetTagId());
+     EXPECT_EQ(2222L, dataHolder[0]->GetElapsedTimestampNs());
+@@ -120,7 +120,7 @@ TEST_F(StatsPullerTest, PullFailAfterSuccess) {
+     pullSuccess = true;
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_TRUE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_SUCCESS);
+     ASSERT_EQ(1, dataHolder.size());
+     EXPECT_EQ(pullTagId, dataHolder[0]->GetTagId());
+     EXPECT_EQ(1111L, dataHolder[0]->GetElapsedTimestampNs());
+@@ -134,13 +134,13 @@ TEST_F(StatsPullerTest, PullFailAfterSuccess) {
+ 
+     pullSuccess = false;
+     dataHolder.clear();
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ 
+     // Fails due to hitting the cool down.
+     pullSuccess = true;
+     dataHolder.clear();
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+@@ -152,7 +152,7 @@ TEST_F(StatsPullerTest, PullTakeTooLongAndPullFast) {
+     pullDelayNs = MillisToNano(6);
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ 
+     pullData.clear();
+@@ -161,7 +161,7 @@ TEST_F(StatsPullerTest, PullTakeTooLongAndPullFast) {
+ 
+     pullSuccess = true;
+     dataHolder.clear();
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+@@ -171,7 +171,7 @@ TEST_F(StatsPullerTest, PullFail) {
+     pullSuccess = false;
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+@@ -182,7 +182,7 @@ TEST_F(StatsPullerTest, PullTakeTooLong) {
+     pullDelayNs = MillisToNano(6);
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+@@ -192,7 +192,7 @@ TEST_F(StatsPullerTest, PullTooFast) {
+     pullSuccess = true;
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_TRUE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_SUCCESS);
+     ASSERT_EQ(1, dataHolder.size());
+     EXPECT_EQ(pullTagId, dataHolder[0]->GetTagId());
+     EXPECT_EQ(1111L, dataHolder[0]->GetElapsedTimestampNs());
+@@ -205,7 +205,7 @@ TEST_F(StatsPullerTest, PullTooFast) {
+     pullSuccess = true;
+ 
+     dataHolder.clear();
+-    EXPECT_TRUE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_SUCCESS);
+     ASSERT_EQ(1, dataHolder.size());
+     EXPECT_EQ(pullTagId, dataHolder[0]->GetTagId());
+     EXPECT_EQ(1111L, dataHolder[0]->GetElapsedTimestampNs());
+@@ -219,7 +219,7 @@ TEST_F(StatsPullerTest, PullFailsAndTooFast) {
+     pullSuccess = false;
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ 
+     pullData.clear();
+@@ -227,7 +227,7 @@ TEST_F(StatsPullerTest, PullFailsAndTooFast) {
+ 
+     pullSuccess = true;
+ 
+-    EXPECT_FALSE(puller.Pull(getElapsedRealtimeNs(), &dataHolder));
++    EXPECT_EQ(puller.Pull(getElapsedRealtimeNs(), &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+@@ -238,7 +238,7 @@ TEST_F(StatsPullerTest, PullSameEventTime) {
+     int64_t eventTimeNs = getElapsedRealtimeNs();
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_TRUE(puller.Pull(eventTimeNs, &dataHolder));
++    EXPECT_EQ(puller.Pull(eventTimeNs, &dataHolder), PULL_SUCCESS);
+     ASSERT_EQ(1, dataHolder.size());
+     EXPECT_EQ(pullTagId, dataHolder[0]->GetTagId());
+     EXPECT_EQ(1111L, dataHolder[0]->GetElapsedTimestampNs());
+@@ -253,7 +253,7 @@ TEST_F(StatsPullerTest, PullSameEventTime) {
+     pullSuccess = true;
+ 
+     dataHolder.clear();
+-    EXPECT_TRUE(puller.Pull(eventTimeNs, &dataHolder));
++    EXPECT_EQ(puller.Pull(eventTimeNs, &dataHolder), PULL_SUCCESS);
+     ASSERT_EQ(1, dataHolder.size());
+     EXPECT_EQ(pullTagId, dataHolder[0]->GetTagId());
+     EXPECT_EQ(1111L, dataHolder[0]->GetElapsedTimestampNs());
+@@ -270,7 +270,7 @@ TEST_F(StatsPullerTest, PullTakeTooLongAndPullSameEventTime) {
+     pullDelayNs = MillisToNano(6);
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_FALSE(puller.Pull(eventTimeNs, &dataHolder));
++    EXPECT_EQ(puller.Pull(eventTimeNs, &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ 
+     // Sleep to ensure the cool down expires. 6ms is taken by the delay, so only 5 is needed here.
+@@ -282,7 +282,7 @@ TEST_F(StatsPullerTest, PullTakeTooLongAndPullSameEventTime) {
+ 
+     pullSuccess = true;
+     dataHolder.clear();
+-    EXPECT_FALSE(puller.Pull(eventTimeNs, &dataHolder));
++    EXPECT_EQ(puller.Pull(eventTimeNs, &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+@@ -293,7 +293,7 @@ TEST_F(StatsPullerTest, PullFailsAndPullSameEventTime) {
+     int64_t eventTimeNs = getElapsedRealtimeNs();
+ 
+     vector<std::shared_ptr<LogEvent>> dataHolder;
+-    EXPECT_FALSE(puller.Pull(eventTimeNs, &dataHolder));
++    EXPECT_EQ(puller.Pull(eventTimeNs, &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ 
+     // Sleep to ensure the cool down expires.
+@@ -304,7 +304,7 @@ TEST_F(StatsPullerTest, PullFailsAndPullSameEventTime) {
+ 
+     pullSuccess = true;
+ 
+-    EXPECT_FALSE(puller.Pull(eventTimeNs, &dataHolder));
++    EXPECT_EQ(puller.Pull(eventTimeNs, &dataHolder), PULL_FAIL);
+     ASSERT_EQ(0, dataHolder.size());
+ }
+ 
+-- 
+2.17.1
+
