@@ -1,0 +1,189 @@
+From 273cafcf013a99ea10e927e4159b32971eda8861 Mon Sep 17 00:00:00 2001
+From: Austin Sun <austin.sun@intel.com>
+Date: Mon, 23 Oct 2023 00:48:56 +0000
+Subject: [PATCH] WA: network netd change
+
+1) not disable ipfwd
+2) add eth0 to eth1 or wlan0 table
+3) identify VM3
+
+Tracked-On: OAM-113193
+Signed-off-by: Austin Sun <austin.sun@intel.com>
+---
+ server/RouteController.cpp  | 50 +++++++++++++++++++++++++++++++++++--
+ server/TetherController.cpp |  8 +++---
+ 2 files changed, 53 insertions(+), 5 deletions(-)
+
+diff --git a/server/RouteController.cpp b/server/RouteController.cpp
+index ba305e69..3be7e5d5 100644
+--- a/server/RouteController.cpp
++++ b/server/RouteController.cpp
+@@ -36,12 +36,14 @@
+ #include <android-base/file.h>
+ #include <android-base/stringprintf.h>
+ #include <android-base/strings.h>
++#include <android-base/properties.h>
+ #include "log/log.h"
+ #include "netid_client.h"
+ #include "netutils/ifc.h"
+ 
+ using android::base::StartsWith;
+ using android::base::StringPrintf;
++using android::base::GetProperty;
+ using android::base::WriteStringToFile;
+ using android::net::UidRangeParcel;
+ 
+@@ -61,6 +63,7 @@ const char* const ROUTE_TABLE_NAME_LEGACY_SYSTEM  = "legacy_system";
+ 
+ const char* const ROUTE_TABLE_NAME_LOCAL = "local";
+ const char* const ROUTE_TABLE_NAME_MAIN  = "main";
++const char* const VM_PROPERTY = "vendor.modules.eth.vm";
+ 
+ // None of our regular routes specify priority, which causes them to have the default priority.
+ // For default throw routes, we use a fixed priority of 100000.
+@@ -231,6 +234,16 @@ int padInterfaceName(const char* input, char* name, size_t* length, uint16_t* pa
+     return 0;
+ }
+ 
++//WA: hardcode for add eth0 subnet to localnetwork
++// to enable VM3 ping VM1, otherwise VM3 can not ping VM1
++void addInterfaceToTable(uint32_t table) {
++    ALOGI("add eth0 to %u table", table);
++    if (int ret = modifyIpRoute(RTM_NEWROUTE, NETLINK_ROUTE_CREATE_FLAGS, table, "eth0", "192.168.12.0/24",
++                  nullptr, 0 /* mtu */)) {
++        ALOGE("add eth0 to %u table%s", table, strerror(ret));
++    }
++}
++
+ // Adds or removes a routing rule for IPv4 and IPv6.
+ //
+ // + If |table| is non-zero, the rule points at the specified routing table. Otherwise, the table is
+@@ -264,7 +277,6 @@ int padInterfaceName(const char* input, char* name, size_t* length, uint16_t* pa
+     if (int ret = padInterfaceName(oif, oifName, &oifLength, &oifPadding)) {
+         return ret;
+     }
+-
+     // Either both start and end UID must be specified, or neither.
+     if ((uidStart == INVALID_UID) != (uidEnd == INVALID_UID)) {
+         ALOGE("incompatible start and end UIDs (%u vs %u)", uidStart, uidEnd);
+@@ -314,6 +326,7 @@ int padInterfaceName(const char* input, char* name, size_t* length, uint16_t* pa
+     };
+ 
+     uint16_t flags = (action == RTM_NEWRULE) ? NETLINK_RULE_CREATE_FLAGS : NETLINK_REQUEST_FLAGS;
++    ALOGI("modifyIpRule action:%s, rule:%s iifName:%s,ofiName:%s, table,%u",actionName(action),familyName(rule.family),iifName,oifName,table);
+     for (size_t i = 0; i < ARRAY_SIZE(AF_FAMILIES); ++i) {
+         rule.family = AF_FAMILIES[i];
+         if (int ret = sendNetlinkRequest(action, flags, iov, ARRAY_SIZE(iov), nullptr)) {
+@@ -440,6 +453,8 @@ int modifyIpRoute(uint16_t action, uint16_t flags, uint32_t table, const char* i
+     }
+ 
+     int ret = sendNetlinkRequest(action, flags, iov, ARRAY_SIZE(iov), nullptr);
++    ALOGI("modifyIpRoute %s route %s -> %s %s to table %u: %s",
++              actionName(action), destination, nexthop, interface, table, strerror(-ret));
+     if (ret) {
+         ALOGE("Error %s route %s -> %s %s to table %u: %s",
+               actionName(action), destination, nexthop, interface, table, strerror(-ret));
+@@ -798,7 +813,7 @@ int RouteController::modifyPhysicalNetwork(unsigned netId, const char* interface
+     if (table == RT_TABLE_UNSPEC) {
+         return -ESRCH;
+     }
+-
++    ALOGI("modifyPhysicalNetwork %s", interface);
+     for (const auto& [subPriority, uidRanges] : uidRangeMap) {
+         for (const UidRangeParcel& range : uidRanges.getRanges()) {
+             if (int ret = modifyUidNetworkRule(netId, table, range.start, range.stop, subPriority,
+@@ -815,7 +830,21 @@ int RouteController::modifyPhysicalNetwork(unsigned netId, const char* interface
+             }
+         }
+     }
++    //2023-10-20 13:16:28 remove as set default in Tracker
++    /*if (!strcmp(interface, "eth1")) {
++        //WA: this will enable VM3 to ping eth1 as default , otherwise
++        //if default network is eth0, then it can not access outlink
++        ALOGI("remove eth0 to default network");
++        int ret = removeInterfaceFromDefaultNetwork("eth0", permission);
++        if(ret){
++            ALOGE("remove eth0 to default network err %s", strerror(-ret));
++        }
+ 
++        ret = addInterfaceToDefaultNetwork(interface, permission);
++        if(ret){
++            ALOGE("add eth1 to default network err %s", strerror(-ret));
++        }
++    }*/
+     if (!modifyNonUidBasedRules) {
+         // we are done.
+         return 0;
+@@ -1148,6 +1177,7 @@ int RouteController::flushRoutes(const char* interface) {
+ }
+ 
+ int RouteController::Init(unsigned localNetId) {
++    ALOGD("RouteController Init");
+     if (int ret = flushRules()) {
+         return ret;
+     }
+@@ -1157,6 +1187,7 @@ int RouteController::Init(unsigned localNetId) {
+     if (int ret = addLocalNetworkRules(localNetId)) {
+         return ret;
+     }
++
+     if (int ret = addUnreachableRule()) {
+         return ret;
+     }
+@@ -1188,11 +1219,26 @@ int RouteController::removeInterfaceFromLocalNetwork(unsigned netId, const char*
+ int RouteController::addInterfaceToPhysicalNetwork(unsigned netId, const char* interface,
+                                                    Permission permission,
+                                                    const UidRangeMap& uidRangeMap) {
++    ALOGI("addInterfaceToPhysicalNetwork");
+     if (int ret = modifyPhysicalNetwork(netId, interface, uidRangeMap, permission, ACTION_ADD,
+                                         MODIFY_NON_UID_BASED_RULES)) {
+         return ret;
+     }
+     maybeModifyQdiscClsact(interface, ACTION_ADD);
++    uint32_t table = getRouteTableForInterface(interface);
++    if (table == RT_TABLE_UNSPEC) {
++        return -ESRCH;
++    }
++    if( strcmp("3",android::base::GetProperty(VM_PROPERTY,"").c_str())==0 ) {
++        ALOGI("VM3 will add eth0 to Table");
++        if(strcmp(interface,"eth0") != 0) {
++            ALOGI("add eth0 to %s table", interface);
++            //WA: hardcode for add eth0 subnet to localnetwork
++            // to enable VM3 ping VM1,
++            // otherwise VM3 can not ping VM1
++            addInterfaceToTable(table);
++        }
++    }
+     updateTableNamesFile();
+     return 0;
+ }
+diff --git a/server/TetherController.cpp b/server/TetherController.cpp
+index 325fc413..3df235b5 100644
+--- a/server/TetherController.cpp
++++ b/server/TetherController.cpp
+@@ -168,7 +168,9 @@ TetherController::TetherController() {
+ 
+ bool TetherController::setIpFwdEnabled() {
+     bool success = true;
+-    bool disable = mForwardingRequests.empty();
++    // bool disable = mForwardingRequests.empty();
++    //always enable ipfwd
++    bool disable = false;
+     const char* value = disable ? "0" : "1";
+     ALOGD("Setting IP forward enable = %s", value);
+     success &= writeToFile(IPV4_FORWARDING_PROC_FILE, value);
+@@ -861,9 +863,9 @@ int TetherController::addForwardChainStats(TetherStatsList& statsList,
+         if (!std::regex_search(line, matches, IP_RE)) return -EREMOTEIO;
+         // Here use IP_RE to distiguish IPv4 and IPv6 iptables.
+         // IPv4 has "--" indicating what to do with fragments...
+-        //		 26 	2373 RETURN     all  --  wlan0	rmnet0	0.0.0.0/0			 0.0.0.0/0
++        //         26     2373 RETURN     all  --  wlan0    rmnet0    0.0.0.0/0             0.0.0.0/0
+         // ... but IPv6 does not.
+-        //		 26 	2373 RETURN 	all      wlan0	rmnet0	::/0				 ::/0
++        //         26     2373 RETURN     all      wlan0    rmnet0    ::/0                 ::/0
+         // TODO: Replace strtoXX() calls with ParseUint() /ParseInt()
+         int64_t packets = strtoul(matches[PACKET_COUNTS].str().c_str(), nullptr, 10);
+         int64_t bytes = strtoul(matches[BYTE_COUNTS].str().c_str(), nullptr, 10);
+-- 
+2.17.1
+
