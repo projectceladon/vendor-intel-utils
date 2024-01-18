@@ -1,0 +1,617 @@
+From 35b2b366360e2147c56c48848ecee4a0b7a594ab Mon Sep 17 00:00:00 2001
+From: Austin Sun <austin.sun@intel.com>
+Date: Sat, 14 Oct 2023 01:16:18 +0000
+Subject: [PATCH] WA: connectivity wifi
+
+1) not ClearState and enable debug
+2) not make eth0 is default network
+3) network Ranker eth1 is higher than eth0
+4) Best network to put eth1 is in front of eth0
+5) enable debug log
+6) fix: plugin eth1 after poweron default is still eth0 issue
+7) identify VM3
+
+Tracked-On: OAM-113193
+Signed-off-by: Austin Sun <austin.sun@intel.com>
+---
+ .../networkstack/tethering/Tethering.java     |   5 +-
+ .../tethering/UpstreamNetworkMonitor.java     |  44 ++++++--
+ framework/src/android/net/LinkProperties.java |   5 +-
+ framework/src/android/net/NetworkAgent.java   |   2 +-
+ .../android/server/ConnectivityService.java   |  86 ++++++++------
+ .../server/connectivity/NetworkAgentInfo.java |   2 +-
+ .../server/connectivity/NetworkRanker.java    | 105 +++++++++++++++---
+ .../android/server/NetworkAgentWrapper.java   |   7 +-
+ 8 files changed, 196 insertions(+), 60 deletions(-)
+
+diff --git a/Tethering/src/com/android/networkstack/tethering/Tethering.java b/Tethering/src/com/android/networkstack/tethering/Tethering.java
+index c39fe3ec68..58cb0b8f97 100644
+--- a/Tethering/src/com/android/networkstack/tethering/Tethering.java
++++ b/Tethering/src/com/android/networkstack/tethering/Tethering.java
+@@ -163,8 +163,8 @@ import java.util.concurrent.atomic.AtomicReference;
+ public class Tethering {
+ 
+     private static final String TAG = Tethering.class.getSimpleName();
+-    private static final boolean DBG = false;
+-    private static final boolean VDBG = false;
++    private static final boolean DBG = true;
++    private static final boolean VDBG = true;
+ 
+     private static final Class[] sMessageClasses = {
+             Tethering.class, TetherMainSM.class, IpServer.class
+@@ -1657,6 +1657,7 @@ public class Tethering {
+             maybeDunSettingChanged();
+ 
+             final TetheringConfiguration config = mConfig;
++            if (DBG) Log.d(TAG, "chooseUpstreamAutomatically: " + config.chooseUpstreamAutomatically);
+             final UpstreamNetworkState ns = (config.chooseUpstreamAutomatically)
+                     ? mUpstreamNetworkMonitor.getCurrentPreferredUpstream()
+                     : mUpstreamNetworkMonitor.selectPreferredUpstreamType(
+diff --git a/Tethering/src/com/android/networkstack/tethering/UpstreamNetworkMonitor.java b/Tethering/src/com/android/networkstack/tethering/UpstreamNetworkMonitor.java
+index 69471a1516..75c9cc92de 100644
+--- a/Tethering/src/com/android/networkstack/tethering/UpstreamNetworkMonitor.java
++++ b/Tethering/src/com/android/networkstack/tethering/UpstreamNetworkMonitor.java
+@@ -39,6 +39,7 @@ import android.net.NetworkRequest;
+ import android.net.util.PrefixUtils;
+ import android.net.util.SharedLog;
+ import android.os.Handler;
++import android.os.SystemProperties;
+ import android.util.Log;
+ import android.util.SparseIntArray;
+ 
+@@ -83,8 +84,8 @@ import java.util.Set;
+  */
+ public class UpstreamNetworkMonitor {
+     private static final String TAG = UpstreamNetworkMonitor.class.getSimpleName();
+-    private static final boolean DBG = false;
+-    private static final boolean VDBG = false;
++    private static final boolean DBG = true;
++    private static final boolean VDBG = true;
+ 
+     public static final int EVENT_ON_CAPABILITIES   = 1;
+     public static final int EVENT_ON_LINKPROPERTIES = 2;
+@@ -328,6 +329,7 @@ public class UpstreamNetworkMonitor {
+      * Returns null if no current upstream is available.
+      */
+     public UpstreamNetworkState getCurrentPreferredUpstream() {
++        if (VDBG) Log.d(TAG, "getCurrentPreferredUpstream" + mDefaultInternetNetwork);
+         final UpstreamNetworkState dfltState = (mDefaultInternetNetwork != null)
+                 ? mNetworkMap.get(mDefaultInternetNetwork)
+                 : null;
+@@ -450,6 +452,7 @@ public class UpstreamNetworkMonitor {
+     }
+ 
+     private void maybeHandleNetworkSwitch(@NonNull Network network) {
++        if (VDBG) Log.d(TAG, "maybeHandleNetworkSwitch" + network);
+         if (Objects.equals(mDefaultInternetNetwork, network)) return;
+ 
+         final UpstreamNetworkState ns = mNetworkMap.get(network);
+@@ -460,13 +463,31 @@ public class UpstreamNetworkMonitor {
+             Log.wtf(TAG, "maybeHandleNetworkSwitch: no UpstreamNetworkState for " + network);
+             return;
+         }
+-
+         // Default network changed. Update local data and notify tethering.
+-        Log.d(TAG, "New default Internet network: " + network);
+-        mDefaultInternetNetwork = network;
+-        notifyTarget(EVENT_DEFAULT_SWITCHED, ns);
+-    }
+ 
++        if ("3".equals(SystemProperties.get("vendor.modules.eth.vm"))) {
++
++             String iface = ns.linkProperties.getInterfaceName();
++             Log.d(TAG, "New default Internet network: " + network + " iface: " + iface);
++		     if(mDefaultInternetNetwork != null) {
++		         if( iface != null && !iface.equals("eth0")) {
++		             mDefaultInternetNetwork = network;
++                     notifyTarget(EVENT_DEFAULT_SWITCHED, ns);
++	             } else {
++                     Log.d(TAG, "donot update default to eth0");
++                 }
++		     } else {
++                 Log.d(TAG, "mDefaultInternetNetwork is null , just update it");
++		         mDefaultInternetNetwork = network;
++                 notifyTarget(EVENT_DEFAULT_SWITCHED, ns);
++		     }
++        } else {
++                 Log.d(TAG, "New default Internet network: " + network);
++		         mDefaultInternetNetwork = network;
++                 notifyTarget(EVENT_DEFAULT_SWITCHED, ns);
++
++        }
++    }
+     private void recomputeLocalPrefixes() {
+         final HashSet<IpPrefix> localPrefixes = allLocalPrefixes(mNetworkMap.values());
+         if (!mLocalPrefixes.equals(localPrefixes)) {
+@@ -594,7 +615,6 @@ public class UpstreamNetworkMonitor {
+             Iterable<UpstreamNetworkState> netStates, Iterable<Integer> preferredTypes,
+             boolean isCellularUpstreamPermitted) {
+         final TypeStatePair result = new TypeStatePair();
+-
+         for (int type : preferredTypes) {
+             NetworkCapabilities nc;
+             try {
+@@ -611,7 +631,13 @@ public class UpstreamNetworkMonitor {
+                 if (!nc.satisfiedByNetworkCapabilities(value.networkCapabilities)) {
+                     continue;
+                 }
+-
++                if ("3".equals(SystemProperties.get("vendor.modules.eth.vm"))) {
++                    if (value.linkProperties.getInterfaceName().equals("eth0")) {
++				        //avoid use eth0 as upstream network
++                        Log.d(TAG,"VM3 the upstream network is eth0, skip it");
++                        continue;
++				    }
++                }
+                 result.type = type;
+                 result.ns = value;
+                 return result;
+diff --git a/framework/src/android/net/LinkProperties.java b/framework/src/android/net/LinkProperties.java
+index 99f48b49c6..c29edbf92e 100644
+--- a/framework/src/android/net/LinkProperties.java
++++ b/framework/src/android/net/LinkProperties.java
+@@ -24,7 +24,7 @@ import android.os.Build;
+ import android.os.Parcel;
+ import android.os.Parcelable;
+ import android.text.TextUtils;
+-
++import android.util.Log;
+ import com.android.net.module.util.LinkPropertiesUtils;
+ 
+ import java.net.Inet4Address;
+@@ -55,6 +55,7 @@ public final class LinkProperties implements Parcelable {
+     // The interface described by the network link.
+     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
+     private String mIfaceName;
++      private final String TAG = "LinkProperties";
+     private final ArrayList<LinkAddress> mLinkAddresses = new ArrayList<>();
+     private final ArrayList<InetAddress> mDnses = new ArrayList<>();
+     // PCSCF addresses are addresses of SIP proxies that only exist for the IMS core service.
+@@ -189,6 +190,7 @@ public final class LinkProperties implements Parcelable {
+         mPcscfs.addAll(source.mPcscfs);
+         mDomains = source.mDomains;
+         mRoutes.addAll(source.mRoutes);
++        Log.d(TAG, "add Route" + mRoutes);
+         mHttpProxy = (source.mHttpProxy == null) ? null : new ProxyInfo(source.mHttpProxy);
+         for (LinkProperties l: source.mStackedLinks.values()) {
+             addStackedLink(l);
+@@ -703,6 +705,7 @@ public final class LinkProperties implements Parcelable {
+                     "Route added with non-matching interface: " + routeIface
+                             + " vs. " + mIfaceName);
+         }
++        Log.d(TAG, "addRoute" + route);
+         route = routeWithInterface(route);
+ 
+         int i = findRouteIndexByRouteKey(route);
+diff --git a/framework/src/android/net/NetworkAgent.java b/framework/src/android/net/NetworkAgent.java
+index adcf338ba1..a0dd3f8c6b 100644
+--- a/framework/src/android/net/NetworkAgent.java
++++ b/framework/src/android/net/NetworkAgent.java
+@@ -106,7 +106,7 @@ public abstract class NetworkAgent {
+     private final Handler mHandler;
+     private final String LOG_TAG;
+     private static final boolean DBG = true;
+-    private static final boolean VDBG = false;
++    private static final boolean VDBG = true;
+     /** @hide */
+     @TestApi
+     public static final int MIN_LINGER_TIMER_MS = 2000;
+diff --git a/service/src/com/android/server/ConnectivityService.java b/service/src/com/android/server/ConnectivityService.java
+index 418e9e33b8..9ffd6930d0 100644
+--- a/service/src/com/android/server/ConnectivityService.java
++++ b/service/src/com/android/server/ConnectivityService.java
+@@ -79,12 +79,14 @@ import static android.net.NetworkCapabilities.TRANSPORT_CELLULAR;
+ import static android.net.NetworkCapabilities.TRANSPORT_TEST;
+ import static android.net.NetworkCapabilities.TRANSPORT_VPN;
+ import static android.net.NetworkCapabilities.TRANSPORT_WIFI;
++import static android.net.NetworkCapabilities.transportNamesOf;
+ import static android.net.NetworkRequest.Type.LISTEN_FOR_BEST;
+ import static android.net.OemNetworkPreferences.OEM_NETWORK_PREFERENCE_TEST;
+ import static android.net.OemNetworkPreferences.OEM_NETWORK_PREFERENCE_TEST_ONLY;
+ import static android.net.shared.NetworkMonitorUtils.isPrivateDnsValidationRequired;
+ import static android.os.Process.INVALID_UID;
+ import static android.os.Process.VPN_UID;
++import android.os.SystemProperties;
+ import static android.system.OsConstants.IPPROTO_TCP;
+ import static android.system.OsConstants.IPPROTO_UDP;
+ 
+@@ -289,10 +291,9 @@ public class ConnectivityService extends IConnectivityManager.Stub
+     public static final String SHORT_ARG = "--short";
+     private static final String NETWORK_ARG = "networks";
+     private static final String REQUEST_ARG = "requests";
+-
+     private static final boolean DBG = true;
+-    private static final boolean DDBG = Log.isLoggable(TAG, Log.DEBUG);
+-    private static final boolean VDBG = Log.isLoggable(TAG, Log.VERBOSE);
++    private static final boolean DDBG = true;
++    private static final boolean VDBG = true;
+ 
+     private static final boolean LOGD_BLOCKED_NETWORKINFO = true;
+ 
+@@ -802,8 +803,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
+     static class LegacyTypeTracker {
+ 
+         private static final boolean DBG = true;
+-        private static final boolean VDBG = false;
+-
++        private static final boolean VDBG = true;
+         /**
+          * Array of lists, one per legacy network type (e.g., TYPE_MOBILE_MMS).
+          * Each list holds references to all NetworkAgentInfos that are used to
+@@ -4097,37 +4097,46 @@ public class ConnectivityService extends IConnectivityManager.Stub
+                 || nai.getScore().getKeepConnectedReason() != NetworkScore.KEEP_CONNECTED_NONE) {
+             return false;
+         }
++        if ("3".equals(SystemProperties.get("vendor.modules.eth.vm"))) {
++            log("VM3 unneeded, we keep it, "+ transportNamesOf(nai.getCapsNoCopy().getTransportTypes()));
++            if (transportNamesOf(nai.getCapsNoCopy().getTransportTypes()) == "ETHERNET")
++            {
++               log("VM3 ethernet , we keep it as used");
++               return false;
++            }
++            //hack to not release this network
++            return false;
++        } else {
++            final int numRequests;
++            switch (reason) {
++                case TEARDOWN:
++                    numRequests = nai.numRequestNetworkRequests();
++                    break;
++                case LINGER:
++                    numRequests = nai.numForegroundNetworkRequests();
++                    break;
++                default:
++                    Log.wtf(TAG, "Invalid reason. Cannot happen.");
++                    return true;
++            }
+ 
+-        final int numRequests;
+-        switch (reason) {
+-            case TEARDOWN:
+-                numRequests = nai.numRequestNetworkRequests();
+-                break;
+-            case LINGER:
+-                numRequests = nai.numForegroundNetworkRequests();
+-                break;
+-            default:
+-                Log.wtf(TAG, "Invalid reason. Cannot happen.");
+-                return true;
+-        }
+-
+-        if (numRequests > 0) return false;
++            if (numRequests > 0) return false;
+ 
+-        for (NetworkRequestInfo nri : mNetworkRequests.values()) {
+-            if (reason == UnneededFor.LINGER
+-                    && !nri.isMultilayerRequest()
+-                    && nri.mRequests.get(0).isBackgroundRequest()) {
+-                // Background requests don't affect lingering.
+-                continue;
+-            }
++            for (NetworkRequestInfo nri : mNetworkRequests.values()) {
++                if (reason == UnneededFor.LINGER
++                        && !nri.isMultilayerRequest()
++                        && nri.mRequests.get(0).isBackgroundRequest()) {
++                    // Background requests don't affect lingering.
++                    continue;
++                }
+ 
+-            if (isNetworkPotentialSatisfier(nai, nri)) {
+-                return false;
++                if (isNetworkPotentialSatisfier(nai, nri)) {
++                    return false;
++                }
+             }
++            return true;
+         }
+-        return true;
+     }
+-
+     private boolean isNetworkPotentialSatisfier(
+             @NonNull final NetworkAgentInfo candidate, @NonNull final NetworkRequestInfo nri) {
+         // listen requests won't keep up a network satisfying it. If this is not a multilayer
+@@ -7813,6 +7822,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
+     }
+ 
+     private void processDefaultNetworkChanges(@NonNull final NetworkReassignment changes) {
++        if (DBG) log("processDefaultNetworkChanges");
+         boolean isDefaultChanged = false;
+         for (final NetworkRequestInfo defaultRequestInfo : mDefaultNetworkRequests) {
+             final NetworkReassignment.RequestReassignment reassignment =
+@@ -7838,9 +7848,11 @@ public class ConnectivityService extends IConnectivityManager.Stub
+         if (DBG) {
+             log("Switching to new default network for: " + nri + " using " + newDefaultNetwork);
+         }
+-
+         // Fix up the NetworkCapabilities of any networks that have this network as underlying.
+         if (newDefaultNetwork != null) {
++            if (DBG) {
++                log("propagateUnderlyingNetworkCapabilities: " + nri + " using " + newDefaultNetwork);
++            }
+             propagateUnderlyingNetworkCapabilities(newDefaultNetwork.network);
+         }
+ 
+@@ -8099,26 +8111,36 @@ public class ConnectivityService extends IConnectivityManager.Stub
+             if (!nri.isMultilayerRequest() && nri.mRequests.get(0).isListen()) {
+                 continue;
+             }
++            log("nri is "+ nri);
+             NetworkAgentInfo bestNetwork = null;
+             NetworkRequest bestRequest = null;
+             for (final NetworkRequest req : nri.mRequests) {
+                 bestNetwork = mNetworkRanker.getBestNetwork(req, nais, nri.getSatisfier());
++                log("computeNetworkReassignment get bestNetwork");
+                 // Stop evaluating as the highest possible priority request is satisfied.
+                 if (null != bestNetwork) {
++                    log("break computeNetworkReassignment");
+                     bestRequest = req;
+                     break;
+                 }
+             }
+             if (null == bestNetwork && isDefaultBlocked(nri)) {
+                 // Remove default networking if disallowed for managed default requests.
++
++                log("remove default network computeNetworkReassignment");
+                 bestNetwork = mNoServiceNetwork;
+             }
++            log("before getSatisifer network computeNetworkReassignment Satisfier is " + nri.getSatisfier()
++                +"bestNetwork is :"+ bestNetwork);
+             if (nri.getSatisfier() != bestNetwork) {
+                 // bestNetwork may be null if no network can satisfy this request.
++                log("Satisfier" + nri.getSatisfier() + "is not same as " + bestNetwork);
+                 changes.addRequestReassignment(new NetworkReassignment.RequestReassignment(
+                         nri, nri.mActiveRequest, bestRequest, nri.getSatisfier(), bestNetwork));
+             }
++            log("after getSatisifer network computeNetworkReassignment");
+         }
++        log("computeNetworkReassignment"+changes);
+         return changes;
+     }
+ 
+@@ -8144,6 +8166,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
+         // TODO: This may be slow, and should be optimized.
+         final long now = SystemClock.elapsedRealtime();
+         final NetworkReassignment changes = computeNetworkReassignment(networkRequests);
++        log("rematchNetworksAndRequests");
+         if (VDBG || DDBG) {
+             log(changes.debugString());
+         } else if (DBG) {
+@@ -8156,7 +8179,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
+     private void applyNetworkReassignment(@NonNull final NetworkReassignment changes,
+             final long now) {
+         final Collection<NetworkAgentInfo> nais = mNetworkAgentInfos;
+-
+         // Since most of the time there are only 0 or 1 background networks, it would probably
+         // be more efficient to just use an ArrayList here. TODO : measure performance
+         final ArraySet<NetworkAgentInfo> oldBgNetworks = new ArraySet<>();
+diff --git a/service/src/com/android/server/connectivity/NetworkAgentInfo.java b/service/src/com/android/server/connectivity/NetworkAgentInfo.java
+index bbf523a29d..65330c5f64 100644
+--- a/service/src/com/android/server/connectivity/NetworkAgentInfo.java
++++ b/service/src/com/android/server/connectivity/NetworkAgentInfo.java
+@@ -342,7 +342,7 @@ public class NetworkAgentInfo implements Comparable<NetworkAgentInfo>, NetworkRa
+     private volatile NetworkMonitorManager mNetworkMonitor;
+ 
+     private static final String TAG = ConnectivityService.class.getSimpleName();
+-    private static final boolean VDBG = false;
++    private static final boolean VDBG = true;
+     private final ConnectivityService mConnService;
+     private final Context mContext;
+     private final Handler mHandler;
+diff --git a/service/src/com/android/server/connectivity/NetworkRanker.java b/service/src/com/android/server/connectivity/NetworkRanker.java
+index d7eb9c8a59..3dc4baae0d 100644
+--- a/service/src/com/android/server/connectivity/NetworkRanker.java
++++ b/service/src/com/android/server/connectivity/NetworkRanker.java
+@@ -36,15 +36,16 @@ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+ import android.net.NetworkCapabilities;
+ import android.net.NetworkRequest;
+-
++import android.os.SystemProperties;
++import android.util.Log;
+ import com.android.net.module.util.CollectionUtils;
+-
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
++import java.util.Collections;
++import java.util.Comparator;
+ import java.util.List;
+ import java.util.function.Predicate;
+-
+ /**
+  * A class that knows how to find the best network matching a request out of a list of networks.
+  */
+@@ -52,7 +53,8 @@ public class NetworkRanker {
+     // Historically the legacy ints have been 0~100 in principle (though the highest score in
+     // AOSP has always been 90). This is relied on by VPNs that send a legacy score of 101.
+     public static final int LEGACY_INT_MAX = 100;
+-
++    private static final String TAG = "NetworkRanker";
++    private static final boolean DBG = true;
+     /**
+      * A class that can be scored against other scoreables.
+      */
+@@ -75,19 +77,73 @@ public class NetworkRanker {
+             @NonNull final Collection<NetworkAgentInfo> nais,
+             @Nullable final NetworkAgentInfo currentSatisfier) {
+         final ArrayList<NetworkAgentInfo> candidates = filter(nais, nai -> nai.satisfies(request));
+-        if (candidates.size() == 1) return candidates.get(0); // Only one potential satisfier
++        if (candidates.size() == 1) {
++            if(DBG) {
++                Log.d(TAG, "Only 1 Candidicate");
++            }
++            return candidates.get(0); // Only one potential satisfier
++        }
+         if (candidates.size() <= 0) return null; // No network can satisfy this request
++        if ("3".equals(SystemProperties.get("vendor.modules.eth.vm"))) {
++            if(DBG) {
++                 Log.d(TAG, "VM3 start check getBestNetwork");
++            }
++            Comparator c = new Comparator<NetworkAgentInfo>() {
++            @Override
++                public int compare(NetworkAgentInfo o1, NetworkAgentInfo o2) {
++                    if((int)o1.getCurrentScore()<(int)o2.getCurrentScore())
++                        return 1;
++                    else return -1;
++                }
++            };
++            if(DBG) {
++                 Log.d(TAG, "before getBestNetwork Sort");
++            }
++            //assume at least 2 candidates
++            if (candidates == null) {
++                 Log.d(TAG, "no candidates , just return");
++                 return null;
++            }
++            NetworkAgentInfo eth0nai = null;
++            for( NetworkAgentInfo nai:candidates){
++                Log.d(TAG, "NAI is: "+ nai);
++                if (nai.linkProperties.getInterfaceName().equals("eth0")) {
++                   Log.d(TAG, "get eth0 NAI from candidates"+ nai);
++                   eth0nai = nai;
++                   break;
++                 }
++            }
++            if (eth0nai != null) {
++                Log.d(TAG, "remove eth0 NAI from candidates");
++                candidates.remove(eth0nai);
++            }
++            //if after remove, only 1 candidates
++            if (candidates.size() == 1) {
++                if(DBG) {
++                     Log.d(TAG, "Only 1 Candidicate after remove eth0");
++                }
++                 return candidates.get(0); // Only one potential satisfier
++            }
++            if (candidates.size() <= 0) return null; // No network can satisfy this request
++            Collections.sort(candidates,c);
++            if(DBG) {
++                Log.d(TAG, "after getBestNetwork Sort");
++                for( NetworkAgentInfo nai:candidates){
++                    Log.d(TAG, "NAI is: "+ nai);
++                }
++            }
++        }
+         if (USE_POLICY_RANKING) {
+             return getBestNetworkByPolicy(candidates, currentSatisfier);
+         } else {
+             return getBestNetworkByLegacyInt(candidates);
+         }
+     }
+-
+     // Transport preference order, if it comes down to that.
+-    private static final int[] PREFERRED_TRANSPORTS_ORDER = { TRANSPORT_ETHERNET, TRANSPORT_WIFI,
++//    private static final int[] PREFERRED_TRANSPORTS_ORDER = { TRANSPORT_ETHERNET, TRANSPORT_WIFI,
++//  WIFI first and then ethernet
++    private static final int[] PREFERRED_TRANSPORTS_ORDER = { TRANSPORT_WIFI, TRANSPORT_ETHERNET,
+             TRANSPORT_BLUETOOTH, TRANSPORT_CELLULAR };
+-
+     // Function used to partition a list into two working areas depending on whether they
+     // satisfy a predicate. All items satisfying the predicate will be put in |positive|, all
+     // items that don't will be put in |negative|.
+@@ -167,7 +223,6 @@ public class NetworkRanker {
+                 new ArrayList<>(candidates.size() /* initialCapacity */);
+         final ArrayList<T> rejected =
+                 new ArrayList<>(candidates.size() /* initialCapacity */);
+-
+         // The following tests will search for a network matching a given criterion. They all
+         // function the same way : if any network matches the criterion, drop from consideration
+         // all networks that don't. To achieve this, the tests below :
+@@ -182,14 +237,25 @@ public class NetworkRanker {
+         // If a network is invincible, use it.
+         partitionInto(candidates, nai -> nai.getScore().hasPolicy(POLICY_IS_INVINCIBLE),
+                 accepted, rejected);
+-        if (accepted.size() == 1) return accepted.get(0);
++        if (accepted.size() == 1){
++            if(DBG) {
++                 Log.d(TAG, "INVINCIBLE Policy");
++            }
++            return accepted.get(0);
++        }
+         if (accepted.size() > 0 && rejected.size() > 0) candidates = new ArrayList<>(accepted);
++        if(DBG) {
++              Log.d(TAG, "check VPN Policy");
++        }
+ 
+         // If there is a connected VPN, use it.
+         partitionInto(candidates, nai -> nai.getScore().hasPolicy(POLICY_IS_VPN),
+                 accepted, rejected);
+         if (accepted.size() == 1) return accepted.get(0);
+         if (accepted.size() > 0 && rejected.size() > 0) candidates = new ArrayList<>(accepted);
++        if(DBG) {
++              Log.d(TAG, "check USER Policy");
++        }
+ 
+         // Selected & Accept-unvalidated policy : if any network has both of these, then don't
+         // choose one that doesn't.
+@@ -198,6 +264,9 @@ public class NetworkRanker {
+                 accepted, rejected);
+         if (accepted.size() == 1) return accepted.get(0);
+         if (accepted.size() > 0 && rejected.size() > 0) candidates = new ArrayList<>(accepted);
++        if(DBG) {
++              Log.d(TAG, "check VALIDATED Policy");
++        }
+ 
+         // If any network is validated (or should be accepted even if it's not validated), then
+         // don't choose one that isn't.
+@@ -210,7 +279,9 @@ public class NetworkRanker {
+         applyYieldToBadWifiPolicy(accepted, rejected);
+         if (accepted.size() == 1) return accepted.get(0);
+         if (accepted.size() > 0 && rejected.size() > 0) candidates = new ArrayList<>(accepted);
+-
++        if(DBG) {
++              Log.d(TAG, "check EXITING Policy");
++        }
+         // If any network is not exiting, don't choose one that is.
+         partitionInto(candidates, nai -> !nai.getScore().hasPolicy(POLICY_EXITING),
+                 accepted, rejected);
+@@ -234,6 +305,10 @@ public class NetworkRanker {
+ 
+         // If any network is for the default subscription, don't choose a network for another
+         // subscription with the same transport.
++        if(DBG) {
++              Log.d(TAG, "check TRANSPORT Policy");
++        }
++
+         partitionInto(candidates, nai -> nai.getScore().hasPolicy(POLICY_TRANSPORT_PRIMARY),
+                 accepted, rejected);
+         if (accepted.size() > 0) {
+@@ -268,11 +343,15 @@ public class NetworkRanker {
+                 break;
+             }
+         }
+-
++        if(DBG) {
++              Log.d(TAG, "check currentSatisfier Policy");
++        }
+         // At this point there are still multiple networks passing all the tests above. If any
+         // of them is the previous satisfier, keep it.
+         if (candidates.contains(currentSatisfier)) return currentSatisfier;
+-
++        if(DBG) {
++              Log.d(TAG, "just return the first Policy");
++        }
+         // If there are still multiple options at this point but none of them is any of the
+         // transports above, it doesn't matter which is returned. They are all the same.
+         return candidates.get(0);
+diff --git a/tests/integration/util/com/android/server/NetworkAgentWrapper.java b/tests/integration/util/com/android/server/NetworkAgentWrapper.java
+index 95ea401acd..1b6a2a3105 100644
+--- a/tests/integration/util/com/android/server/NetworkAgentWrapper.java
++++ b/tests/integration/util/com/android/server/NetworkAgentWrapper.java
+@@ -91,7 +91,12 @@ public class NetworkAgentWrapper implements TestableNetworkCallback.HasNetwork {
+         mNetworkCapabilities.addTransportType(transport);
+         switch (transport) {
+             case TRANSPORT_ETHERNET:
+-                mScore = new NetworkScore.Builder().setLegacyInt(70).build();
++                if(linkProperties.getInterfaceName().equals("eth1")) {
++
++                    mScore = new NetworkScore.Builder().setLegacyInt(75).build();
++                } else {
++                    mScore = new NetworkScore.Builder().setLegacyInt(70).build();
++                }
+                 break;
+             case TRANSPORT_WIFI:
+                 mScore = new NetworkScore.Builder().setLegacyInt(60).build();
+-- 
+2.17.1
+
