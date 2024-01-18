@@ -1,0 +1,94 @@
+From 9e48465a12ee49262a14f45df94e7eacdbc32d42 Mon Sep 17 00:00:00 2001
+From: jizhenlo <zhenlong.z.ji@intel.com>
+Date: Wed, 13 Dec 2023 15:58:33 +0800
+Subject: [PATCH] Handle virtiofs plug in/out event
+
+A usb disk need to be shared between VM1,2 and VM3.
+The usb disk is mounted as virtiofs and sent to VM1,
+VM2 and VM3 by the SOS. Android will create a dir
+under /mnt and mount the relevant virtiofs on the dir
+when it receive the virtio plug in event, it will umount
+virtiofs and remove the dir when it receive the virtio
+plug out event.
+
+Tracked-On: OAM-114205
+Signed-off-by: jizhenlo <zhenlong.z.ji@intel.com>
+---
+ NetlinkHandler.cpp | 38 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/NetlinkHandler.cpp b/NetlinkHandler.cpp
+index 2231cd17..949870b8 100644
+--- a/NetlinkHandler.cpp
++++ b/NetlinkHandler.cpp
+@@ -18,6 +18,10 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/mount.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <thread>
+ 
+ #include <android-base/logging.h>
+ 
+@@ -25,6 +29,10 @@
+ #include "NetlinkHandler.h"
+ #include "VolumeManager.h"
+ 
++#define VIRTIO_DIR	"/mnt/virtiofs"
++#define VIRTIO_BDF	"pci0000:00/0000:00:1c.0"
++#define VIRTIO_TAG	"tag-usb-hp"
++
+ NetlinkHandler::NetlinkHandler(int listenerSocket) : NetlinkListener(listenerSocket) {}
+ 
+ NetlinkHandler::~NetlinkHandler() {}
+@@ -33,15 +41,45 @@ int NetlinkHandler::start() {
+     return this->startListener();
+ }
+ 
++void mountUsbDisk() {
++    for (int i = 0; i < 5; ++i) {
++		if (mount(VIRTIO_TAG, VIRTIO_DIR, "virtiofs", MS_SILENT, NULL) != 0) {
++			LOG(WARNING) << "Virtiofs mount failed: " << errno;
++			usleep(300000);
++		} else {
++			break;
++		}
++    }
++}
++
+ void NetlinkHandler::onEvent(NetlinkEvent* evt) {
+     VolumeManager* vm = VolumeManager::Instance();
+     const char* subsys = evt->getSubsystem();
++	std::string eventPath(evt->findParam("DEVPATH") ? evt->findParam("DEVPATH") : "");
++
+ 
+     if (!subsys) {
+         LOG(WARNING) << "No subsystem found in netlink event";
+         return;
+     }
+ 
++	if (std::string(subsys) == "virtio" && eventPath.find(VIRTIO_BDF) != std::string::npos) {
++		if (evt->getAction() == NetlinkEvent::Action::kAdd) {
++			if (mkdir(VIRTIO_DIR, 0766) < 0 && errno != EEXIST) {
++				LOG(WARNING) << "mkdir virtiofs failed: " << errno;
++				return;
++			}
++            std::thread(mountUsbDisk).detach();
++		} else if (evt->getAction() == NetlinkEvent::Action::kRemove) {
++			if (umount(VIRTIO_DIR) != 0) {
++				LOG(WARNING) << "Virtiofs umount failed: " << errno;
++			} else {
++				rmdir(VIRTIO_DIR);
++			}
++		}
++		return;
++	}
++
+     if (std::string(subsys) == "block") {
+         vm->handleBlockEvent(evt);
+     }
+-- 
+2.25.1
+
