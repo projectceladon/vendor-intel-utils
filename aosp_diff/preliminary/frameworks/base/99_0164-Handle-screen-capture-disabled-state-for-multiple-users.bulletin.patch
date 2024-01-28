@@ -1,0 +1,166 @@
+From 9b10fd9718f4e6f6843adbfc14e46a93aab93aad Mon Sep 17 00:00:00 2001
+From: Rubin Xu <rubinxu@google.com>
+Date: Wed, 1 Nov 2023 13:36:31 +0000
+Subject: [PATCH] Handle screen capture disabled state for multiple users
+
+Before this fix, the framework use one single integer to track screen
+capture disabled policy across the device. This can be either a real
+userId, or the symbolic USER_ALL or USER_NULL for all users or no user.
+This has the problem that it can't represent policies from more than
+one admin (or policies from both the admin and its parent). In addition,
+due to the way DevicePolicyManagerService refreshes policies, when a
+non-managed user is started, its default policy state overrides any
+existing policy, causing screen capture to be no longer disabled.
+
+Fix this by properly tracking the policy for each user in an set.
+We still use USER_ALL in the set to represent screen capture being
+disabled for all users.
+
+In Android 14, the screen capture logic is migrated to policy engine
+which already contains this fix.
+
+Bug: 305664128
+Test: ScreenCaptureDisabledTest
+Test: FrameworksServicesTests:DevicePolicyManagerTest
+Test: DevicePolicyManagerServiceMigrationTest
+Test: MixedDeviceOwnerTest#testScreenCaptureDisabled_assist
+      MixedProfileOwnerTest#testScreenCaptureDisabled_assist
+      MixedManagedProfileOwnerTest#testScreenCaptureDisabled_assist
+Test: MixedManagedProfileOwnerTest#testScreenCaptureDisabled_assist_allowedPrimaryUser
+Test: MixedDeviceOwnerTest#testCreateAdminSupportIntent
+      MixedProfileOwnerTest#testCreateAdminSupportIntent
+      MixedManagedProfileOwnerTest#testCreateAdminSupportIntent
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:5f3db5ae9b9cf69c8a4ea73b6ed49ce9d49ba223)
+Merged-In: Ib016b740927003f8bd81992f24c722c29ac723b5
+Change-Id: Ib016b740927003f8bd81992f24c722c29ac723b5
+---
+ .../devicepolicy/DevicePolicyCacheImpl.java   | 26 +++++++++++++++--
+ .../DevicePolicyManagerService.java           | 28 ++++++-------------
+ .../devicepolicy/DevicePolicyManagerTest.java |  2 +-
+ 3 files changed, 33 insertions(+), 23 deletions(-)
+
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyCacheImpl.java b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyCacheImpl.java
+index 304d148252b1..fa11fb2061df 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyCacheImpl.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyCacheImpl.java
+@@ -25,6 +25,9 @@ import android.util.SparseIntArray;
+ 
+ import com.android.internal.annotations.GuardedBy;
+ 
++import java.util.HashSet;
++import java.util.Set;
++
+ /**
+  * Implementation of {@link DevicePolicyCache}, to which {@link DevicePolicyManagerService} pushes
+  * policies.
+@@ -45,6 +48,13 @@ public class DevicePolicyCacheImpl extends DevicePolicyCache {
+     @GuardedBy("mLock")
+     private int mScreenCaptureDisallowedUser = UserHandle.USER_NULL;
+ 
++    /**
++     * Indicates if screen capture is disallowed on a specific user or all users if
++     * it contains {@link UserHandle#USER_ALL}.
++     */
++    @GuardedBy("mLock")
++    private Set<Integer> mScreenCaptureDisallowedUsers = new HashSet<>();
++
+     @GuardedBy("mLock")
+     private final SparseIntArray mPasswordQuality = new SparseIntArray();
+ 
+@@ -71,8 +81,8 @@ public class DevicePolicyCacheImpl extends DevicePolicyCache {
+     @Override
+     public boolean isScreenCaptureAllowed(int userHandle) {
+         synchronized (mLock) {
+-            return mScreenCaptureDisallowedUser != UserHandle.USER_ALL
+-                    && mScreenCaptureDisallowedUser != userHandle;
++            return !mScreenCaptureDisallowedUsers.contains(userHandle)
++                    && !mScreenCaptureDisallowedUsers.contains(UserHandle.USER_ALL);
+         }
+     }
+ 
+@@ -88,6 +98,16 @@ public class DevicePolicyCacheImpl extends DevicePolicyCache {
+         }
+     }
+ 
++    public void setScreenCaptureDisallowedUser(int userHandle, boolean disallowed) {
++        synchronized (mLock) {
++            if (disallowed) {
++                mScreenCaptureDisallowedUsers.add(userHandle);
++            } else {
++                mScreenCaptureDisallowedUsers.remove(userHandle);
++            }
++        }
++    }
++
+     @Override
+     public int getPasswordQuality(@UserIdInt int userHandle) {
+         synchronized (mLock) {
+@@ -136,7 +156,7 @@ public class DevicePolicyCacheImpl extends DevicePolicyCache {
+     public void dump(IndentingPrintWriter pw) {
+         pw.println("Device policy cache:");
+         pw.increaseIndent();
+-        pw.println("Screen capture disallowed user: " + mScreenCaptureDisallowedUser);
++        pw.println("Screen capture disallowed users: " + mScreenCaptureDisallowedUsers);
+         pw.println("Password quality: " + mPasswordQuality.toString());
+         pw.println("Permission policy: " + mPermissionPolicy.toString());
+         pw.println("Admin can grant sensors permission: "
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+index 32aa936195e2..46fc18e55936 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+@@ -7707,30 +7707,20 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
+     // be disabled device-wide.
+     private void pushScreenCapturePolicy(int adminUserId) {
+         // Update screen capture device-wide if disabled by the DO or COPE PO on the parent profile.
+-        ActiveAdmin admin =
+-                getDeviceOwnerOrProfileOwnerOfOrganizationOwnedDeviceParentLocked(
++        // Always do this regardless which user this method is called with. Probably a little
++        // wasteful but still safe.
++        ActiveAdmin admin = getDeviceOwnerOrProfileOwnerOfOrganizationOwnedDeviceParentLocked(
+                         UserHandle.USER_SYSTEM);
+-        if (admin != null && admin.disableScreenCapture) {
+-            setScreenCaptureDisabled(UserHandle.USER_ALL);
+-        } else {
+-            // Otherwise, update screen capture only for the calling user.
+-            admin = getProfileOwnerAdminLocked(adminUserId);
+-            if (admin != null && admin.disableScreenCapture) {
+-                setScreenCaptureDisabled(adminUserId);
+-            } else {
+-                setScreenCaptureDisabled(UserHandle.USER_NULL);
+-            }
+-        }
++        setScreenCaptureDisabled(UserHandle.USER_ALL, admin != null && admin.disableScreenCapture);
++        // Update screen capture only for the calling user.
++        admin = getProfileOwnerAdminLocked(adminUserId);
++        setScreenCaptureDisabled(adminUserId, admin != null && admin.disableScreenCapture);
+     }
+ 
+     // Set the latest screen capture policy, overriding any existing ones.
+     // userHandle can be one of USER_ALL, USER_NULL or a concrete userId.
+-    private void setScreenCaptureDisabled(int userHandle) {
+-        int current = mPolicyCache.getScreenCaptureDisallowedUser();
+-        if (userHandle == current) {
+-            return;
+-        }
+-        mPolicyCache.setScreenCaptureDisallowedUser(userHandle);
++    private void setScreenCaptureDisabled(int userHandle, boolean disabled) {
++        mPolicyCache.setScreenCaptureDisallowedUser(userHandle, disabled);
+         updateScreenCaptureDisabled();
+     }
+ 
+diff --git a/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerTest.java b/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerTest.java
+index 388170bd24cb..31ce9ab8efad 100644
+--- a/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerTest.java
++++ b/services/tests/servicestests/src/com/android/server/devicepolicy/DevicePolicyManagerTest.java
+@@ -5056,7 +5056,7 @@ public class DevicePolicyManagerTest extends DpmTestBase {
+         // Refresh strong auth timeout
+         verify(getServices().lockSettingsInternal).refreshStrongAuthTimeout(UserHandle.USER_SYSTEM);
+         // Refresh screen capture
+-        verify(getServices().iwindowManager).refreshScreenCaptureDisabled();
++        verify(getServices().iwindowManager, times(2)).refreshScreenCaptureDisabled();
+         // Unsuspend personal apps
+         verify(getServices().packageManagerInternal)
+                 .unsuspendForSuspendingPackage(PLATFORM_PACKAGE_NAME, UserHandle.USER_SYSTEM);
+-- 
+2.43.0.195.gebba966016-goog
+

@@ -1,0 +1,555 @@
+From c4fa7aeb5626f4281c07b6db06f6c00a300f9aed Mon Sep 17 00:00:00 2001
+From: Sergey Nikolaienkov <sergeynv@google.com>
+Date: Sat, 1 Jul 2023 16:03:56 +0200
+Subject: [PATCH] DO NOT MERGE: "Hide" /Android/data|obb|sanbox/ on shared
+ storage
+
+Implement shouldHideDocument() in the ExternalStorageProvider so that it
+resitcts access to 'Android/data/', 'Android/obb/' and 'Android/sandbox'
+on the integrated shared storage along with all their content and
+subdirectories.
+
+Clean up the abstract FileSystemProvider, specifically all variants of
+queryChildDocuments().
+
+Bug: 200034476
+Bug: 220066255
+Bug: 283962634
+Test: make & flash systemimage, run manually
+Test: atest ExternalStorageProviderTests
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:131e73e1b3839111463aae26bae1b3db6782eb38)
+Merged-In: I48c2ce7ff2d7fc067961ea2af0ea63818316f086
+Change-Id: I48c2ce7ff2d7fc067961ea2af0ea63818316f086
+---
+ .../internal/content/FileSystemProvider.java  | 166 +++++++++--------
+ .../ExternalStorageProvider.java              | 173 +++++++++++-------
+ 2 files changed, 198 insertions(+), 141 deletions(-)
+
+diff --git a/core/java/com/android/internal/content/FileSystemProvider.java b/core/java/com/android/internal/content/FileSystemProvider.java
+index 563cf0414ab9..be944d6410e8 100644
+--- a/core/java/com/android/internal/content/FileSystemProvider.java
++++ b/core/java/com/android/internal/content/FileSystemProvider.java
+@@ -62,14 +62,14 @@ import java.nio.file.FileVisitor;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.nio.file.attribute.BasicFileAttributes;
++import java.util.ArrayDeque;
+ import java.util.Arrays;
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Locale;
++import java.util.Queue;
+ import java.util.Set;
+ import java.util.concurrent.CopyOnWriteArrayList;
+-import java.util.function.Predicate;
+-import java.util.regex.Pattern;
+ 
+ /**
+  * A helper class for {@link android.provider.DocumentsProvider} to perform file operations on local
+@@ -87,6 +87,8 @@ public abstract class FileSystemProvider extends DocumentsProvider {
+             DocumentsContract.QUERY_ARG_LAST_MODIFIED_AFTER,
+             DocumentsContract.QUERY_ARG_MIME_TYPES);
+ 
++    private static final int MAX_RESULTS_NUMBER = 23;
++
+     private static String joinNewline(String... args) {
+         return TextUtils.join("\n", args);
+     }
+@@ -373,62 +375,53 @@ public abstract class FileSystemProvider extends DocumentsProvider {
+     }
+ 
+     /**
+-     * This method is similar to
+-     * {@link DocumentsProvider#queryChildDocuments(String, String[], String)}. This method returns
+-     * all children documents including hidden directories/files.
+-     *
+-     * <p>
+-     * In a scoped storage world, access to "Android/data" style directories are hidden for privacy
+-     * reasons. This method may show privacy sensitive data, so its usage should only be in
+-     * restricted modes.
+-     *
+-     * @param parentDocumentId the directory to return children for.
+-     * @param projection list of {@link Document} columns to put into the
+-     *            cursor. If {@code null} all supported columns should be
+-     *            included.
+-     * @param sortOrder how to order the rows, formatted as an SQL
+-     *            {@code ORDER BY} clause (excluding the ORDER BY itself).
+-     *            Passing {@code null} will use the default sort order, which
+-     *            may be unordered. This ordering is a hint that can be used to
+-     *            prioritize how data is fetched from the network, but UI may
+-     *            always enforce a specific ordering
+-     * @throws FileNotFoundException when parent document doesn't exist or query fails
++     * WARNING: this method should really be {@code final}, but for the backward compatibility it's
++     * not; new classes that extend {@link FileSystemProvider} should override
++     * {@link #queryChildDocuments(String, String[], String, boolean)}, not this method.
+      */
+-    protected Cursor queryChildDocumentsShowAll(
+-            String parentDocumentId, String[] projection, String sortOrder)
++    @Override
++    public Cursor queryChildDocuments(String documentId, String[] projection, String sortOrder)
+             throws FileNotFoundException {
+-        return queryChildDocuments(parentDocumentId, projection, sortOrder, File -> true);
++        return queryChildDocuments(documentId, projection, sortOrder, /* includeHidden */ false);
+     }
+ 
++    /**
++     * This method is similar to {@link #queryChildDocuments(String, String[], String)}, however, it
++     * could return <b>all</b> content of the directory, <b>including restricted (hidden)
++     * directories and files</b>.
++     * <p>
++     * In the scoped storage world, some directories and files (e.g. {@code Android/data/} and
++     * {@code Android/obb/} on the external storage) are hidden for privacy reasons.
++     * Hence, this method may reveal privacy-sensitive data, thus should be used with extra care.
++     */
+     @Override
+-    public Cursor queryChildDocuments(
+-            String parentDocumentId, String[] projection, String sortOrder)
+-            throws FileNotFoundException {
+-        // Access to some directories is hidden for privacy reasons.
+-        return queryChildDocuments(parentDocumentId, projection, sortOrder, this::shouldShow);
++    public final Cursor queryChildDocumentsForManage(String documentId, String[] projection,
++            String sortOrder) throws FileNotFoundException {
++        return queryChildDocuments(documentId, projection, sortOrder, /* includeHidden */ true);
+     }
+ 
+-    private Cursor queryChildDocuments(
+-            String parentDocumentId, String[] projection, String sortOrder,
+-            @NonNull Predicate<File> filter) throws FileNotFoundException {
+-        final File parent = getFileForDocId(parentDocumentId);
++    protected Cursor queryChildDocuments(String documentId, String[] projection, String sortOrder,
++            boolean includeHidden) throws FileNotFoundException {
++        final File parent = getFileForDocId(documentId);
+         final MatrixCursor result = new DirectoryCursor(
+-                resolveProjection(projection), parentDocumentId, parent);
++                resolveProjection(projection), documentId, parent);
++
++        if (!parent.isDirectory()) {
++            Log.w(TAG, '"' + documentId + "\" is not a directory");
++            return result;
++        }
+ 
+-        if (!filter.test(parent)) {
+-            Log.w(TAG, "No permission to access parentDocumentId: " + parentDocumentId);
++        if (!includeHidden && shouldHideDocument(documentId)) {
++            Log.w(TAG, "Queried directory \"" + documentId + "\" is hidden");
+             return result;
+         }
+ 
+-        if (parent.isDirectory()) {
+-            for (File file : FileUtils.listFilesOrEmpty(parent)) {
+-                if (filter.test(file)) {
+-                    includeFile(result, null, file);
+-                }
+-            }
+-        } else {
+-            Log.w(TAG, "parentDocumentId '" + parentDocumentId + "' is not Directory");
++        for (File file : FileUtils.listFilesOrEmpty(parent)) {
++            if (!includeHidden && shouldHideDocument(file)) continue;
++
++            includeFile(result, null, file);
+         }
++
+         return result;
+     }
+ 
+@@ -450,23 +443,29 @@ public abstract class FileSystemProvider extends DocumentsProvider {
+      *
+      * @see ContentResolver#EXTRA_HONORED_ARGS
+      */
+-    protected final Cursor querySearchDocuments(
+-            File folder, String[] projection, Set<String> exclusion, Bundle queryArgs)
+-            throws FileNotFoundException {
++    protected final Cursor querySearchDocuments(File folder, String[] projection,
++            Set<String> exclusion, Bundle queryArgs) throws FileNotFoundException {
+         final MatrixCursor result = new MatrixCursor(resolveProjection(projection));
+-        final LinkedList<File> pending = new LinkedList<>();
+-        pending.add(folder);
+-        while (!pending.isEmpty() && result.getCount() < 24) {
+-            final File file = pending.removeFirst();
+-            if (shouldHide(file)) continue;
++
++        // We'll be a running a BFS here.
++        final Queue<File> pending = new ArrayDeque<>();
++        pending.offer(folder);
++
++        while (!pending.isEmpty() && result.getCount() < MAX_RESULTS_NUMBER) {
++            final File file = pending.poll();
++
++            // Skip hidden documents (both files and directories)
++            if (shouldHideDocument(file)) continue;
+ 
+             if (file.isDirectory()) {
+                 for (File child : FileUtils.listFilesOrEmpty(file)) {
+-                    pending.add(child);
++                    pending.offer(child);
+                 }
+             }
+-            if (!exclusion.contains(file.getAbsolutePath()) && matchSearchQueryArguments(file,
+-                    queryArgs)) {
++
++            if (exclusion.contains(file.getAbsolutePath())) continue;
++
++            if (matchSearchQueryArguments(file, queryArgs)) {
+                 includeFile(result, null, file);
+             }
+         }
+@@ -610,26 +609,23 @@ public abstract class FileSystemProvider extends DocumentsProvider {
+ 
+         final int flagIndex = ArrayUtils.indexOf(columns, Document.COLUMN_FLAGS);
+         if (flagIndex != -1) {
++            final boolean isDir = mimeType.equals(Document.MIME_TYPE_DIR);
+             int flags = 0;
+             if (file.canWrite()) {
+-                if (mimeType.equals(Document.MIME_TYPE_DIR)) {
++                flags |= Document.FLAG_SUPPORTS_DELETE;
++                flags |= Document.FLAG_SUPPORTS_RENAME;
++                flags |= Document.FLAG_SUPPORTS_MOVE;
++                if (isDir) {
+                     flags |= Document.FLAG_DIR_SUPPORTS_CREATE;
+-                    flags |= Document.FLAG_SUPPORTS_DELETE;
+-                    flags |= Document.FLAG_SUPPORTS_RENAME;
+-                    flags |= Document.FLAG_SUPPORTS_MOVE;
+-
+-                    if (shouldBlockFromTree(docId)) {
+-                        flags |= Document.FLAG_DIR_BLOCKS_OPEN_DOCUMENT_TREE;
+-                    }
+-
+                 } else {
+                     flags |= Document.FLAG_SUPPORTS_WRITE;
+-                    flags |= Document.FLAG_SUPPORTS_DELETE;
+-                    flags |= Document.FLAG_SUPPORTS_RENAME;
+-                    flags |= Document.FLAG_SUPPORTS_MOVE;
+                 }
+             }
+ 
++            if (isDir && shouldBlockDirectoryFromTree(docId)) {
++                flags |= Document.FLAG_DIR_BLOCKS_OPEN_DOCUMENT_TREE;
++            }
++
+             if (mimeType.startsWith("image/")) {
+                 flags |= Document.FLAG_SUPPORTS_THUMBNAIL;
+             }
+@@ -662,22 +658,36 @@ public abstract class FileSystemProvider extends DocumentsProvider {
+         return row;
+     }
+ 
+-    private static final Pattern PATTERN_HIDDEN_PATH = Pattern.compile(
+-            "(?i)^/storage/[^/]+/(?:[0-9]+/)?Android/(?:data|obb|sandbox)$");
+-
+     /**
+-     * In a scoped storage world, access to "Android/data" style directories are
+-     * hidden for privacy reasons.
++     * Some providers may want to restrict access to certain directories and files,
++     * e.g. <i>"Android/data"</i> and <i>"Android/obb"</i> on the shared storage for
++     * privacy reasons.
++     * Such providers should override this method.
+      */
+-    protected boolean shouldHide(@NonNull File file) {
+-        return (PATTERN_HIDDEN_PATH.matcher(file.getAbsolutePath()).matches());
++    protected boolean shouldHideDocument(@NonNull String documentId)
++            throws FileNotFoundException {
++        return false;
+     }
+ 
+-    private boolean shouldShow(@NonNull File file) {
+-        return !shouldHide(file);
++    /**
++     * A variant of the {@link #shouldHideDocument(String)} that takes a {@link File} instead of
++     * a {@link String} {@code documentId}.
++     *
++     * @see #shouldHideDocument(String)
++     */
++    protected final boolean shouldHideDocument(@NonNull File document)
++            throws FileNotFoundException {
++        return shouldHideDocument(getDocIdForFile(document));
+     }
+ 
+-    protected boolean shouldBlockFromTree(@NonNull String docId) {
++    /**
++     * @return if the directory that should be blocked from being selected when the user launches
++     * an {@link Intent#ACTION_OPEN_DOCUMENT_TREE} intent.
++     *
++     * @see Document#FLAG_DIR_BLOCKS_OPEN_DOCUMENT_TREE
++     */
++    protected boolean shouldBlockDirectoryFromTree(@NonNull String documentId)
++            throws FileNotFoundException {
+         return false;
+     }
+ 
+diff --git a/packages/ExternalStorageProvider/src/com/android/externalstorage/ExternalStorageProvider.java b/packages/ExternalStorageProvider/src/com/android/externalstorage/ExternalStorageProvider.java
+index 4c313b22f71e..3409c29d3c2c 100644
+--- a/packages/ExternalStorageProvider/src/com/android/externalstorage/ExternalStorageProvider.java
++++ b/packages/ExternalStorageProvider/src/com/android/externalstorage/ExternalStorageProvider.java
+@@ -16,6 +16,8 @@
+ 
+ package com.android.externalstorage;
+ 
++import static java.util.regex.Pattern.CASE_INSENSITIVE;
++
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+ import android.app.usage.StorageStatsManager;
+@@ -64,7 +66,19 @@ import java.util.List;
+ import java.util.Locale;
+ import java.util.Objects;
+ import java.util.UUID;
+-
++import java.util.regex.Pattern;
++
++/**
++ * Presents content of the shared (a.k.a. "external") storage.
++ * <p>
++ * Starting with Android 11 (R), restricts access to the certain sections of the shared storage:
++ * {@code Android/data/}, {@code Android/obb/} and {@code Android/sandbox/}, that will be hidden in
++ * the DocumentsUI by default.
++ * See <a href="https://developer.android.com/about/versions/11/privacy/storage">
++ * Storage updates in Android 11</a>.
++ * <p>
++ * Documents ID format: {@code root:path/to/file}.
++ */
+ public class ExternalStorageProvider extends FileSystemProvider {
+     private static final String TAG = "ExternalStorage";
+ 
+@@ -75,7 +89,12 @@ public class ExternalStorageProvider extends FileSystemProvider {
+     private static final Uri BASE_URI =
+             new Uri.Builder().scheme(ContentResolver.SCHEME_CONTENT).authority(AUTHORITY).build();
+ 
+-    // docId format: root:path/to/file
++    /**
++     * Regex for detecting {@code /Android/data/}, {@code /Android/obb/} and
++     * {@code /Android/sandbox/} along with all their subdirectories and content.
++     */
++    private static final Pattern PATTERN_RESTRICTED_ANDROID_SUBTREES =
++            Pattern.compile("^Android/(?:data|obb|sandbox)(?:/.+)?", CASE_INSENSITIVE);
+ 
+     private static final String[] DEFAULT_ROOT_PROJECTION = new String[] {
+             Root.COLUMN_ROOT_ID, Root.COLUMN_FLAGS, Root.COLUMN_ICON, Root.COLUMN_TITLE,
+@@ -278,76 +297,91 @@ public class ExternalStorageProvider extends FileSystemProvider {
+         return projection != null ? projection : DEFAULT_ROOT_PROJECTION;
+     }
+ 
++    /**
++     * Mark {@code Android/data/}, {@code Android/obb/} and {@code Android/sandbox/} on the
++     * integrated shared ("external") storage along with all their content and subdirectories as
++     * hidden.
++     */
+     @Override
+-    public Cursor queryChildDocumentsForManage(
+-            String parentDocId, String[] projection, String sortOrder)
+-            throws FileNotFoundException {
+-        return queryChildDocumentsShowAll(parentDocId, projection, sortOrder);
++    protected boolean shouldHideDocument(@NonNull String documentId) {
++        // Don't need to hide anything on USB drives.
++        if (isOnRemovableUsbStorage(documentId)) {
++            return false;
++        }
++
++        final String path = getPathFromDocId(documentId);
++        return PATTERN_RESTRICTED_ANDROID_SUBTREES.matcher(path).matches();
+     }
+ 
+     /**
+      * Check that the directory is the root of storage or blocked file from tree.
++     * <p>
++     * Note, that this is different from hidden documents: blocked documents <b>WILL</b> appear
++     * the UI, but the user <b>WILL NOT</b> be able to select them.
+      *
+-     * @param docId the docId of the directory to be checked
++     * @param documentId the docId of the directory to be checked
+      * @return true, should be blocked from tree. Otherwise, false.
++     *
++     * @see Document#FLAG_DIR_BLOCKS_OPEN_DOCUMENT_TREE
+      */
+     @Override
+-    protected boolean shouldBlockFromTree(@NonNull String docId) {
+-        try {
+-            final File dir = getFileForDocId(docId, false /* visible */);
+-
+-            // the file is null or it is not a directory
+-            if (dir == null || !dir.isDirectory()) {
+-                return false;
+-            }
++    protected boolean shouldBlockDirectoryFromTree(@NonNull String documentId)
++            throws FileNotFoundException {
++        final File dir = getFileForDocId(documentId, false);
++        // The file is null or it is not a directory
++        if (dir == null || !dir.isDirectory()) {
++            return false;
++        }
+ 
+-            // Allow all directories on USB, including the root.
+-            try {
+-                RootInfo rootInfo = getRootFromDocId(docId);
+-                if ((rootInfo.flags & Root.FLAG_REMOVABLE_USB) == Root.FLAG_REMOVABLE_USB) {
+-                    return false;
+-                }
+-            } catch (FileNotFoundException e) {
+-                Log.e(TAG, "Failed to determine rootInfo for docId");
+-            }
++        // Allow all directories on USB, including the root.
++        if (isOnRemovableUsbStorage(documentId)) {
++            return false;
++        }
+ 
+-            final String path = getPathFromDocId(docId);
++        // Get canonical(!) path. Note that this path will have neither leading nor training "/".
++        // This the root's path will be just an empty string.
++        final String path = getPathFromDocId(documentId);
+ 
+-            // Block the root of the storage
+-            if (path.isEmpty()) {
+-                return true;
+-            }
++        // Block the root of the storage
++        if (path.isEmpty()) {
++            return true;
++        }
+ 
+-            // Block Download folder from tree
+-            if (TextUtils.equals(Environment.DIRECTORY_DOWNLOADS.toLowerCase(Locale.ROOT),
+-                    path.toLowerCase(Locale.ROOT))) {
+-                return true;
+-            }
++        // Block /Download/ and /Android/ folders from the tree.
++        if (equalIgnoringCase(path, Environment.DIRECTORY_DOWNLOADS) ||
++                equalIgnoringCase(path, Environment.DIRECTORY_ANDROID)) {
++            return true;
++        }
+ 
+-            // Block /Android
+-            if (TextUtils.equals(Environment.DIRECTORY_ANDROID.toLowerCase(Locale.ROOT),
+-                    path.toLowerCase(Locale.ROOT))) {
+-                return true;
+-            }
++        // This shouldn't really make a difference, but just in case - let's block hidden
++        // directories as well.
++        if (shouldHideDocument(documentId)) {
++            return true;
++        }
+ 
+-            // Block /Android/data, /Android/obb, /Android/sandbox and sub dirs
+-            if (shouldHide(dir)) {
+-                return true;
+-            }
++        return false;
++    }
+ 
++    private boolean isOnRemovableUsbStorage(@NonNull String documentId) {
++        final RootInfo rootInfo;
++        try {
++            rootInfo = getRootFromDocId(documentId);
++        } catch (FileNotFoundException e) {
++            Log.e(TAG, "Failed to determine rootInfo for docId\"" + documentId + '"');
+             return false;
+-        } catch (IOException e) {
+-            throw new IllegalArgumentException(
+-                    "Failed to determine if " + docId + " should block from tree " + ": " + e);
+         }
++
++        return (rootInfo.flags & Root.FLAG_REMOVABLE_USB) != 0;
+     }
+ 
++    @NonNull
+     @Override
+-    protected String getDocIdForFile(File file) throws FileNotFoundException {
++    protected String getDocIdForFile(@NonNull File file) throws FileNotFoundException {
+         return getDocIdForFileMaybeCreate(file, false);
+     }
+ 
+-    private String getDocIdForFileMaybeCreate(File file, boolean createNewDir)
++    @NonNull
++    private String getDocIdForFileMaybeCreate(@NonNull File file, boolean createNewDir)
+             throws FileNotFoundException {
+         String path = file.getAbsolutePath();
+ 
+@@ -417,31 +451,33 @@ public class ExternalStorageProvider extends FileSystemProvider {
+     private File getFileForDocId(String docId, boolean visible, boolean mustExist)
+             throws FileNotFoundException {
+         RootInfo root = getRootFromDocId(docId);
+-        return buildFile(root, docId, visible, mustExist);
++        return buildFile(root, docId, mustExist);
+     }
+ 
+-    private Pair<RootInfo, File> resolveDocId(String docId, boolean visible)
+-            throws FileNotFoundException {
++    private Pair<RootInfo, File> resolveDocId(String docId) throws FileNotFoundException {
+         RootInfo root = getRootFromDocId(docId);
+-        return Pair.create(root, buildFile(root, docId, visible, true));
++        return Pair.create(root, buildFile(root, docId, /* mustExist */ true));
+     }
+ 
+     @VisibleForTesting
+-    static String getPathFromDocId(String docId) throws IOException {
++    static String getPathFromDocId(String docId) {
+         final int splitIndex = docId.indexOf(':', 1);
+         final String docIdPath = docId.substring(splitIndex + 1);
+-        // Get CanonicalPath and remove the first "/"
+-        final String canonicalPath = new File(docIdPath).getCanonicalPath().substring(1);
+ 
+-        if (canonicalPath.isEmpty()) {
+-            return canonicalPath;
++        // Canonicalize path and strip the leading "/"
++        final String path;
++        try {
++            path = new File(docIdPath).getCanonicalPath().substring(1);
++        } catch (IOException e) {
++            Log.w(TAG, "Could not canonicalize \"" + docIdPath + '"');
++            return "";
+         }
+ 
+-        // remove trailing "/"
+-        if (canonicalPath.charAt(canonicalPath.length() - 1) == '/') {
+-            return canonicalPath.substring(0, canonicalPath.length() - 1);
++        // Remove the trailing "/" as well.
++        if (!path.isEmpty() && path.charAt(path.length() - 1) == '/') {
++            return path.substring(0, path.length() - 1);
+         } else {
+-            return canonicalPath;
++            return path;
+         }
+     }
+ 
+@@ -460,7 +496,7 @@ public class ExternalStorageProvider extends FileSystemProvider {
+         return root;
+     }
+ 
+-    private File buildFile(RootInfo root, String docId, boolean visible, boolean mustExist)
++    private File buildFile(RootInfo root, String docId, boolean mustExist)
+             throws FileNotFoundException {
+         final int splitIndex = docId.indexOf(':', 1);
+         final String path = docId.substring(splitIndex + 1);
+@@ -544,7 +580,7 @@ public class ExternalStorageProvider extends FileSystemProvider {
+     @Override
+     public Path findDocumentPath(@Nullable String parentDocId, String childDocId)
+             throws FileNotFoundException {
+-        final Pair<RootInfo, File> resolvedDocId = resolveDocId(childDocId, false);
++        final Pair<RootInfo, File> resolvedDocId = resolveDocId(childDocId);
+         final RootInfo root = resolvedDocId.first;
+         File child = resolvedDocId.second;
+ 
+@@ -648,6 +684,13 @@ public class ExternalStorageProvider extends FileSystemProvider {
+         }
+     }
+ 
++    /**
++     * Print the state into the given stream.
++     * Gets invoked when you run:
++     * <pre>
++     * adb shell dumpsys activity provider com.android.externalstorage/.ExternalStorageProvider
++     * </pre>
++     */
+     @Override
+     public void dump(FileDescriptor fd, PrintWriter writer, String[] args) {
+         final IndentingPrintWriter pw = new IndentingPrintWriter(writer, "  ", 160);
+@@ -731,4 +774,8 @@ public class ExternalStorageProvider extends FileSystemProvider {
+         }
+         return bundle;
+     }
++
++    private static boolean equalIgnoringCase(@NonNull String a, @NonNull String b) {
++        return TextUtils.equals(a.toLowerCase(Locale.ROOT), b.toLowerCase(Locale.ROOT));
++    }
+ }
+-- 
+2.43.0.195.gebba966016-goog
+
