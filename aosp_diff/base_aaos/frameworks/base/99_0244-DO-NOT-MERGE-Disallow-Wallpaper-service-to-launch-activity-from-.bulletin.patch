@@ -1,0 +1,317 @@
+From 2601009f4aa4eac1ba345146f1454a29406a701e Mon Sep 17 00:00:00 2001
+From: Nan Wu <wnan@google.com>
+Date: Fri, 2 Dec 2022 19:08:54 +0000
+Subject: [PATCH] DO NOT MERGE Disallow Wallpaper service to launch activity
+ from background.
+
+Add a flag so that when a foreground client binds to a service,
+disallow the bound service to launch activity from background.
+Modify the WallpaperManagerService to take advantage of the new flag.
+
+Test: atest BackgroundActivityLaunchTest WallpaperManagerServiceTests
+Bug: 261072174
+(cherry picked from commit 064be0ffc599a94ee2c4016cf69f4e8e0f062227)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:b7b2856de6258ee2595cc60b30e2e3c6648dfc74)
+Merged-In: Id4e4cb6144597cf3638f2aaa34ea455a239fa1a7
+Change-Id: Id4e4cb6144597cf3638f2aaa34ea455a239fa1a7
+---
+ core/java/android/content/Context.java        |  9 ++++
+ .../server/activitymanagerservice.proto       |  1 +
+ .../android/server/am/ConnectionRecord.java   |  5 +++
+ .../server/am/ProcessServiceRecord.java       | 23 ++++++----
+ .../com/android/server/am/ServiceRecord.java  |  2 +-
+ .../wallpaper/WallpaperManagerService.java    |  3 +-
+ .../wm/BackgroundLaunchProcessController.java | 42 +++++++++++--------
+ .../server/wm/WindowProcessController.java    | 14 ++++++-
+ 8 files changed, 69 insertions(+), 30 deletions(-)
+
+diff --git a/core/java/android/content/Context.java b/core/java/android/content/Context.java
+index 913c3b8a33cd..f8d73529ca45 100644
+--- a/core/java/android/content/Context.java
++++ b/core/java/android/content/Context.java
+@@ -250,6 +250,7 @@ public abstract class Context {
+             BIND_IMPORTANT,
+             BIND_ADJUST_WITH_ACTIVITY,
+             BIND_NOT_PERCEPTIBLE,
++            BIND_DENY_ACTIVITY_STARTS,
+             BIND_INCLUDE_CAPABILITIES
+     })
+     @Retention(RetentionPolicy.SOURCE)
+@@ -370,6 +371,14 @@ public abstract class Context {
+     /***********    Public flags above this line ***********/
+     /***********    Hidden flags below this line ***********/
+ 
++    /**
++     * Flag for {@link #bindService}: If binding from an app that is visible, the bound service is
++     * allowed to start an activity from background. Add a flag so that this behavior can be opted
++     * out.
++     * @hide
++     */
++    public static final int BIND_DENY_ACTIVITY_STARTS = 0X000004000;
++
+     /**
+      * Flag for {@link #bindService}: This flag is only intended to be used by the system to
+      * indicate that a service binding is not considered as real package component usage and should
+diff --git a/core/proto/android/server/activitymanagerservice.proto b/core/proto/android/server/activitymanagerservice.proto
+index 17dc4589d402..24d2c90b8215 100644
+--- a/core/proto/android/server/activitymanagerservice.proto
++++ b/core/proto/android/server/activitymanagerservice.proto
+@@ -524,6 +524,7 @@ message ConnectionRecordProto {
+         DEAD = 15;
+         NOT_PERCEPTIBLE = 16;
+         INCLUDE_CAPABILITIES = 17;
++        DENY_ACTIVITY_STARTS = 18;
+     }
+     repeated Flag flags = 3;
+     optional string service_name = 4;
+diff --git a/services/core/java/com/android/server/am/ConnectionRecord.java b/services/core/java/com/android/server/am/ConnectionRecord.java
+index 916127126117..2e2ac4ad1543 100644
+--- a/services/core/java/com/android/server/am/ConnectionRecord.java
++++ b/services/core/java/com/android/server/am/ConnectionRecord.java
+@@ -68,6 +68,7 @@ final class ConnectionRecord {
+             Context.BIND_NOT_VISIBLE,
+             Context.BIND_NOT_PERCEPTIBLE,
+             Context.BIND_INCLUDE_CAPABILITIES,
++            Context.BIND_DENY_ACTIVITY_STARTS,
+     };
+     private static final int[] BIND_PROTO_ENUMS = new int[] {
+             ConnectionRecordProto.AUTO_CREATE,
+@@ -87,6 +88,7 @@ final class ConnectionRecord {
+             ConnectionRecordProto.NOT_VISIBLE,
+             ConnectionRecordProto.NOT_PERCEPTIBLE,
+             ConnectionRecordProto.INCLUDE_CAPABILITIES,
++            ConnectionRecordProto.DENY_ACTIVITY_STARTS,
+     };
+ 
+     void dump(PrintWriter pw, String prefix) {
+@@ -226,6 +228,9 @@ final class ConnectionRecord {
+         if ((flags & Context.BIND_NOT_PERCEPTIBLE) != 0) {
+             sb.append("!PRCP ");
+         }
++        if ((flags & Context.BIND_DENY_ACTIVITY_STARTS) != 0) {
++            sb.append("BALFD ");
++        }
+         if ((flags & Context.BIND_INCLUDE_CAPABILITIES) != 0) {
+             sb.append("CAPS ");
+         }
+diff --git a/services/core/java/com/android/server/am/ProcessServiceRecord.java b/services/core/java/com/android/server/am/ProcessServiceRecord.java
+index 8f77b87f5308..1f689b3ce928 100644
+--- a/services/core/java/com/android/server/am/ProcessServiceRecord.java
++++ b/services/core/java/com/android/server/am/ProcessServiceRecord.java
+@@ -23,6 +23,7 @@ import android.util.ArrayMap;
+ import android.util.ArraySet;
+ 
+ import com.android.internal.annotations.GuardedBy;
++import com.android.server.wm.WindowProcessController;
+ 
+ import java.io.PrintWriter;
+ import java.util.ArrayList;
+@@ -323,19 +324,21 @@ final class ProcessServiceRecord {
+         return mConnections.size();
+     }
+ 
+-    void addBoundClientUid(int clientUid) {
++    void addBoundClientUid(int clientUid, String clientPackageName, int bindFlags) {
+         mBoundClientUids.add(clientUid);
+-        mApp.getWindowProcessController().setBoundClientUids(mBoundClientUids);
++        mApp.getWindowProcessController()
++                .addBoundClientUid(clientUid, clientPackageName, bindFlags);
+     }
+ 
+     void updateBoundClientUids() {
++        clearBoundClientUids();
+         if (mServices.isEmpty()) {
+-            clearBoundClientUids();
+             return;
+         }
+         // grab a set of clientUids of all mConnections of all services
+         final ArraySet<Integer> boundClientUids = new ArraySet<>();
+         final int serviceCount = mServices.size();
++        WindowProcessController controller = mApp.getWindowProcessController();
+         for (int j = 0; j < serviceCount; j++) {
+             final ArrayMap<IBinder, ArrayList<ConnectionRecord>> conns =
+                     mServices.valueAt(j).getConnections();
+@@ -343,12 +346,13 @@ final class ProcessServiceRecord {
+             for (int conni = 0; conni < size; conni++) {
+                 ArrayList<ConnectionRecord> c = conns.valueAt(conni);
+                 for (int i = 0; i < c.size(); i++) {
+-                    boundClientUids.add(c.get(i).clientUid);
++                    ConnectionRecord cr = c.get(i);
++                    boundClientUids.add(cr.clientUid);
++                    controller.addBoundClientUid(cr.clientUid, cr.clientPackageName, cr.flags);
+                 }
+             }
+         }
+         mBoundClientUids = boundClientUids;
+-        mApp.getWindowProcessController().setBoundClientUids(mBoundClientUids);
+     }
+ 
+     void addBoundClientUidsOfNewService(ServiceRecord sr) {
+@@ -359,15 +363,18 @@ final class ProcessServiceRecord {
+         for (int conni = conns.size() - 1; conni >= 0; conni--) {
+             ArrayList<ConnectionRecord> c = conns.valueAt(conni);
+             for (int i = 0; i < c.size(); i++) {
+-                mBoundClientUids.add(c.get(i).clientUid);
++                ConnectionRecord cr = c.get(i);
++                mBoundClientUids.add(cr.clientUid);
++                mApp.getWindowProcessController()
++                        .addBoundClientUid(cr.clientUid, cr.clientPackageName, cr.flags);
++
+             }
+         }
+-        mApp.getWindowProcessController().setBoundClientUids(mBoundClientUids);
+     }
+ 
+     void clearBoundClientUids() {
+         mBoundClientUids.clear();
+-        mApp.getWindowProcessController().setBoundClientUids(mBoundClientUids);
++        mApp.getWindowProcessController().clearBoundClientUids();
+     }
+ 
+     @GuardedBy("mService")
+diff --git a/services/core/java/com/android/server/am/ServiceRecord.java b/services/core/java/com/android/server/am/ServiceRecord.java
+index e36898fee387..8cadce8f3207 100644
+--- a/services/core/java/com/android/server/am/ServiceRecord.java
++++ b/services/core/java/com/android/server/am/ServiceRecord.java
+@@ -684,7 +684,7 @@ final class ServiceRecord extends Binder implements ComponentName.WithComponentN
+ 
+         // if we have a process attached, add bound client uid of this connection to it
+         if (app != null) {
+-            app.mServices.addBoundClientUid(c.clientUid);
++            app.mServices.addBoundClientUid(c.clientUid, c.clientPackageName, c.flags);
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java b/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java
+index 15a41f6b3d2c..e632567e3882 100644
+--- a/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java
++++ b/services/core/java/com/android/server/wallpaper/WallpaperManagerService.java
+@@ -2975,7 +2975,8 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
+             if (!mContext.bindServiceAsUser(intent, newConn,
+                     Context.BIND_AUTO_CREATE | Context.BIND_SHOWING_UI
+                             | Context.BIND_FOREGROUND_SERVICE_WHILE_AWAKE
+-                            | Context.BIND_INCLUDE_CAPABILITIES,
++                            | Context.BIND_INCLUDE_CAPABILITIES
++                            | Context.BIND_DENY_ACTIVITY_STARTS,
+                     new UserHandle(serviceUserId))) {
+                 String msg = "Unable to bind service: "
+                         + componentName;
+diff --git a/services/core/java/com/android/server/wm/BackgroundLaunchProcessController.java b/services/core/java/com/android/server/wm/BackgroundLaunchProcessController.java
+index 0afd87282783..ccc907b68169 100644
+--- a/services/core/java/com/android/server/wm/BackgroundLaunchProcessController.java
++++ b/services/core/java/com/android/server/wm/BackgroundLaunchProcessController.java
+@@ -25,11 +25,11 @@ import static com.android.server.wm.ActivityTaskManagerService.APP_SWITCH_FG_ONL
+ 
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.content.Context;
+ import android.os.Binder;
+ import android.os.IBinder;
+ import android.os.SystemClock;
+ import android.util.ArrayMap;
+-import android.util.ArraySet;
+ import android.util.IntArray;
+ import android.util.Slog;
+ 
+@@ -61,9 +61,11 @@ class BackgroundLaunchProcessController {
+     @GuardedBy("this")
+     private @Nullable ArrayMap<Binder, IBinder> mBackgroundActivityStartTokens;
+ 
+-    /** Set of UIDs of clients currently bound to this process. */
++    /** Set of UIDs of clients currently bound to this process and opt in to allow this process to
++     * launch background activity.
++     */
+     @GuardedBy("this")
+-    private @Nullable IntArray mBoundClientUids;
++    private @Nullable IntArray mBalOptInBoundClientUids;
+ 
+     BackgroundLaunchProcessController(@NonNull IntPredicate uidHasActiveVisibleWindowPredicate,
+             @Nullable BackgroundActivityStartCallback callback) {
+@@ -169,9 +171,9 @@ class BackgroundLaunchProcessController {
+ 
+     private boolean isBoundByForegroundUid() {
+         synchronized (this) {
+-            if (mBoundClientUids != null) {
+-                for (int i = mBoundClientUids.size() - 1; i >= 0; i--) {
+-                    if (mUidHasActiveVisibleWindowPredicate.test(mBoundClientUids.get(i))) {
++            if (mBalOptInBoundClientUids != null) {
++                for (int i = mBalOptInBoundClientUids.size() - 1; i >= 0; i--) {
++                    if (mUidHasActiveVisibleWindowPredicate.test(mBalOptInBoundClientUids.get(i))) {
+                         return true;
+                     }
+                 }
+@@ -180,19 +182,23 @@ class BackgroundLaunchProcessController {
+         return false;
+     }
+ 
+-    void setBoundClientUids(ArraySet<Integer> boundClientUids) {
++    void clearBalOptInBoundClientUids() {
+         synchronized (this) {
+-            if (boundClientUids == null || boundClientUids.isEmpty()) {
+-                mBoundClientUids = null;
+-                return;
+-            }
+-            if (mBoundClientUids == null) {
+-                mBoundClientUids = new IntArray();
++            if (mBalOptInBoundClientUids == null) {
++                mBalOptInBoundClientUids = new IntArray();
+             } else {
+-                mBoundClientUids.clear();
++                mBalOptInBoundClientUids.clear();
++            }
++        }
++    }
++
++    void addBoundClientUid(int clientUid, String clientPackageName, int bindFlags) {
++        if ((bindFlags & Context.BIND_DENY_ACTIVITY_STARTS) == 0) {
++            if (mBalOptInBoundClientUids == null) {
++                mBalOptInBoundClientUids = new IntArray();
+             }
+-            for (int i = boundClientUids.size() - 1; i >= 0; i--) {
+-                mBoundClientUids.add(boundClientUids.valueAt(i));
++            if (mBalOptInBoundClientUids.indexOf(clientUid) == -1) {
++                mBalOptInBoundClientUids.add(clientUid);
+             }
+         }
+     }
+@@ -258,10 +264,10 @@ class BackgroundLaunchProcessController {
+                     pw.println(mBackgroundActivityStartTokens.valueAt(i));
+                 }
+             }
+-            if (mBoundClientUids != null && mBoundClientUids.size() > 0) {
++            if (mBalOptInBoundClientUids != null && mBalOptInBoundClientUids.size() > 0) {
+                 pw.print(prefix);
+                 pw.print("BoundClientUids:");
+-                pw.println(Arrays.toString(mBoundClientUids.toArray()));
++                pw.println(Arrays.toString(mBalOptInBoundClientUids.toArray()));
+             }
+         }
+     }
+diff --git a/services/core/java/com/android/server/wm/WindowProcessController.java b/services/core/java/com/android/server/wm/WindowProcessController.java
+index 3ccb06ccef15..7b957f53f302 100644
+--- a/services/core/java/com/android/server/wm/WindowProcessController.java
++++ b/services/core/java/com/android/server/wm/WindowProcessController.java
+@@ -538,8 +538,18 @@ public class WindowProcessController extends ConfigurationContainer<Configuratio
+         return mBgLaunchController.canCloseSystemDialogsByToken(mUid);
+     }
+ 
+-    public void setBoundClientUids(ArraySet<Integer> boundClientUids) {
+-        mBgLaunchController.setBoundClientUids(boundClientUids);
++    /**
++     * Clear all bound client Uids.
++     */
++    public void clearBoundClientUids() {
++        mBgLaunchController.clearBalOptInBoundClientUids();
++    }
++
++    /**
++     * Add bound client Uid.
++     */
++    public void addBoundClientUid(int clientUid, String clientPackageName, int bindFlags) {
++        mBgLaunchController.addBoundClientUid(clientUid, clientPackageName, bindFlags);
+     }
+ 
+     /**
+-- 
+2.43.0.195.gebba966016-goog
+
