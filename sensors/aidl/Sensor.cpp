@@ -148,33 +148,151 @@ std::vector<Event> Sensor::readEvents() {
     event.sensorType = mSensorInfo.type;
     event.timestamp = ::android::elapsedRealtimeNano();
     memset(&event.payload, 0, sizeof(event.payload));
-    EventPayload::Vec3 vec3 ;
+    EventPayload::Vec3 vec3;
+    EventPayload::Vec4 vec4;
+    EventPayload::Uncal uncal;
+    EventPayload::Data data;
+
     if (iioc && iioc->is_iioc_initialized) {
-        vec3 = {
-              .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
-              .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
-              .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
-              .status = SensorStatus::ACCURACY_HIGH,
-            };
-    } else {
-        if (event.sensorHandle == 1) {
-            vec3 = {
-              .x = 0,
-              .y = 0,
-              .z = -9.8,
-              .status = SensorStatus::ACCURACY_HIGH,
-        };
+        switch (event.sensorType) {
+            case SensorType::ACCELEROMETER:
+            case SensorType::MAGNETIC_FIELD:
+            case SensorType::ORIENTATION:
+            case SensorType::GYROSCOPE:
+            case SensorType::GRAVITY:
+            case SensorType::LINEAR_ACCELERATION:{
+                vec3 = {
+                    .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
+                    .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
+                    .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
+                    .status = SensorStatus::ACCURACY_HIGH,};
+                event.payload.set<EventPayload::Tag::vec3>(vec3);
+                break;
+            }
+            case SensorType::GAME_ROTATION_VECTOR: {
+                vec4 = {
+                    .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
+                    .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
+                    .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
+                    .w = iioc->devlist[mSensorInfo.sensorHandle].data[3],};
+                event.payload.set<EventPayload::Tag::vec4>(vec4);
+                break;
+            }
+            case SensorType::ROTATION_VECTOR:
+            case SensorType::GEOMAGNETIC_ROTATION_VECTOR: {
+                memcpy(data.values.data(), iioc->devlist[mSensorInfo.sensorHandle].data, 5 * sizeof(float));
+                event.payload.set<EventPayload::Tag::data>(data);
+                break;
+            }
+            case SensorType::GYROSCOPE_UNCALIBRATED: {
+                uncal = {
+                    .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
+                    .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
+                    .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
+                    .xBias = iioc->devlist[mSensorInfo.sensorHandle].data[3],
+                    .yBias = iioc->devlist[mSensorInfo.sensorHandle].data[4],
+                    .zBias = iioc->devlist[mSensorInfo.sensorHandle].data[5],};
+                event.payload.set<EventPayload::Tag::uncal>(uncal);
+                break;
+            }
+            case SensorType::LIGHT:
+            case SensorType::DEVICE_ORIENTATION:
+            case SensorType::PRESSURE:
+            case SensorType::PROXIMITY:
+            case SensorType::AMBIENT_TEMPERATURE:
+            case SensorType::RELATIVE_HUMIDITY:
+            case SensorType::HINGE_ANGLE:{
+                event.payload.set<EventPayload::Tag::scalar>((float)iioc->devlist[mSensorInfo.sensorHandle].data[0]);
+                break;
+            }
+            default :{
+                vec3 = {
+                    .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
+                    .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
+                    .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
+                    .status = SensorStatus::ACCURACY_HIGH,};
+            event.payload.set<EventPayload::Tag::vec3>(vec3);
+            }
         }
-        else {
-            vec3 = {
-              .x = 0,
-              .y = 0,
-              .z = 0,
-              .status = SensorStatus::ACCURACY_HIGH,
-        };
+    } else {
+        switch (event.sensorType) {
+            case SensorType::ACCELEROMETER:{
+                vec3 = {
+                    .x = 0,
+                    .y = 0,
+                    .z = -9.8,
+                    .status = SensorStatus::ACCURACY_HIGH,
+                    };
+                event.payload.set<EventPayload::Tag::vec3>(vec3);
+                break;
+            }
+            case SensorType::MAGNETIC_FIELD:{
+                vec3 = {
+                    .x = 100.0,
+                    .y = 0,
+                    .z = 50.0,
+                    .status = SensorStatus::ACCURACY_HIGH,};
+                event.payload.set<EventPayload::Tag::vec3>(vec3);
+                break;
+            }
+            case SensorType::ORIENTATION:
+            case SensorType::GYROSCOPE:
+            case SensorType::GRAVITY:
+            case SensorType::LINEAR_ACCELERATION: {
+                event.payload.set<EventPayload::Tag::vec3>(vec3);
+                break;
+            }
+            case SensorType::GAME_ROTATION_VECTOR: {
+                event.payload.set<EventPayload::Tag::vec4>(vec4);
+                break;
+            }
+            case SensorType::ROTATION_VECTOR:
+            case SensorType::GEOMAGNETIC_ROTATION_VECTOR: {
+                event.payload.set<EventPayload::Tag::data>(data);
+                break;
+            }
+            case SensorType::GYROSCOPE_UNCALIBRATED: {
+                event.payload.set<EventPayload::Tag::uncal>(uncal);
+                break;
+            }
+            case SensorType::LIGHT:{
+                event.payload.set<EventPayload::Tag::scalar>(80.0f);
+                break;
+            }
+            case SensorType::DEVICE_ORIENTATION:{
+                event.payload.set<EventPayload::Tag::scalar>(0.0f);
+                break;
+            }
+            case SensorType::PRESSURE:{
+                event.payload.set<EventPayload::Tag::scalar>(1013.25f);
+                break;
+            }
+            case SensorType::PROXIMITY:{
+                event.payload.set<EventPayload::Tag::scalar>(2.5f);
+                break;
+            }
+            case SensorType::AMBIENT_TEMPERATURE:{
+                event.payload.set<EventPayload::Tag::scalar>(40.0f);
+                break;
+            }
+            case SensorType::RELATIVE_HUMIDITY:{
+                event.payload.set<EventPayload::Tag::scalar>(50.0f);
+                break;
+            }
+            case SensorType::HINGE_ANGLE: {
+                event.payload.set<EventPayload::Tag::scalar>(180.0f);
+                break;
+            }
+            default :{
+                vec3 = {
+                    .x = 0,
+                    .y = 0,
+                    .z = 0,
+                    .status = SensorStatus::ACCURACY_HIGH,};
+                event.payload.set<EventPayload::Tag::vec3>(vec3);
+            }
         }
     }
-    event.payload.set<EventPayload::Tag::vec3>(vec3);
     events.push_back(event);
 #ifdef DEBUG   // Probing data to debug
     ALOGD("readEvents: handle(%d) name -> %s data[%f, %f, %f]",
