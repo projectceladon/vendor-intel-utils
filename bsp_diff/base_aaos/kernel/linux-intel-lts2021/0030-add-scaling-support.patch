@@ -1,0 +1,196 @@
+From 78e1e188d32fb767673029c30f686f96a9a9cf9f Mon Sep 17 00:00:00 2001
+From: Hang Liu <hang1.liu@intel.com>
+Date: Tue, 11 Jul 2023 11:16:00 +0800
+Subject: [PATCH 1/3] add scaling support
+
+The gem buffer created by i915 in guest vm may be
+smaller than the resolution determined by the
+mode setting operation. In that case, a new framebuffer
+may be created by virtio gpu driver, and i915 rendering
+must be utilized to do the composition. To save the
+effort, pass the dst crtc info to the backend which will
+scale the gem buffer to the crtc.
+
+Tracked-On: OAM-113127
+Signed-off-by: Hang Liu<hang1.liu@intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_drv.c   |  1 +
+ drivers/gpu/drm/virtio/virtgpu_drv.h   |  5 +++++
+ drivers/gpu/drm/virtio/virtgpu_kms.c   |  3 +++
+ drivers/gpu/drm/virtio/virtgpu_plane.c | 24 +++++++++++++++++++++---
+ drivers/gpu/drm/virtio/virtgpu_vq.c    | 20 ++++++++++++++++++++
+ include/uapi/linux/virtio_gpu.h        | 14 ++++++++++++++
+ 6 files changed, 64 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index 51a5b10bf1f4..bdc61c971acb 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -172,6 +172,7 @@ static unsigned int features[] = {
+ 	VIRTIO_GPU_F_EDID,
+ 	VIRTIO_GPU_F_RESOURCE_UUID,
+ 	VIRTIO_GPU_F_RESOURCE_BLOB,
++	VIRTIO_GPU_F_SCALING,
+ };
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index 3e272d8a80e4..c8be1d6ce2ef 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -234,6 +234,7 @@ struct virtio_gpu_device {
+ 
+ 	bool has_virgl_3d;
+ 	bool has_edid;
++	bool has_scaling;
+ 	bool has_indirect;
+ 	bool has_resource_assign_uuid;
+ 	bool has_resource_blob;
+@@ -413,6 +414,10 @@ virtio_gpu_cmd_set_scanout_blob(struct virtio_gpu_device *vgdev,
+ 				uint32_t width, uint32_t height,
+ 				uint32_t x, uint32_t y);
+ 
++void virtio_gpu_cmd_set_scaling(struct virtio_gpu_device *vgdev,
++				     uint32_t scanout_id,
++				     struct drm_rect *rect_dst);
++
+ /* virtgpu_display.c */
+ int virtio_gpu_modeset_init(struct virtio_gpu_device *vgdev);
+ void virtio_gpu_modeset_fini(struct virtio_gpu_device *vgdev);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index 81dcd498f9a1..9a10141e7b2c 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -166,6 +166,9 @@ int virtio_gpu_init(struct drm_device *dev)
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_RESOURCE_UUID)) {
+ 		vgdev->has_resource_assign_uuid = true;
+ 	}
++	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_SCALING)) {
++		vgdev->has_scaling = true;
++	}
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_RESOURCE_BLOB)) {
+ 		vgdev->has_resource_blob = true;
+ 	}
+diff --git a/drivers/gpu/drm/virtio/virtgpu_plane.c b/drivers/gpu/drm/virtio/virtgpu_plane.c
+index 764cde441d55..7a592f7fafd4 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_plane.c
++++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
+@@ -133,9 +133,13 @@ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+ {
+ 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
+ 										 plane);
++	struct drm_device *dev = plane->dev;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
+ 	bool is_cursor = plane->type == DRM_PLANE_TYPE_CURSOR;
+ 	struct drm_crtc_state *crtc_state;
+ 	int ret;
++	int min_scale = DRM_PLANE_HELPER_NO_SCALING;
++	int max_scale = DRM_PLANE_HELPER_NO_SCALING;
+ 
+ 	if (!new_plane_state->fb || WARN_ON(!new_plane_state->crtc))
+ 		return 0;
+@@ -144,10 +148,13 @@ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+ 					       new_plane_state->crtc);
+ 	if (IS_ERR(crtc_state))
+                 return PTR_ERR(crtc_state);
+-
++	if(vgdev->has_scaling && (new_plane_state->fb->format->format != DRM_FORMAT_C8)) {
++		min_scale = 1;
++		max_scale = 0x30000-1;
++	}
+ 	ret = drm_atomic_helper_check_plane_state(new_plane_state, crtc_state,
+-						  DRM_PLANE_HELPER_NO_SCALING,
+-						  DRM_PLANE_HELPER_NO_SCALING,
++						  min_scale,
++						  max_scale,
+ 						  is_cursor, true);
+ 	return ret;
+ }
+@@ -280,6 +287,17 @@ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 		}
+ 	}
+ 
++	if(vgdev->has_scaling) {
++		struct drm_rect rect_dst;
++
++		rect_dst.x1 = plane->state->crtc_x;
++		rect_dst.y1 = plane->state->crtc_y;
++		rect_dst.x2 = plane->state->crtc_w;
++		rect_dst.y2 = plane->state->crtc_h;
++
++		virtio_gpu_cmd_set_scaling(vgdev, output->index, &rect_dst);
++	}
++
+ 	virtio_gpu_resource_flush(plane,
+ 				  rect.x1,
+ 				  rect.y1,
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index 93a41d018dca..f1108f1b854b 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -1304,3 +1304,23 @@ void virtio_gpu_cmd_set_scanout_blob(struct virtio_gpu_device *vgdev,
+ 
+ 	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
+ }
++
++void virtio_gpu_cmd_set_scaling(struct virtio_gpu_device *vgdev,
++				     uint32_t scanout_id,
++				     struct drm_rect *rect_dst)
++{
++	struct virtio_gpu_set_scaling *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++
++	cmd_p = virtio_gpu_alloc_cmd(vgdev, &vbuf, sizeof(*cmd_p));
++	memset(cmd_p, 0, sizeof(*cmd_p));
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_SET_SCALING);
++	cmd_p->scanout_id = cpu_to_le32(scanout_id);
++
++	cmd_p->dst.width = cpu_to_le32(rect_dst->x2);
++	cmd_p->dst.height = cpu_to_le32(rect_dst->y2);
++	cmd_p->dst.x = cpu_to_le32(rect_dst->x1);
++	cmd_p->dst.y = cpu_to_le32(rect_dst->y1);
++
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++}
+diff --git a/include/uapi/linux/virtio_gpu.h b/include/uapi/linux/virtio_gpu.h
+index 97523a95781d..5993276c87b4 100644
+--- a/include/uapi/linux/virtio_gpu.h
++++ b/include/uapi/linux/virtio_gpu.h
+@@ -60,6 +60,11 @@
+  */
+ #define VIRTIO_GPU_F_RESOURCE_BLOB       3
+ 
++/*
++*VIRTIO_GPU_CMD_SET_SCALING
++*/
++#define VIRTIO_GPU_F_SCALING	6
++
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+ 
+@@ -78,6 +83,7 @@ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID,
+ 	VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB,
+ 	VIRTIO_GPU_CMD_SET_SCANOUT_BLOB,
++	VIRTIO_GPU_CMD_SET_SCALING,
+ 
+ 	/* 3d commands */
+ 	VIRTIO_GPU_CMD_CTX_CREATE = 0x0200,
+@@ -192,6 +198,14 @@ struct virtio_gpu_resource_flush {
+ 	__le32 padding;
+ };
+ 
++/* VIRTIO_GPU_CMD_SET_SCALING */
++struct virtio_gpu_set_scaling {
++	struct virtio_gpu_ctrl_hdr hdr;
++	struct virtio_gpu_rect dst;
++	__le32 scanout_id;
++	__le32 padding;
++};
++
+ /* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: simple transfer to_host */
+ struct virtio_gpu_transfer_to_host_2d {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+-- 
+2.40.1
+

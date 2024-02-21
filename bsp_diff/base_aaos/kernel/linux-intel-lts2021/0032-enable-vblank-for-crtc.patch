@@ -1,0 +1,280 @@
+From 0d717cdb739c65e4fb6aac4b7a20b2fc55dc4823 Mon Sep 17 00:00:00 2001
+From: Hang Liu <hang1.liu@intel.com>
+Date: Sat, 1 Jul 2023 12:30:18 +0800
+Subject: [PATCH 3/3] enable vblank for crtc
+
+virtio gpu backend inject virtual vblank interrupt
+for each virtio gpu crtc. The purpose for doing this
+is to avoid the potential image tearing caused by the
+concurrent accessing the same framebuffer by rendering
+engine in guest and display engine in host.
+
+Tracked-On: OAM-113127
+Signed-off-by: Hang Liu<hang1.liu@intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_display.c | 36 +++++++++++
+ drivers/gpu/drm/virtio/virtgpu_drv.c     | 11 ++++
+ drivers/gpu/drm/virtio/virtgpu_drv.h     |  5 +-
+ drivers/gpu/drm/virtio/virtgpu_kms.c     |  8 ++-
+ drivers/gpu/drm/virtio/virtgpu_vq.c      | 80 ++++++++++++++++++++++++
+ 5 files changed, 137 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_display.c b/drivers/gpu/drm/virtio/virtgpu_display.c
+index 938dfcfc095d..02d72436abb0 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_display.c
++++ b/drivers/gpu/drm/virtio/virtgpu_display.c
+@@ -31,6 +31,7 @@
+ #include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_probe_helper.h>
+ #include <drm/drm_simple_kms_helper.h>
++#include <drm/drm_vblank.h>
+ 
+ #include "virtgpu_drv.h"
+ 
+@@ -46,6 +47,28 @@
+ #define drm_connector_to_virtio_gpu_output(x) \
+ 	container_of(x, struct virtio_gpu_output, conn)
+ 
++static int virtio_irq_enable_vblank(struct drm_crtc *crtc)
++{
++
++	struct drm_device *dev = crtc->dev;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	struct virtio_gpu_output *output = drm_crtc_to_virtio_gpu_output(crtc);
++
++	virtio_gpu_vblank_poll_arm(vgdev->vblank[output->index].vblank.vq);
++	virtqueue_enable_cb(vgdev->vblank[output->index].vblank.vq);
++	return 0;
++}
++
++static void virtio_irq_disable_vblank(struct drm_crtc *crtc)
++{
++	struct drm_device *dev = crtc->dev;
++	struct virtio_gpu_device *vgdev;
++	vgdev = dev->dev_private;
++	struct virtio_gpu_output *output = drm_crtc_to_virtio_gpu_output(crtc);
++
++	virtqueue_disable_cb(vgdev->vblank[output->index].vblank.vq);
++}
++
+ static const struct drm_crtc_funcs virtio_gpu_crtc_funcs = {
+ 	.set_config             = drm_atomic_helper_set_config,
+ 	.destroy                = drm_crtc_cleanup,
+@@ -54,6 +77,8 @@ static const struct drm_crtc_funcs virtio_gpu_crtc_funcs = {
+ 	.reset                  = drm_atomic_helper_crtc_reset,
+ 	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
+ 	.atomic_destroy_state   = drm_atomic_helper_crtc_destroy_state,
++	.enable_vblank = virtio_irq_enable_vblank,
++	.disable_vblank = virtio_irq_disable_vblank,
+ };
+ 
+ static const struct drm_framebuffer_funcs virtio_gpu_fb_funcs = {
+@@ -122,6 +147,17 @@ static void virtio_gpu_crtc_atomic_flush(struct drm_crtc *crtc,
+ 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
+ 									  crtc);
+ 	struct virtio_gpu_output *output = drm_crtc_to_virtio_gpu_output(crtc);
++	struct drm_device *drm = crtc->dev;
++
++	spin_lock_irq(&drm->event_lock);
++
++
++	if (crtc->state->event) {
++		drm_crtc_send_vblank_event(crtc, crtc->state->event);
++		crtc->state->event = NULL;
++	}
++
++	spin_unlock_irq(&drm->event_lock);
+ 
+ 	/*
+ 	 * virtio-gpu can't do modeset and plane update operations
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index 1b440e9bfc84..e58f3a51a8ec 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -35,6 +35,7 @@
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_file.h>
++#include <drm/drm_vblank.h>
+ 
+ #include "virtgpu_drv.h"
+ 
+@@ -101,6 +102,7 @@ static int virtio_gpu_probe(struct virtio_device *vdev)
+ {
+ 	struct drm_device *dev;
+ 	int ret;
++	struct virtio_gpu_device *pgpudev;
+ 
+ 	if (vgacon_text_force() && virtio_gpu_modeset == -1)
+ 		return -EINVAL;
+@@ -123,6 +125,15 @@ static int virtio_gpu_probe(struct virtio_device *vdev)
+ 	if (ret)
+ 		goto err_free;
+ 
++	pgpudev = dev->dev_private;
++	if(pgpudev->num_vblankq) {
++		ret = drm_vblank_init(dev, pgpudev->num_vblankq);
++		if (ret) {
++			DRM_ERROR("could not init vblank\n");
++			goto err_deinit;
++		}
++	}
++
+ 	ret = drm_dev_register(dev, 0);
+ 	if (ret)
+ 		goto err_deinit;
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index 56c1569e1e49..3c6000659281 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -391,13 +391,14 @@ virtio_gpu_cmd_resource_create_3d(struct virtio_gpu_device *vgdev,
+ 				  struct virtio_gpu_fence *fence);
+ void virtio_gpu_ctrl_ack(struct virtqueue *vq);
+ void virtio_gpu_cursor_ack(struct virtqueue *vq);
++void virtio_gpu_vblank_ack(struct virtqueue *vq);
++void virtio_gpu_vblank_poll_arm(struct virtqueue *vq);
+ void virtio_gpu_fence_ack(struct virtqueue *vq);
+ void virtio_gpu_dequeue_ctrl_func(struct work_struct *work);
+ void virtio_gpu_dequeue_cursor_func(struct work_struct *work);
+ void virtio_gpu_dequeue_fence_func(struct work_struct *work);
+-
+ void virtio_gpu_notify(struct virtio_gpu_device *vgdev);
+-
++void virtio_gpu_vblankq_notify(struct virtio_gpu_device *vgdev);
+ int
+ virtio_gpu_cmd_resource_assign_uuid(struct virtio_gpu_device *vgdev,
+ 				    struct virtio_gpu_object_array *objs);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index 039793bdb3ee..2d8bc10bdeb9 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -100,7 +100,7 @@ int virtio_gpu_find_vqs(struct virtio_gpu_device *vgdev)
+ 	struct virtqueue **vqs;
+ 	int i, total_vqs, err;
+ 	const char **names;
+-	int ret;
++	int ret = 0;
+ 
+ 	total_vqs = vgdev->num_vblankq + 2;
+ 	vqs = kcalloc(total_vqs, sizeof(*vqs), GFP_KERNEL);
+@@ -274,6 +274,12 @@ int virtio_gpu_init(struct drm_device *dev)
+ 
+ 	if (num_capsets)
+ 		virtio_gpu_get_capsets(vgdev, num_capsets);
++
++	virtio_gpu_vblankq_notify(vgdev);
++
++	for(i=0; i < vgdev->num_vblankq; i++)
++		virtqueue_disable_cb(vgdev->vblank[i].vblank.vq);
++
+ 	if (vgdev->has_edid)
+ 		virtio_gpu_cmd_get_edids(vgdev);
+ 	virtio_gpu_cmd_get_display_info(vgdev);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index f1108f1b854b..9938821a5815 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -31,6 +31,9 @@
+ #include <linux/virtio_config.h>
+ #include <linux/virtio_ring.h>
+ 
++#include <drm/drm.h>
++#include <drm/drm_vblank.h>
++
+ #include "virtgpu_drv.h"
+ #include "virtgpu_trace.h"
+ 
+@@ -59,6 +62,60 @@ void virtio_gpu_ctrl_ack(struct virtqueue *vq)
+ 	schedule_work(&vgdev->ctrlq.dequeue_work);
+ }
+ 
++static void virtgpu_irqqueue_buf(struct virtqueue *vq,
++				  uint32_t *evtbuf)
++{
++	struct scatterlist sg[1];
++	sg_init_one(sg, evtbuf, sizeof(*evtbuf));
++	virtqueue_add_inbuf(vq, sg, 1, evtbuf, GFP_ATOMIC);
++}
++
++void virtio_gpu_vblank_poll_arm(struct virtqueue *vq)
++{
++	struct drm_device *dev = vq->vdev->priv;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	unsigned long irqflags;
++	unsigned int len;
++	unsigned int *ret_value;
++	int target = 0;
++
++	while((target < vgdev->num_vblankq) && (vgdev->vblank[target].vblank.vq != vq)) {
++		target++;
++	}
++
++	spin_lock_irqsave(&vgdev->vblank[target].vblank.qlock, irqflags);
++	if((ret_value = virtqueue_get_buf(vq, &len)) != NULL) {
++
++		virtgpu_irqqueue_buf(vq, ret_value);
++	}
++	virtqueue_kick(vq);
++	spin_unlock_irqrestore(&vgdev->vblank[target].vblank.qlock, irqflags);
++}
++
++void virtio_gpu_vblank_ack(struct virtqueue *vq)
++{
++	struct drm_device *dev = vq->vdev->priv;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	unsigned long irqflags;
++	unsigned int len;
++	unsigned int *ret_value;
++	int target = 0;
++
++	while((target < vgdev->num_vblankq) && (vgdev->vblank[target].vblank.vq != vq)) {
++		target++;
++	}
++
++	spin_lock_irqsave(&vgdev->vblank[target].vblank.qlock, irqflags);
++	if((ret_value = virtqueue_get_buf(vgdev->vblank[target].vblank.vq, &len)) != NULL) {
++
++		virtgpu_irqqueue_buf(vgdev->vblank[target].vblank.vq, ret_value);
++	}
++
++	spin_unlock_irqrestore(&vgdev->vblank[target].vblank.qlock, irqflags);
++	drm_handle_vblank(dev, target);
++
++}
++
+ void virtio_gpu_cursor_ack(struct virtqueue *vq)
+ {
+ 	struct drm_device *dev = vq->vdev->priv;
+@@ -424,6 +481,29 @@ static int virtio_gpu_queue_fenced_ctrl_buffer(struct virtio_gpu_device *vgdev,
+ 	return ret;
+ }
+ 
++
++
++void virtio_gpu_vblankq_notify(struct virtio_gpu_device *vgdev)
++{
++	int size,i;
++
++	for(i=0; i < vgdev->num_vblankq; i++) {
++		spin_lock(&vgdev->vblank[i].vblank.qlock);
++
++		size = virtqueue_get_vring_size(vgdev->vblank[i].vblank.vq);
++		if (size > ARRAY_SIZE(vgdev->vblank[i].buf))
++			size = ARRAY_SIZE(vgdev->vblank[i].buf);
++
++		virtgpu_irqqueue_buf(vgdev->vblank[i].vblank.vq, &vgdev->vblank[i].buf[0]);
++
++		virtqueue_kick(vgdev->vblank[i].vblank.vq);
++
++		spin_unlock(&vgdev->vblank[i].vblank.qlock);
++
++	}
++
++}
++
+ void virtio_gpu_notify(struct virtio_gpu_device *vgdev)
+ {
+ 	bool notify;
+-- 
+2.40.1
+

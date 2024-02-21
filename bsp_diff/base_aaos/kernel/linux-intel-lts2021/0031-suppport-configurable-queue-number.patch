@@ -1,0 +1,187 @@
+From 6ab0ff024519a164071480075756f456359585df Mon Sep 17 00:00:00 2001
+From: Hang Liu <hang1.liu@intel.com>
+Date: Sat, 1 Jul 2023 11:09:56 +0800
+Subject: [PATCH 2/3] suppport configurable queue number
+
+virtio backend set the vblank queue number
+in the config space, since vblank interrupt reuse
+the virtio queue interrupt.
+
+Tracked-On: OAM-113127
+Signed-off-by: Hang Liu<hang1.liu@intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_drv.c |  1 +
+ drivers/gpu/drm/virtio/virtgpu_drv.h |  8 ++++
+ drivers/gpu/drm/virtio/virtgpu_kms.c | 55 ++++++++++++++++++++++++----
+ include/uapi/linux/virtio_gpu.h      |  3 ++
+ 4 files changed, 59 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index bdc61c971acb..1b440e9bfc84 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -173,6 +173,7 @@ static unsigned int features[] = {
+ 	VIRTIO_GPU_F_RESOURCE_UUID,
+ 	VIRTIO_GPU_F_RESOURCE_BLOB,
+ 	VIRTIO_GPU_F_SCALING,
++	VIRTIO_GPU_F_VBLANK,
+ };
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index c8be1d6ce2ef..56c1569e1e49 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -206,6 +206,11 @@ struct virtio_gpu_drv_cap_cache {
+ 	atomic_t is_valid;
+ };
+ 
++struct virtio_gpu_vblank {
++	struct virtio_gpu_queue vblank;
++	uint32_t buf[4];
++};
++
+ struct virtio_gpu_device {
+ 	struct device *dev;
+ 	struct drm_device *ddev;
+@@ -215,6 +220,7 @@ struct virtio_gpu_device {
+ 	struct virtio_gpu_output outputs[VIRTIO_GPU_MAX_SCANOUTS];
+ 	uint32_t num_scanouts;
+ 
++	uint32_t num_vblankq;
+ 	struct virtio_gpu_queue ctrlq;
+ 	struct virtio_gpu_queue cursorq;
+ 	struct kmem_cache *vbufs;
+@@ -235,6 +241,7 @@ struct virtio_gpu_device {
+ 	bool has_virgl_3d;
+ 	bool has_edid;
+ 	bool has_scaling;
++	bool has_vblank;
+ 	bool has_indirect;
+ 	bool has_resource_assign_uuid;
+ 	bool has_resource_blob;
+@@ -257,6 +264,7 @@ struct virtio_gpu_device {
+ 	spinlock_t resource_export_lock;
+ 	/* protects map state and host_visible_mm */
+ 	spinlock_t host_visible_lock;
++	struct virtio_gpu_vblank vblank[];
+ };
+ 
+ struct virtio_gpu_fpriv {
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index 9a10141e7b2c..039793bdb3ee 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -96,27 +96,56 @@ static void virtio_gpu_get_capsets(struct virtio_gpu_device *vgdev,
+ 
+ int virtio_gpu_find_vqs(struct virtio_gpu_device *vgdev)
+ {
+-	static vq_callback_t *callbacks[] = {
+-		virtio_gpu_ctrl_ack, virtio_gpu_cursor_ack
+-	};
+-	static const char * const names[] = { "control", "cursor" };
+-	struct virtqueue *vqs[2];
++	vq_callback_t **callbacks;
++	struct virtqueue **vqs;
++	int i, total_vqs, err;
++	const char **names;
+ 	int ret;
+ 
+-	ret = virtio_find_vqs(vgdev->vdev, 2, vqs, callbacks, names, NULL);
++	total_vqs = vgdev->num_vblankq + 2;
++	vqs = kcalloc(total_vqs, sizeof(*vqs), GFP_KERNEL);
++	callbacks = kmalloc_array(total_vqs, sizeof(vq_callback_t *),
++				  GFP_KERNEL);
++	names = kmalloc_array(total_vqs, sizeof(char *), GFP_KERNEL);
++
++	if (!callbacks || !vqs || !names) {
++		err = -ENOMEM;
++		goto out;
++	}
++
++	callbacks[0] = virtio_gpu_ctrl_ack;
++	callbacks[1] = virtio_gpu_cursor_ack;
++	names[0] = "control";
++	names[1] = "cursor";
++	for (i = 2; i < total_vqs; i++) {
++		callbacks[i] = virtio_gpu_vblank_ack;
++		names[i] = "vblank";
++	}
++
++	ret = virtio_find_vqs(vgdev->vdev, total_vqs, vqs, callbacks, names, NULL);
+ 	if (ret)
+-		return ret;
++		goto out;
+ 
+ 	vgdev->ctrlq.vq = vqs[0];
+ 	vgdev->cursorq.vq = vqs[1];
+ 
+-	return 0;
++	for (i = 2; i < total_vqs; i++)
++		vgdev->vblank[i-2].vblank.vq = vqs[i];
++
++	ret = 0;
++out:
++	kfree(names);
++
++	kfree(callbacks);
++	kfree(vqs);
++	return ret;
+ }
+ 
+ int virtio_gpu_init(struct drm_device *dev)
+ {
+ 	struct virtio_gpu_device *vgdev;
+ 	u32 num_scanouts, num_capsets;
++	int i;
+ 	int ret = 0;
+ 
+ 	if (!virtio_has_feature(dev_to_virtio(dev->dev), VIRTIO_F_VERSION_1))
+@@ -169,6 +198,9 @@ int virtio_gpu_init(struct drm_device *dev)
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_SCALING)) {
+ 		vgdev->has_scaling = true;
+ 	}
++	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_VBLANK)) {
++		vgdev->has_vblank = true;
++	}
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_RESOURCE_BLOB)) {
+ 		vgdev->has_resource_blob = true;
+ 	}
+@@ -198,6 +230,13 @@ int virtio_gpu_init(struct drm_device *dev)
+ 		 vgdev->has_resource_blob ? '+' : '-',
+ 		 vgdev->has_host_visible ? '+' : '-');
+ 
++	vgdev->num_vblankq = 0;
++	if(vgdev->has_vblank)
++		virtio_cread_le(vgdev->vdev, struct virtio_gpu_config,
++				num_pipe, &vgdev->num_vblankq);
++	for(i=0; i<vgdev->num_vblankq; i++)
++		spin_lock_init(&vgdev->vblank[i].vblank.qlock);
++
+ 	ret = virtio_gpu_find_vqs(vgdev);
+ 	if (ret) {
+ 		DRM_ERROR("failed to find virt queues\n");
+diff --git a/include/uapi/linux/virtio_gpu.h b/include/uapi/linux/virtio_gpu.h
+index 5993276c87b4..5766c788256f 100644
+--- a/include/uapi/linux/virtio_gpu.h
++++ b/include/uapi/linux/virtio_gpu.h
+@@ -65,6 +65,8 @@
+ */
+ #define VIRTIO_GPU_F_SCALING	6
+ 
++#define VIRTIO_GPU_F_VBLANK     7
++
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+ 
+@@ -363,6 +365,7 @@ struct virtio_gpu_config {
+ 	__le32 events_clear;
+ 	__le32 num_scanouts;
+ 	__le32 num_capsets;
++	__le32 num_pipe;
+ };
+ 
+ /* simple formats for fbcon/X use */
+-- 
+2.40.1
+
