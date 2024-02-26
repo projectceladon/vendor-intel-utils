@@ -1,0 +1,621 @@
+From f5f32d525b0bcbf6343bda4b805c118092831926 Mon Sep 17 00:00:00 2001
+From: HeYue <yue.he@intel.com>
+Date: Mon, 25 Sep 2023 11:04:21 +0800
+Subject: [PATCH 01/14] ivshm: Initialize module and device class
+
+Signed-off-by: Junjie Mao <junjie.mao@intel.com>
+---
+ drivers/Kconfig               |   2 +
+ drivers/Makefile              |   1 +
+ drivers/ivshm/Kconfig         |  19 ++
+ drivers/ivshm/Makefile        |   3 +
+ drivers/ivshm/ivshm.c         | 381 ++++++++++++++++++++++++++++++++++
+ drivers/ivshm/ivshm.h         |  78 +++++++
+ drivers/ivshm/ivshm_ivshmem.c |  61 ++++++
+ 7 files changed, 545 insertions(+)
+ create mode 100644 drivers/ivshm/Kconfig
+ create mode 100644 drivers/ivshm/Makefile
+ create mode 100644 drivers/ivshm/ivshm.c
+ create mode 100644 drivers/ivshm/ivshm.h
+ create mode 100644 drivers/ivshm/ivshm_ivshmem.c
+
+diff --git a/drivers/Kconfig b/drivers/Kconfig
+index e733ae66231e..3cf8234fd80d 100644
+--- a/drivers/Kconfig
++++ b/drivers/Kconfig
+@@ -131,6 +131,8 @@ source "drivers/auxdisplay/Kconfig"
+ 
+ source "drivers/uio/Kconfig"
+ 
++source "drivers/ivshm/Kconfig"
++
+ source "drivers/vfio/Kconfig"
+ 
+ source "drivers/vlynq/Kconfig"
+diff --git a/drivers/Makefile b/drivers/Makefile
+index 660f7df8d33a..dd269daad02f 100644
+--- a/drivers/Makefile
++++ b/drivers/Makefile
+@@ -90,6 +90,7 @@ obj-$(CONFIG_ATM)		+= atm/
+ obj-$(CONFIG_FUSION)		+= message/
+ obj-y				+= firewire/
+ obj-$(CONFIG_UIO)		+= uio/
++obj-$(CONFIG_IVSHM)		+= ivshm/
+ obj-$(CONFIG_VFIO)		+= vfio/
+ obj-y				+= cdrom/
+ obj-y				+= auxdisplay/
+diff --git a/drivers/ivshm/Kconfig b/drivers/ivshm/Kconfig
+new file mode 100644
+index 000000000000..e684d8216a15
+--- /dev/null
++++ b/drivers/ivshm/Kconfig
+@@ -0,0 +1,19 @@
++# SPDX-License-Identifier: GPL-2.0-only
++menuconfig IVSHM
++	tristate "Inter-VM Shared Memory drivers"
++	depends on MMU
++	help
++	  Enable this to allow the inter-VM shared memory driver core code to be
++	  built.
++
++	  If you don't know what to do here, say N.
++
++if IVSHM
++
++config IVSHM_IVSHMEM
++	tristate "Driver for QEMU IVSHMEM"
++	depends on PCI
++	help
++	  Driver for QEMU IVSHMEM.
++
++endif
+diff --git a/drivers/ivshm/Makefile b/drivers/ivshm/Makefile
+new file mode 100644
+index 000000000000..cd7ba764d981
+--- /dev/null
++++ b/drivers/ivshm/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_IVSHM)	+= ivshm.o
++obj-$(CONFIG_IVSHM_IVSHMEM) += ivshm_ivshmem.o
+diff --git a/drivers/ivshm/ivshm.c b/drivers/ivshm/ivshm.c
+new file mode 100644
+index 000000000000..2df1584a3a16
+--- /dev/null
++++ b/drivers/ivshm/ivshm.c
+@@ -0,0 +1,381 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/module.h>
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/string.h>
++#include <linux/kobject.h>
++#include <linux/cdev.h>
++#include <linux/fs.h>
++
++#include "ivshm.h"
++
++#define IVSHM_MAX_DEVICES		(1U << MINORBITS)
++
++static int ivshm_major, ivshm_region_major;
++static struct cdev *ivshm_cdev, *ivshm_region_cdev;
++static DEFINE_IDR(ivshm_idr);
++static DEFINE_IDR(ivshm_region_idr);
++
++/* Protect idr accesses */
++static DEFINE_MUTEX(minor_lock);
++
++static const struct file_operations ivshm_fops;
++static const struct file_operations ivshm_region_fops;
++
++/**
++ * Class declaration
++ */
++static struct attribute *ivshm_attrs[] = {
++	NULL,
++};
++ATTRIBUTE_GROUPS(ivshm);
++
++static bool ivshm_class_registered;
++
++static struct class ivshm_class = {
++	.name = "ivshm",
++	.dev_groups = ivshm_groups,
++};
++
++static struct attribute *ivshm_region_attrs[] = {
++	NULL,
++};
++ATTRIBUTE_GROUPS(ivshm_region);
++
++static struct class ivshm_region_class = {
++	.name = "ivshm_region",
++	.dev_groups = ivshm_region_groups,
++};
++
++/**
++ * Device major/minor initialization
++ */
++
++static int ivshm_major_init(const char *name, const struct file_operations *fops, int *major, struct cdev **dev)
++{
++	struct cdev *cdev = NULL;
++	dev_t ivshm_dev = 0;
++	int result;
++
++	result = alloc_chrdev_region(&ivshm_dev, 0, IVSHM_MAX_DEVICES, name);
++	if (result)
++		return result;
++
++	result = -ENOMEM;
++	cdev = cdev_alloc();
++	if (!cdev)
++		goto err_cdev_alloc;
++
++	cdev->owner = THIS_MODULE;
++	cdev->ops = fops;
++	kobject_set_name(&cdev->kobj, "%s", name);
++
++	result = cdev_add(cdev, ivshm_dev, IVSHM_MAX_DEVICES);
++	if (result)
++		goto err_cdev_add;
++
++	*major = MAJOR(ivshm_dev);
++	*dev = cdev;
++
++	return 0;
++
++err_cdev_add:
++	kobject_put(&cdev->kobj);
++err_cdev_alloc:
++	unregister_chrdev_region(ivshm_dev, IVSHM_MAX_DEVICES);
++	return result;
++}
++
++static void ivshm_major_cleanup(int major, struct cdev *cdev)
++{
++	unregister_chrdev_region(MKDEV(major, 0), IVSHM_MAX_DEVICES);
++	cdev_del(cdev);
++}
++
++static int ivshm_get_minor(struct idr *idr, void *ptr)
++{
++	int retval;
++
++	mutex_lock(&minor_lock);
++	retval = idr_alloc(idr, ptr, 0, IVSHM_MAX_DEVICES, GFP_KERNEL);
++	mutex_unlock(&minor_lock);
++	return retval;
++}
++
++static void ivshm_free_minor(struct idr *idr, unsigned long minor)
++{
++	mutex_lock(&minor_lock);
++	idr_remove(idr, minor);
++	mutex_unlock(&minor_lock);
++}
++
++/**
++ * Char device operations
++ */
++
++static const struct file_operations ivshm_fops = {
++	.owner		= THIS_MODULE,
++	.llseek		= noop_llseek,
++};
++
++static const struct file_operations ivshm_region_fops = {
++	.owner		= THIS_MODULE,
++	.open		= NULL,
++	.release	= NULL,
++	.read		= NULL,
++	.write		= NULL,
++	.mmap		= NULL,
++	.poll		= NULL,
++	.unlocked_ioctl	= NULL,
++	.fasync		= NULL,
++	.llseek		= noop_llseek,
++};
++
++/**
++ * Device registeration
++ */
++
++static void devm_ivshm_unregister_device(struct device *dev, void *res)
++{
++	ivshm_unregister_device(*(struct ivshm_info **)res);
++}
++
++static void ivshm_device_release(struct device *dev)
++{
++	struct ivshm_device *idev = dev_get_drvdata(dev);
++
++	kfree(idev);
++}
++
++static void ivshm_region_release(struct device *dev)
++{
++	struct ivshm_region *iregion = dev_get_drvdata(dev);
++
++	kfree(iregion);
++}
++
++int __ivshm_register_device(struct module *owner,
++			    struct device *parent,
++			    struct ivshm_info *info)
++{
++	struct ivshm_device *idev;
++	int ret;
++
++	idev = kzalloc(sizeof(*idev), GFP_KERNEL);
++	if (!idev)
++		return -ENOMEM;
++
++	idev->owner = owner;
++	idev->info = info;
++	INIT_LIST_HEAD(&idev->regions);
++
++	idev->minor = ivshm_get_minor(&ivshm_idr, idev);
++	if (idev->minor < 0) {
++		ret = idev->minor;
++		kfree(idev);
++		return ret;
++	}
++
++	device_initialize(&idev->dev);
++	idev->dev.devt = MKDEV(ivshm_major, idev->minor);
++	idev->dev.class = &ivshm_class;
++	idev->dev.parent = parent;
++	idev->dev.release = ivshm_device_release;
++	dev_set_drvdata(&idev->dev, idev);
++
++	ret = dev_set_name(&idev->dev, "ivshm%d", idev->minor);
++	if (ret)
++		goto err_device_create;
++
++	ret = device_add(&idev->dev);
++	if (ret)
++		goto err_device_create;
++
++	info->ivshm_dev = idev;
++
++	return 0;
++
++err_device_create:
++	ivshm_free_minor(&ivshm_idr, idev->minor);
++	put_device(&idev->dev);
++	return ret;
++}
++
++int __devm_ivshm_register_device(struct module *owner,
++				 struct device *parent,
++				 struct ivshm_info *info)
++{
++	struct ivshm_info **ptr;
++	int ret;
++
++	ptr = devres_alloc(devm_ivshm_unregister_device, sizeof(struct ivshm_info *),
++			   GFP_KERNEL);
++	if (!ptr)
++		return -ENOMEM;
++
++	*ptr = info;
++	ret = __ivshm_register_device(owner, parent, info);
++	if (ret) {
++		devres_free(ptr);
++		return ret;
++	}
++
++	devres_add(parent, ptr);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(__devm_ivshm_register_device);
++
++void ivshm_unregister_device(struct ivshm_info *info)
++{
++	struct ivshm_device *idev;
++	struct ivshm_region *iregion, *next;
++
++	if (!info || !info->ivshm_dev)
++		return;
++
++	idev = info->ivshm_dev;
++
++	list_for_each_entry_safe(iregion, next, &idev->regions, list) {
++		kfree(iregion->listeners);
++		device_unregister(&iregion->dev);
++		ivshm_free_minor(&ivshm_region_idr, iregion->minor);
++		list_del(&iregion->list);
++		kfree(iregion);
++	}
++
++	device_unregister(&idev->dev);
++
++	ivshm_free_minor(&ivshm_idr, idev->minor);
++
++	return;
++}
++EXPORT_SYMBOL_GPL(ivshm_unregister_device);
++
++int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_size_t base, resource_size_t len)
++{
++	struct ivshm_region *iregion;
++	int ret;
++
++	iregion = kzalloc(sizeof(*iregion), GFP_KERNEL);
++	if (!iregion)
++		return -ENOMEM;
++
++	strncpy(iregion->name, name, IVSHM_REGION_NAME_LEN);
++	iregion->owner = THIS_MODULE;
++	iregion->idev = idev;
++	INIT_LIST_HEAD(&iregion->list);
++
++	iregion->minor = ivshm_get_minor(&ivshm_region_idr, iregion);
++	if (iregion->minor < 0) {
++		ret = iregion->minor;
++		goto err_get_minor;
++	}
++
++	iregion->listeners = kcalloc(idev->info->nr_vectors, sizeof(*iregion->listeners), GFP_KERNEL);
++	if (!iregion->listeners) {
++		ret = -ENOMEM;
++		goto err_alloc_lists;
++	}
++
++	device_initialize(&iregion->dev);
++	iregion->dev.devt = MKDEV(ivshm_region_major, iregion->minor);
++	iregion->dev.class = &ivshm_region_class;
++	iregion->dev.parent = idev->dev.parent;
++	iregion->dev.release = ivshm_region_release;
++	dev_set_drvdata(&iregion->dev, iregion);
++
++	ret = dev_set_name(&iregion->dev, "ivshm%d.%s", idev->minor, iregion->name);
++	if (ret)
++		goto err_device_create;
++
++	ret = device_add(&iregion->dev);
++	if (ret)
++		goto err_device_create;
++
++	iregion->base = base;
++	iregion->len = len;
++
++	list_add(&iregion->list, &idev->regions);
++
++	return 0;
++
++err_device_create:
++	put_device(&iregion->dev);
++	kfree(iregion->listeners);
++err_alloc_lists:
++	ivshm_free_minor(&ivshm_region_idr, iregion->minor);
++err_get_minor:
++	kfree(iregion);
++	return ret;
++}
++
++
++/**
++ * Module and class initialization
++ */
++
++static int init_ivshm_class(void)
++{
++	int ret;
++
++	/* This is the first time in here, set everything up properly */
++	ret = ivshm_major_init("ivshm", &ivshm_fops, &ivshm_major, &ivshm_cdev);
++	if (ret)
++		goto exit;
++
++	ret = ivshm_major_init("ivshm_region", &ivshm_region_fops, &ivshm_region_major, &ivshm_region_cdev);
++	if (ret)
++		goto err_ivshm_region_init;
++
++	ret = class_register(&ivshm_class);
++	if (ret) {
++		printk(KERN_ERR "class_register failed for ivshm\n");
++		goto err_class_register;
++	}
++
++	ret = class_register(&ivshm_region_class);
++	if (ret) {
++		printk(KERN_ERR "class_register failed for ivshm_region\n");
++		goto err_region_class_register;
++	}
++
++	ivshm_class_registered = true;
++
++	return 0;
++
++err_region_class_register:
++	class_unregister(&ivshm_class);
++err_class_register:
++	ivshm_major_cleanup(ivshm_region_major, ivshm_region_cdev);
++err_ivshm_region_init:
++	ivshm_major_cleanup(ivshm_major, ivshm_cdev);
++exit:
++	return ret;
++}
++
++static void release_ivshm_class(void)
++{
++	ivshm_class_registered = false;
++	class_unregister(&ivshm_class);
++	class_unregister(&ivshm_region_class);
++	ivshm_major_cleanup(ivshm_major, ivshm_cdev);
++	ivshm_major_cleanup(ivshm_region_major, ivshm_region_cdev);
++}
++
++static int __init ivshm_init(void)
++{
++	return init_ivshm_class();
++}
++
++static void __exit ivshm_exit(void)
++{
++	release_ivshm_class();
++	idr_destroy(&ivshm_region_idr);
++	idr_destroy(&ivshm_idr);
++}
++
++module_init(ivshm_init)
++module_exit(ivshm_exit)
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/ivshm/ivshm.h b/drivers/ivshm/ivshm.h
+new file mode 100644
+index 000000000000..7b7b7a22e90f
+--- /dev/null
++++ b/drivers/ivshm/ivshm.h
+@@ -0,0 +1,78 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef _IVSHM_DRIVER_H_
++#define _IVSHM_DRIVER_H_
++
++#include <linux/device.h>
++#include <linux/cdev.h>
++
++/*
++ * Ioctl APIs
++ */
++
++#define IVSHM_LISTENER_EVENTFD    0
++
++union ivshm_listener_data {
++	int fd;
++};
++
++struct ivshm_add_listener {
++	int vector;
++	int listener_type;
++	union ivshm_listener_data data;
++};
++
++#define IVSHM_ADD_LISTENER	_IOW('u', 100, struct ivshm_add_listener)
++
++/*
++ * Internal data structures
++ */
++
++#define IVSHM_REGION_NAME_LEN   16
++
++struct ivshm_device {
++	struct module      *owner;
++	struct device       dev;
++	struct ivshm_info  *info;
++
++	int                 minor;
++	struct list_head    regions;
++};
++
++struct ivshm_region {
++	struct module         *owner;
++	struct device          dev;
++
++	char                   name[IVSHM_REGION_NAME_LEN];
++	struct list_head       list;
++	struct ivshm_device   *idev;
++
++	resource_size_t        base;
++	resource_size_t        len;
++	struct list_head      *listeners;
++
++	int                    minor;
++};
++
++struct ivshm_listener {
++	int type;
++	union ivshm_listener_data data;
++};
++
++struct ivshm_info {
++	struct ivshm_device   *ivshm_dev;
++	size_t                 nr_vectors;
++};
++
++extern int __must_check
++__devm_ivshm_register_device(struct module *owner,
++			     struct device *parent,
++			     struct ivshm_info *info);
++#define devm_ivshm_register_device(parent, info) \
++	__devm_ivshm_register_device(THIS_MODULE, parent, info)
++
++extern void ivshm_unregister_device(struct ivshm_info *info);
++
++extern int ivshm_register_region(struct ivshm_device *dev, const char *name, resource_size_t base, resource_size_t size);
++
++#endif
+diff --git a/drivers/ivshm/ivshm_ivshmem.c b/drivers/ivshm/ivshm_ivshmem.c
+new file mode 100644
+index 000000000000..8991bb11157c
+--- /dev/null
++++ b/drivers/ivshm/ivshm_ivshmem.c
+@@ -0,0 +1,61 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/device.h>
++#include <linux/module.h>
++#include <linux/pci.h>
++
++#include "ivshm.h"
++
++#define DRIVER_VERSION	"0.01.0"
++#define DRIVER_AUTHOR	"Junjie Mao <junjie.mao@intel.com>"
++#define DRIVER_DESC	"Inter-VM shared memory driver for QEMU ivshmem devices"
++
++struct ivshm_ivshmem_dev {
++	struct ivshm_info  info;
++	struct pci_dev    *pdev;
++};
++
++static int probe(struct pci_dev *pdev, const struct pci_device_id *id)
++{
++	struct ivshm_ivshmem_dev *idev;
++	int err;
++
++	idev = devm_kzalloc(&pdev->dev, sizeof(struct ivshm_ivshmem_dev), GFP_KERNEL);
++	if (!idev)
++		return -ENOMEM;
++
++	err = devm_ivshm_register_device(&pdev->dev, &idev->info);
++	if (err) {
++		dev_err(&pdev->dev, "Failed to register ivshm device.\n");
++		return err;
++	}
++
++	err = ivshm_register_region(idev->info.ivshm_dev, "default", 0, 0);
++	if (err) {
++		dev_err(&pdev->dev, "Failed to register ivshm region.\n");
++		goto err_register_region;
++	}
++
++	return 0;
++
++err_register_region:
++	ivshm_unregister_device(&idev->info);
++	return err;
++}
++
++static void remove(struct pci_dev *pdev)
++{
++}
++
++static struct pci_driver ivshmem_pci_driver = {
++	.name = "ivshm_ivshmem",
++	.id_table = NULL, /* only dynamic id's */
++	.probe = probe,
++	.remove = remove,
++};
++
++module_pci_driver(ivshmem_pci_driver);
++MODULE_VERSION(DRIVER_VERSION);
++MODULE_LICENSE("GPL v2");
++MODULE_AUTHOR(DRIVER_AUTHOR);
++MODULE_DESCRIPTION(DRIVER_DESC);
+-- 
+2.17.1
+
