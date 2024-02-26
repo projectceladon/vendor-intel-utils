@@ -1,0 +1,435 @@
+From 9ac5a697c179d783af08202b833e0c2d7c82ed84 Mon Sep 17 00:00:00 2001
+From: zhonghuis <zhonghui.shi@intel.com>
+Date: Mon, 26 Feb 2024 15:16:46 +0000
+Subject: [PATCH] Setup interface to handle contrast and luminance color
+ transform
+
+setup interface in SurfaceFlinger to receive and handle contrast and
+luminance value, then pass down to hwc
+
+Signed-off-by: zhonghuis <zhonghui.shi@intel.com>
+---
+ libs/renderengine/skia/SkiaGLRenderEngine.cpp |  8 ++-
+ .../CompositionRefreshArgs.h                  | 12 ++++
+ .../impl/OutputCompositionState.h             |  6 ++
+ .../CompositionEngine/src/Display.cpp         | 25 ++++++--
+ .../CompositionEngine/src/Output.cpp          |  8 ++-
+ .../src/OutputCompositionState.cpp            |  2 +
+ .../DisplayHardware/ComposerHal.cpp           |  7 +++
+ .../DisplayHardware/ComposerHal.h             |  2 +
+ .../surfaceflinger/DisplayHardware/HWC2.cpp   |  5 ++
+ .../surfaceflinger/DisplayHardware/HWC2.h     |  3 +
+ .../DisplayHardware/HWComposer.cpp            | 10 ++++
+ .../DisplayHardware/HWComposer.h              |  5 ++
+ services/surfaceflinger/SurfaceFlinger.cpp    | 57 ++++++++++++++++++-
+ services/surfaceflinger/SurfaceFlinger.h      | 16 ++++++
+ 14 files changed, 157 insertions(+), 9 deletions(-)
+
+diff --git a/libs/renderengine/skia/SkiaGLRenderEngine.cpp b/libs/renderengine/skia/SkiaGLRenderEngine.cpp
+index e42b5b9e79..74bb985f85 100644
+--- a/libs/renderengine/skia/SkiaGLRenderEngine.cpp
++++ b/libs/renderengine/skia/SkiaGLRenderEngine.cpp
+@@ -479,7 +479,7 @@ static float toDegrees(uint32_t transform) {
+     }
+ }
+ 
+-static SkColorMatrix toSkColorMatrix(const mat4& matrix) {
++[[maybe_unused]] static SkColorMatrix toSkColorMatrix(const mat4& matrix) {
+     return SkColorMatrix(matrix[0][0], matrix[1][0], matrix[2][0], matrix[3][0], 0, matrix[0][1],
+                          matrix[1][1], matrix[2][1], matrix[3][1], 0, matrix[0][2], matrix[1][2],
+                          matrix[2][2], matrix[3][2], 0, matrix[0][3], matrix[1][3], matrix[2][3],
+@@ -780,7 +780,11 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
+     // setup color filter if necessary
+     sk_sp<SkColorFilter> displayColorTransform;
+     if (display.colorTransform != mat4()) {
+-        displayColorTransform = SkColorFilters::Matrix(toSkColorMatrix(display.colorTransform));
++        // Color matrix manipulation can be achieved through Skia Render Engine or hardware (HWC). 
++        // Currently, the hardware approach is utilized with a 3x3 color matrix. Software manipulation 
++        // can be enabled by uncommenting below code if additional processing is required.
++
++        // displayColorTransform = SkColorFilters::Matrix(toSkColorMatrix(display.colorTransform));
+     }
+     const bool ctModifiesAlpha =
+             displayColorTransform && !displayColorTransform->isAlphaUnchanged();
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/CompositionRefreshArgs.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/CompositionRefreshArgs.h
+index 554e2f4868..aece02c267 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/CompositionRefreshArgs.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/CompositionRefreshArgs.h
+@@ -75,6 +75,18 @@ struct CompositionRefreshArgs {
+     // frame. Only set if the color transform is changing this frame.
+     std::optional<mat4> colorTransformMatrix;
+ 
++    // The color contrast to use for this frame. Only set if the color transform is changing this frame
++    std::optional<int32_t> colorTransformContrast;
++
++    // The previous color contrast used
++    std::optional<int32_t> prevColorTransformContrast;
++
++    // The color luminance to use for this frame. Only set if the color transform is changing this frame
++    std::optional<int32_t> colorTransformLuminance;
++
++    // The previous color luminance used
++    std::optional<int32_t> prevColorTransformLuminance;
++
+     // If true, client composition is always used.
+     bool devOptForceClientComposition{false};
+ 
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h
+index f34cb94079..cbd96efaed 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h
+@@ -104,6 +104,12 @@ struct OutputCompositionState {
+     // The color transform matrix to apply
+     mat4 colorTransformMatrix;
+ 
++    // The color transform contrast to apply
++    int32_t colorTransformContrast;
++
++    // The color transform luminance to apply
++    int32_t colorTransformLuminance;
++
+     // Current active color mode
+     ui::ColorMode colorMode{ui::ColorMode::NATIVE};
+ 
+diff --git a/services/surfaceflinger/CompositionEngine/src/Display.cpp b/services/surfaceflinger/CompositionEngine/src/Display.cpp
+index 2f2c686805..6fc262e02b 100644
+--- a/services/surfaceflinger/CompositionEngine/src/Display.cpp
++++ b/services/surfaceflinger/CompositionEngine/src/Display.cpp
+@@ -95,14 +95,31 @@ void Display::disconnect() {
+ void Display::setColorTransform(const compositionengine::CompositionRefreshArgs& args) {
+     Output::setColorTransform(args);
+     const auto halDisplayId = HalDisplayId::tryCast(mId);
+-    if (mIsDisconnected || !halDisplayId || CC_LIKELY(!args.colorTransformMatrix)) {
++    if (mIsDisconnected || !halDisplayId || (CC_LIKELY(!args.colorTransformMatrix) && 
++        CC_LIKELY(!args.colorTransformContrast) && CC_LIKELY(!args.colorTransformLuminance))) {
+         return;
+     }
+ 
+     auto& hwc = getCompositionEngine().getHwComposer();
+-    status_t result = hwc.setColorTransform(*halDisplayId, *args.colorTransformMatrix);
+-    ALOGE_IF(result != NO_ERROR, "Failed to set color transform on display \"%s\": %d",
+-             to_string(mId).c_str(), result);
++    if (CC_LIKELY(args.colorTransformMatrix)){
++        status_t result = hwc.setColorTransform(*halDisplayId, *args.colorTransformMatrix);
++        ALOGE_IF(result != NO_ERROR, "Failed to set color transform on display \"%s\": %d",
++                to_string(mId).c_str(), result);
++    }
++    if (CC_LIKELY(args.colorTransformContrast)){
++        status_t resultContrast = hwc.setColorTransformCorrection(*halDisplayId, 
++                                                                  *args.colorTransformContrast, 
++                                                                  *args.prevColorTransformLuminance);
++        ALOGE_IF(resultContrast != NO_ERROR, "Failed to set color transform on display \"%s\": %d",
++                to_string(mId).c_str(), resultContrast);
++    }
++    if (CC_LIKELY(args.colorTransformLuminance)){
++        status_t resultLuminance = hwc.setColorTransformCorrection(*halDisplayId, 
++                                                                   *args.prevColorTransformContrast, 
++                                                                   *args.colorTransformLuminance);
++        ALOGE_IF(resultLuminance != NO_ERROR, "Failed to set color transform on display \"%s\": %d",
++                to_string(mId).c_str(), resultLuminance);
++    }
+ }
+ 
+ void Display::setColorProfile(const ColorProfile& colorProfile) {
+diff --git a/services/surfaceflinger/CompositionEngine/src/Output.cpp b/services/surfaceflinger/CompositionEngine/src/Output.cpp
+index 95ae5e514e..20b79d9381 100644
+--- a/services/surfaceflinger/CompositionEngine/src/Output.cpp
++++ b/services/surfaceflinger/CompositionEngine/src/Output.cpp
+@@ -237,11 +237,17 @@ void Output::setLayerStackFilter(uint32_t layerStackId, bool isInternal) {
+ 
+ void Output::setColorTransform(const compositionengine::CompositionRefreshArgs& args) {
+     auto& colorTransformMatrix = editState().colorTransformMatrix;
+-    if (!args.colorTransformMatrix || colorTransformMatrix == args.colorTransformMatrix) {
++    auto& colorTransformContrast = editState().colorTransformContrast;
++    auto& colorTransformLuminance = editState().colorTransformLuminance;
++    if ((!args.colorTransformMatrix || colorTransformMatrix == args.colorTransformMatrix) 
++         && (colorTransformContrast == args.colorTransformContrast) 
++         && (colorTransformLuminance == args.colorTransformLuminance)) {
+         return;
+     }
+ 
+     colorTransformMatrix = *args.colorTransformMatrix;
++    colorTransformContrast = *args.colorTransformContrast;
++    colorTransformLuminance = *args.colorTransformLuminance;
+ 
+     dirtyEntireOutput();
+ }
+diff --git a/services/surfaceflinger/CompositionEngine/src/OutputCompositionState.cpp b/services/surfaceflinger/CompositionEngine/src/OutputCompositionState.cpp
+index ee30ad8583..b8df47cd86 100644
+--- a/services/surfaceflinger/CompositionEngine/src/OutputCompositionState.cpp
++++ b/services/surfaceflinger/CompositionEngine/src/OutputCompositionState.cpp
+@@ -53,6 +53,8 @@ void OutputCompositionState::dump(std::string& out) const {
+     dumpVal(out, "renderIntent", toString(renderIntent), renderIntent);
+     dumpVal(out, "dataspace", toString(dataspace), dataspace);
+     dumpVal(out, "colorTransformMatrix", colorTransformMatrix);
++    dumpVal(out, "colorTransformContrast", colorTransformContrast);
++    dumpVal(out, "colorTransformLuminance", colorTransformLuminance);
+     dumpVal(out, "target dataspace", toString(targetDataspace), targetDataspace);
+ 
+     out.append("\n");
+diff --git a/services/surfaceflinger/DisplayHardware/ComposerHal.cpp b/services/surfaceflinger/DisplayHardware/ComposerHal.cpp
+index 09734c275f..e0cc80ef35 100644
+--- a/services/surfaceflinger/DisplayHardware/ComposerHal.cpp
++++ b/services/surfaceflinger/DisplayHardware/ComposerHal.cpp
+@@ -551,6 +551,13 @@ Error Composer::setColorTransform(Display display, const float* matrix,
+     return Error::NONE;
+ }
+ 
++Error Composer::setColorTransformCorrection(Display display, int32_t contrast, int32_t luminance)
++{
++    mWriter.selectDisplay(display);
++    mWriter.setColorTransformCorrection(contrast, luminance);
++    return Error::NONE;
++}
++
+ Error Composer::setOutputBuffer(Display display, const native_handle_t* buffer,
+         int releaseFence)
+ {
+diff --git a/services/surfaceflinger/DisplayHardware/ComposerHal.h b/services/surfaceflinger/DisplayHardware/ComposerHal.h
+index fe114b9512..8b4450f27b 100644
+--- a/services/surfaceflinger/DisplayHardware/ComposerHal.h
++++ b/services/surfaceflinger/DisplayHardware/ComposerHal.h
+@@ -140,6 +140,7 @@ public:
+                                   const std::vector<IComposerClient::Rect>& damage) = 0;
+     virtual Error setColorMode(Display display, ColorMode mode, RenderIntent renderIntent) = 0;
+     virtual Error setColorTransform(Display display, const float* matrix, ColorTransform hint) = 0;
++    virtual Error setColorTransformCorrection(Display display, int32_t contrast, int32_t Luminance) = 0;
+     virtual Error setOutputBuffer(Display display, const native_handle_t* buffer,
+                                   int releaseFence) = 0;
+     virtual Error setPowerMode(Display display, IComposerClient::PowerMode mode) = 0;
+@@ -384,6 +385,7 @@ public:
+                           const std::vector<IComposerClient::Rect>& damage) override;
+     Error setColorMode(Display display, ColorMode mode, RenderIntent renderIntent) override;
+     Error setColorTransform(Display display, const float* matrix, ColorTransform hint) override;
++    Error setColorTransformCorrection(Display display, int32_t contrast, int32_t Luminance);
+     Error setOutputBuffer(Display display, const native_handle_t* buffer,
+                           int releaseFence) override;
+     Error setPowerMode(Display display, IComposerClient::PowerMode mode) override;
+diff --git a/services/surfaceflinger/DisplayHardware/HWC2.cpp b/services/surfaceflinger/DisplayHardware/HWC2.cpp
+index 27146ab79c..5229dd62a2 100644
+--- a/services/surfaceflinger/DisplayHardware/HWC2.cpp
++++ b/services/surfaceflinger/DisplayHardware/HWC2.cpp
+@@ -426,6 +426,11 @@ Error Display::setColorTransform(const android::mat4& matrix, ColorTransform hin
+     return static_cast<Error>(intError);
+ }
+ 
++Error Display::setColorTransformCorrection(int32_t contrast, int32_t luminance) {
++    auto intError = mComposer.setColorTransformCorrection(mId, contrast, luminance);
++    return static_cast<Error>(intError);
++}
++
+ Error Display::setOutputBuffer(const sp<GraphicBuffer>& buffer,
+         const sp<Fence>& releaseFence)
+ {
+diff --git a/services/surfaceflinger/DisplayHardware/HWC2.h b/services/surfaceflinger/DisplayHardware/HWC2.h
+index 871465d717..7c8de867d2 100644
+--- a/services/surfaceflinger/DisplayHardware/HWC2.h
++++ b/services/surfaceflinger/DisplayHardware/HWC2.h
+@@ -125,6 +125,8 @@ public:
+             hal::ColorMode mode, hal::RenderIntent renderIntent) = 0;
+     [[clang::warn_unused_result]] virtual hal::Error setColorTransform(
+             const android::mat4& matrix, hal::ColorTransform hint) = 0;
++    [[clang::warn_unused_result]] virtual hal::Error setColorTransformCorrection(
++            int32_t contrast, int32_t luminance) = 0;
+     [[clang::warn_unused_result]] virtual hal::Error setOutputBuffer(
+             const android::sp<android::GraphicBuffer>& buffer,
+             const android::sp<android::Fence>& releaseFence) = 0;
+@@ -192,6 +194,7 @@ public:
+                                hal::Dataspace dataspace) override;
+     hal::Error setColorMode(hal::ColorMode, hal::RenderIntent) override;
+     hal::Error setColorTransform(const android::mat4& matrix, hal::ColorTransform hint) override;
++    hal::Error setColorTransformCorrection(int32_t contrast, int32_t luminance) override;
+     hal::Error setOutputBuffer(const android::sp<android::GraphicBuffer>&,
+                                const android::sp<android::Fence>& releaseFence) override;
+     hal::Error setPowerMode(hal::PowerMode) override;
+diff --git a/services/surfaceflinger/DisplayHardware/HWComposer.cpp b/services/surfaceflinger/DisplayHardware/HWComposer.cpp
+index a790b4c11e..445fc2d73b 100644
+--- a/services/surfaceflinger/DisplayHardware/HWComposer.cpp
++++ b/services/surfaceflinger/DisplayHardware/HWComposer.cpp
+@@ -673,6 +673,16 @@ status_t HWComposer::setColorTransform(HalDisplayId displayId, const mat4& trans
+     return NO_ERROR;
+ }
+ 
++status_t HWComposer::setColorTransformCorrection(HalDisplayId displayId, 
++                                                 int32_t contrast, 
++                                                 int32_t luminance) {
++    RETURN_IF_INVALID_DISPLAY(displayId, BAD_INDEX);
++    auto& displayData = mDisplayData[displayId];
++    auto error_brightness = displayData.hwcDisplay->setColorTransformCorrection(contrast, luminance);
++    RETURN_IF_HWC_ERROR(error_brightness, displayId, UNKNOWN_ERROR);
++    return NO_ERROR;
++}
++
+ void HWComposer::disconnectDisplay(HalDisplayId displayId) {
+     RETURN_IF_INVALID_DISPLAY(displayId);
+     auto& displayData = mDisplayData[displayId];
+diff --git a/services/surfaceflinger/DisplayHardware/HWComposer.h b/services/surfaceflinger/DisplayHardware/HWComposer.h
+index 49f96d9614..d887d2aa1d 100644
+--- a/services/surfaceflinger/DisplayHardware/HWComposer.h
++++ b/services/surfaceflinger/DisplayHardware/HWComposer.h
+@@ -147,6 +147,9 @@ public:
+     // Sets a color transform to be applied to the result of composition
+     virtual status_t setColorTransform(HalDisplayId, const mat4& transform) = 0;
+ 
++    virtual status_t setColorTransformCorrection(HalDisplayId, int32_t contrast, 
++                                                 int32_t luminance) = 0;
++
+     // reset state when a display is disconnected
+     virtual void disconnectDisplay(HalDisplayId) = 0;
+ 
+@@ -288,6 +291,8 @@ public:
+ 
+     // Sets a color transform to be applied to the result of composition
+     status_t setColorTransform(HalDisplayId, const mat4& transform) override;
++    status_t setColorTransformCorrection(HalDisplayId, int32_t conrtast, 
++                                         int32_t luminance) override;
+ 
+     // reset state when a display is disconnected
+     void disconnectDisplay(HalDisplayId) override;
+diff --git a/services/surfaceflinger/SurfaceFlinger.cpp b/services/surfaceflinger/SurfaceFlinger.cpp
+index 2f8c03949b..39f53db436 100644
+--- a/services/surfaceflinger/SurfaceFlinger.cpp
++++ b/services/surfaceflinger/SurfaceFlinger.cpp
+@@ -2097,6 +2097,18 @@ void SurfaceFlinger::onMessageRefresh() {
+         mDrawingState.colorMatrixChanged = false;
+     }
+ 
++    if (CC_UNLIKELY(mDrawingState.colorContrastChanged)) {
++        refreshArgs.colorTransformContrast = mDrawingState.colorContrast;
++        refreshArgs.prevColorTransformLuminance = mDrawingState.colorLuminance;
++        mDrawingState.colorContrastChanged = false;
++    }
++
++    if (CC_UNLIKELY(mDrawingState.colorLuminanceChanged)) {
++        refreshArgs.colorTransformLuminance = mDrawingState.colorLuminance;
++        refreshArgs.prevColorTransformContrast = mDrawingState.colorContrast;
++        mDrawingState.colorLuminanceChanged = false;
++    }
++
+     refreshArgs.devOptForceClientComposition = mDebugDisableHWC || mDebugRegion;
+ 
+     if (mDebugRegion != 0) {
+@@ -3267,6 +3279,8 @@ void SurfaceFlinger::commitTransactionLocked() {
+     mDrawingState = mCurrentState;
+     // clear the "changed" flags in current state
+     mCurrentState.colorMatrixChanged = false;
++    mCurrentState.colorContrastChanged = false;
++    mCurrentState.colorLuminanceChanged = false;
+ 
+     if (mVisibleRegionsDirty) {
+         for (const auto& rootLayer : mDrawingState.layersSortedByZ) {
+@@ -5280,6 +5294,24 @@ void SurfaceFlinger::updateColorMatrixLocked() {
+     }
+ }
+ 
++void SurfaceFlinger::updateColorContrastLocked() {
++    int32_t colorContrast = mClientColorContrast;
++    if (mCurrentState.colorContrast != colorContrast) {
++        mCurrentState.colorContrast = colorContrast;
++        mCurrentState.colorContrastChanged = true;
++        setTransactionFlags(eTransactionNeeded);
++    }
++}
++
++void SurfaceFlinger::updateColorLuminanceLocked() {
++    int32_t colorLuminance = mClientColorLuminance;
++    if (mCurrentState.colorLuminance != colorLuminance) {
++        mCurrentState.colorLuminance = colorLuminance;
++        mCurrentState.colorLuminanceChanged = true;
++        setTransactionFlags(eTransactionNeeded);
++    }
++}
++
+ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
+ #pragma clang diagnostic push
+ #pragma clang diagnostic error "-Wswitch-enum"
+@@ -5514,6 +5546,18 @@ status_t SurfaceFlinger::onTransact(uint32_t code, const Parcel& data, Parcel* r
+                 reply->writeInt32(0);
+                 reply->writeInt32(mDebugDisableHWC);
+                 return NO_ERROR;
++            case 1012: {
++                Mutex::Autolock _l(mStateLock);
++                // apply a color luminance
++                n = data.readInt32();
++                if (n) {
++                    mClientColorLuminance = data.readInt32();
++                } else {
++                    mClientColorLuminance = 0;
++                }
++                updateColorLuminanceLocked();
++                return NO_ERROR;
++            }            
+             case 1013: {
+                 const auto display = getDefaultDisplayDevice();
+                 if (!display) {
+@@ -5575,8 +5619,17 @@ status_t SurfaceFlinger::onTransact(uint32_t code, const Parcel& data, Parcel* r
+                 updateColorMatrixLocked();
+                 return NO_ERROR;
+             }
+-            case 1016: { // Unused.
+-                return NAME_NOT_FOUND;
++            case 1016: {
++                Mutex::Autolock _l(mStateLock);
++                // apply a color Contrast
++                n = data.readInt32();
++                if (n) {
++                    mClientColorContrast = data.readInt32();
++                } else {
++                    mClientColorContrast = 0;
++                }
++                updateColorContrastLocked();
++                return NO_ERROR;
+             }
+             case 1017: {
+                 n = data.readInt32();
+diff --git a/services/surfaceflinger/SurfaceFlinger.h b/services/surfaceflinger/SurfaceFlinger.h
+index 58c3b3784f..caa116c0be 100644
+--- a/services/surfaceflinger/SurfaceFlinger.h
++++ b/services/surfaceflinger/SurfaceFlinger.h
+@@ -402,6 +402,14 @@ private:
+             if (colorMatrixChanged) {
+                 colorMatrix = other.colorMatrix;
+             }
++            colorContrastChanged = other.colorContrastChanged;
++            if (colorContrastChanged) {
++                colorContrast = other.colorContrast;
++            }
++            colorLuminanceChanged = other.colorLuminanceChanged;
++            if (colorLuminanceChanged) {
++                colorLuminance = other.colorLuminance;
++            }
+             globalShadowSettings = other.globalShadowSettings;
+ 
+             return *this;
+@@ -414,6 +422,10 @@ private:
+         bool colorMatrixChanged = true;
+         mat4 colorMatrix;
+ 
++        bool colorContrastChanged = true;
++        int32_t colorContrast = 128;
++        bool colorLuminanceChanged = true;
++        int32_t colorLuminance = 128;
+         renderengine::ShadowSettings globalShadowSettings;
+ 
+         void traverse(const LayerVector::Visitor& visitor) const;
+@@ -1190,6 +1202,8 @@ private:
+     static mat4 calculateColorMatrix(float saturation);
+ 
+     void updateColorMatrixLocked();
++    void updateColorContrastLocked();
++    void updateColorLuminanceLocked();
+ 
+     // Verify that transaction is being called by an approved process:
+     // either AID_GRAPHICS or AID_SYSTEM.
+@@ -1236,6 +1250,8 @@ private:
+     Daltonizer mDaltonizer;
+     float mGlobalSaturationFactor = 1.0f;
+     mat4 mClientColorMatrix;
++    int32_t mClientColorContrast = 128;
++    int32_t mClientColorLuminance = 128;
+ 
+     // Can't be unordered_set because wp<> isn't hashable
+     std::set<wp<IBinder>> mGraphicBufferProducerList;
+-- 
+2.34.1
+
