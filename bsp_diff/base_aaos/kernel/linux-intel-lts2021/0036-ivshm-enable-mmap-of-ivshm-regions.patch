@@ -1,0 +1,227 @@
+From d36adf093496254e2431f102de65ded0c39f7b41 Mon Sep 17 00:00:00 2001
+From: HeYue <yue.he@intel.com>
+Date: Mon, 25 Sep 2023 11:06:02 +0800
+Subject: [PATCH 02/14] ivshm: enable mmap of ivshm regions
+
+Signed-off-by: Junjie Mao <junjie.mao@intel.com>
+---
+ drivers/ivshm/ivshm.c         | 85 ++++++++++++++++++++++++++++++++---
+ drivers/ivshm/ivshm.h         |  8 ++++
+ drivers/ivshm/ivshm_ivshmem.c | 37 ++++++++++++---
+ 3 files changed, 119 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/ivshm/ivshm.c b/drivers/ivshm/ivshm.c
+index 2df1584a3a16..fd9ebf16976e 100644
+--- a/drivers/ivshm/ivshm.c
++++ b/drivers/ivshm/ivshm.c
+@@ -2,6 +2,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/init.h>
++#include <linux/mm.h>
+ #include <linux/device.h>
+ #include <linux/string.h>
+ #include <linux/kobject.h>
+@@ -119,13 +120,87 @@ static const struct file_operations ivshm_fops = {
+ 	.llseek		= noop_llseek,
+ };
+ 
++static int ivshm_region_open(struct inode *inode, struct file *filep)
++{
++	struct ivshm_region *iregion;
++	struct ivshm_region_user *user;
++	int err = 0;
++
++	mutex_lock(&minor_lock);
++	iregion = idr_find(&ivshm_region_idr, iminor(inode));
++	mutex_unlock(&minor_lock);
++	if (!iregion) {
++		err = -ENODEV;
++		goto out;
++	}
++
++	get_device(&iregion->dev);
++
++	if (!try_module_get(iregion->owner)) {
++		err = -ENODEV;
++		goto out_put_device;
++	}
++
++	user = kmalloc(sizeof(*user), GFP_KERNEL);
++	if (!user) {
++		err = -ENOMEM;
++		goto out_put_module;
++	}
++
++	user->iregion = iregion;
++	filep->private_data = user;
++
++	return 0;
++
++out_put_module:
++	module_put(iregion->owner);
++out_put_device:
++	put_device(&iregion->dev);
++out:
++	return err;
++}
++
++static int ivshm_region_release(struct inode *inode, struct file *filep)
++{
++	struct ivshm_region_user *user = filep->private_data;
++	struct ivshm_region *iregion = user->iregion;
++	int err = 0;
++
++	kfree(user);
++	module_put(iregion->owner);
++	put_device(&iregion->dev);
++
++	return err;
++}
++
++static const struct vm_operations_struct ivshm_region_vm_ops = {
++#ifdef CONFIG_HAVE_IOREMAP_PROT
++	.access = generic_access_phys,
++#endif
++};
++
++static int ivshm_region_mmap(struct file *filep, struct vm_area_struct *vma)
++{
++	struct ivshm_region_user *user = filep->private_data;
++	struct ivshm_region *iregion = user->iregion;
++	int err = 0;
++
++	if (vma->vm_end < vma->vm_start)
++		return -EINVAL;
++
++	vma->vm_ops = &ivshm_region_vm_ops;
++	err = vm_iomap_memory(vma, iregion->base, iregion->len);
++
++	return err;
++}
++
+ static const struct file_operations ivshm_region_fops = {
+ 	.owner		= THIS_MODULE,
+-	.open		= NULL,
+-	.release	= NULL,
++	.open		= ivshm_region_open,
++	.release	= ivshm_region_release,
+ 	.read		= NULL,
+ 	.write		= NULL,
+-	.mmap		= NULL,
++	.mmap		= ivshm_region_mmap,
+ 	.poll		= NULL,
+ 	.unlocked_ioctl	= NULL,
+ 	.fasync		= NULL,
+@@ -148,7 +223,7 @@ static void ivshm_device_release(struct device *dev)
+ 	kfree(idev);
+ }
+ 
+-static void ivshm_region_release(struct device *dev)
++static void ivshm_region_dev_release(struct device *dev)
+ {
+ 	struct ivshm_region *iregion = dev_get_drvdata(dev);
+ 
+@@ -283,7 +358,7 @@ int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_
+ 	iregion->dev.devt = MKDEV(ivshm_region_major, iregion->minor);
+ 	iregion->dev.class = &ivshm_region_class;
+ 	iregion->dev.parent = idev->dev.parent;
+-	iregion->dev.release = ivshm_region_release;
++	iregion->dev.release = ivshm_region_dev_release;
+ 	dev_set_drvdata(&iregion->dev, iregion);
+ 
+ 	ret = dev_set_name(&iregion->dev, "ivshm%d.%s", idev->minor, iregion->name);
+diff --git a/drivers/ivshm/ivshm.h b/drivers/ivshm/ivshm.h
+index 7b7b7a22e90f..e166f732ca18 100644
+--- a/drivers/ivshm/ivshm.h
++++ b/drivers/ivshm/ivshm.h
+@@ -54,7 +54,15 @@ struct ivshm_region {
+ 	int                    minor;
+ };
+ 
++struct ivshm_region_user {
++	struct ivshm_region   *iregion;
++	struct list_head       listeners;
++};
++
+ struct ivshm_listener {
++	struct list_head       region_user_list;
++	struct list_head       region_list;
++
+ 	int type;
+ 	union ivshm_listener_data data;
+ };
+diff --git a/drivers/ivshm/ivshm_ivshmem.c b/drivers/ivshm/ivshm_ivshmem.c
+index 8991bb11157c..a7ab1f882547 100644
+--- a/drivers/ivshm/ivshm_ivshmem.c
++++ b/drivers/ivshm/ivshm_ivshmem.c
+@@ -10,6 +10,8 @@
+ #define DRIVER_AUTHOR	"Junjie Mao <junjie.mao@intel.com>"
+ #define DRIVER_DESC	"Inter-VM shared memory driver for QEMU ivshmem devices"
+ 
++#define IVSHMEM_MEM_BAR  2
++
+ struct ivshm_ivshmem_dev {
+ 	struct ivshm_info  info;
+ 	struct pci_dev    *pdev;
+@@ -18,28 +20,51 @@ struct ivshm_ivshmem_dev {
+ static int probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ {
+ 	struct ivshm_ivshmem_dev *idev;
++	resource_size_t start, len;
+ 	int err;
+ 
++	err = pcim_enable_device(pdev);
++	if (err) {
++		dev_err(&pdev->dev, "Failed to enable PCI device.\n");
++		return err;
++	}
++
++	err = pci_request_regions(pdev, "ivshm_ivshmem");
++	if (err) {
++		dev_err(&pdev->dev, "Failed to request PCI resources.\n");
++		goto out_disable_device;
++	}
++
+ 	idev = devm_kzalloc(&pdev->dev, sizeof(struct ivshm_ivshmem_dev), GFP_KERNEL);
+-	if (!idev)
+-		return -ENOMEM;
++	if (!idev) {
++		err = -ENOMEM;
++		goto out_release_region;
++	}
+ 
+ 	err = devm_ivshm_register_device(&pdev->dev, &idev->info);
+ 	if (err) {
+ 		dev_err(&pdev->dev, "Failed to register ivshm device.\n");
+-		return err;
++		goto out_release_region;
+ 	}
+ 
+-	err = ivshm_register_region(idev->info.ivshm_dev, "default", 0, 0);
++	start = pci_resource_start(pdev, IVSHMEM_MEM_BAR);
++	len = pci_resource_len(pdev, IVSHMEM_MEM_BAR);
++	err = ivshm_register_region(idev->info.ivshm_dev, "default", start, len);
+ 	if (err) {
+ 		dev_err(&pdev->dev, "Failed to register ivshm region.\n");
+-		goto err_register_region;
++		goto out_unregister_device;
+ 	}
+ 
++	pci_set_master(pdev);
++
+ 	return 0;
+ 
+-err_register_region:
++out_unregister_device:
+ 	ivshm_unregister_device(&idev->info);
++out_release_region:
++	pci_release_regions(pdev);
++out_disable_device:
++	pci_disable_device(pdev);
+ 	return err;
+ }
+ 
+-- 
+2.17.1
+
