@@ -1,0 +1,4338 @@
+From fd2c41941e03930ebe996ede2ff8bcb827984ec4 Mon Sep 17 00:00:00 2001
+From: gkdeepa <g.k.deepa@intel.com>
+Date: Mon, 15 Nov 2021 19:04:23 +0530
+Subject: [PATCH] VHAL changes for orien w.r.t facing
+
+Tracked-On:
+---
+ Android.mk                         |   6 -
+ include/CGCodec.h                  |  29 +-
+ include/CameraSocketCommand.h      |  82 ++-
+ include/CameraSocketServerThread.h |  17 +-
+ include/VirtualBaseCamera.h        |   5 +-
+ include/VirtualBuffer.h            |  67 ++-
+ include/VirtualCamera3.h           |   5 +-
+ include/VirtualCameraFactory.h     |  34 +-
+ include/VirtualFakeCamera3.h       |  46 +-
+ include/fake-pipeline2/Sensor.h    |  25 +-
+ src/CGCodec.cpp                    | 116 +++--
+ src/CameraSocketCommand.cpp        |  43 +-
+ src/CameraSocketServerThread.cpp   | 466 ++++++++++++++---
+ src/Exif.cpp                       |   3 +-
+ src/NV21JpegCompressor.cpp         |  14 +-
+ src/VirtualCamera3.cpp             |  10 +-
+ src/VirtualCameraFactory.cpp       | 248 +++------
+ src/VirtualFakeCamera3.cpp         | 786 +++++++++++++++++++----------
+ src/fake-pipeline2/Sensor.cpp      | 434 +++++++++-------
+ 19 files changed, 1603 insertions(+), 833 deletions(-)
+
+diff --git a/Android.mk b/Android.mk
+index 019eb78..3e14dca 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -130,8 +130,6 @@ camera_vhal_c_includes := external/libjpeg-turbo \
+ 	external/libexif \
+ 	external/libyuv/files/include \
+ 	frameworks/native/include/media/hardware \
+-	device/generic/goldfish/include \
+-	device/generic/goldfish-opengl/system/OpenglSystemCommon \
+ 	hardware/libhardware/modules/gralloc \
+ 	$(LOCAL_PATH)/include \
+ 	$(LOCAL_PATH)/$(FFMPEG_PREBUILD)/include \
+@@ -141,14 +139,10 @@ ifeq ($(TARGET_BOARD_PLATFORM), celadon)
+ camera_vhal_c_includes  +=        $(INTEL_MINIGBM)/cros_gralloc
+ endif
+ camera_vhal_shared_libraries := \
+-    libbinder \
+     libexif \
+     liblog \
+     libutils \
+     libcutils \
+-    libEGL \
+-    libGLESv1_CM \
+-    libGLESv2 \
+     libui \
+     libdl \
+     libjpeg \
+diff --git a/include/CGCodec.h b/include/CGCodec.h
+index 94219a1..6af238e 100644
+--- a/include/CGCodec.h
++++ b/include/CGCodec.h
+@@ -17,6 +17,7 @@
+ #ifndef CG_CODEC_H
+ #define CG_CODEC_H
+ 
++#include <mutex>
+ #include <fstream>
+ #include <memory>
+ #include <stdlib.h>
+@@ -57,13 +58,6 @@ public:
+ 
+     CGPixelFormat format();
+ 
+-    /*
+-     * Copy frame data to data block buffer
+-     * @param buffer[out]: destination buffer, should be freed by caller
+-     * @param size[out]: output buffer size
+-     * */
+-    int copy_to_buffer(uint8_t **buffer /* out */, int *size /* out */);
+-
+     int copy_to_buffer(uint8_t *buffer /* out */, int *size /* out */);
+ 
+ private:
+@@ -96,9 +90,12 @@ typedef std::unique_ptr<HWAccelContext, HWAccelContextDeleter> CGHWAccelContex;
+ 
+ class CGVideoDecoder {
+ public:
+-    CGVideoDecoder(){};
+-    CGVideoDecoder(int codec_type, int resolution_type, const char *device_name = nullptr,
+-                   int extra_hw_frames = 0);
++    CGVideoDecoder() {
++        codec_type = int(android::socket::VideoCodecType::kH264);
++        resolution = android::socket::FrameResolution::k480p;
++        device_name = NULL;
++    }
++
+     virtual ~CGVideoDecoder();
+ 
+     /**
+@@ -109,13 +106,12 @@ public:
+ 
+     /**
+      * Initialize the CGVideoDecoder
+-     * @param codec_type        see @enum camera_video_codec_t in @file cg_protocol.h
+      * @param resolution_type   see @enum camera_video_resolution_t in @file cg_protocol.h
+      * @param device_name       the string of hardware acclerator device, such as "vaapi"
+      * @param extra_hw_frames   allocate extra frames for hardware acclerator when decoding
+      */
+-    int init(android::socket::VideoCodecType codec_type, android::socket::FrameResolution resolution_type, const char *device_name = nullptr,
+-             int extra_hw_frames = 0);
++    int init(android::socket::FrameResolution resolution, uint32_t codec_type,
++             const char *device_name = nullptr, int extra_hw_frames = 0);
+ 
+     /**
+      * Send a piece of ES stream data to decoder, the data must have a padding with a lengh
+@@ -151,10 +147,15 @@ private:
+     CGDecContex m_decode_ctx;        ///<! cg decoder internal context
+     CGHWAccelContex m_hw_accel_ctx;  ///<! hw decoding accelerator context
+     int decode_one_frame(const AVPacket *pkt);
+-    bool init_failed_ = false;
++    bool decoder_ready = false;
++    std::recursive_mutex pull_lock;  // Guard m_decode_ctx at get_decoded_frame
++    std::recursive_mutex push_lock;  // Guard m_decode_ctx at decode/decode_one_frame
+ 
+     CGVideoDecoder(const CGVideoDecoder &cg_video_decoder);
+     CGVideoDecoder &operator=(const CGVideoDecoder &) { return *this; }
++    uint32_t codec_type;
++    android::socket::FrameResolution resolution;
++    const char *device_name;
+ };
+ 
+ #endif  // CG_CODEC_H
+diff --git a/include/CameraSocketCommand.h b/include/CameraSocketCommand.h
+index 07b835f..b80509b 100644
+--- a/include/CameraSocketCommand.h
++++ b/include/CameraSocketCommand.h
+@@ -32,16 +32,24 @@ namespace android {
+ 
+ namespace socket {
+ 
+-enum class VideoCodecType { kH264 = 0, kI420 };
+-enum class FrameResolution { k480p = 0, k720p, k1080p };
++enum class VideoCodecType { kH264 = 1, kH265 = 2,  kI420 = 3, kAll = 4 };
++enum class FrameResolution { k480p = 1, k720p = 2, k1080p = 4, kAll = 7 };
+ 
+ struct CameraFrameInfo {
+-    VideoCodecType codec_type = VideoCodecType::kH264;
++    VideoCodecType codec_type = VideoCodecType::kI420;
+     FrameResolution resolution = FrameResolution::k480p;
+     uint32_t reserved[4];
+ };
+ 
+ enum class CameraOperation { kOpen = 11, kClose = 12, kNone = 13 };
++enum class SensorOrientation {
++    ORIENTATION_0 = 0,
++    ORIENTATION_90 = 90,
++    ORIENTATION_180 = 180,
++    ORIENTATION_270 = 270
++};
++
++enum class CameraFacing { BACK_FACING = 0, FRONT_FACING = 1 };
+ 
+ enum class CameraSessionState {
+     kNone,
+@@ -53,17 +61,83 @@ enum class CameraSessionState {
+ 
+ extern const std::unordered_map<CameraSessionState, std::string> kCameraSessionStateNames;
+ 
++typedef enum _ack_value {
++    NACK_CONFIG = 0,
++    ACK_CONFIG = 1,
++} camera_ack_t;
++
++typedef struct _camera_config {
++    uint32_t cameraId;
++    uint32_t codec_type;
++    uint32_t resolution;
++    uint32_t reserved[5];
++} camera_config_t;
++
++typedef enum _camera_cmd {
++    CMD_OPEN = 11,
++    CMD_CLOSE = 12,
++} camera_cmd_t;
++
++typedef enum _camera_version {
++    CAMERA_VHAL_VERSION_1 = 0,  // decode out of camera vhal
++    CAMERA_VHAL_VERSION_2 = 1,  // decode in camera vhal
++} camera_version_t;
++
++typedef struct _camera_config_cmd {
++    camera_version_t version;
++    camera_cmd_t cmd;
++    camera_config_t config;
++} camera_config_cmd_t;
++
++typedef struct _camera_info {
++    uint32_t cameraId;
++    uint32_t codec_type;
++    uint32_t resolution;
++    uint32_t sensorOrientation;
++    uint32_t facing;  // '0' for back camera and '1' for front camera
++    uint32_t reserved[3];
++} camera_info_t;
++
++typedef struct _camera_capability {
++    uint32_t codec_type;          // All supported codec_type
++    uint32_t resolution;          // All supported resolution
++    uint32_t maxNumberOfCameras;  // Max will be restricted to 2
++    uint32_t reserved[5];
++} camera_capability_t;
++
++typedef enum _camera_packet_type {
++    REQUEST_CAPABILITY = 0,
++    CAPABILITY = 1,
++    CAMERA_CONFIG = 2,
++    CAMERA_DATA = 3,
++    ACK = 4,
++    CAMERA_INFO = 5,
++} camera_packet_type_t;
++
++typedef struct _camera_header {
++    camera_packet_type_t type;
++    uint32_t size;  // number of cameras * sizeof(camera_info_t)
++} camera_header_t;
++
++typedef struct _camera_packet {
++    camera_header_t header;
++    uint8_t payload[0];
++} camera_packet_t;
+ enum class CameraVHalVersion {
+     kV1 = 0,  // decode out of camera vhal
+     kV2 = 1,  // decode in camera vhal
+ };
+-
+ // has default values.
+ struct CameraConfig {
+     CameraVHalVersion version = CameraVHalVersion::kV2;
+     CameraOperation operation = CameraOperation::kNone;
+     CameraFrameInfo frame_info;
+ };
++
++const char* camera_type_to_str(int type);
++const char* codec_type_to_str(uint32_t type);
++const char* resolution_to_str(uint32_t resolution);
++
+ }  // namespace socket
+ }  // namespace android
+ 
+diff --git a/include/CameraSocketServerThread.h b/include/CameraSocketServerThread.h
+index e8aa5de..3e81d33 100644
+--- a/include/CameraSocketServerThread.h
++++ b/include/CameraSocketServerThread.h
+@@ -28,6 +28,8 @@
+ #include <memory>
+ #include <atomic>
+ #include <array>
++#include <chrono>
++#include <thread>
+ #ifdef ENABLE_FFMPEG
+ #include "CGCodec.h"
+ #endif
+@@ -58,19 +60,21 @@ public:
+     virtual void requestExit();
+     virtual status_t requestExitAndWait();
+     int getClientFd();
+-    void clearBuffer();
+-    void clearBuffer(char *buffer, int width, int height);
+ 
+ private:
+     virtual status_t readyToRun();
+     virtual bool threadLoop() override;
+ 
++    bool configureCapabilities();
++    void setCameraResolution(uint32_t resolution);
++    void setCameraMaxSupportedResolution(int32_t width, int32_t height);
++
+     Mutex mMutex;
+     bool mRunning;  // guarding only when it's important
+     int mSocketServerFd = -1;
+     std::string mSocketPath;
+     int mClientFd = -1;
+-    ssize_t size_update = 0;
++    int mNumOfCamerasRequested;  // Number of cameras requested to support by client.
+ 
+ #ifdef ENABLE_FFMPEG
+     std::shared_ptr<CGVideoDecoder> mVideoDecoder;
+@@ -81,6 +85,13 @@ private:
+     // Source: https://tools.ietf.org/html/rfc6184#page-13
+     std::array<uint8_t, 200 * 1024> mSocketBuffer = {};
+     size_t mSocketBufferSize = 0;
++    ssize_t size_update = 0;
++    struct ValidateClientCapability {
++        bool validCodecType = false;
++        bool validResolution = false;
++        bool validOrientation = false;
++        bool validCameraFacing = false;
++    };
+ };
+ }  // namespace android
+ 
+diff --git a/include/VirtualBaseCamera.h b/include/VirtualBaseCamera.h
+index 31d8f08..d1bb17e 100644
+--- a/include/VirtualBaseCamera.h
++++ b/include/VirtualBaseCamera.h
+@@ -48,8 +48,7 @@ public:
+      * Return:
+      *  NO_ERROR on success, or an appropriate error status on failure.
+      */
+-    virtual status_t Initialize(const char *device_name, const char *frame_dims,
+-                                const char *facing_dir) = 0;
++    virtual status_t Initialize() = 0;
+ 
+     /****************************************************************************
+      * Camera API implementation
+@@ -61,7 +60,7 @@ public:
+      * NOTE: When this method is called the object is locked.
+      * Note that failures in this method are reported as negative EXXX statuses.
+      */
+-    virtual status_t connectCamera(hw_device_t **device) = 0;
++    virtual status_t openCamera(hw_device_t **device) = 0;
+ 
+     /* Closes connection to the virtual camera.
+      * This method is called in response to camera_device::close callback.
+diff --git a/include/VirtualBuffer.h b/include/VirtualBuffer.h
+index b12148b..23776d1 100644
+--- a/include/VirtualBuffer.h
++++ b/include/VirtualBuffer.h
+@@ -3,21 +3,60 @@
+ 
+ #include <mutex>
+ 
+-#define MAX_CLIENT_BUF 8
++#define BPP_NV12 1.5  // 12 bpp
++
+ namespace android {
+ 
+ extern bool gIsInFrameI420;
+ extern bool gIsInFrameH264;
+ extern bool gUseVaapi;
+ 
++// Max no of cameras supported based on client device request.
++extern uint32_t gMaxNumOfCamerasSupported;
++
++// Max supported res width and height out of all cameras.
++// Used for input buffer allocation.
++extern int32_t gMaxSupportedWidth;
++extern int32_t gMaxSupportedHeight;
++
++// Max supported res width and height of each camera.
++// This would be vary for each camera based on its
++// capability requested by client. And used for metadata updation
++// during boot time.
++extern int32_t gCameraMaxWidth;
++extern int32_t gCameraMaxHeight;
++
++// Camera input res width and height during running
++// condition. It would vary based on app's request.
++extern int32_t gSrcWidth;
++extern int32_t gSrcHeight;
++
++// Input Codec type info based on client device request.
++extern uint32_t gCodecType;
++
++// Orientation info of the image sensor based on client device request.
++extern uint32_t gCameraSensorOrientation;
++
++// Camera facing as either back or front based on client device request.
++// True for back and false for front camera always.
++extern bool gCameraFacingBack;
++
++// Indicate client capability info received successfully when it is true.
++extern bool gCapabilityInfoReceived;
++
++// Status of metadata update, which helps to sync and update
++// each metadata for each camera seperately.
++extern bool gStartMetadataUpdate;
++extern bool gDoneMetadataUpdate;
++
+ enum class VideoBufferType {
+     kI420,
+     kARGB,
+ };
+ 
+ struct Resolution {
+-    int width = 640;
+-    int height = 480;
++    int width = gMaxSupportedWidth;
++    int height = gMaxSupportedHeight;
+ };
+ /// Video buffer and its information
+ struct VideoBuffer {
+@@ -29,12 +68,22 @@ struct VideoBuffer {
+     VideoBufferType type;
+     ~VideoBuffer() {}
+ 
++    // To reset allocated buffer.
+     void reset() {
+         std::fill(buffer, buffer + resolution.width * resolution.height, 0x10);
+         uint8_t* uv_offset = buffer + resolution.width * resolution.height;
+         std::fill(uv_offset, uv_offset + (resolution.width * resolution.height) / 2, 0x80);
+         decoded = false;
+     }
++
++    // To clear used buffer based on current resolution.
++    void clearBuffer() {
++        std::fill(buffer, buffer + gSrcWidth * gSrcHeight, 0x10);
++        uint8_t* uv_offset = buffer + gSrcWidth * gSrcHeight;
++        std::fill(uv_offset, uv_offset + (gSrcWidth * gSrcHeight) / 2, 0x80);
++        decoded = false;
++    }
++
+     bool decoded = false;
+ };
+ 
+@@ -58,8 +107,8 @@ public:
+ 
+     ClientVideoBuffer() {
+         for (int i = 0; i < 1; i++) {
+-            clientBuf[i].buffer =
+-                new uint8_t[clientBuf[i].resolution.width * clientBuf[i].resolution.height * 3 / 2];
++            clientBuf[i].buffer = new uint8_t[clientBuf[i].resolution.width *
++                                              clientBuf[i].resolution.height * BPP_NV12];
+         }
+         clientRevCount = 0;
+         clientUsedCount = 0;
+@@ -78,6 +127,14 @@ public:
+         clientRevCount = clientUsedCount = 0;
+         receivedFrameNo = decodedFrameNo = 0;
+     }
++
++    void clearBuffer() {
++        for (int i = 0; i < 1; i++) {
++            clientBuf[i].clearBuffer();
++        }
++        clientRevCount = clientUsedCount = 0;
++        receivedFrameNo = decodedFrameNo = 0;
++    }
+ };
+ extern std::mutex client_buf_mutex;
+ };  // namespace android
+diff --git a/include/VirtualCamera3.h b/include/VirtualCamera3.h
+index 8cccf28..4ffd714 100644
+--- a/include/VirtualCamera3.h
++++ b/include/VirtualCamera3.h
+@@ -85,15 +85,14 @@ public:
+      ***************************************************************************/
+ 
+ public:
+-    virtual status_t Initialize(const char *device_name, const char *frame_dims,
+-                                const char *facing_dir);
++    virtual status_t Initialize();
+ 
+     /****************************************************************************
+      * Camera module API and generic hardware device API implementation
+      ***************************************************************************/
+ 
+ public:
+-    virtual status_t connectCamera(hw_device_t **device);
++    virtual status_t openCamera(hw_device_t **device);
+ 
+     virtual status_t closeCamera();
+ 
+diff --git a/include/VirtualCameraFactory.h b/include/VirtualCameraFactory.h
+index 183ce48..719f598 100644
+--- a/include/VirtualCameraFactory.h
++++ b/include/VirtualCameraFactory.h
+@@ -29,6 +29,8 @@
+ #ifdef ENABLE_FFMPEG
+ #include "CGCodec.h"
+ #endif
++
++#define MAX_NUMBER_OF_SUPPORTED_CAMERAS 2  // Max restricted to two, but can be extended.
+ namespace android {
+ 
+ class CameraSocketServerThread;
+@@ -151,18 +153,9 @@ public:
+      ***************************************************************************/
+ 
+     /*
+-     * Gets fake camera orientation.
++     * Gets number of virtual remote cameras.
+      */
+-    int getFakeCameraOrientation() {
+-        const char *key    = "remote.camera.fake.orientation";
+-        int         degree = property_get_int32(key, 90);
+-        return degree;
+-    }
+-
+-    /*
+-     * Gets number of virtual cameras.
+-     */
+-    int getVirtualCameraNum() const { return mVirtualCameraNum; }
++    int getVirtualCameraNum() const { return mNumOfCamerasSupported; }
+ 
+     /*
+      * Checks whether or not the constructor has succeeded.
+@@ -175,16 +168,14 @@ private:
+      ***************************************************************************/
+ 
+     /*
+-     * Creates a fake camera and adds it to mVirtualCameras. If backCamera is
+-     * true, it will be created as if it were a camera on the back of the phone.
+-     * Otherwise, it will be front-facing.
++     * Creates a virtual remote camera and adds it to mVirtualCameras.
+      */
+ #ifdef ENABLE_FFMPEG
+-    void createFakeCamera(std::shared_ptr<CameraSocketServerThread> socket_server,
+-                          std::shared_ptr<CGVideoDecoder> decoder, bool backCamera);
++    void createVirtualRemoteCamera(std::shared_ptr<CameraSocketServerThread> socket_server,
++                                   std::shared_ptr<CGVideoDecoder> decoder, int cameraId);
+ #else
+-    void createFakeCamera(std::shared_ptr<CameraSocketServerThread> socket_server,
+-                          bool backCamera);
++void createVirtualRemoteCamera(std::shared_ptr<CameraSocketServerThread> socket_server,
++                                  int cameraId);
+ #endif
+     /*
+      * Waits till remote-props has done setup, timeout after 500ms.
+@@ -212,11 +203,8 @@ private:
+     // Array of cameras available for the emulation.
+     VirtualBaseCamera **mVirtualCameras;
+ 
+-    // Number of virtual cameras (including the fake ones).
+-    int mVirtualCameraNum;
+-
+-    // Number of virtual fake cameras.
+-    int mFakeCameraNum;
++    // Number of cameras supported in the HAL based on client request.
++    int mNumOfCamerasSupported;
+ 
+     // Flags whether or not constructor has succeeded.
+     bool mConstructedOK;
+diff --git a/include/VirtualFakeCamera3.h b/include/VirtualFakeCamera3.h
+index 0b17f8a..c05c666 100644
+--- a/include/VirtualFakeCamera3.h
++++ b/include/VirtualFakeCamera3.h
+@@ -55,31 +55,30 @@ namespace android {
+ class VirtualFakeCamera3 : public VirtualCamera3, private Sensor::SensorListener {
+ public:
+ #ifdef ENABLE_FFMPEG
+-    VirtualFakeCamera3(int cameraId, bool facingBack, struct hw_module_t *module,
++    VirtualFakeCamera3(int cameraId, struct hw_module_t *module,
+                        std::shared_ptr<CameraSocketServerThread> socket_server,
+                        std::shared_ptr<CGVideoDecoder> decoder,
+                        std::atomic<socket::CameraSessionState> &state);
+ #else
+-    VirtualFakeCamera3(int cameraId, bool facingBack, struct hw_module_t *module,
++    VirtualFakeCamera3(int cameraId, struct hw_module_t *module,
+                        std::shared_ptr<CameraSocketServerThread> socket_server,
+                        std::atomic<socket::CameraSessionState> &state);
+ #endif
+     virtual ~VirtualFakeCamera3();
+ 
+     /****************************************************************************
+-     * VirtualCamera3 virtual overrides
++* VirtualCamera3 virtual overrides
+      ***************************************************************************/
+-
+ public:
+-    virtual status_t Initialize(const char *device_name, const char *frame_dims,
+-                                const char *facing_dir);
++    virtual status_t Initialize();
+ 
+     /****************************************************************************
++     
+      * Camera module API and generic hardware device API implementation
+      ***************************************************************************/
+ 
+ public:
+-    virtual status_t connectCamera(hw_device_t **device);
++    virtual status_t openCamera(hw_device_t **device);
+ 
+     virtual status_t closeCamera();
+ 
+@@ -105,6 +104,12 @@ protected:
+     virtual void dump(int fd);
+ 
+ private:
++    /** Initialize the Sensor and Decoder part of the Camera*/
++    status_t connectCamera();
++
++    /** Set the Decoder resolution based on the app's res request*/
++    uint32_t setDecoderResolution(uint32_t resolution);
++
+     /**
+      * Get the requested capability set for this camera
+      */
+@@ -134,6 +139,15 @@ private:
+     /** Handle interrupt events from the sensor */
+     void onSensorEvent(uint32_t frameNumber, Event e, nsecs_t timestamp);
+ 
++    /** Update max supported res width and height based on capability data.*/
++    void setMaxSupportedResolution();
++
++    /** Update input codec type for each camera based on capability data.*/
++    void setInputCodecType();
++
++    /** Update camera facing info based on capability data from client.*/
++    void setCameraFacingInfo();
++
+     /****************************************************************************
+      * Static configuration information
+      ***************************************************************************/
+@@ -147,8 +161,7 @@ private:
+     // sensor-generated buffers which use a nonpositive ID. Otherwise, HAL3 has
+     // no concept of a stream id.
+     static const uint32_t kGenericStreamId = 1;
+-    static const int32_t kAvailableFormats[];
+-    static const uint32_t kAvailableRawSizes[];
++    static const int32_t kHalSupportedFormats[];
+     static const int64_t kSyncWaitTimeout = 10000000;   // 10 ms
+     static const int32_t kMaxSyncTimeoutCount = 1000;   // 1000 kSyncWaitTimeouts
+     static const uint32_t kFenceTimeoutMs = 2000;       // 2 s
+@@ -166,6 +179,13 @@ private:
+     int32_t mSensorWidth;
+     int32_t mSensorHeight;
+ 
++    uint32_t mSrcWidth;
++    uint32_t mSrcHeight;
++
++    uint32_t mCodecType;
++    uint32_t mDecoderResolution;
++    bool mDecoderInitDone;
++
+     SortedVector<AvailableCapabilities> mCapabilities;
+ 
+     /**
+@@ -208,7 +228,13 @@ private:
+     std::atomic<socket::CameraSessionState> &mCameraSessionState;
+ 
+     bool createSocketServer(bool facing_back);
+-    status_t sendCommandToClient(socket::CameraOperation operation);
++    status_t sendCommandToClient(socket::camera_cmd_t cmd);
++
++    enum DecoderResolution {
++        DECODER_SUPPORTED_RESOLUTION_480P = 480,
++        DECODER_SUPPORTED_RESOLUTION_720P = 720,
++        DECODER_SUPPORTED_RESOLUTION_1080P = 1080,
++    };
+ 
+     /** Processing thread for sending out results */
+ 
+diff --git a/include/fake-pipeline2/Sensor.h b/include/fake-pipeline2/Sensor.h
+index b83e771..cd26a2a 100644
+--- a/include/fake-pipeline2/Sensor.h
++++ b/include/fake-pipeline2/Sensor.h
+@@ -98,8 +98,8 @@ namespace android {
+ 
+ class Sensor : private Thread, public virtual RefBase {
+ public:
+-    // width: Width of pixel array
+-    // height: Height of pixel array
++    // width: Max width of client camera HW.
++    // height: Max height of client camera HW.
+ #ifdef ENABLE_FFMPEG
+     Sensor(uint32_t width, uint32_t height, std::shared_ptr<CGVideoDecoder> decoder = nullptr);
+ #else
+@@ -131,12 +131,6 @@ public:
+     // To simplify tracking sensor's current frame
+     void setFrameNumber(uint32_t frameNumber);
+ 
+-    /*
+-     * Controls that cause reconfiguration delay
+-     */
+-
+-    void setBinning(int horizontalFactor, int verticalFactor);
+-
+     /*
+      * Synchronizing with sensor operation (vertical sync)
+      */
+@@ -258,6 +252,21 @@ private:
+     // m_major_version 0: CPU 1: SG1
+     uint8_t m_major_version = 1;
+ 
++    // Max supported resolution and size of client/source camera HW.
++    // HAL supports max 1080p resolution.
++  
++    uint32_t mSrcFrameSize = 0;
++
++    /**
++     * Allocate static memories to avoid continuous allocation on every open camera.
++     * Hence allocating buffers for max supported resolution, that is 1080p.
++     */
++
++    static const size_t maxSupportedResWidth = 640;
++    static const size_t maxSupportedResHeight = 480;
++    static const size_t bpp = 2;  // 12 bpp for NV12/NV21 and 4 bits extra for FHD operations.
++    static const size_t buffSize = maxSupportedResWidth * maxSupportedResHeight * bpp;
++
+     // memories for preview usecases
+     uint32_t destPrevBufSize = FRAME_SIZE_480P;
+     std::array<uint8_t, 640 * 480 * 3 / 2> mDstTempPrevBuf = {};
+diff --git a/src/CGCodec.cpp b/src/CGCodec.cpp
+index af090a7..2a643e9 100644
+--- a/src/CGCodec.cpp
++++ b/src/CGCodec.cpp
+@@ -48,38 +48,6 @@ CGPixelFormat CGVideoFrame::format() {
+     }
+ }
+ 
+-int CGVideoFrame::copy_to_buffer(uint8_t **buffer, int *size) {
+-    ALOGVV("%s E", __func__);
+-
+-    if (!buffer || !size) {
+-        ALOGW("Bad input parameter.\n");
+-        return -1;
+-    }
+-
+-    int buf_size = av_image_get_buffer_size((AVPixelFormat)m_avframe->format, m_avframe->width,
+-                                            m_avframe->height, 1);
+-    uint8_t *out_buffer = (uint8_t *)malloc(buf_size);
+-    if (!out_buffer) {
+-        ALOGW("Can not alloc buffer\n");
+-        return -1;
+-    }
+-
+-    int ret =
+-        av_image_copy_to_buffer(out_buffer, buf_size, (const uint8_t *const *)m_avframe->data,
+-                                (const int *)m_avframe->linesize, (AVPixelFormat)m_avframe->format,
+-                                m_avframe->width, m_avframe->height, 1);
+-    if (ret < 0) {
+-        ALOGW("Can not copy image to buffer\n");
+-        free(out_buffer);
+-        return -1;
+-    }
+-
+-    *size = buf_size;
+-    *buffer = out_buffer;
+-    ALOGVV("%s: X", __func__);
+-    return 0;
+-}
+-
+ int CGVideoFrame::copy_to_buffer(uint8_t *out_buffer, int *size) {
+     ALOGVV("%s E", __func__);
+ 
+@@ -172,7 +140,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelF
+ 
+ HWAccelContext::HWAccelContext(const AVCodec *decoder, AVCodecContext *avcodec_ctx,
+                                const char *device_name, int extra_frames) {
+-    char *dev_dri = NULL;
+     const char *device_prefix = "/dev/dri/renderD";
+     char device[MAX_DEVICE_NAME_SIZE] = {'\0'};
+     char prop_val[PROPERTY_VALUE_MAX] = {'\0'};
+@@ -234,15 +201,25 @@ void HWAccelContextDeleter::operator()(HWAccelContext *p) { delete p; }
+ 
+ CGVideoDecoder::~CGVideoDecoder() { destroy(); }
+ 
+-bool CGVideoDecoder::can_decode() const { return !init_failed_; }
++bool CGVideoDecoder::can_decode() const { return decoder_ready; }
++
++int CGVideoDecoder::init(android::socket::FrameResolution resolution, uint32_t codec_type,
++                         const char *device_name, int extra_hw_frames) {
++    ALOGVV("%s E", __func__);
++    std::lock_guard<std::recursive_mutex> decode_push_lock(push_lock);
++    std::lock_guard<std::recursive_mutex> decode_pull_lock(pull_lock);
++    decoder_ready = false;
++
++    // Update current init parameters which would be used during re-init.
++    this->codec_type = codec_type;
++    this->resolution = resolution;
++    this->device_name = device_name;
+ 
+-int CGVideoDecoder::init(android::socket::VideoCodecType codec_type, android::socket::FrameResolution resolution_type, const char *device_name,
+-                         int extra_hw_frames) {
+-    m_decode_ctx = CGDecContex(new DecodeContext(int(codec_type), int(resolution_type)));
+-    init_failed_ = true;
++    m_decode_ctx = CGDecContex(new DecodeContext(int(codec_type), int(resolution)));
+ 
+-    AVCodecID codec_id = AV_CODEC_ID_H264;
+-    ALOGW("Note: Currently we decode only H264 frames!");
++    AVCodecID codec_id = (codec_type == int(android::socket::VideoCodecType::kH265))
++                             ? AV_CODEC_ID_H265
++                             : AV_CODEC_ID_H264;
+ 
+     const AVCodec *codec = avcodec_find_decoder(codec_id);
+     if (codec == nullptr) {
+@@ -293,12 +270,17 @@ int CGVideoDecoder::init(android::socket::VideoCodecType codec_type, android::so
+     m_decode_ctx->parser = parser;
+     m_decode_ctx->avcodec_ctx = c;
+     m_decode_ctx->packet = pkt;
+-    init_failed_ = false;
++    decoder_ready = true;
+     return 0;
+ }
+ 
+ int CGVideoDecoder::decode(const uint8_t *data, int data_size) {
+     ALOGVV("%s E", __func__);
++    std::lock_guard<std::recursive_mutex> decode_access_lock(push_lock);
++    if (!can_decode()) {
++        ALOGE("%s Decoder not initialized", __func__);
++        return -1;
++    }
+     if (data == nullptr || data_size <= 0) {
+         ALOGE("%s Invalid args: m_decode_ctx: %p, data: %p, data_size: %d", __func__,
+               m_decode_ctx.get(), data, data_size);
+@@ -318,10 +300,26 @@ int CGVideoDecoder::decode(const uint8_t *data, int data_size) {
+         } else {
+             ALOGVV("%s av_parser_parse2 returned %d pkt->size: %d\n", __func__, ret, pkt->size);
+         }
++
+         data += ret;
+         data_size -= ret;
+ 
+-        if (pkt->size) decode_one_frame(pkt);
++        if (pkt->size) {
++            if (decode_one_frame(pkt) == AVERROR_INVALIDDATA) {
++                ALOGI("%s re-init", __func__);
++                flush_decoder();
++                destroy();
++                if (init((android::socket::FrameResolution)this->resolution, this->codec_type,
++                         this->device_name, 0) < 0) {
++                    ALOGE("%s re-init failed. %s decoding", __func__, device_name);
++                    return -1;
++                } else {
++                    pkt = m_decode_ctx->packet;
++                    parser = m_decode_ctx->parser;
++                    continue;
++                }
++            }
++        }
+     }
+ 
+     ALOGVV("%s X", __func__);
+@@ -334,8 +332,8 @@ int CGVideoDecoder::decode_one_frame(const AVPacket *pkt) {
+ 
+     int sent = avcodec_send_packet(c, pkt);
+     if (sent < 0) {
+-        ALOGW("Error sending a packet for decoding\n");
+-        return -1;
++        ALOGE("%s Error sending a packet for decoding: %s\n", __func__, av_err2str(sent));
++        return sent;
+     }
+ 
+     int decode_stat = 0;
+@@ -350,8 +348,7 @@ int CGVideoDecoder::decode_one_frame(const AVPacket *pkt) {
+         }
+         decode_stat = avcodec_receive_frame(c, frame);
+         if (decode_stat == AVERROR(EAGAIN) || decode_stat == AVERROR_EOF) {
+-            ALOGW("%s avcodec_receive_frame returned AVERROR(EAGAIN) | AVERROR_EOF%d\n", __func__,
+-                  decode_stat);
++            ALOGVV("%s avcodec_receive_frame returned: %s\n", __func__, av_err2str(decode_stat));
+             break;
+         } else if (decode_stat < 0) {
+             ALOGW("Error during decoding\n");
+@@ -362,7 +359,12 @@ int CGVideoDecoder::decode_one_frame(const AVPacket *pkt) {
+         if (frame->width != m_decode_ctx->resolution.first ||
+             frame->height != m_decode_ctx->resolution.second ||
+             (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_VAAPI)) {
+-            ALOGW("video format mismatch: %d %d %d\n", frame->width, frame->height, frame->format);
++            ALOGW("%s: Camera input res from client is %dx%d, but decoder initialized with %dx%d",
++                  __func__, frame->width, frame->height, m_decode_ctx->resolution.first,
++                  m_decode_ctx->resolution.second);
++            if (frame->format != AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_VAAPI)
++                ALOGW("%s: Camera input frame format %d is not matching with Decoder format",
++                      __func__, frame->format);
+             av_frame_free(&frame);
+             return -1;
+         }
+@@ -380,8 +382,9 @@ int CGVideoDecoder::decode_one_frame(const AVPacket *pkt) {
+             }
+ 
+             /* retrieve data from GPU to CPU */
+-            if (av_hwframe_transfer_data(sw_frame, frame, 0) < 0) {
+-                ALOGW("Error transferring the data to system memory\n");
++            int ret = av_hwframe_transfer_data(sw_frame, frame, 0);
++            if (ret < 0) {
++                ALOGE("Error transferring the data to system memory: %s\n", av_err2str(ret));
+                 return -1;
+             }
+ 
+@@ -404,10 +407,14 @@ int CGVideoDecoder::decode_one_frame(const AVPacket *pkt) {
+ }
+ 
+ int CGVideoDecoder::get_decoded_frame(CGVideoFrame::Ptr cg_frame) {
++    std::lock_guard<std::recursive_mutex> decode_access_lock(pull_lock);
++    if (!can_decode()) {
++        ALOGE("%s Decoder not initialized", __func__);
++        return -1;
++    }
+     std::lock_guard<std::mutex> lock(m_decode_ctx->mutex_);
+ 
+-    if (m_decode_ctx->decoded_frames.empty())
+-        return -1;
++    if (m_decode_ctx->decoded_frames.empty()) return -1;
+ 
+     while (m_decode_ctx->decoded_frames.size() > MAX_ALLOWED_PENDING_FRAMES) {
+         auto it = m_decode_ctx->decoded_frames.begin();
+@@ -427,6 +434,7 @@ int CGVideoDecoder::get_decoded_frame(CGVideoFrame::Ptr cg_frame) {
+ 
+ /* flush the decoder */
+ int CGVideoDecoder::flush_decoder() {
++    std::lock_guard<std::recursive_mutex> decode_push_lock(push_lock);
+     AVCodecContext *c = m_decode_ctx->avcodec_ctx;
+     AVPacket *packet = m_decode_ctx->packet;
+ 
+@@ -445,16 +453,22 @@ int CGVideoDecoder::flush_decoder() {
+ }
+ 
+ int CGVideoDecoder::destroy() {
++    std::lock_guard<std::recursive_mutex> decode_push_lock(push_lock);
++    std::lock_guard<std::recursive_mutex> decode_pull_lock(pull_lock);
++    decoder_ready = false;
+     av_parser_close(m_decode_ctx->parser);
+     avcodec_free_context(&m_decode_ctx->avcodec_ctx);
+     av_packet_free(&m_decode_ctx->packet);
+ 
+     if (!m_decode_ctx->decoded_frames.empty()) {
++        std::lock_guard<std::mutex> lock(m_decode_ctx->mutex_);
+         for (auto frame : m_decode_ctx->decoded_frames) {
+             av_frame_free(&frame);
+         }
+         m_decode_ctx->decoded_frames.clear();
+     }
++    m_hw_accel_ctx.reset();
++    m_decode_ctx.reset();
+ 
+     return 0;
+ }
+diff --git a/src/CameraSocketCommand.cpp b/src/CameraSocketCommand.cpp
+index 5eb3454..9c8eceb 100644
+--- a/src/CameraSocketCommand.cpp
++++ b/src/CameraSocketCommand.cpp
+@@ -30,5 +30,46 @@ const std::unordered_map<CameraSessionState, std::string> kCameraSessionStateNam
+     {CameraSessionState::kCameraClosed, "Camera closed"},
+     {CameraSessionState::kDecodingStopped, "Decoding stopped"},
+ };
++
++const char* camera_type_to_str(int type) {
++    switch (type) {
++        case REQUEST_CAPABILITY:
++            return "REQUEST_CAPABILITY";
++        case CAPABILITY:
++            return "CAPABILITY";
++        case CAMERA_CONFIG:
++            return "CAMERA_CONFIG";
++        case CAMERA_DATA:
++            return "CAMERA_DATA";
++        case ACK:
++            return "ACK";
++        default:
++            return "invalid";
++    }
++}
++
++const char* codec_type_to_str(uint32_t type) {
++    switch (type) {
++        case int(android::socket::VideoCodecType::kH264):
++            return "H264";
++        case int(android::socket::VideoCodecType::kH265):
++            return "H265";
++        default:
++            return "invalid";
++    }
++}
++
++const char* resolution_to_str(uint32_t resolution) {
++    switch (resolution) {
++        case int(android::socket::FrameResolution::k480p):
++            return "480p";
++        case int(android::socket::FrameResolution::k720p):
++            return "720p";
++        case int(android::socket::FrameResolution::k1080p):
++            return "1080p";
++        default:
++            return "invalid";
++    }
+ }
+-}  // namespace android
+\ No newline at end of file
++}  // namespace socket
++}  // namespace android
+diff --git a/src/CameraSocketServerThread.cpp b/src/CameraSocketServerThread.cpp
+index 62d4f25..285c621 100644
+--- a/src/CameraSocketServerThread.cpp
++++ b/src/CameraSocketServerThread.cpp
+@@ -15,11 +15,11 @@
+  */
+ //#define LOG_NDEBUG 0
+ //#define LOG_NNDEBUG 0
+-#define LOG_TAG "CameraSocketServerThread: "
++#define LOG_TAG "CameraSocketServerThread:"
+ #include <log/log.h>
+ 
+-#ifdef LOG_NNDEBUG
+-#define ALOGVV(...) ALOGV(__VA_ARGS__)
++#if defined(LOG_NNDEBUG) && LOG_NNDEBUG == 0
++#define ALOGVV ALOGV
+ #else
+ #define ALOGVV(...) ((void)0)
+ #endif
+@@ -49,6 +49,22 @@ android::ClientVideoBuffer *android::ClientVideoBuffer::ic_instance = 0;
+ 
+ namespace android {
+ 
++uint32_t gMaxNumOfCamerasSupported;
++
++int32_t gMaxSupportedWidth;
++int32_t gMaxSupportedHeight;
++
++int32_t gCameraMaxWidth;
++int32_t gCameraMaxHeight;
++
++uint32_t gCodecType;
++uint32_t gCameraSensorOrientation;
++bool gCameraFacingBack;
++
++bool gCapabilityInfoReceived;
++bool gStartMetadataUpdate;
++bool gDoneMetadataUpdate;
++
+ using namespace socket;
+ #ifdef ENABLE_FFMPEG
+ CameraSocketServerThread::CameraSocketServerThread(std::string suffix,
+@@ -64,9 +80,17 @@ CameraSocketServerThread::CameraSocketServerThread(std::string suffix,
+ #endif
+     std::string sock_path = "/ipc/camera-socket" + suffix;
+     char *k8s_env_value = getenv("K8S_ENV");
+-    mSocketPath = (k8s_env_value != NULL && !strcmp(k8s_env_value, "true"))
+-            ? "/conn/camera-socket" : sock_path.c_str();
+-    ALOGI("%s camera socket server path is %s", __FUNCTION__, mSocketPath.c_str());
++    mSocketPath = (k8s_env_value != NULL && !strcmp(k8s_env_value, "true")) ? "/conn/camera-socket"
++                                                                            : sock_path.c_str();
++    mNumOfCamerasRequested = 2;
++    //D TODO
++    gCameraMaxWidth = 640;
++    gCameraMaxHeight = 480;
++    gMaxNumOfCamerasSupported = 2;
++    //mNumOfCamerasRequested = 2;
++    /*gCameraFacingBack = false;
++    gCameraSensorOrientation = (uint32_t)SensorOrientation::ORIENTATION_270;*/
++    gCodecType = (uint32_t)VideoCodecType::kI420;
+ }
+ 
+ CameraSocketServerThread::~CameraSocketServerThread() {
+@@ -82,7 +106,7 @@ CameraSocketServerThread::~CameraSocketServerThread() {
+ }
+ 
+ status_t CameraSocketServerThread::requestExitAndWait() {
+-    ALOGE("%s: Not implemented. Use requestExit + join instead", __FUNCTION__);
++    ALOGV("%s: Not implemented. Use requestExit + join instead", __FUNCTION__);
+     return INVALID_OPERATION;
+ }
+ 
+@@ -105,29 +129,334 @@ status_t CameraSocketServerThread::readyToRun() {
+     return OK;
+ }
+ 
+-void CameraSocketServerThread::clearBuffer() {
+-    ALOGVV(LOG_TAG " %s Enter", __FUNCTION__);
+-    mSocketBuffer.fill(0);
+-    ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+-    char *fbuffer = (char *)handle->clientBuf[handle->clientRevCount % 1].buffer;
++void CameraSocketServerThread::setCameraMaxSupportedResolution(int32_t width, int32_t height) {
++    ALOGV(LOG_TAG "%s: E", __FUNCTION__);
+ 
+-    if (gIsInFrameI420) {
+-        // TODO: Use width and height for current resolution
+-        clearBuffer(fbuffer, 640, 480);
++    if (gMaxSupportedWidth < width && gMaxSupportedHeight < height) {
++        gMaxSupportedWidth = width;
++        gMaxSupportedHeight = height;
++        ALOGI(LOG_TAG "%s: Set Camera Max supported resolution: %dx%d", __FUNCTION__,
++              gMaxSupportedWidth, gMaxSupportedHeight);
+     }
+-    ALOGVV(LOG_TAG " %s: Exit", __FUNCTION__);
+ }
+ 
+-void CameraSocketServerThread::clearBuffer(char *buffer, int width, int height) {
+-    ALOGVV(LOG_TAG " %s Enter", __FUNCTION__);
+-    char *uv_offset = buffer + width * height;
+-    memset(buffer, 0x10, (width * height));
+-    memset(uv_offset, 0x80, (width * height) / 2);
+-    ALOGVV(LOG_TAG " %s: Exit", __FUNCTION__);
++void CameraSocketServerThread::setCameraResolution(uint32_t resolution) {
++    ALOGV(LOG_TAG "%s: E", __FUNCTION__);
++
++    switch (resolution) {
++        case uint32_t(FrameResolution::k480p):
++            gCameraMaxWidth = 640;
++            gCameraMaxHeight = 480;
++            break;
++        case uint32_t(FrameResolution::k720p):
++            gCameraMaxWidth = 1280;
++            gCameraMaxHeight = 720;
++            break;
++        case uint32_t(FrameResolution::k1080p):
++            gCameraMaxWidth = 1920;
++            gCameraMaxHeight = 1080;
++            break;
++        default:
++            break;
++    }
++    ALOGI(LOG_TAG "%s: Set Camera resolution: %dx%d", __FUNCTION__, gCameraMaxWidth,
++          gCameraMaxHeight);
++
++    setCameraMaxSupportedResolution(gCameraMaxWidth, gCameraMaxHeight);
++}
++
++bool CameraSocketServerThread::configureCapabilities() {
++    ALOGV(LOG_TAG " %s Enter", __FUNCTION__);
++
++    bool status = false;
++    bool valid_client_cap_info = false;
++    int camera_id, expctd_cam_id;
++    struct ValidateClientCapability val_client_cap[MAX_NUMBER_OF_SUPPORTED_CAMERAS];
++    size_t ack_packet_size = sizeof(camera_header_t) + sizeof(camera_ack_t);
++    size_t cap_packet_size = sizeof(camera_header_t) + sizeof(camera_capability_t);
++    ssize_t recv_size = 0;
++    camera_ack_t ack_payload = ACK_CONFIG;
++
++    camera_info_t camera_info[MAX_NUMBER_OF_SUPPORTED_CAMERAS] = {};
++    camera_capability_t capability = {};
++
++    camera_packet_t *cap_packet = NULL;
++    camera_packet_t *ack_packet = NULL;
++    camera_header_t header = {};
++/*
++    if ((recv_size = recv(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
++        ALOGV(LOG_TAG "%s: Failed to receive header, err: %s ", __FUNCTION__, strerror(errno));
++        goto out;
++    }
++
++    if (header.type != REQUEST_CAPABILITY) {
++        ALOGV(LOG_TAG "%s: Invalid packet type\n", __FUNCTION__);
++        goto out;
++    }
++    ALOGI(LOG_TAG "%s: Received REQUEST_CAPABILITY header from client", __FUNCTION__);
++*/
++    cap_packet = (camera_packet_t *)malloc(cap_packet_size);
++    if (cap_packet == NULL) {
++        ALOGV(LOG_TAG "%s: cap camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
++        return false;
++    }
++
++    cap_packet->header.type = CAPABILITY;
++    cap_packet->header.size = sizeof(camera_capability_t);
++    capability.codec_type = (uint32_t)VideoCodecType::kAll;
++    capability.resolution = (uint32_t)FrameResolution::kAll;
++    capability.maxNumberOfCameras = MAX_NUMBER_OF_SUPPORTED_CAMERAS;
++
++    memcpy(cap_packet->payload, &capability, sizeof(camera_capability_t));
++ /*   if (send(mClientFd, cap_packet, cap_packet_size, 0) < 0) {
++        ALOGV(LOG_TAG "%s: Failed to send camera capabilities, err: %s ", __FUNCTION__,
++              strerror(errno));
++        goto out;
++    }*/
++    ALOGI(LOG_TAG "%s: Sent CAPABILITY packet to client", __FUNCTION__);
++/*
++    if ((recv_size = recv(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
++        ALOGV(LOG_TAG "%s: Failed to receive header, err: %s ", __FUNCTION__, strerror(errno));
++        goto out;
++    }
++
++    if (header.type != CAMERA_INFO) {
++        ALOGV(LOG_TAG "%s: invalid camera_packet_type: %s", __FUNCTION__,
++              camera_type_to_str(header.type));
++        goto out;
++    }
++*/
++    // Get the number fo cameras requested to support from client.
++/*    for (int i = 1; i <= MAX_NUMBER_OF_SUPPORTED_CAMERAS; i++) {
++        if (header.size == i * sizeof(camera_info_t)) {
++            mNumOfCamerasRequested = i;
++            break;
++        } else if (mNumOfCamerasRequested == 0 && i == MAX_NUMBER_OF_SUPPORTED_CAMERAS) {
++            ALOGV(LOG_TAG
++                  "%s: Failed to support number of cameras requested by client "
++                  "which is higher than the max number of cameras supported in the HAL",
++                  __FUNCTION__);
++            goto out;
++        }
++    }
++*/
++    /*if (mNumOfCamerasRequested == 0) {
++        ALOGV(LOG_TAG "%s: invalid header size received, size = %zu", __FUNCTION__, recv_size);
++        goto out;
++    } else {
++        // Update the number of cameras globally to create camera pipeline.
++        gMaxNumOfCamerasSupported = mNumOfCamerasRequested;
++    }*/
++/*
++    if ((recv_size = recv(mClientFd, (char *)&camera_info,
++                          mNumOfCamerasRequested * sizeof(camera_info_t), MSG_WAITALL)) < 0) {
++        ALOGV(LOG_TAG "%s: Failed to receive camera info, err: %s ", __FUNCTION__, strerror(errno));
++        goto out;
++    }
++*/
++    camera_info[0].cameraId = 0;
++    camera_info[0].codec_type = (uint32_t)VideoCodecType::kI420;
++    camera_info[0].sensorOrientation =  (uint32_t)SensorOrientation::ORIENTATION_0;
++    camera_info[0].facing =       (uint32_t)CameraFacing::BACK_FACING;
++    camera_info[0].resolution =  (uint32_t)FrameResolution::k480p;
++    camera_info[1].cameraId = 1;
++    camera_info[1].codec_type = (uint32_t)VideoCodecType::kI420;
++    camera_info[1].sensorOrientation =  (uint32_t)SensorOrientation::ORIENTATION_0;
++    camera_info[1].facing =       (uint32_t)CameraFacing::FRONT_FACING;
++    camera_info[1].resolution =  (uint32_t)FrameResolution::k480p;
++    mNumOfCamerasRequested =2;
++    ALOGI(LOG_TAG "%s: Received CAMERA_INFO packet from client with recv_size: %zd ", __FUNCTION__,
++          recv_size);
++    ALOGI(LOG_TAG "%s: Number of cameras requested = %d", __FUNCTION__, mNumOfCamerasRequested);
++   gMaxNumOfCamerasSupported = mNumOfCamerasRequested;
++    // Update status globally after received successful capability info.
++    gCapabilityInfoReceived = true;
++
++    // validate capability info received from the client.
++    for (int i = 0; i < mNumOfCamerasRequested; i++) {
++        expctd_cam_id = i;
++        if (expctd_cam_id == (int)camera_info[i].cameraId)
++            ALOGV(LOG_TAG
++                   "%s: Camera Id number %u received from client is matching with expected Id",
++                   __FUNCTION__, camera_info[i].cameraId);
++        else
++            ALOGI(LOG_TAG
++                  "%s: [Warning] Camera Id number %u received from client is not matching with "
++                  "expected Id %d",
++                  __FUNCTION__, camera_info[i].cameraId, expctd_cam_id);
++
++        switch (camera_info[i].codec_type) {
++            case uint32_t(VideoCodecType::kH264):
++            case uint32_t(VideoCodecType::kH265):
++            case uint32_t(VideoCodecType::kI420):
++                val_client_cap[i].validCodecType = true;
++                break;
++            default:
++                val_client_cap[i].validCodecType = false;
++                break;
++        }
++
++        switch (camera_info[i].resolution) {
++            case uint32_t(FrameResolution::k480p):
++            case uint32_t(FrameResolution::k720p):
++            case uint32_t(FrameResolution::k1080p):
++                val_client_cap[i].validResolution = true;
++                break;
++            default:
++                val_client_cap[i].validResolution = false;
++                break;
++        }
++
++        switch (camera_info[i].sensorOrientation) {
++            case uint32_t(SensorOrientation::ORIENTATION_0):
++            case uint32_t(SensorOrientation::ORIENTATION_90):
++            case uint32_t(SensorOrientation::ORIENTATION_180):
++            case uint32_t(SensorOrientation::ORIENTATION_270):
++                val_client_cap[i].validOrientation = true;
++                break;
++            default:
++                val_client_cap[i].validOrientation = false;
++                break;
++        }
++
++        switch (camera_info[i].facing) {
++            case uint32_t(CameraFacing::BACK_FACING):
++            case uint32_t(CameraFacing::FRONT_FACING):
++                val_client_cap[i].validCameraFacing = true;
++                break;
++            default:
++                val_client_cap[i].validCameraFacing = false;
++                break;
++        }
++    }
++
++    // Check whether recceived any invalid capability info or not.
++    // ACK packet to client would be updated based on this verification.
++    /*for (int i = 0; i < mNumOfCamerasRequested; i++) {
++        if (!val_client_cap[i].validCodecType || !val_client_cap[i].validResolution ||
++            !val_client_cap[i].validOrientation || !val_client_cap[i].validCameraFacing) {
++            valid_client_cap_info = false;
++            ALOGV("%s: capability info received from client is not completely correct and expected",
++                  __FUNCTION__);
++            break;
++        } else {
++            ALOGV("%s: capability info received from client is correct and expected",
++                   __FUNCTION__);
++            valid_client_cap_info = true;
++        }
++    }*/
++
++            valid_client_cap_info = true;
++    // Updating metadata for each camera seperately with its capability info received.
++    for (int i = 0; i < mNumOfCamerasRequested; i++) {
++        // Going to update metadata for each camera, so update the status.
++        gStartMetadataUpdate = false;
++        gDoneMetadataUpdate = false;
++        camera_id = i;
++        ALOGV(LOG_TAG
++              "%s - Client requested for codec_type: %s, resolution: %s, orientation: %u, and "
++              "facing: %u for camera Id %d",
++              __FUNCTION__, codec_type_to_str(camera_info[i].codec_type),
++              resolution_to_str(camera_info[i].resolution), camera_info[i].sensorOrientation,
++              camera_info[i].facing, camera_id);
++
++        if (val_client_cap[i].validResolution) {
++            // Set Camera capable resolution based on remote client capability info.
++            setCameraResolution(camera_info[i].resolution);
++        } else {
++            // Set default resolution if receive invalid capability info from client.
++            // Default resolution would be 480p.
++            setCameraResolution((uint32_t)FrameResolution::k480p);
++            ALOGV(LOG_TAG
++                  "%s: Not received valid resolution, "
++                  "hence selected 480p as default",
++                  __FUNCTION__);
++        }
++
++        if (val_client_cap[i].validCodecType) {
++            // Set codec type based on remote client capability info.
++            gCodecType = camera_info[i].codec_type;
++        } else {
++            // Set default codec type if receive invalid capability info from client.
++            // Default codec type would be H264.
++            gCodecType = (uint32_t)VideoCodecType::kH264;
++            ALOGV(LOG_TAG "%s: Not received valid codec type, hence selected H264 as default",
++                  __FUNCTION__);
++        }
++
++        if (val_client_cap[i].validOrientation) {
++            // Set Camera sensor orientation based on remote client camera orientation.
++            gCameraSensorOrientation = camera_info[i].sensorOrientation;
++        } else {
++            // Set default camera sensor orientation if received invalid orientation data from
++            // client. Default sensor orientation would be zero deg and consider as landscape
++            // display.
++            gCameraSensorOrientation = (uint32_t)SensorOrientation::ORIENTATION_0;
++            ALOGV(LOG_TAG
++                  "%s: Not received valid sensor orientation, "
++                  "hence selected ORIENTATION_0 as default",
++                  __FUNCTION__);
++        }
++
++        if (val_client_cap[i].validCameraFacing) {
++            // Set camera facing based on client request.
++            if (camera_info[i].facing == (uint32_t)CameraFacing::BACK_FACING)
++                gCameraFacingBack = true;
++            else
++                gCameraFacingBack = false;
++        } else {
++            // Set default camera facing info if received invalid facing info from client.
++            // Default would be back for camera Id '0' and front for camera Id '1'.
++            if (camera_id == 1)
++                gCameraFacingBack = false;
++            else
++                gCameraFacingBack = true;
++            ALOGV(LOG_TAG
++                  "%s: Not received valid camera facing info, "
++                  "hence selected default",
++                  __FUNCTION__);
++        }
++
++        // Start updating metadata for one camera, so update the status.
++        gStartMetadataUpdate = true;
++
++        // Wait till complete the metadata update for a camera.
++        while (!gDoneMetadataUpdate) {
++            ALOGV("%s: wait till complete the metadata update for a camera", __FUNCTION__);
++            // 200us sleep for this thread.
++            std::this_thread::sleep_for(std::chrono::microseconds(200));
++        }
++    }
++
++    ack_packet = (camera_packet_t *)malloc(ack_packet_size);
++    if (ack_packet == NULL) {
++        ALOGV(LOG_TAG "%s: ack camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
++        goto out;
++    }
++    ack_payload = (valid_client_cap_info) ? ACK_CONFIG : NACK_CONFIG;
++
++    ack_packet->header.type = ACK;
++    ack_packet->header.size = sizeof(camera_ack_t);
++
++    memcpy(ack_packet->payload, &ack_payload, sizeof(camera_ack_t));
++/*    if (send(mClientFd, ack_packet, ack_packet_size, 0) < 0) {
++        ALOGV(LOG_TAG "%s: Failed to send camera capabilities, err: %s ", __FUNCTION__,
++              strerror(errno));
++        goto out;
++    }*/
++    ALOGI(LOG_TAG "%s: Sent ACK packet to client with ack_size: %zu ", __FUNCTION__,
++          ack_packet_size);
++
++    status = true;
++out:
++    free(ack_packet);
++    free(cap_packet);
++    ALOGV(LOG_TAG " %s: Exit", __FUNCTION__);
++    return status;
+ }
+ 
+ bool CameraSocketServerThread::threadLoop() {
+-    struct sockaddr_un addr_un;
++ struct sockaddr_un addr_un;
+     memset(&addr_un, 0, sizeof(addr_un));
+     addr_un.sun_family = AF_UNIX;
+     int ret = 0;
+@@ -150,18 +479,18 @@ bool CameraSocketServerThread::threadLoop() {
+     else{
+        //Fall back to unix socket by default
+        //trans_mode = UNIX;
+-       //Deepa to do 
++       //D to do 
+        trans_mode = VSOCK;
+-       ALOGVV("%s: falling back to UNIX as the trans mode is not set",__FUNCTION__);
++       ALOGV("%s: falling back to UNIX as the trans mode is not set",__FUNCTION__);
+     }
+     if(trans_mode == UNIX)
+     {
+         mSocketServerFd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+         if (mSocketServerFd < 0) {
+-            ALOGE("%s:%d Fail to construct camera socket with error: %s", __FUNCTION__, __LINE__,
++            ALOGV("%s:%d Fail to construct camera socket with error: %s", __FUNCTION__, __LINE__,
+               strerror(errno));
+         return false;
+-    }
++        }
+ 
+     struct sockaddr_un addr_un;
+     memset(&addr_un, 0, sizeof(addr_un));
+@@ -173,7 +502,7 @@ bool CameraSocketServerThread::threadLoop() {
+         ALOGI(" %s camera socket server file is %s", __FUNCTION__, mSocketPath.c_str());
+         ret = unlink(mSocketPath.c_str());
+         if (ret < 0) {
+-            ALOGE(LOG_TAG " %s Failed to unlink %s address %d, %s", __FUNCTION__,
++            ALOGV(LOG_TAG " %s Failed to unlink %s address %d, %s", __FUNCTION__,
+                   mSocketPath.c_str(), ret, strerror(errno));
+             return false;
+         }
+@@ -185,7 +514,7 @@ bool CameraSocketServerThread::threadLoop() {
+     ret = ::bind(mSocketServerFd, (struct sockaddr *)&addr_un,
+                  sizeof(sa_family_t) + strlen(mSocketPath.c_str()) + 1);
+     if (ret < 0) {
+-        ALOGE(LOG_TAG " %s Failed to bind %s address %d, %s", __FUNCTION__, mSocketPath.c_str(),
++        ALOGV(LOG_TAG " %s Failed to bind %s address %d, %s", __FUNCTION__, mSocketPath.c_str(),
+               ret, strerror(errno));
+         return false;
+     }
+@@ -200,7 +529,7 @@ bool CameraSocketServerThread::threadLoop() {
+ 
+         ret = listen(mSocketServerFd, 5);
+         if (ret < 0) {
+-            ALOGE("%s Failed to listen on %s", __FUNCTION__, mSocketPath.c_str());
++            ALOGV("%s Failed to listen on %s", __FUNCTION__, mSocketPath.c_str());
+             return false;
+         }
+     }
+@@ -209,16 +538,15 @@ bool CameraSocketServerThread::threadLoop() {
+         int new_client_fd =-1;
+         int port = 8085;
+         int so_reuseaddr = 1;
+-
+         mSocketServerFd = ::socket(AF_INET, SOCK_STREAM, 0);
+         if (mSocketServerFd < 0) {
+-            ALOGE(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
++            ALOGV(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
+             __FUNCTION__, __LINE__, strerror(errno));
+             return false;
+         }
+         if (setsockopt(mSocketServerFd, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr,
+                    sizeof(int)) < 0) {
+-             ALOGE(LOG_TAG " %s setsockopt(SO_REUSEADDR) failed. : %d\n", __func__,
++             ALOGV(LOG_TAG " %s setsockopt(SO_REUSEADDR) failed. : %d\n", __func__,
+             mSocketServerFd);
+             return false;
+         }
+@@ -229,13 +557,13 @@ bool CameraSocketServerThread::threadLoop() {
+         ret = ::bind(mSocketServerFd, (struct sockaddr *)&addr_ip,
+                sizeof(struct sockaddr_in));
+         if (ret < 0) {
+-            ALOGE(LOG_TAG " %s Failed to bind port(%d). ret: %d, %s", __func__, port, ret,
++            ALOGV(LOG_TAG " %s Failed to bind port(%d). ret: %d, %s", __func__, port, ret,
+             strerror(errno));
+             return false;
+         }
+         ret = listen(mSocketServerFd, 5);
+         if (ret < 0) {
+-            ALOGE("%s Failed to listen on ", __FUNCTION__);
++            ALOGV("%s Failed to listen on ", __FUNCTION__);
+             return false;
+         }
+     }else{
+@@ -251,26 +579,26 @@ bool CameraSocketServerThread::threadLoop() {
+         size_update = 0;
+         mSocketServerFd = ::socket(AF_VSOCK, SOCK_STREAM, 0);
+         if (mSocketServerFd < 0) {
+-        ALOGE(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
++        ALOGV(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
+         __FUNCTION__, __LINE__, strerror(errno));
+         return false;
+         }
+         ret = ::bind(mSocketServerFd, (struct sockaddr *)&addr_vm,
+             sizeof(struct sockaddr_vm));
+         if (ret < 0) {
+-            ALOGE(LOG_TAG " %s Failed to bind port(%d). ret: %d, %s", __func__, port, ret,
++            ALOGV(LOG_TAG " %s Failed to bind port(%d). ret: %d, %s", __func__, port, ret,
+             strerror(errno));
+             return false;
+         }
+         ret = listen(mSocketServerFd, 32);
+         if (ret < 0) {
+-        ALOGE("%s Failed to listen on ", __FUNCTION__);
++        ALOGV("%s Failed to listen on ", __FUNCTION__);
+         return false;
+         }
+ 
+     }
+     while (mRunning) {
+-        ALOGI(LOG_TAG " %s: Wait for camera client to connect. . .", __FUNCTION__);
++        ALOGV(LOG_TAG " %s: Wait for camera client to connect. . .", __FUNCTION__);
+ 
+         if (trans_mode == TCP) {
+             socklen_t alen = sizeof(struct sockaddr_in);
+@@ -287,61 +615,68 @@ bool CameraSocketServerThread::threadLoop() {
+         }
+         ALOGI(LOG_TAG " %s: Accepted client: [%d]", __FUNCTION__, new_client_fd);
+         if (new_client_fd < 0) {
+-            ALOGE(LOG_TAG " %s: Fail to accept client. Error: [%s]", __FUNCTION__, strerror(errno));
++            ALOGV(LOG_TAG " %s: Fail to accept client. Error: [%s]", __FUNCTION__, strerror(errno));
+             continue;
+         }
+-        mClientFd = new_client_fd;
++ 
++        bool status = false;
++        status = configureCapabilities();
++        if (status) {
++            ALOGI(LOG_TAG
++                  "%s: Capability negotiation and metadata update"
++                  "for %d camera(s) completed successfully..",
++                  __FUNCTION__, mNumOfCamerasRequested);
++        }
++        mClientFd =  new_client_fd; 
+ 
+         ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+         char *fbuffer = (char *)handle->clientBuf[handle->clientRevCount % 1].buffer;
+-
+-        clearBuffer(fbuffer, 640, 480);
++        // Reset and clear the input buffer before receiving the frames.
++        handle->reset();
+ 
+         struct pollfd fd;
+         int event;
+-
+         fd.fd = mClientFd;  // your socket handler
+         fd.events = POLLIN | POLLHUP;
+ 
++
+         while (true) {
+             // check if there are any events on fd.
+-            int ret = poll(&fd, 1, 3000);  // 1 second for timeout
++            int ret = poll(&fd, 1, 3000);  // 3 seconds for timeout
+ 
+             event = fd.revents;  // returned events
+ 
+             if (event & POLLHUP) {
+                 // connnection disconnected => socket is closed at the other end => close the
+                 // socket.
+-                ALOGE(LOG_TAG " %s: POLLHUP: Close camera socket connection", __FUNCTION__);
++                ALOGV(LOG_TAG " %s: POLLHUP: Close camera socket connection", __FUNCTION__);
+                 shutdown(mClientFd, SHUT_RDWR);
+                 close(mClientFd);
+                 mClientFd = -1;
+-                clearBuffer(fbuffer, 640, 480);
++                handle->reset();
+                 break;
+-            } else if ((event & POLLIN) || (trans_mode == VSOCK) || (trans_mode == TCP) ) {  // preview / record
++            } else if ((event & POLLIN)) {  // preview / record
+                 // data is available in socket => read data
+                 if (gIsInFrameI420) {
+                     ssize_t size = 0;
+-
+-                    //in VSOCk case the MSG_WAITALL is not helping in getting the complete buffer
+-                    if(trans_mode == VSOCK)
+-                    {
++                     
++                     if(trans_mode == VSOCK){
+                         while(size_update != 460800){
+                             size = recv(mClientFd, (char *)fbuffer+size_update, 460800, 0);
+                             size_update += size;
+                             if (size_update == 460800){
+                                 handle->clientRevCount++;
+                                 size_update = 0;
+-                                ALOGVV(LOG_TAG
++                                ALOGV(LOG_TAG
+                                    "[I420] %s: Packet rev %d and "
+                                    "size %zd",
+                                    __FUNCTION__, handle->clientRevCount, size);
+                             }
+                         }
+                     }else{
+-                        if ((size = recv(mClientFd, (char *)fbuffer, 460800, MSG_WAITALL)) > 0) {
++                    if ((size = recv(mClientFd, (char *)fbuffer, 460800, MSG_WAITALL)) > 0) {
+                         handle->clientRevCount++;
+-                        ALOGVV(LOG_TAG
++                        ALOGV(LOG_TAG
+                                "[I420] %s: Packet rev %d and "
+                                "size %zd",
+                                __FUNCTION__, handle->clientRevCount, size);
+@@ -353,31 +688,32 @@ bool CameraSocketServerThread::threadLoop() {
+                     ssize_t size = 0;
+                     if ((size = recv(mClientFd, (char *)&recv_frame_size, sizeof(size_t),
+                                      MSG_WAITALL)) > 0) {
+-                        ALOGVV("[H264] Received Header %zd bytes. Payload size: %zu", size,
++                        ALOGV("[H264] Received Header %zd bytes. Payload size: %zu", size,
+                               recv_frame_size);
+                         if (recv_frame_size > mSocketBuffer.size()) {
+                             // maximum size of a H264 packet in any aggregation packet is 65535
+                             // bytes. Source: https://tools.ietf.org/html/rfc6184#page-13
+-                            ALOGE(
++                            ALOGV(
+                                 "%s Fatal: Unusual H264 packet size detected: %zu! Max is %zu, ...",
+                                 __func__, recv_frame_size, mSocketBuffer.size());
+                             continue;
+                         }
++
+                         // recv frame
+                         if ((size = recv(mClientFd, (char *)mSocketBuffer.data(), recv_frame_size,
+                                          MSG_WAITALL)) > 0) {
+                             mSocketBufferSize = recv_frame_size;
+-                            ALOGVV("%s [H264] Camera session state: %s", __func__,
++                            ALOGV("%s [H264] Camera session state: %s", __func__,
+                                   kCameraSessionStateNames.at(mCameraSessionState).c_str());
+                             switch (mCameraSessionState) {
+                                 case CameraSessionState::kCameraOpened:
+                                     mCameraSessionState = CameraSessionState::kDecodingStarted;
+-                                    ALOGVV("%s [H264] Decoding started now.", __func__);
++                                    ALOGV("%s [H264] Decoding started now.", __func__);
+                                     [[fallthrough]];
+                                 case CameraSessionState::kDecodingStarted:
+                                     mVideoDecoder->decode(mSocketBuffer.data(), mSocketBufferSize);
+                                     handle->clientRevCount++;
+-                                    ALOGVV("%s [H264] Received Payload #%d %zd/%zu bytes", __func__,
++                                    ALOGV("%s [H264] Received Payload #%d %zd/%zu bytes", __func__,
+                                           handle->clientRevCount, size, recv_frame_size);
+                                     break;
+                                 case CameraSessionState::kCameraClosed:
+@@ -387,25 +723,25 @@ bool CameraSocketServerThread::threadLoop() {
+                                     ALOGI("%s [H264] Decoding stopped now.", __func__);
+                                     break;
+                                 case CameraSessionState::kDecodingStopped:
+-                                    ALOGVV("%s [H264] Decoding is already stopped, skip the packets",
++                                    ALOGV("%s [H264] Decoding is already stopped, skip the packets",
+                                           __func__);
+                                     [[fallthrough]];
+                                 default:
+-                                    ALOGE("%s [H264] Invalid Camera session state!", __func__);
++                                    ALOGV("%s [H264] Invalid Camera session state!", __func__);
+                                     break;
+                             }
+                         }
+                     }
+ #endif
+                 } else {
+-                    ALOGE("%s: only H264, I420 input frames supported", __FUNCTION__);
++                    ALOGV("%s: only H264, I420 input frames supported", __FUNCTION__);
+                 }
+             } else {
+-                //    ALOGE("%s: continue polling..", __FUNCTION__);
++                //    ALOGV("%s: continue polling..", __FUNCTION__);
+             }
+         }
+     }
+-    ALOGE(" %s: Quit CameraSocketServerThread... %s(%d)", __FUNCTION__, mSocketPath.c_str(),
++    ALOGV(" %s: Quit CameraSocketServerThread... %s(%d)", __FUNCTION__, mSocketPath.c_str(),
+           mClientFd);
+     shutdown(mClientFd, SHUT_RDWR);
+     close(mClientFd);
+diff --git a/src/Exif.cpp b/src/Exif.cpp
+index 57e0574..2ed9db3 100644
+--- a/src/Exif.cpp
++++ b/src/Exif.cpp
+@@ -14,7 +14,7 @@
+  * limitations under the License.
+  */
+ 
+-// #define LOG_NDEBUG 0
++#define LOG_NDEBUG 0
+ #define LOG_TAG "VirtualCamera_Exif"
+ #include <log/log.h>
+ #include <cutils/properties.h>
+@@ -338,6 +338,7 @@ static ExifData *createExifDataCommon(const CameraMetadata &params, int width, i
+         EXIF_ROTATE_CAMERA_CW270 = 8,
+     };
+     uint16_t exifOrien = 1;
++    ALOGE("degrees in VHAL EXIF %d",degrees);
+     switch (degrees) {
+         case 0:
+             exifOrien = EXIF_ROTATE_CAMERA_CW0;
+diff --git a/src/NV21JpegCompressor.cpp b/src/NV21JpegCompressor.cpp
+index 3348959..771d43f 100644
+--- a/src/NV21JpegCompressor.cpp
++++ b/src/NV21JpegCompressor.cpp
+@@ -45,18 +45,18 @@ typedef void (*GetCompressedImageFunc)(JpegStub *stub, void *buff);
+ typedef size_t (*GetCompressedSizeFunc)(JpegStub *stub);
+ 
+ NV21JpegCompressor::NV21JpegCompressor() {
+-    const char dlName[] = "/system/vendor/lib64/hw/camera.cic_cloud.jpeg.so";
++    const char dlName[] = "/system/vendor/lib64/hw/camera.celadon.jpeg.so";
+     if (!mDl) {
+         mDl = dlopen(dlName, RTLD_NOW);
+     }
+     if (mDl) {
+-       InitFunc f = (InitFunc)getSymbol(mDl, "JpegStub_init");
+-       if (f)
+-           (*f)(&mStub);
+-       else
+-           ALOGE("%s: Fatal error: getSymbol(JpegStub_init) failed", __func__);
++        InitFunc f = (InitFunc)getSymbol(mDl, "JpegStub_init");
++        if (f)
++            (*f)(&mStub);
++        else
++            ALOGE("%s: Fatal error: getSymbol(JpegStub_init) failed", __func__);
+     } else {
+-       ALOGE("%s: Fatal error: dlopen(%s) failed", __func__, dlName);
++        ALOGE("%s: Fatal error: dlopen(%s) failed", __func__, dlName);
+     }
+ }
+ 
+diff --git a/src/VirtualCamera3.cpp b/src/VirtualCamera3.cpp
+index 587a881..a8c246e 100644
+--- a/src/VirtualCamera3.cpp
++++ b/src/VirtualCamera3.cpp
+@@ -58,8 +58,7 @@ VirtualCamera3::~VirtualCamera3() {}
+  * Public API
+  ***************************************************************************/
+ 
+-status_t VirtualCamera3::Initialize(const char *device_name, const char *frame_dims,
+-                                    const char *facing_dir) {
++status_t VirtualCamera3::Initialize() {
+     ALOGV("%s", __FUNCTION__);
+ 
+     mStatus = STATUS_CLOSED;
+@@ -70,8 +69,8 @@ status_t VirtualCamera3::Initialize(const char *device_name, const char *frame_d
+  * Camera API implementation
+  ***************************************************************************/
+ 
+-status_t VirtualCamera3::connectCamera(hw_device_t **device) {
+-    ALOGV("%s", __FUNCTION__);
++status_t VirtualCamera3::openCamera(hw_device_t **device) {
++    ALOGV("%s: E", __FUNCTION__);
+     if (device == NULL) return BAD_VALUE;
+ 
+     if (mStatus != STATUS_CLOSED) {
+@@ -81,12 +80,13 @@ status_t VirtualCamera3::connectCamera(hw_device_t **device) {
+ 
+     *device = &common;
+     mStatus = STATUS_OPEN;
++    ALOGI("%s : Camera %d opened successfully..", __FUNCTION__, mCameraID);
+     return NO_ERROR;
+ }
+ 
+ status_t VirtualCamera3::closeCamera() {
+     mStatus = STATUS_CLOSED;
+-    ALOGI("%s : Camera session closed successfully!!!", __FUNCTION__);
++    ALOGI("%s : Camera %d closed successfully..", __FUNCTION__, mCameraID);
+     return NO_ERROR;
+ }
+ 
+diff --git a/src/VirtualCameraFactory.cpp b/src/VirtualCameraFactory.cpp
+index 8454fa2..478fa68 100644
+--- a/src/VirtualCameraFactory.cpp
++++ b/src/VirtualCameraFactory.cpp
+@@ -20,8 +20,8 @@
+  */
+ 
+ #define LOG_NDEBUG 0
+-#define LOG_TAG "VirtualCamera_Factory"
+-
++#define LOG_TAG "VirtualCamera_Factory "
++#include "VirtualBuffer.h"
+ #include "VirtualCameraFactory.h"
+ #include "VirtualFakeCamera3.h"
+ #include "CameraSocketServerThread.h"
+@@ -53,8 +53,8 @@ void VirtualCameraFactory::readSystemProperties() {
+ 
+     property_get("ro.vendor.camera.in_frame_format.i420", prop_val, "false");
+     gIsInFrameI420 = !strcmp(prop_val, "true");
+-//Deepa to do
+-       gIsInFrameI420 = true;
++    //D TODO
++     gIsInFrameI420 = true;
+     property_get("ro.vendor.camera.decode.vaapi", prop_val, "false");
+     gUseVaapi = !strcmp(prop_val, "true");
+ 
+@@ -64,55 +64,19 @@ void VirtualCameraFactory::readSystemProperties() {
+ 
+ VirtualCameraFactory::VirtualCameraFactory()
+     : mVirtualCameras(nullptr),
+-      mVirtualCameraNum(0),
+-      mFakeCameraNum(0),
++      mNumOfCamerasSupported(0),
+       mConstructedOK(false),
+       mCallbacks(nullptr) {
+-    /*
+-     * Figure out how many cameras need to be created, so we can allocate the
+-     * array of virtual cameras before populating it.
+-     */
+-    int virtualCamerasSize = 0;
+-
+-    mCameraSessionState = socket::CameraSessionState::kNone;
+-
+-    waitForRemoteSfFakeCameraPropertyAvailable();
+-    // Fake Cameras
+-    if (isFakeCameraEmulationOn(/* backCamera */ true)) {
+-        mFakeCameraNum++;
+-    }
+-    if (isFakeCameraEmulationOn(/* backCamera */ false)) {
+-        mFakeCameraNum++;
+-    }
+-    virtualCamerasSize += mFakeCameraNum;
+-
+-    /*
+-     * We have the number of cameras we need to create, now allocate space for
+-     * them.
+-     */
+-    mVirtualCameras = new VirtualBaseCamera *[virtualCamerasSize];
+-    if (mVirtualCameras == nullptr) {
+-        ALOGE("%s: Unable to allocate virtual camera array for %d entries", __FUNCTION__,
+-              mVirtualCameraNum);
+-        return;
+-    }
+-    if (mVirtualCameras != nullptr) {
+-        for (int n = 0; n < virtualCamerasSize; n++) {
+-            mVirtualCameras[n] = nullptr;
+-        }
+-    }
+-
+     readSystemProperties();
+ 
+     if (gIsInFrameH264) {
+-        // create decoder
++        // Create decoder to decode H264/H265 input frames.
+         ALOGV("%s Creating decoder.", __func__);
+ #ifdef ENABLE_FFMPEG
+         mDecoder = std::make_shared<CGVideoDecoder>();
+ #endif
+     }
+-
+-    // create socket server who push packets to decoder
++    // Create socket server which is used to communicate with client device.
+ #ifdef ENABLE_FFMPEG
+     createSocketServer(mDecoder);
+ #else
+@@ -120,24 +84,54 @@ VirtualCameraFactory::VirtualCameraFactory()
+ #endif
+     ALOGV("%s socket server created: ", __func__);
+ 
+-    // Create fake cameras, if enabled.
+-    if (isFakeCameraEmulationOn(/* backCamera */ true)) {
+-#ifdef ENABLE_FFMPEG
+-        createFakeCamera(mSocketServer, mDecoder, /* backCamera */ true);
+-#else
+-        createFakeCamera(mSocketServer,  /* backCamera */ true);
+-#endif
++    // Check whether capability info is received or not and
++    // wait until receive capability info from client HW.
++    // Number of supported cameras and its corresponding
++    // metadata info would be updated always based on this
++    // capability info from the remote client HW.
++    while (!gCapabilityInfoReceived) {
++        ALOGV("%s: waiting for the capability info...", __func__);
++        // 1ms sleep for this thread.
++        std::this_thread::sleep_for(1ms);
++    }
++
++    ALOGV("%s: Received capability info from remote client device", __FUNCTION__);
++
++    // Update number of cameras requested from remote client HW.
++    mNumOfCamerasSupported = gMaxNumOfCamerasSupported;
++
++    // Allocate space for each cameras requested.
++    mVirtualCameras = new VirtualBaseCamera *[mNumOfCamerasSupported];
++    if (mVirtualCameras == nullptr) {
++        ALOGV("%s: Unable to allocate virtual camera array", __FUNCTION__);
++        return;
++    } else {
++        for (int n = 0; n < mNumOfCamerasSupported; n++) {
++            mVirtualCameras[n] = nullptr;
++        }
+     }
+-    if (isFakeCameraEmulationOn(/* backCamera */ false)) {
++
++    // Create cameras based on the client request.
++    for (int cameraId = 0; cameraId < mNumOfCamerasSupported; cameraId++) {
++        // Wait until start updating metadata for each camera.
++        while (!gStartMetadataUpdate) {
++            //ALOGV("%s: wait until start updating metadata for a single camera", __func__);
++            // 200us sleep for this thread.
++            std::this_thread::sleep_for(std::chrono::microseconds(200));
++        }
++
+ #ifdef ENABLE_FFMPEG
+-        createFakeCamera(mSocketServer, mDecoder, /* backCamera */ false);
++        createVirtualRemoteCamera(mSocketServer, mDecoder, cameraId);
+ #else
+-        createFakeCamera(mSocketServer,  /* backCamera */ false);
++        createVirtualRemoteCamera(mSocketServer, cameraId);
+ #endif
++        // Created a camera successfully hence update the status.
++        gDoneMetadataUpdate = true;
++        gStartMetadataUpdate = false;
++      
+     }
+ 
+-    ALOGI("%d cameras are being virtual. %d of them are fake cameras.", mVirtualCameraNum,
+-          mFakeCameraNum);
++    ALOGI("%s: Total number of cameras supported: %d", __FUNCTION__, mNumOfCamerasSupported);
+ 
+     mConstructedOK = true;
+ }
+@@ -148,17 +142,17 @@ bool VirtualCameraFactory::createSocketServer() {
+ #endif
+     ALOGV("%s: E", __FUNCTION__);
+ 
++    mCameraSessionState = socket::CameraSessionState::kNone;
+     char id[PROPERTY_VALUE_MAX] = {0};
+ #ifdef ENABLE_FFMPEG
+     if (property_get("ro.boot.container.id", id, "") > 0) {
+         mSocketServer =
+             std::make_shared<CameraSocketServerThread>(id, decoder, std::ref(mCameraSessionState));
+     } else
+-        ALOGE("%s: FATAL: container id is not set!!", __func__);
++        ALOGV("%s: FATAL: container id is not set!!", __func__);
+ 
+     ALOGV("%s: X", __FUNCTION__);
+ #else
+-    ALOGE("Deepa CameraSocketServerThread run");
+     mSocketServer =
+         std::make_shared<CameraSocketServerThread>(id, std::ref(mCameraSessionState));
+ #endif
+@@ -169,7 +163,7 @@ bool VirtualCameraFactory::createSocketServer() {
+ 
+ VirtualCameraFactory::~VirtualCameraFactory() {
+     if (mVirtualCameras != nullptr) {
+-        for (int n = 0; n < mVirtualCameraNum; n++) {
++        for (int n = 0; n < mNumOfCamerasSupported; n++) {
+             if (mVirtualCameras[n] != nullptr) {
+                 delete mVirtualCameras[n];
+             }
+@@ -197,29 +191,29 @@ int VirtualCameraFactory::cameraDeviceOpen(int cameraId, hw_device_t **device) {
+     *device = nullptr;
+ 
+     if (!isConstructedOK()) {
+-        ALOGE("%s: VirtualCameraFactory has failed to initialize", __FUNCTION__);
++        ALOGV("%s: VirtualCameraFactory has failed to initialize", __FUNCTION__);
+         return -EINVAL;
+     }
+ 
+-    if (cameraId < 0 || cameraId >=getVirtualCameraNum()) {
+-        ALOGE("%s: Camera id %d is out of bounds (%d)", __FUNCTION__, cameraId,
++    if (cameraId < 0 || cameraId >= getVirtualCameraNum()) {
++        ALOGV("%s: Camera id %d is out of bounds (%d)", __FUNCTION__, cameraId,
+               getVirtualCameraNum());
+         return -ENODEV;
+     }
+ 
+-    return mVirtualCameras[cameraId]->connectCamera(device);
++    return mVirtualCameras[cameraId]->openCamera(device);
+ }
+ 
+ int VirtualCameraFactory::getCameraInfo(int cameraId, struct camera_info *info) {
+     ALOGI("%s: id = %d", __FUNCTION__, cameraId);
+ 
+     if (!isConstructedOK()) {
+-        ALOGE("%s: VirtualCameraFactory has failed to initialize", __FUNCTION__);
++        ALOGV("%s: VirtualCameraFactory has failed to initialize", __FUNCTION__);
+         return -EINVAL;
+     }
+ 
+     if (cameraId < 0 || cameraId >= getVirtualCameraNum()) {
+-        ALOGE("%s: Camera id %d is out of bounds (%d)", __FUNCTION__, cameraId,
++        ALOGV("%s: Camera id %d is out of bounds (%d)", __FUNCTION__, cameraId,
+               getVirtualCameraNum());
+         return -ENODEV;
+     }
+@@ -252,12 +246,12 @@ int VirtualCameraFactory::device_open(const hw_module_t *module, const char *nam
+      */
+ 
+     if (module != &HAL_MODULE_INFO_SYM.common) {
+-        ALOGE("%s: Invalid module %p expected %p", __FUNCTION__, module,
++        ALOGV("%s: Invalid module %p expected %p", __FUNCTION__, module,
+               &HAL_MODULE_INFO_SYM.common);
+         return -EINVAL;
+     }
+     if (name == nullptr) {
+-        ALOGE("%s: NULL name is not expected here", __FUNCTION__);
++        ALOGV("%s: NULL name is not expected here", __FUNCTION__);
+         return -EINVAL;
+     }
+ 
+@@ -290,117 +284,37 @@ int VirtualCameraFactory::open_legacy(const struct hw_module_t *module, const ch
+  * Internal API
+  *******************************************************************************/
+ #ifdef ENABLE_FFMPEG
+-void VirtualCameraFactory::createFakeCamera(std::shared_ptr<CameraSocketServerThread> socket_server,
+-                                            std::shared_ptr<CGVideoDecoder>           decoder,
+-                                            bool                                      backCamera) {
++void VirtualCameraFactory::createVirtualRemoteCamera(
++    std::shared_ptr<CameraSocketServerThread> socket_server,
++    std::shared_ptr<CGVideoDecoder> decoder, int cameraId) {
+ #else
+-void VirtualCameraFactory::createFakeCamera(std::shared_ptr<CameraSocketServerThread> socket_server,
+-                                            bool                                      backCamera) {
++void VirtualCameraFactory::createVirtualRemoteCamera(
++    std::shared_ptr<CameraSocketServerThread> socket_server,
++    int cameraId) {
+ #endif
+-    int halVersion = getCameraHalVersion(backCamera);
+-
+-    /*
+-     * Create and initialize the fake camera, using the index into
+-     * mVirtualCameras as the camera ID.
+-     */
+-    switch (halVersion) {
+-        case 1:
+-        case 2:
+-            ALOGE("%s: Unuspported Camera HAL version. Only HAL version 3 is supported.", __func__);
+-            break;
+-        case 3: {
+-            mVirtualCameras[mVirtualCameraNum] =
++    ALOGV("%s: E", __FUNCTION__);
++    mVirtualCameras[cameraId] =
+ #ifdef ENABLE_FFMPEG
+-                new VirtualFakeCamera3(mVirtualCameraNum, backCamera, &HAL_MODULE_INFO_SYM.common,
+-                                       socket_server, decoder, std::ref(mCameraSessionState));
++        new VirtualFakeCamera3(cameraId, &HAL_MODULE_INFO_SYM.common, socket_server, decoder,
++                               std::ref(mCameraSessionState));
+ #else
+-                new VirtualFakeCamera3(mVirtualCameraNum, backCamera, &HAL_MODULE_INFO_SYM.common,
+-                                       socket_server, std::ref(mCameraSessionState));
+-#endif
+-        } break;
+-        default:
+-            ALOGE("%s: Unknown %s camera hal version requested: %d", __FUNCTION__,
+-                  backCamera ? "back" : "front", halVersion);
+-    }
+-
+-    if (mVirtualCameras[mVirtualCameraNum] == nullptr) {
+-        ALOGE("%s: Unable to instantiate fake camera class", __FUNCTION__);
++ new VirtualFakeCamera3(cameraId, &HAL_MODULE_INFO_SYM.common, socket_server, 
++                               std::ref(mCameraSessionState));
++#endif							   
++    if (mVirtualCameras[cameraId] == nullptr) {
++        ALOGV("%s: Unable to instantiate fake camera class", __FUNCTION__);
+     } else {
+-        ALOGV("%s: %s camera device version is %d", __FUNCTION__, backCamera ? "Back" : "Front",
+-              halVersion);
+-        status_t res = mVirtualCameras[mVirtualCameraNum]->Initialize(nullptr, nullptr, nullptr);
++        status_t res = mVirtualCameras[cameraId]->Initialize();
+         if (res == NO_ERROR) {
++            ALOGI("%s: Initialization for %s Camera ID: %d completed successfully..", __FUNCTION__,
++                  gCameraFacingBack ? "Back" : "Front", cameraId);
+             // Camera creation and initialization was successful.
+-            mVirtualCameraNum++;
+         } else {
+-            ALOGE("%s: Unable to initialize %s camera %d: %s (%d)", __FUNCTION__,
+-                  backCamera ? "back" : "front", mVirtualCameraNum, strerror(-res), res);
+-            delete mVirtualCameras[mVirtualCameraNum];
+-        }
+-    }
+-}
+-
+-void VirtualCameraFactory::waitForRemoteSfFakeCameraPropertyAvailable() {
+-    /*
+-     * Camera service may start running before remote-props sets
+-     * remote.sf.fake_camera to any of the follwing four values:
+-     * "none,front,back,both"; so we need to wait.
+-     *
+-     * android/camera/camera-service.c
+-     * bug: 30768229
+-     */
+-    int  numAttempts = 100;
+-    char prop[PROPERTY_VALUE_MAX];
+-    bool timeout = true;
+-    for (int i = 0; i < numAttempts; ++i) {
+-        if (property_get("ro.vendor.remote.sf.fake_camera", prop, nullptr) != 0) {
+-            timeout = false;
+-            break;
+-        }
+-        usleep(5000);
+-    }
+-    if (timeout) {
+-        ALOGE("timeout (%dms) waiting for property remote.sf.fake_camera to be set\n",
+-              5 * numAttempts);
+-    }
+-    //Deepa: this property is not requied for CIV, removed the check and assigned the value
+-}
+-
+-bool VirtualCameraFactory::isFakeCameraEmulationOn(bool backCamera) {
+-    /*
+-     * Defined by 'remote.sf.fake_camera' boot property. If the property exists,
+-     * and if it's set to 'both', then fake cameras are used to emulate both
+-     * sides. If it's set to 'back' or 'front', then a fake camera is used only
+-     * to emulate the back or front camera, respectively.
+-     */
+-    char prop[PROPERTY_VALUE_MAX];
+-    if ((property_get("ro.vendor.remote.sf.fake_camera", prop, nullptr) > 0) &&
+-        (!strcmp(prop, "both") || !strcmp(prop, backCamera ? "back" : "front"))) {
+-        return true;
+-    } else {
+-        return false;
+-    }
+-    return true;
+-}
+-
+-int VirtualCameraFactory::getCameraHalVersion(bool backCamera) {
+-    /*
+-     * Defined by 'remote.sf.front_camera_hal_version' and
+-     * 'remote.sf.back_camera_hal_version' boot properties. If the property
+-     * doesn't exist, it is assumed we are working with HAL v1.
+-     */
+-    char        prop[PROPERTY_VALUE_MAX];
+-    const char *propQuery = backCamera ? "ro.vendor.remote.sf.back_camera_hal" : "ro.vendor.remote.sf.front_camera_hal";
+-    if (property_get(propQuery, prop, nullptr) > 0) {
+-        char *propEnd = prop;
+-        int   val     = strtol(prop, &propEnd, 10);
+-        if (*propEnd == '\0') {
+-            return val;
++            ALOGV("%s: Unable to initialize %s camera %d: %s (%d)", __FUNCTION__,
++                  gCameraFacingBack ? "back" : "front", cameraId, strerror(-res), res);
++            delete mVirtualCameras[cameraId];
+         }
+-        // Badly formatted property. It should just be a number.
+-        ALOGE("remote.sf.back_camera_hal is not a number: %s", prop);
+     }
+-    return 3;
+ }
+ 
+ /********************************************************************************
+diff --git a/src/VirtualFakeCamera3.cpp b/src/VirtualFakeCamera3.cpp
+index 3743cd1..5336fe3 100644
+--- a/src/VirtualFakeCamera3.cpp
++++ b/src/VirtualFakeCamera3.cpp
+@@ -41,15 +41,12 @@
+ #include <thread>
+ #include <vector>
+ #include "VirtualBuffer.h"
+-
+ #if defined(LOG_NNDEBUG) && LOG_NNDEBUG == 0
+ #define ALOGVV ALOGV
+ #else
+ #define ALOGVV(...) ((void)0)
+ #endif
+ 
+-#define MAX_TIMEOUT_FOR_CAMERA_CLOSE_SESSION 12 //12ms
+-
+ using namespace std;
+ using namespace chrono;
+ using namespace chrono_literals;
+@@ -57,9 +54,11 @@ buffer_handle_t bufferHandle;
+ buffer_handle_t bufferHandle1;
+ buffer_handle_t bufferHandle2;
+ buffer_handle_t bufferHandle_3;
+-
+ namespace android {
+ 
++int32_t gSrcWidth;
++int32_t gSrcHeight;
++
+ using namespace socket;
+ /**
+  * Constants for camera capabilities
+@@ -68,18 +67,13 @@ using namespace socket;
+ const int64_t USEC = 1000LL;
+ const int64_t MSEC = USEC * 1000LL;
+ 
+-const int32_t VirtualFakeCamera3::kAvailableFormats[] = {
+-    HAL_PIXEL_FORMAT_RAW16, HAL_PIXEL_FORMAT_BLOB, HAL_PIXEL_FORMAT_RGBA_8888,
+-    HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-    // These are handled by YCbCr_420_888
+-    //        HAL_PIXEL_FORMAT_YV12,
+-    //        HAL_PIXEL_FORMAT_YCrCb_420_SP,
+-    HAL_PIXEL_FORMAT_YCbCr_420_888, HAL_PIXEL_FORMAT_Y16};
+-
+-const uint32_t VirtualFakeCamera3::kAvailableRawSizes[4] = {
+-    640, 480,
+-    // 1280, 720
+-    //    mSensorWidth, mSensorHeight
++const int32_t VirtualFakeCamera3::kHalSupportedFormats[] = {
++    HAL_PIXEL_FORMAT_BLOB,
++    HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,  // defined as RGB32
++    HAL_PIXEL_FORMAT_RGBA_8888,               // RGB32
++    HAL_PIXEL_FORMAT_YCbCr_420_888,           // NV12
++    //HAL_PIXEL_FORMAT_YCrCb_420_SP,            // NV21
++    // HAL_PIXEL_FORMAT_YV12 /* Not supporting now*/
+ };
+ 
+ /**
+@@ -102,26 +96,23 @@ const float VirtualFakeCamera3::kExposureWanderMax = 1;
+  * Camera device lifecycle methods
+  */
+ #ifdef ENABLE_FFMPEG
+-VirtualFakeCamera3::VirtualFakeCamera3(int cameraId, bool facingBack, struct hw_module_t *module,
++VirtualFakeCamera3::VirtualFakeCamera3(int cameraId, struct hw_module_t *module,
+                                        std::shared_ptr<CameraSocketServerThread> socket_server,
+                                        std::shared_ptr<CGVideoDecoder> decoder,
+                                        std::atomic<CameraSessionState> &state)
+     : VirtualCamera3(cameraId, module),
+-      mFacingBack(facingBack),
+       mSocketServer(socket_server),
+       mDecoder(decoder),
+       mCameraSessionState{state} {
+ #else
+-VirtualFakeCamera3::VirtualFakeCamera3(int cameraId, bool facingBack, struct hw_module_t *module,
++VirtualFakeCamera3::VirtualFakeCamera3(int cameraId, struct hw_module_t *module,
+                                        std::shared_ptr<CameraSocketServerThread> socket_server,
+                                        std::atomic<CameraSessionState> &state)
+     : VirtualCamera3(cameraId, module),
+-      mFacingBack(facingBack),
+       mSocketServer(socket_server),
+-      mCameraSessionState{state} {
++     mCameraSessionState{state} {
+ #endif
+-    ALOGI("Constructing virtual fake camera 3: ID %d, facing %s", mCameraID,
+-          facingBack ? "back" : "front");
++    ALOGI("Constructing virtual fake camera 3: for ID %d", mCameraID);
+ 
+     mControlMode = ANDROID_CONTROL_MODE_AUTO;
+     mFacePriority = false;
+@@ -137,7 +128,17 @@ VirtualFakeCamera3::VirtualFakeCamera3(int cameraId, bool facingBack, struct hw_
+     mAeCurrentSensitivity = kNormalSensitivity;
+     mSensorWidth = 640;
+     mSensorHeight = 480;
++    
++	mSrcWidth = 640;
++    mSrcHeight = 480;
++    mCodecType = 0;
++    mDecoderResolution = 0;
++    mFacingBack = false;
++    mDecoderInitDone = false;
+     mInputStream = NULL;
++    mSensor = NULL;
++    mReadoutThread = NULL;
++    mJpegCompressor = NULL;
+ }
+ 
+ VirtualFakeCamera3::~VirtualFakeCamera3() {
+@@ -148,95 +149,173 @@ VirtualFakeCamera3::~VirtualFakeCamera3() {
+     }
+ }
+ 
+-status_t VirtualFakeCamera3::Initialize(const char *device_name, const char *frame_dims,
+-                                        const char *facing_dir) {
+-    ALOGVV("%s: E", __FUNCTION__);
++status_t VirtualFakeCamera3::Initialize() {
++    ALOGV("%s: E", __FUNCTION__);
+     status_t res;
+ 
+     if (mStatus != STATUS_ERROR) {
+-        ALOGE("%s: Already initialized!", __FUNCTION__);
++        ALOGV("%s: Already initialized!", __FUNCTION__);
+         return INVALID_OPERATION;
+     }
+ 
+     res = getCameraCapabilities();
+     if (res != OK) {
+-        ALOGE("%s: Unable to get camera capabilities: %s (%d)", __FUNCTION__, strerror(-res), res);
++        ALOGV("%s: Unable to get camera capabilities: %s (%d)", __FUNCTION__, strerror(-res), res);
+         return res;
+     }
+ 
+     res = constructStaticInfo();
+     if (res != OK) {
+-        ALOGE("%s: Unable to allocate static info: %s (%d)", __FUNCTION__, strerror(-res), res);
++        ALOGV("%s: Unable to allocate static info: %s (%d)", __FUNCTION__, strerror(-res), res);
+         return res;
+     }
+ 
+-    return VirtualCamera3::Initialize(nullptr, nullptr, nullptr);
++    return VirtualCamera3::Initialize();
+ }
+ 
+-status_t VirtualFakeCamera3::sendCommandToClient(socket::CameraOperation operation) {
++status_t VirtualFakeCamera3::openCamera(hw_device_t **device) {
++    ALOGI(LOG_TAG "%s: E", __FUNCTION__);
++    Mutex::Autolock l(mLock);
++
++    return VirtualCamera3::openCamera(device);
++}
++
++uint32_t VirtualFakeCamera3::setDecoderResolution(uint32_t resolution) {
++    ALOGV(LOG_TAG "%s: E", __FUNCTION__);
++    uint32_t res = 0;
++    switch (resolution) {
++        case DECODER_SUPPORTED_RESOLUTION_480P:
++            res = (uint32_t)FrameResolution::k480p;
++            break;
++        case DECODER_SUPPORTED_RESOLUTION_720P:
++            res = (uint32_t)FrameResolution::k720p;
++            break;
++        case DECODER_SUPPORTED_RESOLUTION_1080P:
++            res = (uint32_t)FrameResolution::k1080p;
++            break;
++        default:
++            ALOGI("%s: Selected default 480p resolution!!!", __func__);
++            res = (uint32_t)FrameResolution::k480p;
++            break;
++    }
++
++    ALOGI("%s: Resolution selected for decoder init is %s", __func__, resolution_to_str(res));
++    return res;
++}
++status_t VirtualFakeCamera3::sendCommandToClient(camera_cmd_t cmd) {
+     ALOGI("%s E", __func__);
++    status_t status = INVALID_OPERATION;
++    size_t config_cmd_packet_size = sizeof(camera_header_t) + sizeof(camera_config_cmd_t);
++    camera_config_cmd_t config_cmd = {};
++    config_cmd.version = CAMERA_VHAL_VERSION_2;
++    config_cmd.cmd = cmd;
++    config_cmd.config.cameraId = mCameraID;
++    config_cmd.config.codec_type = mCodecType;
++    config_cmd.config.resolution = mDecoderResolution;
++
++    camera_packet_t *config_cmd_packet = NULL;
++#if 0
++
++    int client_fd = mSocketServer->getClientFd();
++    if (client_fd < 0) {
++        ALOGV("%s: We're not connected to client yet!", __FUNCTION__);
++        return status;
++    }
+ 
+-    socket::CameraConfig camera_config = {};
+-    camera_config.operation = operation;
++    config_cmd_packet = (camera_packet_t *)malloc(config_cmd_packet_size);
++    if (config_cmd_packet == NULL) {
++        ALOGV(LOG_TAG "%s: config camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
++        goto out;
++    }
++
++    config_cmd_packet->header.type = CAMERA_CONFIG;
++    config_cmd_packet->header.size = sizeof(camera_config_cmd_t);
++    memcpy(config_cmd_packet->payload, &config_cmd, sizeof(camera_config_cmd_t));
++
++    ALOGI("%s: Camera client fd %d!", __FUNCTION__, client_fd);
++    if (send(client_fd, config_cmd_packet, config_cmd_packet_size, 0) < 0) {
++        ALOGV(LOG_TAG "%s: Failed to send Camera %s command to client, err %s ", __FUNCTION__,
++              (cmd == camera_cmd_t::CMD_CLOSE) ? "CloseCamera" : "OpenCamera", strerror(errno));
++        goto out;
++    }
++
++    ALOGI("%s: Sent cmd %s to client %d!", __FUNCTION__,
++          (cmd == camera_cmd_t::CMD_CLOSE) ? "CloseCamera" : "OpenCamera", client_fd);
++    status = OK;
++#endif
++    CameraConfig camera_config = {};
++    if(cmd == CMD_OPEN)
++    {
++    camera_config.operation = socket::CameraOperation::kOpen;
++    } 
++    else
++    camera_config.operation = socket::CameraOperation::kClose;
+ 
+     int client_fd = mSocketServer->getClientFd();
+     if (client_fd < 0) {
+-        ALOGE("%s: We're not connected to client yet!", __FUNCTION__);
++        ALOGV("%s: We're not connected to client yet!", __FUNCTION__);
+         return INVALID_OPERATION;
+     }
+     char mode[PROPERTY_VALUE_MAX];
+     //incase vsock add yuv command
+-    //Deepa :to do
++    //D :to do
+     //if ((property_get("ro.vendor.camera.transference", mode, nullptr) > 0))
+     {
+     //    if (!strcmp(mode, "VSOCK"))
+-            ALOGE("%s:! Deepa sending Vsock ingo!", __FUNCTION__);
++            ALOGV("%s:! sending Vsock ingo!", __FUNCTION__);
+             camera_config.frame_info.codec_type = VideoCodecType::kI420;
+     }
+     ALOGI("%s: Camera client fd %d!", __FUNCTION__, client_fd);
+     if (send(client_fd, &camera_config, sizeof(camera_config), 0) < 0) {
+-        ALOGE(LOG_TAG "%s: Failed to send Camera Open command to client, err %s ", __FUNCTION__,
++        ALOGV(LOG_TAG "%s: Failed to send Camera Open command to client, err %s ", __FUNCTION__,
+               strerror(errno));
+         return INVALID_OPERATION;
+     }
+ 
+     std::string cmd_str =
+-        (operation == socket::CameraOperation::kClose) ? "CloseCamera" : "OpenCamera";
++        (cmd == CMD_CLOSE) ? "CloseCamera" : "OpenCamera";
+     ALOGI("%s: Sent cmd %s to client %d!", __FUNCTION__, cmd_str.c_str(), client_fd);
+     return OK;
++out:
++    free(config_cmd_packet);
++    return status;
+ }
+ 
+-status_t VirtualFakeCamera3::connectCamera(hw_device_t **device) {
++status_t VirtualFakeCamera3::connectCamera() {
+     ALOGI(LOG_TAG "%s: E", __FUNCTION__);
+-    Mutex::Autolock l(mLock);
+ 
+     if (gIsInFrameH264) {
+         const char *device_name = gUseVaapi ? "vaapi" : nullptr;
+ #ifdef ENABLE_FFMPEG
+         // initialize decoder
+-        if (mDecoder->init(VideoCodecType::kH264, FrameResolution::k480p, device_name, 0) < 0) {
+-            ALOGE("%s VideoDecoder init failed. %s decoding", __func__,
++        if (mDecoder->init((android::socket::FrameResolution)mDecoderResolution, mCodecType,
++                           device_name, 0) < 0) {
++            ALOGV("%s VideoDecoder init failed. %s decoding", __func__,
+                   !device_name ? "SW" : device_name);
+         } else {
++            mDecoderInitDone = true;
+             ALOGI("%s VideoDecoder init done. Device: %s", __func__,
+                   !device_name ? "SW" : device_name);
+         }
+ #endif
+     }
++    else 
++         mDecoderInitDone = true;
++
+     ALOGI("%s Calling sendCommandToClient", __func__);
+     status_t ret;
+-    if ((ret = sendCommandToClient(socket::CameraOperation::kOpen)) != OK) {
+-        ALOGE("%s sendCommandToClient failed", __func__);
++    if ((ret = sendCommandToClient(camera_cmd_t::CMD_OPEN)) != OK) {
++        ALOGV("%s sendCommandToClient failed", __func__);
+         return ret;
+     }
+     ALOGI("%s Called sendCommandToClient", __func__);
+-    mCameraSessionState = socket::CameraSessionState::kCameraOpened;
++    mCameraSessionState = CameraSessionState::kCameraOpened;
+ 
+     // create sensor who gets decoded frames and forwards them to framework
+ #ifdef ENABLE_FFMPEG
+-    mSensor = new Sensor(mSensorWidth, mSensorHeight, mDecoder);
++    mSensor = new Sensor(mSrcWidth, mSrcHeight, mDecoder);
+ #else
+-    mSensor = new Sensor(mSensorWidth, mSensorHeight);
++ mSensor = new Sensor(mSrcWidth, mSrcHeight);
+ #endif
+     mSensor->setSensorListener(this);
+ 
+@@ -264,7 +343,7 @@ status_t VirtualFakeCamera3::connectCamera(hw_device_t **device) {
+     mAeCurrentExposureTime = kNormalExposureTime;
+     mAeCurrentSensitivity = kNormalSensitivity;
+ 
+-    return VirtualCamera3::connectCamera(device);
++    return OK;
+ }
+ 
+ /**
+@@ -285,20 +364,22 @@ status_t VirtualFakeCamera3::closeCamera() {
+     // remote. If NO processCaptureRequest received between open and close then wait.
+ 
+     if (!mprocessCaptureRequestFlag) {
+-        ALOGE(LOG_TAG " %s: wait:..", __FUNCTION__);
++        ALOGV(LOG_TAG " %s: wait:..", __FUNCTION__);
+         std::this_thread::sleep_for(2500ms);
+     }
+-
+     mprocessCaptureRequestFlag = false;
+ 
++    if (mSensor == NULL) {
++        return VirtualCamera3::closeCamera();
++    }
++
+     {
+         Mutex::Autolock l(mLock);
+         if (mStatus == STATUS_CLOSED) return OK;
+ 
+         auto ret = mSensor->shutDown();
+         if (ret != NO_ERROR) {
+-            ALOGE("%s: Unable to shut down sensor: %d", __FUNCTION__, ret);
+-            return ret;
++            ALOGV("%s: Unable to shut down sensor: %d", __FUNCTION__, ret);
+         }
+         mSensor.clear();
+ 
+@@ -321,35 +402,38 @@ status_t VirtualFakeCamera3::closeCamera() {
+ 
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+     handle->reset();
+-    ALOGI("%s VideoBuffers are reset", __func__);
+-
+-    // Set state to CameraClosed, so that SocketServerThread stops decoding.
+-    mCameraSessionState = socket::CameraSessionState::kCameraClosed;
++    ALOGI("%s: Camera input buffers are reset", __func__);
+ 
+     if (gIsInFrameH264) {
+-        int waitForCameraClose = 0;
+-        while (mCameraSessionState != socket::CameraSessionState::kDecodingStopped) {
+-            std::this_thread::sleep_for(2ms);
+-            waitForCameraClose += 2; // 2 corresponds to 2ms
+-            if (waitForCameraClose == MAX_TIMEOUT_FOR_CAMERA_CLOSE_SESSION)
+-                break;
+-	}
++        // Set state to CameraClosed, so that SocketServerThread stops decoding.
++        mCameraSessionState = socket::CameraSessionState::kCameraClosed;
++#ifdef ENABLE_FFMPEG
++        mDecoder->flush_decoder();
++        mDecoder->destroy();
++#endif
+         ALOGI("%s Decoding is stopped, now send CLOSE command to client", __func__);
+     }
+ 
+     // Send close command to client
+-    status_t ret = sendCommandToClient(socket::CameraOperation::kClose);
++    status_t ret = sendCommandToClient(camera_cmd_t::CMD_CLOSE);
+     if (ret != OK) {
+-        ALOGE("%s sendCommandToClient failed", __func__);
+-        return ret;
++        ALOGV("%s sendCommandToClient failed", __func__);
+     }
+ 
++    // Set NULL or Zero to some local members which would be updated in the
++    // next configure_streams call to support Dynamic multi-resolution.
++    mSrcWidth = 640;
++    mSrcHeight = 480;
++    mDecoderResolution = 0;
++    mDecoderInitDone = false;
++    mSensor = NULL;
++    mReadoutThread = NULL;
++    mJpegCompressor = NULL;
++
+     return VirtualCamera3::closeCamera();
+ }
+ 
+ status_t VirtualFakeCamera3::getCameraInfo(struct camera_info *info) {
+-    info->facing = mFacingBack ? CAMERA_FACING_BACK : CAMERA_FACING_FRONT;
+-    info->orientation = gVirtualCameraFactory.getFakeCameraOrientation();
+     return VirtualCamera3::getCameraInfo(info);
+ }
+ 
+@@ -359,9 +443,10 @@ status_t VirtualFakeCamera3::getCameraInfo(struct camera_info *info) {
+ 
+ status_t VirtualFakeCamera3::configureStreams(camera3_stream_configuration *streamList) {
+     Mutex::Autolock l(mLock);
++    status_t res;
+ 
+     if (mStatus != STATUS_OPEN && mStatus != STATUS_READY) {
+-        ALOGE("%s: Cannot configure streams in state %d", __FUNCTION__, mStatus);
++        ALOGV("%s: Cannot configure streams in state %d", __FUNCTION__, mStatus);
+         return NO_INIT;
+     }
+ 
+@@ -369,19 +454,19 @@ status_t VirtualFakeCamera3::configureStreams(camera3_stream_configuration *stre
+      * Sanity-check input list.
+      */
+     if (streamList == NULL) {
+-        ALOGE("%s: NULL stream configuration", __FUNCTION__);
++        ALOGV("%s: NULL stream configuration", __FUNCTION__);
+         return BAD_VALUE;
+     }
+ 
+     ALOGI("%s: %d streams", __FUNCTION__, streamList->num_streams);
+     if (streamList->streams == NULL) {
+-        ALOGE("%s: NULL stream list", __FUNCTION__);
++        ALOGV("%s: NULL stream list", __FUNCTION__);
+         return BAD_VALUE;
+     }
+ 
+     ALOGI("%s: %d streams", __FUNCTION__, streamList->num_streams);
+     if (streamList->num_streams < 1) {
+-        ALOGE("%s: Bad number of streams requested: %d", __FUNCTION__, streamList->num_streams);
++        ALOGV("%s: Bad number of streams requested: %d", __FUNCTION__, streamList->num_streams);
+         return BAD_VALUE;
+     }
+ 
+@@ -390,20 +475,20 @@ status_t VirtualFakeCamera3::configureStreams(camera3_stream_configuration *stre
+         camera3_stream_t *newStream = streamList->streams[i];
+ 
+         if (newStream == NULL) {
+-            ALOGE("%s: Stream index %zu was NULL", __FUNCTION__, i);
++            ALOGV("%s: Stream index %zu was NULL", __FUNCTION__, i);
+             return BAD_VALUE;
+         }
+ 
+         ALOGI(
+             " %s: Stream %p (id %zu), type %d, usage 0x%x, format 0x%x "
+-            "width %d, height %d",
++            "width %d, height %d, rotation %d",
+             __FUNCTION__, newStream, i, newStream->stream_type, newStream->usage, newStream->format,
+-            newStream->width, newStream->height);
++            newStream->width, newStream->height, newStream->rotation);
+ 
+         if (newStream->stream_type == CAMERA3_STREAM_INPUT ||
+             newStream->stream_type == CAMERA3_STREAM_BIDIRECTIONAL) {
+             if (inputStream != NULL) {
+-                ALOGE("%s: Multiple input streams requested!", __FUNCTION__);
++                ALOGV("%s: Multiple input streams requested!", __FUNCTION__);
+                 return BAD_VALUE;
+             }
+             inputStream = newStream;
+@@ -412,7 +497,7 @@ status_t VirtualFakeCamera3::configureStreams(camera3_stream_configuration *stre
+         if (newStream->stream_type != CAMERA3_STREAM_INPUT) {
+             if (newStream->rotation < CAMERA3_STREAM_ROTATION_0 ||
+                 newStream->rotation > CAMERA3_STREAM_ROTATION_270) {
+-                ALOGE("%s: Unsupported stream rotation 0x%x requested", __FUNCTION__,
++                ALOGV("%s: Unsupported stream rotation 0x%x requested", __FUNCTION__,
+                       newStream->rotation);
+                 return BAD_VALUE;
+             }
+@@ -421,25 +506,37 @@ status_t VirtualFakeCamera3::configureStreams(camera3_stream_configuration *stre
+         if (newStream->width == 0 || newStream->height == 0 ||
+             newStream->width > (uint32_t)mSensorWidth ||
+             newStream->height > (uint32_t)mSensorHeight) {
+-            ALOGE("%s: Unsupported stream width 0x%x height 0x%x", __FUNCTION__, newStream->width,
++            ALOGV("%s: Unsupported stream width 0x%x height 0x%x", __FUNCTION__, newStream->width,
+                   newStream->height);
+             return BAD_VALUE;
+         }
+ 
+         bool validFormat = false;
+-        for (size_t f = 0; f < sizeof(kAvailableFormats) / sizeof(kAvailableFormats[0]); f++) {
+-            if (newStream->format == kAvailableFormats[f]) {
++        for (size_t f = 0; f < sizeof(kHalSupportedFormats) / sizeof(kHalSupportedFormats[0]);
++             f++) {
++            if (newStream->format == kHalSupportedFormats[f]) {
+                 validFormat = true;
+                 break;
+             }
+         }
+         if (!validFormat) {
+-            ALOGE("%s: Unsupported stream format 0x%x requested", __FUNCTION__, newStream->format);
++            ALOGV("%s: Unsupported stream format 0x%x requested", __FUNCTION__, newStream->format);
+             return BAD_VALUE;
+         }
++
++       /* if (mSrcWidth < newStream->width && mSrcHeight < newStream->height) {
++            // Update app's res request to local variable.
++            mSrcWidth = newStream->width;
++            mSrcHeight = newStream->height;
++            // Update globally for clearing used buffers properly.
++            gSrcWidth = mSrcWidth;
++            gSrcHeight = mSrcHeight;
++        }*/
+     }
+     mInputStream = inputStream;
+ 
++    ALOGI("%s: Camera current input resolution is %dx%d", __FUNCTION__, mSrcWidth, mSrcHeight);
++
+     /**
+      * Initially mark all existing streams as not alive
+      */
+@@ -474,9 +571,9 @@ status_t VirtualFakeCamera3::configureStreams(camera3_stream_configuration *stre
+                 // Workarroud: SG1:  HAL_PIXEL_FORMAT_RGBA_8888 &&
+                 // GRALLOC_USAGE_HW_CAMERA_WRITE combination doesn't supported by minigbm
+                 newStream->usage |= GRALLOC_USAGE_HW_CAMERA_WRITE;
+-                ALOGE("%s: GRALLOC0", __FUNCTION__);
++                ALOGV("%s: GRALLOC0", __FUNCTION__);
+ #else
+-                ALOGE("%s: GRALLOC1", __FUNCTION__);
++                ALOGV("%s: GRALLOC1", __FUNCTION__);
+ #endif
+                 break;
+             case CAMERA3_STREAM_INPUT:
+@@ -522,30 +619,47 @@ status_t VirtualFakeCamera3::configureStreams(camera3_stream_configuration *stre
+      * Can't reuse settings across configure call
+      */
+     mPrevSettings.clear();
++
++    /**
++     * Initialize Camera sensor and Input decoder based on app's res request.
++     */
++    if (!mDecoderInitDone) {
++        ALOGI("%s: Initializing decoder and sensor for new resolution request!!!", __func__);
++        res = connectCamera();
++        if (res != OK) {
++            return res;
++        }
++
++        // Fill the input buffer with black frame to avoid green frame
++        // while changing the resolution in each request.
++        ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++        handle->clearBuffer();
++    }
++
+     return OK;
+ }
+ 
+ status_t VirtualFakeCamera3::registerStreamBuffers(const camera3_stream_buffer_set *bufferSet) {
+-    ALOGVV("%s: E", __FUNCTION__);
++    ALOGV("%s: E", __FUNCTION__);
+     Mutex::Autolock l(mLock);
+ 
+     // Should not be called in HAL versions >= 3.2
+ 
+-    ALOGE("%s: Should not be invoked on new HALs!", __FUNCTION__);
++    ALOGV("%s: Should not be invoked on new HALs!", __FUNCTION__);
+     return NO_INIT;
+ }
+ 
+ const camera_metadata_t *VirtualFakeCamera3::constructDefaultRequestSettings(int type) {
+-    ALOGVV("%s: E", __FUNCTION__);
++    ALOGV("%s: E", __FUNCTION__);
+     Mutex::Autolock l(mLock);
+ 
+     if (type < 0 || type >= CAMERA3_TEMPLATE_COUNT) {
+-        ALOGE("%s: Unknown request settings template: %d", __FUNCTION__, type);
++        ALOGV("%s: Unknown request settings template: %d", __FUNCTION__, type);
+         return NULL;
+     }
+ 
+     if (!hasCapability(BACKWARD_COMPATIBLE) && type != CAMERA3_TEMPLATE_PREVIEW) {
+-        ALOGE("%s: Template %d not supported w/o BACKWARD_COMPATIBLE capability", __FUNCTION__,
++        ALOGV("%s: Template %d not supported w/o BACKWARD_COMPATIBLE capability", __FUNCTION__,
+               type);
+         return NULL;
+     }
+@@ -861,27 +975,29 @@ const camera_metadata_t *VirtualFakeCamera3::constructDefaultRequestSettings(int
+ }
+ 
+ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *request) {
++    ALOGV("%s: E", __FUNCTION__);
+     Mutex::Autolock l(mLock);
+     status_t res;
+-    status_t ret;
+-    uint64_t useflag = 0;
+     mprocessCaptureRequestFlag = true;
+     /** Validation */
+ 
+     if (mStatus < STATUS_READY) {
+-        ALOGE("%s: Can't submit capture requests in state %d", __FUNCTION__, mStatus);
++        ALOGV("%s: Can't submit capture requests in state %d", __FUNCTION__, mStatus);
+         return INVALID_OPERATION;
+     }
+ 
+     if (request == NULL) {
+-        ALOGE("%s: NULL request!", __FUNCTION__);
++        ALOGV("%s: NULL request!", __FUNCTION__);
+         return BAD_VALUE;
+     }
+ 
++    ALOGV("%s: Number of requested buffers = %u, Frame no: %u", __FUNCTION__,
++           request->num_output_buffers, request->frame_number);
++
+     uint32_t frameNumber = request->frame_number;
+ 
+     if (request->settings == NULL && mPrevSettings.isEmpty()) {
+-        ALOGE(
++        ALOGV(
+             "%s: Request %d: NULL settings for first request after"
+             "configureStreams()",
+             __FUNCTION__, frameNumber);
+@@ -889,7 +1005,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+     }
+ 
+     if (request->input_buffer != NULL && request->input_buffer->stream != mInputStream) {
+-        ALOGE("%s: Request %d: Input buffer not from input stream!", __FUNCTION__, frameNumber);
++        ALOGV("%s: Request %d: Input buffer not from input stream!", __FUNCTION__, frameNumber);
+         ALOGV("%s: Bad stream %p, expected: %p", __FUNCTION__, request->input_buffer->stream,
+               mInputStream);
+         ALOGV("%s: Bad stream type %d, expected stream type %d", __FUNCTION__,
+@@ -900,7 +1016,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+     }
+ 
+     if (request->num_output_buffers < 1 || request->output_buffers == NULL) {
+-        ALOGE("%s: Request %d: No output buffers provided!", __FUNCTION__, frameNumber);
++        ALOGV("%s: Request %d: No output buffers provided!", __FUNCTION__, frameNumber);
+         return BAD_VALUE;
+     }
+ 
+@@ -918,25 +1034,25 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+     do {
+         PrivateStreamInfo *priv = static_cast<PrivateStreamInfo *>(b->stream->priv);
+         if (priv == NULL) {
+-            ALOGE("%s: Request %d: Buffer %zu: Unconfigured stream!", __FUNCTION__, frameNumber,
++            ALOGV("%s: Request %d: Buffer %zu: Unconfigured stream!", __FUNCTION__, frameNumber,
+                   idx);
+             return BAD_VALUE;
+         }
+         if (!priv->alive) {
+-            ALOGE("%s: Request %d: Buffer %zu: Dead stream!", __FUNCTION__, frameNumber, idx);
++            ALOGV("%s: Request %d: Buffer %zu: Dead stream!", __FUNCTION__, frameNumber, idx);
+             return BAD_VALUE;
+         }
+         if (b->status != CAMERA3_BUFFER_STATUS_OK) {
+-            ALOGE("%s: Request %d: Buffer %zu: Status not OK!", __FUNCTION__, frameNumber, idx);
++            ALOGV("%s: Request %d: Buffer %zu: Status not OK!", __FUNCTION__, frameNumber, idx);
+             return BAD_VALUE;
+         }
+         if (b->release_fence != -1) {
+-            ALOGE("%s: Request %d: Buffer %zu: Has a release fence!", __FUNCTION__, frameNumber,
++            ALOGV("%s: Request %d: Buffer %zu: Has a release fence!", __FUNCTION__, frameNumber,
+                   idx);
+             return BAD_VALUE;
+         }
+         if (b->buffer == NULL) {
+-            ALOGE("%s: Request %d: Buffer %zu: NULL buffer handle!", __FUNCTION__, frameNumber,
++            ALOGV("%s: Request %d: Buffer %zu: NULL buffer handle!", __FUNCTION__, frameNumber,
+                   idx);
+             return BAD_VALUE;
+         }
+@@ -996,16 +1112,19 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+     for (size_t i = 0; i < request->num_output_buffers; i++) {
+         const camera3_stream_buffer &srcBuf = request->output_buffers[i];
+         StreamBuffer destBuf;
++
+         destBuf.streamId = kGenericStreamId;
+         destBuf.width = srcBuf.stream->width;
+         destBuf.height = srcBuf.stream->height;
++        destBuf.stride = srcBuf.stream->width;
++        destBuf.dataSpace = srcBuf.stream->data_space;
++        destBuf.buffer = srcBuf.buffer;
++        // Set this first to get rid of klocwork warnings.
++        // It would be overwritten again if it is HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED
+         destBuf.format = (srcBuf.stream->format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED)
+                              ? HAL_PIXEL_FORMAT_RGBA_8888
+                              : srcBuf.stream->format;
+-        // Fix ME (dest buffer fixed for 640x480)
+-        // destBuf.width = 640;
+-        // destBuf.height = 480;
+-        // inline with goldfish gralloc
++
+         if (srcBuf.stream->format == HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED) {
+ #ifndef USE_GRALLOC1
+             if (srcBuf.stream->usage & GRALLOC_USAGE_HW_CAMERA_WRITE) {
+@@ -1016,15 +1135,13 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+                     destBuf.format = HAL_PIXEL_FORMAT_YCbCr_420_888;
+                 } else if ((srcBuf.stream->usage & GRALLOC_USAGE_HW_CAMERA_MASK) ==
+                            GRALLOC_USAGE_HW_CAMERA_ZSL) {
++                    // Note: Currently no support for ZSL mode
+                     destBuf.format = HAL_PIXEL_FORMAT_RGB_888;
+                 }
+ #ifndef USE_GRALLOC1
+             }
+ #endif
+         }
+-        destBuf.stride = srcBuf.stream->width;
+-        destBuf.dataSpace = srcBuf.stream->data_space;
+-        destBuf.buffer = srcBuf.buffer;
+ 
+         if (destBuf.format == HAL_PIXEL_FORMAT_BLOB) {
+             needJpeg = true;
+@@ -1034,7 +1151,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+         sp<Fence> bufferAcquireFence = new Fence(srcBuf.acquire_fence);
+         res = bufferAcquireFence->wait(kFenceTimeoutMs);
+         if (res == TIMED_OUT) {
+-            ALOGE("%s: Request %d: Buffer %zu: Fence timed out after %d ms", __FUNCTION__,
++            ALOGV("%s: Request %d: Buffer %zu: Fence timed out after %d ms", __FUNCTION__,
+                   frameNumber, i, kFenceTimeoutMs);
+         }
+         if (res == OK) {
+@@ -1047,7 +1164,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+                     res = GrallocModule::getInstance().importBuffer(bufferHandle2, &bufferHandle1);
+                     //res = GrallocModule::getInstance().importBuffer(*(destBuf.buffer), &bufferHandle1);
+                     if (res!= OK) {
+-                      //  ALOGE("%s: Gralloc importBuffer failed",__FUNCTION__);
++                      //  ALOGV("%s: Gralloc importBuffer failed",__FUNCTION__);
+                     }
+                     res = GrallocModule::getInstance().lock_ycbcr(bufferHandle2,
+                     //res = GrallocModule::getInstance().lock_ycbcr(bufferHandle1,
+@@ -1062,11 +1179,9 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+ #endif
+                                                                   0, 0, destBuf.width,
+                                                                   destBuf.height, &ycbcr);
+-                    // This is only valid because we know that emulator's
+-                    // YCbCr_420_888 is really contiguous NV21 under the hood
+                     destBuf.img = static_cast<uint8_t *>(ycbcr.y);
+                 } else {
+-                    ALOGE("Unexpected private format for flexible YUV: 0x%x", destBuf.format);
++                    ALOGV("Unexpected private format for flexible YUV: 0x%x", destBuf.format);
+                     res = INVALID_OPERATION;
+                 }
+             } else {
+@@ -1075,7 +1190,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+                 res = GrallocModule::getInstance().importBuffer(bufferHandle_3, &bufferHandle);
+                 //res = GrallocModule::getInstance().importBuffer(*(destBuf.buffer), &bufferHandle);
+                 if (res!= OK) {
+-                        ALOGE("%s: Gralloc importBuffer failed",__FUNCTION__);
++                        ALOGV("%s: Gralloc importBuffer failed",__FUNCTION__);
+                 }
+ 
+                 res = GrallocModule::getInstance().lock(bufferHandle_3,
+@@ -1093,10 +1208,10 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+                                                         (void **)&(destBuf.img));
+             }
+             if (res != OK) {
+-                ALOGE("%s: Request %d: Buffer %zu: Unable to lock buffer", __FUNCTION__,
++                ALOGV("%s: Request %d: Buffer %zu: Unable to lock buffer", __FUNCTION__,
+                       frameNumber, i);
+             } else {
+-                ALOGVV(" %s, stream format 0x%x width %d height %d buffer 0x%p img 0x%p",
++                ALOGV(" %s, stream format 0x%x width %d height %d buffer 0x%p img 0x%p",
+                        __FUNCTION__, destBuf.format, destBuf.width, destBuf.height, destBuf.buffer,
+                        destBuf.img);
+             }
+@@ -1138,13 +1253,13 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+     if (needJpeg) {
+         bool ready = mJpegCompressor->waitForDone(kJpegTimeoutNs);
+         if (!ready) {
+-            ALOGE("%s: Timeout waiting for JPEG compression to complete!", __FUNCTION__);
++            ALOGV("%s: Timeout waiting for JPEG compression to complete!", __FUNCTION__);
+             res = NO_INIT;
+             goto out;
+         }
+         res = mJpegCompressor->reserve();
+         if (res != OK) {
+-            ALOGE("%s: Error managing JPEG compressor resources, can't reserve it!", __FUNCTION__);
++            ALOGV("%s: Error managing JPEG compressor resources, can't reserve it!", __FUNCTION__);
+             res = NO_INIT;
+             goto out;
+         }
+@@ -1155,7 +1270,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+      */
+     res = mReadoutThread->waitForReadout();
+     if (res != OK) {
+-        ALOGE("%s: Timeout waiting for previous requests to complete!", __FUNCTION__);
++        ALOGV("%s: Timeout waiting for previous requests to complete!", __FUNCTION__);
+         res = NO_INIT;
+         goto out;
+     }
+@@ -1171,7 +1286,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+             goto out;
+         }
+         if (syncTimeoutCount == kMaxSyncTimeoutCount) {
+-            ALOGE("%s: Request %d: Sensor sync timed out after %" PRId64 " ms", __FUNCTION__,
++            ALOGV("%s: Request %d: Sensor sync timed out after %" PRId64 " ms", __FUNCTION__,
+                   frameNumber, kSyncWaitTimeout * kMaxSyncTimeoutCount / 1000000);
+             res = NO_INIT;
+             goto out;
+@@ -1194,7 +1309,7 @@ status_t VirtualFakeCamera3::processCaptureRequest(camera3_capture_request *requ
+     r.buffers = buffers;
+ 
+     mReadoutThread->queueCaptureRequest(r);
+-    ALOGVV("%s: Queued frame %d", __FUNCTION__, request->frame_number);
++    ALOGV("%s: Queued frame %d", __FUNCTION__, request->frame_number);
+ 
+     // Cache the settings for next time
+     mPrevSettings.acquire(settings);
+@@ -1207,7 +1322,7 @@ out:
+ }
+ 
+ status_t VirtualFakeCamera3::flush() {
+-    ALOGVV("%s: Not implemented; ignored", __FUNCTION__);
++    ALOGV("%s: Not implemented; ignored", __FUNCTION__);
+     return OK;
+ }
+ 
+@@ -1238,7 +1353,7 @@ status_t VirtualFakeCamera3::getCameraCapabilities() {
+             cap = strtok_r(NULL, " ,", &saveptr);
+         }
+         if (mCapabilities.size() == 0) {
+-            ALOGE("remote.sf.back_camera_caps had no valid capabilities: %s", prop);
++            ALOGV("remote.sf.back_camera_caps had no valid capabilities: %s", prop);
+         }
+     }
+     // Default to FULL_LEVEL plus RAW if nothing is defined
+@@ -1280,29 +1395,46 @@ bool VirtualFakeCamera3::hasCapability(AvailableCapabilities cap) {
+     return idx >= 0;
+ }
+ 
++void VirtualFakeCamera3::setCameraFacingInfo() {
++    // Updating facing info based on client request.
++    mFacingBack = gCameraFacingBack;
++    ALOGI("%s: Camera ID %d is set as %s facing", __func__, mCameraID,
++          mFacingBack ? "Back" : "Front");
++}
++
++void VirtualFakeCamera3::setInputCodecType() {
++    mCodecType = gCodecType;
++    ALOGI("%s: Selected %s Codec_type for Camera %d", __func__, codec_type_to_str(mCodecType),
++          mCameraID);
++}
++
++void VirtualFakeCamera3::setMaxSupportedResolution() {
++    // Updating max sensor supported resolution based on client camera.
++    // This would be used in sensor related operations and metadata info.
++    mSensorWidth = gCameraMaxWidth;
++    mSensorHeight = gCameraMaxHeight;
++    ALOGI("%s: Maximum supported Resolution of Camera %d: %dx%d", __func__, mCameraID, mSensorWidth,
++          mSensorHeight);
++}
++
+ status_t VirtualFakeCamera3::constructStaticInfo() {
+     CameraMetadata info;
+     Vector<int32_t> availableCharacteristicsKeys;
+     status_t res;
+-
+-    // Find max width/height
+     int32_t width = 0, height = 0;
+-    size_t rawSizeCount = sizeof(kAvailableRawSizes) / sizeof(kAvailableRawSizes[0]);
+-    for (size_t index = 0; index + 1 < rawSizeCount; index += 2) {
+-        if (width <= (int32_t)kAvailableRawSizes[index] &&
+-            height <= (int32_t)kAvailableRawSizes[index + 1]) {
+-            width = kAvailableRawSizes[index];
+-            height = kAvailableRawSizes[index + 1];
+-        }
+-    }
+ 
+-    if (width < 1280 || height < 720) {
+-        width = 640;
+-        height = 480;
+-    }
+-    mSensorWidth = width;
+-    mSensorHeight = height;
+-    ALOGE("%s: [width:height] [%d:%d]", __func__, mSensorWidth, mSensorHeight);
++    ALOGV("%s: Updating metadata for Camera %d", __func__, mCameraID);
++
++    // Setting the max supported Camera resolution.
++    setMaxSupportedResolution();
++    // set codec type of the input frame.
++    setInputCodecType();
++    // Set camera facing info.
++    setCameraFacingInfo();
++
++    // Updating width and height based on capability info.
++    width = mSensorWidth;
++    height = mSensorHeight;
+ 
+ #define ADD_STATIC_ENTRY(name, varptr, count) \
+     availableCharacteristicsKeys.add(name);   \
+@@ -1331,21 +1463,12 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+     static const float sensorPhysicalSize[2] = {3.20f, 2.40f};  // mm
+     ADD_STATIC_ENTRY(ANDROID_SENSOR_INFO_PHYSICAL_SIZE, sensorPhysicalSize, 2);
+ 
+-    const int32_t pixelArray[] = {mSensorWidth, mSensorHeight};
++    int32_t pixelArray[] = {mSensorWidth, mSensorHeight};
+     ADD_STATIC_ENTRY(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE, pixelArray, 2);
+-    const int32_t activeArray[] = {0, 0, mSensorWidth, mSensorHeight};
++    int32_t activeArray[] = {0, 0, mSensorWidth, mSensorHeight};
+     ADD_STATIC_ENTRY(ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE, activeArray, 4);
+ 
+-    char mode[PROPERTY_VALUE_MAX];
+-    static int32_t orientation = 0;
+-    if ((property_get("persist.remote.camera.orientation", mode, nullptr) > 0) &&
+-        (!strcmp(mode, "portrait"))) {
+-        ALOGV("persist.remote.camera.orientation: portrait");
+-        orientation = 270;
+-    } else {
+-        ALOGV("persist.remote.camera.orientation: landscape");
+-        orientation = 0;
+-    }
++    int32_t orientation = gCameraSensorOrientation;
+     ADD_STATIC_ENTRY(ANDROID_SENSOR_ORIENTATION, &orientation, 1);
+ 
+     static const uint8_t timestampSource = ANDROID_SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME;
+@@ -1378,11 +1501,11 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+ 
+     if (hasCapability(BACKWARD_COMPATIBLE)) {
+         // 5 cm min focus distance for back camera, infinity (fixed focus) for front
+-        const float minFocusDistance = mFacingBack ? 1.0 / 0.05 : 0.0;
++        float minFocusDistance = mFacingBack ? 1.0 / 0.05 : 0.0;
+         ADD_STATIC_ENTRY(ANDROID_LENS_INFO_MINIMUM_FOCUS_DISTANCE, &minFocusDistance, 1);
+ 
+         // 5 m hyperfocal distance for back camera, infinity (fixed focus) for front
+-        const float hyperFocalDistance = mFacingBack ? 1.0 / 5.0 : 0.0;
++        float hyperFocalDistance = mFacingBack ? 1.0 / 5.0 : 0.0;
+         ADD_STATIC_ENTRY(ANDROID_LENS_INFO_HYPERFOCAL_DISTANCE, &hyperFocalDistance, 1);
+ 
+         static const float apertures = 2.8f;
+@@ -1452,7 +1575,7 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+                          sizeof(lensRadialDistortion) / sizeof(float));
+     }
+ 
+-    const uint8_t lensFacing = mFacingBack ? ANDROID_LENS_FACING_BACK : ANDROID_LENS_FACING_FRONT;
++    uint8_t lensFacing = mFacingBack ? ANDROID_LENS_FACING_BACK : ANDROID_LENS_FACING_FRONT;
+     ADD_STATIC_ENTRY(ANDROID_LENS_FACING, &lensFacing, 1);
+ 
+     // android.flash
+@@ -1484,43 +1607,41 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+ 
+     // android.scaler
+ 
+-    const std::vector<int32_t> availableStreamConfigurationsBasic = {
++    const std::vector<int32_t> availableStreamConfigurationsDefault = {
+         HAL_PIXEL_FORMAT_BLOB,
+         width,
+         height,
+         ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
++    };
++
++    const std::vector<int32_t> availableStreamConfigurations1080p = {
+         HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-        320,
+-        240,
++        1280,
++        720,
+         ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+-        HAL_PIXEL_FORMAT_YCbCr_420_888,
+-        320,
+-        240,
+-        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+-        HAL_PIXEL_FORMAT_BLOB,
+-        320,
+-        240,
+-        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+-        HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-        176,
+-        144,
++        HAL_PIXEL_FORMAT_YCrCb_420_SP,
++        1280,
++        720,
+         ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+         HAL_PIXEL_FORMAT_YCbCr_420_888,
+-        176,
+-        144,
++        1280,
++        720,
+         ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+         HAL_PIXEL_FORMAT_BLOB,
+-        176,
+-        144,
++        1280,
++        720,
+         ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+     };
+ 
+-    // Always need to include 640x480 in basic formats
+-    const std::vector<int32_t> availableStreamConfigurationsBasic640 = {
++    const std::vector<int32_t> availableStreamConfigurations720p = {
+         HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+         640,
+         480,
+         ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
++        HAL_PIXEL_FORMAT_YCrCb_420_SP,
++        640,
++        480,
++        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+         HAL_PIXEL_FORMAT_YCbCr_420_888,
+         640,
+         480,
+@@ -1528,7 +1649,27 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+         HAL_PIXEL_FORMAT_BLOB,
+         640,
+         480,
+-        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT};
++        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
++    };
++
++    const std::vector<int32_t> availableStreamConfigurations480p = {
++        HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
++        320,
++        240,
++        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
++        HAL_PIXEL_FORMAT_YCrCb_420_SP,
++        320,
++        240,
++        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
++        HAL_PIXEL_FORMAT_YCbCr_420_888,
++        320,
++        240,
++        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
++        HAL_PIXEL_FORMAT_BLOB,
++        320,
++        240,
++        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
++    };
+ 
+     const std::vector<int32_t> availableStreamConfigurationsRaw = {
+         HAL_PIXEL_FORMAT_RAW16,
+@@ -1555,13 +1696,43 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+     std::vector<int32_t> availableStreamConfigurations;
+ 
+     if (hasCapability(BACKWARD_COMPATIBLE)) {
+-        availableStreamConfigurations.insert(availableStreamConfigurations.end(),
+-                                             availableStreamConfigurationsBasic.begin(),
+-                                             availableStreamConfigurationsBasic.end());
+-        if (width > 640) {
++        if (width == 1920 && height == 1080) {
+             availableStreamConfigurations.insert(availableStreamConfigurations.end(),
+-                                                 availableStreamConfigurationsBasic640.begin(),
+-                                                 availableStreamConfigurationsBasic640.end());
++                                                 availableStreamConfigurationsDefault.begin(),
++                                                 availableStreamConfigurationsDefault.end());
++
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurations1080p.begin(),
++                                                 availableStreamConfigurations1080p.end());
++
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurations720p.begin(),
++                                                 availableStreamConfigurations720p.end());
++
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurations480p.begin(),
++                                                 availableStreamConfigurations480p.end());
++
++        } else if (width == 1280 && height == 720) {
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurationsDefault.begin(),
++                                                 availableStreamConfigurationsDefault.end());
++
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurations720p.begin(),
++                                                 availableStreamConfigurations720p.end());
++
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurations480p.begin(),
++                                                 availableStreamConfigurations480p.end());
++        } else {  // For 480p
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurationsDefault.begin(),
++                                                 availableStreamConfigurationsDefault.end());
++
++            availableStreamConfigurations.insert(availableStreamConfigurations.end(),
++                                                 availableStreamConfigurations480p.begin(),
++                                                 availableStreamConfigurations480p.end());
+         }
+     }
+     if (hasCapability(RAW)) {
+@@ -1580,43 +1751,41 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+                          &availableStreamConfigurations[0], availableStreamConfigurations.size());
+     }
+ 
+-    const std::vector<int64_t> availableMinFrameDurationsBasic = {
++    const std::vector<int64_t> availableMinFrameDurationsDefault = {
+         HAL_PIXEL_FORMAT_BLOB,
+         width,
+         height,
+         Sensor::kFrameDurationRange[0],
++    };
++
++    const std::vector<int64_t> availableMinFrameDurations1080p = {
+         HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-        320,
+-        240,
++        1280,
++        720,
+         Sensor::kFrameDurationRange[0],
+-        HAL_PIXEL_FORMAT_YCbCr_420_888,
+-        320,
+-        240,
+-        Sensor::kFrameDurationRange[0],
+-        HAL_PIXEL_FORMAT_BLOB,
+-        320,
+-        240,
+-        Sensor::kFrameDurationRange[0],
+-        HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-        176,
+-        144,
++        HAL_PIXEL_FORMAT_YCrCb_420_SP,
++        1280,
++        720,
+         Sensor::kFrameDurationRange[0],
+         HAL_PIXEL_FORMAT_YCbCr_420_888,
+-        176,
+-        144,
++        1280,
++        720,
+         Sensor::kFrameDurationRange[0],
+         HAL_PIXEL_FORMAT_BLOB,
+-        176,
+-        144,
++        1280,
++        720,
+         Sensor::kFrameDurationRange[0],
+     };
+ 
+-    // Always need to include 640x480 in basic formats
+-    const std::vector<int64_t> availableMinFrameDurationsBasic640 = {
++    const std::vector<int64_t> availableMinFrameDurations720p = {
+         HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+         640,
+         480,
+         Sensor::kFrameDurationRange[0],
++        HAL_PIXEL_FORMAT_YCrCb_420_SP,
++        640,
++        480,
++        Sensor::kFrameDurationRange[0],
+         HAL_PIXEL_FORMAT_YCbCr_420_888,
+         640,
+         480,
+@@ -1624,7 +1793,27 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+         HAL_PIXEL_FORMAT_BLOB,
+         640,
+         480,
+-        Sensor::kFrameDurationRange[0]};
++        Sensor::kFrameDurationRange[0],
++    };
++
++    const std::vector<int64_t> availableMinFrameDurations480p = {
++        HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
++        320,
++        240,
++        Sensor::kFrameDurationRange[0],
++        HAL_PIXEL_FORMAT_YCrCb_420_SP,
++        320,
++        240,
++        Sensor::kFrameDurationRange[0],
++        HAL_PIXEL_FORMAT_YCbCr_420_888,
++        320,
++        240,
++        Sensor::kFrameDurationRange[0],
++        HAL_PIXEL_FORMAT_BLOB,
++        320,
++        240,
++        Sensor::kFrameDurationRange[0],
++    };
+ 
+     const std::vector<int64_t> availableMinFrameDurationsRaw = {
+         HAL_PIXEL_FORMAT_RAW16,
+@@ -1651,13 +1840,42 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+     std::vector<int64_t> availableMinFrameDurations;
+ 
+     if (hasCapability(BACKWARD_COMPATIBLE)) {
+-        availableMinFrameDurations.insert(availableMinFrameDurations.end(),
+-                                          availableMinFrameDurationsBasic.begin(),
+-                                          availableMinFrameDurationsBasic.end());
+-        if (width > 640) {
++        if (width == 1920 && height == 1080) {
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurationsDefault.begin(),
++                                              availableMinFrameDurationsDefault.end());
++
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurations1080p.begin(),
++                                              availableMinFrameDurations1080p.end());
++
+             availableMinFrameDurations.insert(availableMinFrameDurations.end(),
+-                                              availableMinFrameDurationsBasic640.begin(),
+-                                              availableMinFrameDurationsBasic640.end());
++                                              availableMinFrameDurations720p.begin(),
++                                              availableMinFrameDurations720p.end());
++
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurations480p.begin(),
++                                              availableMinFrameDurations480p.end());
++        } else if (width == 1280 && height == 720) {
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurationsDefault.begin(),
++                                              availableMinFrameDurationsDefault.end());
++
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurations720p.begin(),
++                                              availableMinFrameDurations720p.end());
++
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurations480p.begin(),
++                                              availableMinFrameDurations480p.end());
++        } else {  // For 480p
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurationsDefault.begin(),
++                                              availableMinFrameDurationsDefault.end());
++
++            availableMinFrameDurations.insert(availableMinFrameDurations.end(),
++                                              availableMinFrameDurations480p.begin(),
++                                              availableMinFrameDurations480p.end());
+         }
+     }
+     if (hasCapability(RAW)) {
+@@ -1676,51 +1894,32 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+                          &availableMinFrameDurations[0], availableMinFrameDurations.size());
+     }
+ 
+-    const std::vector<int64_t> availableStallDurationsBasic = {
++    const std::vector<int64_t> availableStallDurationsDefault = {
+         HAL_PIXEL_FORMAT_BLOB,
+         width,
+         height,
+         Sensor::kFrameDurationRange[0],
+-        HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-        320,
+-        240,
+-        0,
+-        HAL_PIXEL_FORMAT_YCbCr_420_888,
+-        320,
+-        240,
+-        0,
+-        HAL_PIXEL_FORMAT_RGBA_8888,
+-        320,
+-        240,
+-        0,
+-        HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-        176,
+-        144,
+-        0,
+-        HAL_PIXEL_FORMAT_YCbCr_420_888,
+-        176,
+-        144,
+-        0,
+-        HAL_PIXEL_FORMAT_RGBA_8888,
+-        176,
+-        144,
+-        0,
+     };
+ 
+-    // Always need to include 640x480 in basic formats
+-    const std::vector<int64_t> availableStallDurationsBasic640 = {
+-        HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED,
+-        640,
+-        480,
+-        0,
+-        HAL_PIXEL_FORMAT_YCbCr_420_888,
+-        640,
+-        480,
+-        0,
++    const std::vector<int64_t> availableStallDurations1080p = {
++        HAL_PIXEL_FORMAT_BLOB,
++        1280,
++        720,
++        Sensor::kFrameDurationRange[0],
++    };
++    const std::vector<int64_t> availableStallDurations720p = {
+         HAL_PIXEL_FORMAT_BLOB,
+         640,
+         480,
+-        Sensor::kFrameDurationRange[0]};
++        Sensor::kFrameDurationRange[0],
++    };
++
++    const std::vector<int64_t> availableStallDurations480p = {
++        HAL_PIXEL_FORMAT_BLOB,
++        320,
++        240,
++        Sensor::kFrameDurationRange[0],
++    };
+ 
+     const std::vector<int64_t> availableStallDurationsRaw = {HAL_PIXEL_FORMAT_RAW16, 640, 480,
+                                                              Sensor::kFrameDurationRange[0]};
+@@ -1741,13 +1940,42 @@ status_t VirtualFakeCamera3::constructStaticInfo() {
+     std::vector<int64_t> availableStallDurations;
+ 
+     if (hasCapability(BACKWARD_COMPATIBLE)) {
+-        availableStallDurations.insert(availableStallDurations.end(),
+-                                       availableStallDurationsBasic.begin(),
+-                                       availableStallDurationsBasic.end());
+-        if (width > 640) {
++        if (width == 1920 && height == 1080) {
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurationsDefault.begin(),
++                                           availableStallDurationsDefault.end());
++
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurations1080p.begin(),
++                                           availableStallDurations1080p.end());
++
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurations720p.begin(),
++                                           availableStallDurations720p.end());
++
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurations480p.begin(),
++                                           availableStallDurations480p.end());
++        } else if (width == 1280 && height == 720) {
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurationsDefault.begin(),
++                                           availableStallDurationsDefault.end());
++
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurations720p.begin(),
++                                           availableStallDurations720p.end());
++
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurations480p.begin(),
++                                           availableStallDurations480p.end());
++        } else {  // For 480p
++            availableStallDurations.insert(availableStallDurations.end(),
++                                           availableStallDurationsDefault.begin(),
++                                           availableStallDurationsDefault.end());
++
+             availableStallDurations.insert(availableStallDurations.end(),
+-                                           availableStallDurationsBasic640.begin(),
+-                                           availableStallDurationsBasic640.end());
++                                           availableStallDurations480p.begin(),
++                                           availableStallDurations480p.end());
+         }
+     }
+     if (hasCapability(RAW)) {
+@@ -2133,7 +2361,7 @@ status_t VirtualFakeCamera3::process3A(CameraMetadata &settings) {
+ 
+     e = settings.find(ANDROID_CONTROL_MODE);
+     if (e.count == 0) {
+-        ALOGE("%s: No control mode entry!", __FUNCTION__);
++        ALOGV("%s: No control mode entry!", __FUNCTION__);
+         return BAD_VALUE;
+     }
+     uint8_t controlMode = e.data.u8[0];
+@@ -2149,13 +2377,13 @@ status_t VirtualFakeCamera3::process3A(CameraMetadata &settings) {
+         return OK;
+     } else if (controlMode == ANDROID_CONTROL_MODE_USE_SCENE_MODE) {
+         if (!hasCapability(BACKWARD_COMPATIBLE)) {
+-            ALOGE("%s: Can't use scene mode when BACKWARD_COMPATIBLE not supported!", __FUNCTION__);
++            ALOGV("%s: Can't use scene mode when BACKWARD_COMPATIBLE not supported!", __FUNCTION__);
+             return BAD_VALUE;
+         }
+ 
+         e = settings.find(ANDROID_CONTROL_SCENE_MODE);
+         if (e.count == 0) {
+-            ALOGE("%s: No scene mode entry!", __FUNCTION__);
++            ALOGV("%s: No scene mode entry!", __FUNCTION__);
+             return BAD_VALUE;
+         }
+         uint8_t sceneMode = e.data.u8[0];
+@@ -2165,7 +2393,7 @@ status_t VirtualFakeCamera3::process3A(CameraMetadata &settings) {
+                 mFacePriority = true;
+                 break;
+             default:
+-                ALOGE("%s: Emulator doesn't support scene mode %d", __FUNCTION__, sceneMode);
++                ALOGV("%s: Emulator doesn't support scene mode %d", __FUNCTION__, sceneMode);
+                 return BAD_VALUE;
+         }
+     } else {
+@@ -2193,7 +2421,7 @@ status_t VirtualFakeCamera3::doFakeAE(CameraMetadata &settings) {
+ 
+     e = settings.find(ANDROID_CONTROL_AE_MODE);
+     if (e.count == 0 && hasCapability(BACKWARD_COMPATIBLE)) {
+-        ALOGE("%s: No AE mode entry!", __FUNCTION__);
++        ALOGV("%s: No AE mode entry!", __FUNCTION__);
+         return BAD_VALUE;
+     }
+     uint8_t aeMode = (e.count > 0) ? e.data.u8[0] : (uint8_t)ANDROID_CONTROL_AE_MODE_ON;
+@@ -2289,7 +2517,7 @@ status_t VirtualFakeCamera3::doFakeAE(CameraMetadata &settings) {
+                 mAeCounter = 0;
+                 break;
+             default:
+-                ALOGE("%s: Emulator in unexpected AE state %d", __FUNCTION__, mAeState);
++                ALOGV("%s: Emulator in unexpected AE state %d", __FUNCTION__, mAeState);
+                 return INVALID_OPERATION;
+         }
+     } else {
+@@ -2305,7 +2533,7 @@ status_t VirtualFakeCamera3::doFakeAF(CameraMetadata &settings) {
+ 
+     e = settings.find(ANDROID_CONTROL_AF_MODE);
+     if (e.count == 0 && hasCapability(BACKWARD_COMPATIBLE)) {
+-        ALOGE("%s: No AF mode entry!", __FUNCTION__);
++        ALOGV("%s: No AF mode entry!", __FUNCTION__);
+         return BAD_VALUE;
+     }
+     uint8_t afMode = (e.count > 0) ? e.data.u8[0] : (uint8_t)ANDROID_CONTROL_AF_MODE_OFF;
+@@ -2337,7 +2565,7 @@ status_t VirtualFakeCamera3::doFakeAF(CameraMetadata &settings) {
+             }
+             break;
+         default:
+-            ALOGE("%s: Emulator doesn't support AF mode %d", __FUNCTION__, afMode);
++            ALOGV("%s: Emulator doesn't support AF mode %d", __FUNCTION__, afMode);
+             return BAD_VALUE;
+     }
+ 
+@@ -2362,12 +2590,12 @@ status_t VirtualFakeCamera3::doFakeAF(CameraMetadata &settings) {
+             // Cancel trigger always transitions into INACTIVE
+             mAfState = ANDROID_CONTROL_AF_STATE_INACTIVE;
+ 
+-            ALOGVV("%s: AF State transition to STATE_INACTIVE", __FUNCTION__);
++            ALOGV("%s: AF State transition to STATE_INACTIVE", __FUNCTION__);
+ 
+             // Stay in 'inactive' until at least next frame
+             return OK;
+         default:
+-            ALOGE("%s: Unknown af trigger value %d", __FUNCTION__, afTrigger);
++            ALOGV("%s: Unknown af trigger value %d", __FUNCTION__, afTrigger);
+             return BAD_VALUE;
+     }
+ 
+@@ -2484,7 +2712,7 @@ status_t VirtualFakeCamera3::doFakeAF(CameraMetadata &settings) {
+             }
+             break;
+         default:
+-            ALOGE("%s: Bad af state %d", __FUNCTION__, mAfState);
++            ALOGV("%s: Bad af state %d", __FUNCTION__, mAfState);
+     }
+ 
+     {
+@@ -2499,7 +2727,7 @@ status_t VirtualFakeCamera3::doFakeAF(CameraMetadata &settings) {
+         };
+         camera_metadata_enum_snprint(ANDROID_CONTROL_AF_STATE, mAfState, afNewStateString,
+                                      sizeof(afNewStateString));
+-        ALOGVV("%s: AF state transitioned from %s to %s", __FUNCTION__, afStateString,
++        ALOGV("%s: AF state transitioned from %s to %s", __FUNCTION__, afStateString,
+                afNewStateString);
+     }
+ 
+@@ -2511,7 +2739,7 @@ status_t VirtualFakeCamera3::doFakeAWB(CameraMetadata &settings) {
+ 
+     e = settings.find(ANDROID_CONTROL_AWB_MODE);
+     if (e.count == 0 && hasCapability(BACKWARD_COMPATIBLE)) {
+-        ALOGE("%s: No AWB mode entry!", __FUNCTION__);
++        ALOGV("%s: No AWB mode entry!", __FUNCTION__);
+         return BAD_VALUE;
+     }
+     uint8_t awbMode = (e.count > 0) ? e.data.u8[0] : (uint8_t)ANDROID_CONTROL_AWB_MODE_AUTO;
+@@ -2535,7 +2763,7 @@ status_t VirtualFakeCamera3::doFakeAWB(CameraMetadata &settings) {
+                 awbLocked ? ANDROID_CONTROL_AWB_STATE_LOCKED : ANDROID_CONTROL_AWB_STATE_CONVERGED;
+             break;
+         default:
+-            ALOGE("%s: Emulator doesn't support AWB mode %d", __FUNCTION__, awbMode);
++            ALOGV("%s: Emulator doesn't support AWB mode %d", __FUNCTION__, awbMode);
+             return BAD_VALUE;
+     }
+ 
+@@ -2619,7 +2847,7 @@ void VirtualFakeCamera3::signalReadoutIdle() {
+ void VirtualFakeCamera3::onSensorEvent(uint32_t frameNumber, Event e, nsecs_t timestamp) {
+     switch (e) {
+         case Sensor::SensorListener::EXPOSURE_START: {
+-            //          ALOGVV("%s: Frame %d: Sensor started exposure at %lld",
++            //          ALOGV("%s: Frame %d: Sensor started exposure at %lld",
+             //               __FUNCTION__, frameNumber, timestamp);
+             // Trigger shutter notify to framework
+             camera3_notify_msg_t msg;
+@@ -2672,11 +2900,11 @@ status_t VirtualFakeCamera3::ReadoutThread::waitForReadout() {
+     while (mInFlightQueue.size() >= kMaxQueueSize) {
+         res = mInFlightSignal.waitRelative(mLock, kWaitPerLoop);
+         if (res != OK && res != TIMED_OUT) {
+-            ALOGE("%s: Error waiting for in-flight queue to shrink", __FUNCTION__);
++            ALOGV("%s: Error waiting for in-flight queue to shrink", __FUNCTION__);
+             return INVALID_OPERATION;
+         }
+         if (loopCount == kMaxWaitLoops) {
+-            ALOGE("%s: Timed out waiting for in-flight queue to shrink", __FUNCTION__);
++            ALOGV("%s: Timed out waiting for in-flight queue to shrink", __FUNCTION__);
+             return TIMED_OUT;
+         }
+         loopCount++;
+@@ -2687,7 +2915,7 @@ status_t VirtualFakeCamera3::ReadoutThread::waitForReadout() {
+ bool VirtualFakeCamera3::ReadoutThread::threadLoop() {
+     status_t res = NO_ERROR;
+ 
+-    ALOGVV("%s: ReadoutThread waiting for request", __FUNCTION__);
++    ALOGV("%s: ReadoutThread waiting for request", __FUNCTION__);
+ 
+     // First wait for a request from the in-flight queue
+ 
+@@ -2696,10 +2924,10 @@ bool VirtualFakeCamera3::ReadoutThread::threadLoop() {
+         if (mInFlightQueue.empty()) {
+             res = mInFlightSignal.waitRelative(mLock, kWaitPerLoop);
+             if (res == TIMED_OUT) {
+-                ALOGVV("%s: ReadoutThread: Timed out waiting for request", __FUNCTION__);
++                ALOGV("%s: ReadoutThread: Timed out waiting for request", __FUNCTION__);
+                 return true;
+             } else if (res != NO_ERROR) {
+-                ALOGE("%s: Error waiting for capture requests: %d", __FUNCTION__, res);
++                ALOGV("%s: Error waiting for capture requests: %d", __FUNCTION__, res);
+                 return false;
+             }
+         }
+@@ -2710,20 +2938,20 @@ bool VirtualFakeCamera3::ReadoutThread::threadLoop() {
+         mInFlightQueue.erase(mInFlightQueue.begin());
+         mInFlightSignal.signal();
+         mThreadActive = true;
+-        ALOGVV("%s: Beginning readout of frame %d", __FUNCTION__, mCurrentRequest.frameNumber);
++        ALOGV("%s: Beginning readout of frame %d", __FUNCTION__, mCurrentRequest.frameNumber);
+     }
+ 
+     // Then wait for it to be delivered from the sensor
+-    ALOGVV("%s: ReadoutThread: Wait for frame to be delivered from sensor", __FUNCTION__);
++    ALOGV("%s: ReadoutThread: Wait for frame to be delivered from sensor", __FUNCTION__);
+ 
+     nsecs_t captureTime;
+     bool gotFrame = mParent->mSensor->waitForNewFrame(kWaitPerLoop, &captureTime);
+     if (!gotFrame) {
+-        ALOGVV("%s: ReadoutThread: Timed out waiting for sensor frame", __FUNCTION__);
++        ALOGV("%s: ReadoutThread: Timed out waiting for sensor frame", __FUNCTION__);
+         return true;
+     }
+ 
+-    //     ALOGVV("Sensor done with readout for frame %d, captured at %lld ",
++    //     ALOGV("Sensor done with readout for frame %d, captured at %lld ",
+     //          mCurrentRequest.frameNumber, captureTime);
+ 
+     // Check if we need to JPEG encode a buffer, and send it for async
+@@ -2749,7 +2977,7 @@ bool VirtualFakeCamera3::ReadoutThread::threadLoop() {
+             }
+             if (goodBuffer) {
+                 needJpeg = true;
+-                ALOGVV("Sensor done with readout for frame %d, needJpeg = %d",
++                ALOGV("Sensor done with readout for frame %d, needJpeg = %d",
+                        mCurrentRequest.frameNumber, needJpeg);
+ 
+                 mJpegHalBuffer = *buf;
+@@ -2761,7 +2989,7 @@ bool VirtualFakeCamera3::ReadoutThread::threadLoop() {
+ 
+                 continue;
+             }
+-            ALOGE("%s: Error compressing output buffer: %s (%d)", __FUNCTION__, strerror(-res),
++            ALOGV("%s: Error compressing output buffer: %s (%d)", __FUNCTION__, strerror(-res),
+                   res);
+             // fallthrough for cleanup
+         }
+@@ -2838,7 +3066,7 @@ bool VirtualFakeCamera3::ReadoutThread::threadLoop() {
+     if (signalIdle) mParent->signalReadoutIdle();
+ 
+     // Send it off to the framework
+-    ALOGVV("%s: ReadoutThread: Send result to framework", __FUNCTION__);
++    ALOGV("%s: ReadoutThread: Send result to framework", __FUNCTION__);
+     mParent->sendCaptureResult(&result);
+ 
+     // Clean up
+@@ -2875,7 +3103,7 @@ void VirtualFakeCamera3::ReadoutThread::onJpegDone(const StreamBuffer &jpegBuffe
+     result.partial_result = 0;
+ 
+     if (!success) {
+-        ALOGE(
++        ALOGV(
+             "%s: Compression failure, returning error state buffer to"
+             " framework",
+             __FUNCTION__);
+@@ -2889,7 +3117,7 @@ void VirtualFakeCamera3::ReadoutThread::onJpegDone(const StreamBuffer &jpegBuffe
+ void VirtualFakeCamera3::ReadoutThread::onJpegInputDone(const StreamBuffer &inputBuffer) {
+     // Should never get here, since the input buffer has to be returned
+     // by end of processCaptureRequest
+-    ALOGE("%s: Unexpected input buffer from JPEG compressor!", __FUNCTION__);
++    ALOGV("%s: Unexpected input buffer from JPEG compressor!", __FUNCTION__);
+ }
+ 
+ };  // namespace android
+diff --git a/src/fake-pipeline2/Sensor.cpp b/src/fake-pipeline2/Sensor.cpp
+index 577cd91..17a4352 100644
+--- a/src/fake-pipeline2/Sensor.cpp
++++ b/src/fake-pipeline2/Sensor.cpp
+@@ -127,8 +127,16 @@ Sensor::Sensor(uint32_t width, uint32_t height)
+       mScene(width, height, kElectronsPerLuxSecond)
+ #ifdef ENABLE_FFMPEG
+       ,mDecoder{decoder}
+-#endif
+-      {}
++#endif 
++{
++    // Max supported resolution of the camera sensor.
++    // It is based on client camera capability info.
++    //mSrcWidth = width;
++    //mSrcHeight = height;
++    mSrcWidth = 640;
++    mSrcHeight = 480;
++    mSrcFrameSize = mSrcWidth * mSrcHeight * BPP_NV12;
++}
+ 
+ Sensor::~Sensor() { shutDown(); }
+ 
+@@ -242,6 +250,73 @@ status_t Sensor::readyToRun() {
+     return OK;
+ }
+ 
++//#define CROP_ROTATE
++#ifdef CROP_ROTATE
++void bufferCropAndRotate(unsigned char * buff, unsigned char * buff_out){
++//
++//   Original frame                  Cropped frame              Rotated frame                 Upscale frame
++// --------------------               --------                                              --------------------
++// |     |      |     |               |      |                 ---------------              |     |      |     |
++// |     |      |     |               |      |                 |             |              |     |      |     |
++// |     |      |     |   =======>>   |      |     =======>>   |             |  =======>>   |     |      |     |
++// |     |      |     |               |      |                 ---------------              |     |      |     |
++// |     |      |     |               |      |                                              |     |      |     |
++// --------------------               --------                                              --------------------
++//  640x480                            360x480                   480x360                        640x480
++    ALOGI("bufferCropAndRotate");
++    std::unique_ptr<uint8_t[]> cropped_buffer;
++
++    int cropped_width = 360;
++    int cropped_height = 480;
++    int margin = (640-360)/2; //140
++
++    int rotated_height = cropped_width;
++    int rotated_width = cropped_height;
++
++    int rotated_y_stride = rotated_width;
++    int rotated_uv_stride = rotated_width / 2;
++
++    size_t rotated_size =
++        rotated_y_stride * rotated_height + rotated_uv_stride * rotated_height;
++    cropped_buffer.reset(new uint8_t[rotated_size]);
++    uint8_t* rotated_y_plane = cropped_buffer.get();
++    uint8_t* rotated_u_plane =
++      rotated_y_plane + rotated_y_stride * rotated_height;
++    uint8_t* rotated_v_plane =
++      rotated_u_plane + rotated_uv_stride * rotated_height / 2;
++    //libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate90;
++    libyuv::RotationMode rotation_mode = libyuv::RotationMode::kRotate270;
++
++    int res = libyuv::ConvertToI420(
++      buff, 640*480*3/2, rotated_y_plane,
++      rotated_y_stride, rotated_u_plane, rotated_uv_stride, rotated_v_plane,
++      rotated_uv_stride, margin, 0, 640,
++      480, cropped_width, cropped_height, rotation_mode,
++      libyuv::FourCC::FOURCC_I420);
++
++    if(res){
++        ALOGE("critical ConvertToI420 res:%d ", res);
++        return;
++    }
++
++    res = libyuv::I420Scale(
++      rotated_y_plane, rotated_y_stride, rotated_u_plane, rotated_uv_stride,
++      rotated_v_plane, rotated_uv_stride, rotated_width, rotated_height,
++      buff_out, 640,
++      buff_out + 640*480,
++      640 / 2,
++      buff_out + 640*480*5/4,
++      640/2, 640,
++      480, libyuv::FilterMode::kFilterNone);
++
++      if(res){
++        ALOGE("critical I420Scale res:%d ", res);
++    }
++
++}
++char buffer_recv[640*480*3/2];
++#endif
++
+ bool Sensor::threadLoop() {
+     /**
+      * Sensor capture operation main loop.
+@@ -337,6 +412,10 @@ bool Sensor::threadLoop() {
+ 
+         ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+         handle->clientBuf[handle->clientRevCount % 1].decoded = false;
++        #ifdef CROP_ROTATE
++        char *fbuffer = (char *)handle->clientBuf[handle->clientRevCount % 1].buffer;
++        bufferCropAndRotate((uint8_t*)fbuffer, (uint8_t*)buffer_recv);
++        #endif
+ 
+         // Might be adding more buffers, so size isn't constant
+         for (size_t i = 0; i < mNextCapturedBuffers->size(); i++) {
+@@ -417,8 +496,8 @@ bool Sensor::threadLoop() {
+ 
+     ALOGVV("Sensor Thread stage X :4");
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
+-    ALOGVV("Frame #%zu cycle took %d ms, target %d ms", handle->decodedFrameNo,
+-          (int)(workDoneRealTime - startRealTime) / 1000000, (int)(frameDuration / 1000000));
++    ALOGVV("Frame No: %d took %d ms, target %d ms", frameNumber,
++           (int)(workDoneRealTime - startRealTime) / 1000000, (int)(frameDuration / 1000000));
+     return true;
+ };
+ 
+@@ -466,7 +545,11 @@ void Sensor::dump_yuv(uint8_t *img1, size_t img1_size, uint8_t *img2, size_t img
+                       const std::string &filename) {
+     static size_t count = 0;
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++    #ifdef CROP_ROTATE
++    uint8_t *bufData = (uint8_t *)buffer_recv;
++    #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #endif
+ 
+     if (++count == 120) return;
+     if (filename.empty()) {
+@@ -483,7 +566,7 @@ void Sensor::dump_yuv(uint8_t *img1, size_t img1_size, uint8_t *img2, size_t img
+     fclose(f);
+ }
+ #ifdef ENABLE_FFMPEG
+-bool Sensor::getNV12Frames(uint8_t *out_buf, int *out_size,
++bool Sensor::getNV12Frames(uint8_t *input_buf, int *camera_input_size,
+                            std::chrono::milliseconds timeout_ms /* default 5ms */) {
+     auto cg_video_frame = std::make_shared<CGVideoFrame>();
+     size_t retry_count = 0;
+@@ -503,7 +586,7 @@ bool Sensor::getNV12Frames(uint8_t *out_buf, int *out_size,
+             break;
+         } else if (retry_count++ <= maxRetryCount) {  // decoded frames are not ready
+             ALOGVV("%s retry #%zu get_decoded_frame() not ready, lets wait for %zums", __func__,
+-                  retry_count, size_t(timeout_ms.count()));
++                   retry_count, size_t(timeout_ms.count()));
+             std::this_thread::sleep_for(timeout_ms);
+             continue;
+         } else if (retry_count > maxRetryCount) {
+@@ -515,9 +598,9 @@ bool Sensor::getNV12Frames(uint8_t *out_buf, int *out_size,
+         }
+     } while (true);
+ 
+-    cg_video_frame->copy_to_buffer(out_buf, out_size);
++    cg_video_frame->copy_to_buffer(input_buf, camera_input_size);
+     ALOGVV("%s converted to format: %s size: %d \n", __FUNCTION__,
+-           cg_video_frame->format() == NV12 ? "NV12" : "I420", *out_size);
++           cg_video_frame->format() == NV12 ? "NV12" : "I420", *camera_input_size);
+     ALOGVV("%s decoded buffers are copied", __func__);
+ 
+     return true;
+@@ -527,40 +610,34 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     ALOGVV("%s: E", __FUNCTION__);
+ 
+     auto *handle = ClientVideoBuffer::getClientInstance();
++    #ifdef CROP_ROTATE
++    uint8_t *bufData = (uint8_t *)buffer_recv;
++    #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
+-    int out_size;
++    #endif
++    int cameraInputDataSize;
+ 
+     if (!gIsInFrameI420 && !gIsInFrameH264) {
+-        ALOGE("%s Exit - only H264, I420 input frames supported", __FUNCTION__);
++        ALOGE("%s Exit - only H264, H265, I420 input frames supported", __FUNCTION__);
+         return;
+     }
+ 
+-    // TODO:: handle other resolutions as required
+-    if (width == 320 && height == 240) {
+-        destPrevBufSize = FRAME_SIZE_240P;
+-    } else if (width == 640 && height == 480) {
+-        destPrevBufSize = FRAME_SIZE_480P;
+-    } else {
+-        // TODO: adjust default
+-        destPrevBufSize = FRAME_SIZE_480P;
+-    }
++    // Initialize the input data size based on client camera resolution.
++    cameraInputDataSize = mSrcFrameSize;
+ 
+-    // Initialize to the size based on resolution.
+-    out_size = destPrevBufSize;
+ #ifdef ENABLE_FFMPEG
+     if (gIsInFrameH264) {
+         if (handle->clientBuf[handle->clientRevCount % 1].decoded) {
+             // Note: bufData already assigned in the function start
+-            ALOGVV("%s - Already Decoded", __FUNCTION__);
+-            out_size = destPrevBufSize;
+-        } else {
+-            getNV12Frames(bufData, &out_size);
++            ALOGVV("%s - Already Decoded Camera Input Frame..", __FUNCTION__);
++        } else {  // This is the default condition in all apps.
++                  // To get the decoded frame.
++            getNV12Frames(bufData, &cameraInputDataSize);
+             handle->clientBuf[handle->clientRevCount % 1].decoded = true;
+-
+-            ALOGVV("%s - getNV12Framesout_size: %d\n", __func__, out_size);
+             std::unique_lock<std::mutex> ulock(client_buf_mutex);
+             handle->decodedFrameNo++;
+-            ALOGVV("%s Decoded frame #[%zd]", __FUNCTION__, handle->decodedFrameNo);
++            ALOGVV("%s Decoded Camera Input Frame No: %zd with size of %d", __FUNCTION__,
++                   handle->decodedFrameNo, cameraInputDataSize);
+             ulock.unlock();
+         }
+     }
+@@ -568,7 +645,7 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     int src_size = mSrcWidth * mSrcHeight;
+     int dstFrameSize = width * height;
+ 
+-    // For default 640x480 resolution
++    // For Max supported Resolution.
+     if (width == (uint32_t)mSrcWidth && height == (uint32_t)mSrcHeight) {
+         if (gIsInFrameI420) {
+             ALOGVV(LOG_TAG " %s: I420, scaling not required: Size = %dx%d", __FUNCTION__, width,
+@@ -600,8 +677,8 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+                                              dst_stride_abgr, width, height)) {
+             }
+         }
++        // For upscaling and downscaling all other resolutions below max supported resolution.
+     } else {
+-        // For lower resolutions like 320x240
+         if (gIsInFrameI420) {
+             ALOGVV(LOG_TAG " %s: I420, need to scale: Size = %dx%d", __FUNCTION__, width, height);
+             int destFrameSize = width * height;
+@@ -705,7 +782,7 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+         }
+     }
+ 
+-    ALOGVV(" %s: Done with converion into img[%p]", __FUNCTION__, img);
++    ALOGVV(" %s: Captured RGB32 image sucessfully..", __FUNCTION__);
+ 
+ // Debug point
+ #if 0
+@@ -715,7 +792,6 @@ void Sensor::captureRGBA(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+         DUMP_RGBA(j, img, 1228800);
+     }
+ #endif
+-    ALOGVV(" %s: X", __FUNCTION__);
+ }
+ 
+ void Sensor::captureRGB(uint8_t *img, uint32_t gain, uint32_t width, uint32_t height) {
+@@ -774,51 +850,47 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+     ALOGVV(LOG_TAG "%s: E", __FUNCTION__);
+ 
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++    //uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #ifdef CROP_ROTATE
++    uint8_t *bufData = (uint8_t *)buffer_recv;
++    #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    #endif
+ 
+-    ALOGVV(LOG_TAG " %s: bufData[%p] img[%p] resolution[%d:%d]",
+-           __func__, bufData, img, width, height);
+-
+-    int src_size = mSrcWidth * mSrcHeight;
+-    int dstFrameSize = width * height;
++    int cameraInputDataSize;
+ 
+-    int out_size;
++    ALOGVV(LOG_TAG " %s: bufData[%p] img[%p] resolution[%d:%d]", __func__, bufData, img, width,
++           height);
+ 
+     if (!gIsInFrameI420 && !gIsInFrameH264) {
+         ALOGE("%s Exit - only H264, I420 input frames supported", __FUNCTION__);
+         return;
+     }
+ 
+-    // TODO: handle other resolutions as required
+-    if (width == 320 && height == 240) {
+-        mDstBufSize = FRAME_SIZE_240P;
+-    } else if (width == 640 && height == 480) {
+-        mDstBufSize = FRAME_SIZE_480P;
+-    } else {
+-        // TODO: adjust default
+-        mDstBufSize = FRAME_SIZE_480P;
+-    }
+-
+-    // Initialize to the size based on resolution.
+-    out_size = mDstBufSize;
++    // Initialize the input data size based on client camera resolution.
++    cameraInputDataSize = mSrcFrameSize;
+ #ifdef ENABLE_FFMPEG
+     if (gIsInFrameH264) {
+         if (handle->clientBuf[handle->clientRevCount % 1].decoded) {
+-            // Note: bufData already assigned in the function start
+-            ALOGVV("%s - Already Decoded", __FUNCTION__);
+-            out_size = mDstBufSize;
++            // Already decoded camera input as part of preview frame.
++            // This is the default condition in most of the apps.
++            ALOGVV("%s - Already Decoded Camera Input frame..", __FUNCTION__);
+         } else {
+-            getNV12Frames(bufData, &out_size);
++            // To get the decoded frame for the apps which doesn't have RGBA preview.
++            getNV12Frames(bufData, &cameraInputDataSize);
+             handle->clientBuf[handle->clientRevCount % 1].decoded = true;
+-            ALOGVV("%s - getNV12Framesout_size: %d\n", __func__, out_size);
+             std::unique_lock<std::mutex> ulock(client_buf_mutex);
+             handle->decodedFrameNo++;
+-            ALOGVV("%s Decoded frame #[%zd]", __FUNCTION__, handle->decodedFrameNo);
++            ALOGVV("%s Decoded Camera Input Frame No: %zd with size of %d", __FUNCTION__,
++                   handle->decodedFrameNo, cameraInputDataSize);
+             ulock.unlock();
+         }
+     }
+ #endif
+-    // For default resolotion 640x480p
++    int src_size = mSrcWidth * mSrcHeight;
++    int dstFrameSize = width * height;
++
++    // For Max supported Resolution.
+     if (width == (uint32_t)mSrcWidth && height == (uint32_t)mSrcHeight) {
+         if (gIsInFrameI420) {
+             // For I420 input support
+@@ -849,12 +921,12 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+             }
+         } else {
+             // For NV12 Input support. No Color conversion
+-            ALOGVV(LOG_TAG " %s: H264 to NV12 no scaling required: Size = %dx%d, out_size: %d",
+-                   __FUNCTION__, width, height, out_size);
+-            memcpy(img, bufData, out_size);
++            ALOGVV(LOG_TAG " %s: NV12 frame without scaling and color conversion: Size = %dx%d",
++                   __FUNCTION__, width, height);
++            memcpy(img, bufData, cameraInputDataSize);
+         }
++        // For upscaling and downscaling all other resolutions below max supported resolution.
+     } else {
+-        // For lower resoltuions like 320x240p
+         if (gIsInFrameI420) {
+             // For I420 input support
+             ALOGVV(LOG_TAG " %s: I420 with scaling: Size = %dx%d", __FUNCTION__, width, height);
+@@ -912,7 +984,8 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+             }
+         } else {
+             // For NV12 Input support
+-            ALOGVV(LOG_TAG " %s: H264 with scaling Size = %dx%d", __FUNCTION__, width, height);
++            ALOGVV(LOG_TAG " %s: NV12 frame with scaling to Size = %dx%d", __FUNCTION__, width,
++                   height);
+ 
+             const uint8_t *src_y = bufData;
+             int src_stride_y = mSrcWidth;
+@@ -978,14 +1051,19 @@ void Sensor::captureNV12(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+         saveNV21(img, width * height * 3);
+     }
+ #endif
+-    ALOGI(LOG_TAG " %s: Captured NV12 Image sucessfully!!! ", __FUNCTION__);
++    ALOGVV(LOG_TAG " %s: Captured NV12 image sucessfully..", __FUNCTION__);
+ }
+ 
+ void Sensor::captureJPEG(uint8_t *img, uint32_t gain, uint32_t width, uint32_t height) {
+     ALOGVV("%s: E", __FUNCTION__);
+ 
+     ClientVideoBuffer *handle = ClientVideoBuffer::getClientInstance();
++    //uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++  //  #ifdef CROP_ROTATE
++  //  uint8_t *bufData = (uint8_t *)buffer_recv;
++  //  #else
+     uint8_t *bufData = handle->clientBuf[handle->clientRevCount % 1].buffer;
++    //#endif
+ 
+     int src_size = mSrcWidth * mSrcHeight;
+     int dstFrameSize = width * height;
+@@ -1035,86 +1113,86 @@ void Sensor::captureJPEG(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+             ALOGVV(LOG_TAG "%s: I420 input without scaling required Size = %dx%d for JPEG conversion",
+ 			    __FUNCTION__, width, height);
+ 
+-	    const uint8_t *src_y = bufData;
+-	    int src_stride_y = mSrcWidth;
+-	    const uint8_t *src_u = bufData + src_size;
+-	    int src_stride_u = mSrcWidth >> 1;
+-	    const uint8_t *src_v = bufData + src_size + src_size / 4;
+-	    int src_stride_v = mSrcWidth >> 1;
++            const uint8_t *src_y = bufData;
++            int src_stride_y = mSrcWidth;
++            const uint8_t *src_u = bufData + src_size;
++            int src_stride_u = mSrcWidth >> 1;
++            const uint8_t *src_v = bufData + src_size + src_size / 4;
++            int src_stride_v = mSrcWidth >> 1;
+ 
+-	    uint8_t *dst_y = img;
+-	    int dst_stride_y = width;
+-	    uint8_t *dst_vu = dst_y + src_size;
+-	    int dst_stride_vu = width;
++            uint8_t *dst_y = img;
++            int dst_stride_y = width;
++            uint8_t *dst_vu = dst_y + src_size;
++            int dst_stride_vu = width;
+ 
+-	    if (int ret = libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v,
+-				             src_stride_v, dst_y, dst_stride_y, dst_vu,
+-					     dst_stride_vu, width, height)) {
+-	    }
+-        //For NV12 input
+-	} else {
++            if (int ret = libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v,
++                                             src_stride_v, dst_y, dst_stride_y, dst_vu,
++                                             dst_stride_vu, width, height)) {
++            }
++            // For NV12 input
++        } else {
+ 	    ALOGVV(LOG_TAG "%s: NV12 to NV21 conversion for JPEG conversion: Size = %dx%d",
+ 			   __FUNCTION__, width, height);
+ 
+-	    const uint8_t *src_y = bufData;
+-	    int src_stride_y = mSrcWidth;
+-	    const uint8_t *src_uv = bufData + src_size;
+-	    int src_stride_uv = mSrcWidth;
++            const uint8_t *src_y = bufData;
++            int src_stride_y = mSrcWidth;
++            const uint8_t *src_uv = bufData + src_size;
++            int src_stride_uv = mSrcWidth;
+ 
+-	    uint8_t *dst_y = mDstJpegBuf.data();
+-	    int dst_stride_y = mSrcWidth;
+-	    uint8_t *dst_u = mDstJpegBuf.data() + src_size;
+-	    int dst_stride_u = mSrcWidth >> 1;
+-	    uint8_t *dst_v = mDstJpegBuf.data() + src_size + src_size / 4;
+-	    int dst_stride_v = mSrcWidth >> 1;
++            uint8_t *dst_y = mDstJpegBuf.data();
++            int dst_stride_y = mSrcWidth;
++            uint8_t *dst_u = mDstJpegBuf.data() + src_size;
++            int dst_stride_u = mSrcWidth >> 1;
++            uint8_t *dst_v = mDstJpegBuf.data() + src_size + src_size / 4;
++            int dst_stride_v = mSrcWidth >> 1;
+ 
+ 	    if (int ret = libyuv::NV12ToI420(src_y, src_stride_y, src_uv, src_stride_uv,
+ 				             dst_y,dst_stride_y, dst_u, dst_stride_u, dst_v, dst_stride_v,
+ 					     mSrcWidth, mSrcHeight)) {
+ 	    }
+ 
+-	    src_y =mDstJpegBuf.data();
+-	    src_stride_y = mSrcWidth;
+-	    uint8_t *src_u = mDstJpegBuf.data() + src_size;
+-	    int src_stride_u = src_stride_y >> 1;
+-	    const uint8_t *src_v = mDstJpegBuf.data() + src_size + src_size / 4;
+-	    int src_stride_v = src_stride_y >> 1;
++            src_y = mDstJpegBuf.data();
++            src_stride_y = mSrcWidth;
++            uint8_t *src_u = mDstJpegBuf.data() + src_size;
++            int src_stride_u = src_stride_y >> 1;
++            const uint8_t *src_v = mDstJpegBuf.data() + src_size + src_size / 4;
++            int src_stride_v = src_stride_y >> 1;
+ 
+-	    dst_y = img;
+-	    dst_stride_y = width;
+-	    uint8_t *dst_vu = dst_y + dstFrameSize;
+-	    int dst_stride_vu = width;
++            dst_y = img;
++            dst_stride_y = width;
++            uint8_t *dst_vu = dst_y + dstFrameSize;
++            int dst_stride_vu = width;
+ 
+-	    if (int ret = libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v,
+-				             src_stride_v, dst_y, dst_stride_y, dst_vu,
+-					     dst_stride_vu, width, height)) {
+-	    }
++            if (int ret = libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v,
++                                             src_stride_v, dst_y, dst_stride_y, dst_vu,
++                                             dst_stride_vu, width, height)) {
++            }
+         }
+-    //For lower resoltuions like 320x240p
++        // For upscaling and downscaling all other resolutions below max supported resolution.
+     } else {
+-	//For I420 input
++        // For I420 input
+         if (gIsInFrameI420) {
+ 	    ALOGVV(LOG_TAG "%s: I420 with scaling: Size = %dx%d for JPEG conversion",
+ 			    __FUNCTION__, width, height);
+ 
+-	    const uint8_t *src_y = bufData;
+-	    int src_stride_y = mSrcWidth;
+-	    const uint8_t *src_u = bufData + src_size;
+-	    int src_stride_u = src_stride_y >> 1;
+-	    const uint8_t *src_v = bufData + src_size + src_size / 4;
+-	    int src_stride_v = src_stride_y >> 1;
+-	    int src_width = mSrcWidth;
+-	    int src_height = mSrcHeight;
+-
+-	    uint8_t *dst_y = mDstJpegBuf.data();
+-	    int dst_stride_y = width;
+-	    uint8_t *dst_u = mDstJpegBuf.data() + dstFrameSize;
+-	    int dst_stride_u = width >> 1;
+-	    uint8_t *dst_v = mDstJpegBuf.data() + dstFrameSize + dstFrameSize / 4;
+-	    int dst_stride_v = width >> 1;
+-	    int dst_width = width;
+-	    int dst_height = height;
+-	    auto filtering = libyuv::kFilterNone;
++            const uint8_t *src_y = bufData;
++            int src_stride_y = mSrcWidth;
++            const uint8_t *src_u = bufData + src_size;
++            int src_stride_u = src_stride_y >> 1;
++            const uint8_t *src_v = bufData + src_size + src_size / 4;
++            int src_stride_v = src_stride_y >> 1;
++            int src_width = mSrcWidth;
++            int src_height = mSrcHeight;
++
++            uint8_t *dst_y = mDstJpegBuf.data();
++            int dst_stride_y = width;
++            uint8_t *dst_u = mDstJpegBuf.data() + dstFrameSize;
++            int dst_stride_u = width >> 1;
++            uint8_t *dst_v = mDstJpegBuf.data() + dstFrameSize + dstFrameSize / 4;
++            int dst_stride_v = width >> 1;
++            int dst_width = width;
++            int dst_height = height;
++            auto filtering = libyuv::kFilterNone;
+ 
+ 	    if (int ret = libyuv::I420Scale(src_y, src_stride_y, src_u, src_stride_u, src_v,
+ 				            src_stride_v, src_width, src_height, dst_y,
+@@ -1133,8 +1211,8 @@ void Sensor::captureJPEG(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+ 	    dst_y = img;
+ 	    dst_stride_y = width;
+ 
+-	    uint8_t *dst_vu = dst_y + width * height;
+-	    int dst_stride_vu = width;
++            uint8_t *dst_vu = dst_y + width * height;
++            int dst_stride_vu = width;
+ 
+ 	    if (int ret = libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v,
+ 				             src_stride_v, dst_y, dst_stride_y,
+@@ -1144,65 +1222,65 @@ void Sensor::captureJPEG(uint8_t *img, uint32_t gain, uint32_t width, uint32_t h
+ 	} else {
+ 	    ALOGVV(LOG_TAG "%s: NV12 input with scaling Size = %dx%d for JPEG conversion", __FUNCTION__, width, height);
+ 
+-	    const uint8_t *src_y = bufData;
+-	    int src_stride_y = mSrcWidth;
+-	    const uint8_t *src_uv = bufData + src_size;
+-	    int src_stride_uv = mSrcWidth;
+-
+-	    uint8_t *dst_y = mDstJpegTempBuf.data();
+-	    int dst_stride_y = mSrcWidth;
+-	    uint8_t *dst_u = mDstJpegTempBuf.data() + src_size;
+-	    int dst_stride_u = mSrcWidth >> 1;
+-	    uint8_t *dst_v = mDstJpegTempBuf.data() + src_size + src_size / 4;
+-	    int dst_stride_v = mSrcWidth >> 1;
+-
+-	    if (int ret = libyuv::NV12ToI420(src_y, src_stride_y, src_uv, src_stride_uv, dst_y,
+-					     dst_stride_y, dst_u, dst_stride_u, dst_v, dst_stride_v,
+-				             mSrcWidth, mSrcHeight)) {
+-	    }
++            const uint8_t *src_y = bufData;
++            int src_stride_y = mSrcWidth;
++            const uint8_t *src_uv = bufData + src_size;
++            int src_stride_uv = mSrcWidth;
+ 
+-	    src_y = mDstJpegTempBuf.data();
+-	    src_stride_y = mSrcWidth;
+-	    uint8_t *src_u = mDstJpegTempBuf.data() + src_size;
+-	    int src_stride_u = src_stride_y >> 1;
+-	    const uint8_t *src_v = mDstJpegTempBuf.data() + src_size + src_size / 4;
+-	    int src_stride_v = src_stride_y >> 1;
+-	    int src_width = mSrcWidth;
+-	    int src_height = mSrcHeight;
++            uint8_t *dst_y = mDstJpegTempBuf.data();
++            int dst_stride_y = mSrcWidth;
++            uint8_t *dst_u = mDstJpegTempBuf.data() + src_size;
++            int dst_stride_u = mSrcWidth >> 1;
++            uint8_t *dst_v = mDstJpegTempBuf.data() + src_size + src_size / 4;
++            int dst_stride_v = mSrcWidth >> 1;
+ 
+-	    dst_y = mDstJpegBuf.data();
+-	    dst_stride_y = width;
+-	    dst_u = mDstJpegBuf.data() + dstFrameSize;
+-	    dst_stride_u = width >> 1;
+-	    dst_v = mDstJpegBuf.data() + dstFrameSize + dstFrameSize / 4;
+-	    dst_stride_v = width >> 1;
+-	    int dst_width = width;
+-	    int dst_height = height;
+-	    auto filtering = libyuv::kFilterNone;
++            if (int ret = libyuv::NV12ToI420(src_y, src_stride_y, src_uv, src_stride_uv, dst_y,
++                                             dst_stride_y, dst_u, dst_stride_u, dst_v, dst_stride_v,
++                                             mSrcWidth, mSrcHeight)) {
++            }
+ 
+-	    if (int ret = libyuv::I420Scale(src_y, src_stride_y, src_u, src_stride_u, src_v,
+-					    src_stride_v, src_width, src_height, dst_y,
+-					    dst_stride_y, dst_u, dst_stride_u, dst_v, dst_stride_v,
+-					    dst_width, dst_height, filtering)) {
+-	    }
++            src_y = mDstJpegTempBuf.data();
++            src_stride_y = mSrcWidth;
++            uint8_t *src_u = mDstJpegTempBuf.data() + src_size;
++            int src_stride_u = src_stride_y >> 1;
++            const uint8_t *src_v = mDstJpegTempBuf.data() + src_size + src_size / 4;
++            int src_stride_v = src_stride_y >> 1;
++            int src_width = mSrcWidth;
++            int src_height = mSrcHeight;
+ 
+-	    src_y = mDstJpegBuf.data();
+-	    src_stride_y = width;
+-	    src_u = mDstJpegBuf.data() + dstFrameSize;
+-	    src_stride_u = width >> 1;
+-	    src_v = mDstJpegBuf.data() + dstFrameSize + dstFrameSize / 4;
+-	    src_stride_v = width >> 1;
++            dst_y = mDstJpegBuf.data();
++            dst_stride_y = width;
++            dst_u = mDstJpegBuf.data() + dstFrameSize;
++            dst_stride_u = width >> 1;
++            dst_v = mDstJpegBuf.data() + dstFrameSize + dstFrameSize / 4;
++            dst_stride_v = width >> 1;
++            int dst_width = width;
++            int dst_height = height;
++            auto filtering = libyuv::kFilterNone;
+ 
+-	    dst_y = img;
+-	    dst_stride_y = width;
+-	    uint8_t *dst_vu = dst_y + dstFrameSize;
+-	    int dst_stride_vu = width;
++            if (int ret = libyuv::I420Scale(src_y, src_stride_y, src_u, src_stride_u, src_v,
++                                            src_stride_v, src_width, src_height, dst_y,
++                                            dst_stride_y, dst_u, dst_stride_u, dst_v, dst_stride_v,
++                                            dst_width, dst_height, filtering)) {
++            }
+ 
+-	    if (int ret = libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v,
+-				             src_stride_v, dst_y, dst_stride_y, dst_vu,
+-					     dst_stride_vu, width, height)) {
+-	    }
+-	}
++            src_y = mDstJpegBuf.data();
++            src_stride_y = width;
++            src_u = mDstJpegBuf.data() + dstFrameSize;
++            src_stride_u = width >> 1;
++            src_v = mDstJpegBuf.data() + dstFrameSize + dstFrameSize / 4;
++            src_stride_v = width >> 1;
++
++            dst_y = img;
++            dst_stride_y = width;
++            uint8_t *dst_vu = dst_y + dstFrameSize;
++            int dst_stride_vu = width;
++
++            if (int ret = libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v,
++                                             src_stride_v, dst_y, dst_stride_y, dst_vu,
++                                             dst_stride_vu, width, height)) {
++            }
++        }
+     }
+     ALOGVV("%s: Successfully Converted to NV21 for JPEG Capture!!!", __FUNCTION__);
+ }
+-- 
+2.17.1
+
