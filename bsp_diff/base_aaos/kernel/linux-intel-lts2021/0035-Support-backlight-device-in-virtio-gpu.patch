@@ -1,0 +1,423 @@
+From 0f02023df4031f501c42c55b88edab17af993ae0 Mon Sep 17 00:00:00 2001
+From: "Xue, Bosheng" <bosheng.xue@intel.com>
+Date: Fri, 1 Mar 2024 18:21:40 +0800
+Subject: [PATCH] Support backlight device in virtio gpu
+
+Signed-off-by: Xue, Bosheng <bosheng.xue@intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_drv.c |   1 +
+ drivers/gpu/drm/virtio/virtgpu_drv.h |  25 ++++++
+ drivers/gpu/drm/virtio/virtgpu_kms.c |  73 +++++++++++++++
+ drivers/gpu/drm/virtio/virtgpu_vq.c  | 130 +++++++++++++++++++++++++++
+ include/uapi/linux/virtio_gpu.h      |  49 ++++++++++
+ 5 files changed, 278 insertions(+)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index c10ab13c580c..4c373d9f52cf 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -161,6 +161,7 @@ static unsigned int features[] = {
+ 	VIRTIO_GPU_F_MODIFIER,
+ 	VIRTIO_GPU_F_SCALING,
+ 	VIRTIO_GPU_F_VBLANK,
++	VIRTIO_GPU_F_BACKLIGHT,
+ };
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index 313f9508f85f..70a5758ccab9 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -172,6 +172,7 @@ struct virtio_gpu_vbuffer {
+ 
+ 	struct virtio_gpu_object_array *objs;
+ 	struct list_head list;
++	struct completion notify;
+ };
+ 
+ struct virtio_gpu_output {
+@@ -222,12 +223,26 @@ struct virtio_gpu_vblank {
+ 	uint32_t buf[4];
+ };
+ 
++#define MAX_BACKLIGHT_NUM  4
++struct virtio_gpu_backlight {
++	struct virtio_gpu_device *vgdev;
++	struct backlight_device *bd;
++	uint32_t backlight_id;
++	int32_t brightness;
++	int32_t max_brightness;
++	int32_t power;
++	enum backlight_type type;
++	enum backlight_scale scale;
++};
++
+ struct virtio_gpu_device {
+ 	struct drm_device *ddev;
+ 
+ 	struct virtio_device *vdev;
+ 
+ 	struct virtio_gpu_output outputs[VIRTIO_GPU_MAX_SCANOUTS];
++	struct virtio_gpu_backlight backlight[MAX_BACKLIGHT_NUM];
++	uint32_t num_backlight;
+ 	uint32_t num_scanouts;
+ 	uint32_t num_vblankq;
+ 	struct virtio_gpu_queue ctrlq;
+@@ -253,6 +268,7 @@ struct virtio_gpu_device {
+ 	bool has_modifier;
+ 	bool has_scaling;
+ 	bool has_vblank;
++	bool has_backlight;
+ 	bool has_indirect;
+ 	bool has_resource_assign_uuid;
+ 	bool has_resource_blob;
+@@ -448,6 +464,15 @@ void virtio_gpu_cmd_set_scaling(struct virtio_gpu_device *vgdev,
+ 				     uint32_t scanout_id,
+ 				     struct drm_rect *rect_dst);
+ 
++int virtio_gpu_cmd_backlight_update_status(struct virtio_gpu_device *vgdev,
++				     uint32_t backlight_id);
++
++int virtio_gpu_cmd_get_brightness(struct virtio_gpu_device *vgdev,
++				     uint32_t backlight_id);
++
++int virtio_gpu_cmd_backlight_query(struct virtio_gpu_device *vgdev,
++				     uint32_t backlight_id);
++
+ /* virtgpu_display.c */
+ int virtio_gpu_modeset_init(struct virtio_gpu_device *vgdev);
+ void virtio_gpu_modeset_fini(struct virtio_gpu_device *vgdev);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index 670a7f112269..fd2a85d1ab4f 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -159,6 +159,64 @@ int virtio_gpu_find_vqs(struct virtio_gpu_device *vgdev)
+ 	return ret;
+ }
+ 
++static int virtio_backlight_device_update_status(struct backlight_device *bd)
++{
++	int ret = 0;
++	struct virtio_gpu_backlight *backlight = bl_get_data(bd);
++	backlight->power = bd->props.power;
++	backlight->brightness = bd->props.brightness;
++	ret = virtio_gpu_cmd_backlight_update_status(backlight->vgdev, backlight->backlight_id);
++	return ret;
++}
++
++static int virtio_backlight_device_get_brightness(struct backlight_device *bd)
++{
++	int ret = 0;
++	struct virtio_gpu_backlight *backlight = bl_get_data(bd);
++	ret = virtio_gpu_cmd_get_brightness(backlight->vgdev, backlight->backlight_id);
++	return backlight->brightness;
++}
++
++static const struct backlight_ops virtio_backlight_device_ops = {
++	.update_status = virtio_backlight_device_update_status,
++	.get_brightness = virtio_backlight_device_get_brightness,
++};
++
++int virtio_backlight_device_register(struct virtio_gpu_device *vgdev, int index)
++{
++	struct backlight_properties props;
++	char *name;
++	struct backlight_device *bd;
++	int ret = 0;
++	memset(&props, 0, sizeof(props));
++	if (index >= vgdev->num_backlight) {
++		return -EINVAL;
++	}
++	vgdev->backlight[index].vgdev = vgdev;
++	ret = virtio_gpu_cmd_backlight_query(vgdev, index);
++	if (ret) {
++		pr_err("fail to query backlight(%d) device config, ret:%d", index, ret);
++		return ret;
++	}
++
++	props.type = vgdev->backlight[index].type;
++	props.power = vgdev->backlight[index].power;
++	props.scale = vgdev->backlight[index].scale;
++	props.brightness = vgdev->backlight[index].brightness;
++	props.max_brightness = vgdev->backlight[index].max_brightness;
++	name = kasprintf(GFP_KERNEL, "virtio-gpu-backlight%d", index);
++	bd = devm_backlight_device_register(&vgdev->vdev->dev, name, &vgdev->vdev->dev,
++			                    &vgdev->backlight[index], &virtio_backlight_device_ops, &props);
++	if (IS_ERR(bd)) {
++		pr_err("%s, failed to register backlight device\n", __func__);
++		return PTR_ERR(bd);
++	}
++	vgdev->backlight[index].bd = bd;
++	kfree(name);
++	pr_info("backlight device:%s registered\n", name);
++	return 0;
++}
++
+ int virtio_gpu_init(struct virtio_device *vdev, struct drm_device *dev)
+ {
+ 	struct virtio_gpu_device *vgdev;
+@@ -218,6 +276,9 @@ int virtio_gpu_init(struct virtio_device *vdev, struct drm_device *dev)
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_VBLANK)) {
+ 		vgdev->has_vblank = true;
+ 	}
++	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_BACKLIGHT)) {
++		vgdev->has_backlight = true;
++	}
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_RESOURCE_BLOB)) {
+ 		vgdev->has_resource_blob = true;
+ 		if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_MODIFIER)) {
+@@ -291,6 +352,18 @@ int virtio_gpu_init(struct virtio_device *vdev, struct drm_device *dev)
+ 			num_capsets, &num_capsets);
+ 	DRM_INFO("number of cap sets: %d\n", num_capsets);
+ 
++	vgdev->num_backlight = 0;
++	if (vgdev->has_backlight) {
++		virtio_cread_le(vgdev->vdev, struct virtio_gpu_config,
++				num_backlight, &vgdev->num_backlight);
++		if (vgdev->num_backlight > MAX_BACKLIGHT_NUM)
++			vgdev->num_backlight = MAX_BACKLIGHT_NUM;
++	}
++	DRM_INFO("number of backlight: %d\n", vgdev->num_backlight);
++	for(i = 0; i < vgdev->num_backlight; i++) {
++		virtio_backlight_device_register(vgdev, i);
++	}
++
+ 	ret = virtio_gpu_modeset_init(vgdev);
+ 	if (ret) {
+ 		DRM_ERROR("modeset init failed\n");
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index af840566a3e2..4ce5a4251da5 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -30,6 +30,7 @@
+ #include <linux/virtio.h>
+ #include <linux/virtio_config.h>
+ #include <linux/virtio_ring.h>
++#include <linux/backlight.h>
+ 
+ #include <drm/drm.h>
+ #include <drm/drm_edid.h>
+@@ -1410,3 +1411,132 @@ void virtio_gpu_cmd_set_scaling(struct virtio_gpu_device *vgdev,
+ 
+ 	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
+ }
++
++int virtio_gpu_cmd_backlight_update_status(struct virtio_gpu_device *vgdev,
++				     uint32_t backlight_id)
++{
++	struct virtio_gpu_backlight_update_status *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++
++	if (backlight_id >= vgdev->num_backlight) {
++		return -EINVAL;
++	}
++	cmd_p = virtio_gpu_alloc_cmd(vgdev, &vbuf, sizeof(*cmd_p));
++	memset(cmd_p, 0, sizeof(*cmd_p));
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_BACKLIGHT_UPDATE_STATUS);
++	cmd_p->backlight_id = cpu_to_le32(backlight_id);
++	cmd_p->brightness = cpu_to_le32(vgdev->backlight[backlight_id].brightness);
++	cmd_p->power = cpu_to_le32(vgdev->backlight[backlight_id].power);
++
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++	virtio_gpu_notify(vgdev);
++	return 0;
++}
++
++static void virtio_gpu_cmd_get_backlightness_cb(struct virtio_gpu_device *vgdev,
++					       struct virtio_gpu_vbuffer *vbuf)
++{
++	struct virtio_gpu_get_brightness *cmd_p =
++		(struct virtio_gpu_get_brightness *)vbuf->buf;
++	struct virtio_gpu_resp_brightness *resp =
++		(struct virtio_gpu_resp_brightness *)vbuf->resp_buf;
++	int32_t brightness = le32_to_cpu(resp->brightness);
++	uint32_t backlight_id = cmd_p->backlight_id;
++	if (backlight_id < vgdev->num_backlight) {
++		vgdev->backlight[backlight_id].brightness = brightness;
++	}
++	complete(&vbuf->notify);
++}
++
++int virtio_gpu_cmd_get_brightness(struct virtio_gpu_device *vgdev,
++				     uint32_t backlight_id)
++{
++	struct virtio_gpu_get_brightness *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++	void *resp_buf;
++	int ret = 0;
++
++	if (backlight_id >= vgdev->num_backlight)
++		return -EINVAL;
++	resp_buf = kzalloc(sizeof(struct virtio_gpu_resp_brightness),
++			   GFP_KERNEL);
++	if (!resp_buf)
++		return -ENOMEM;
++
++	cmd_p = virtio_gpu_alloc_cmd_resp
++		(vgdev, &virtio_gpu_cmd_get_backlightness_cb, &vbuf,
++		 sizeof(*cmd_p), sizeof(struct virtio_gpu_resp_brightness),
++		 resp_buf);
++	memset(cmd_p, 0, sizeof(*cmd_p));
++
++	init_completion(&vbuf->notify);
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_BACKLIGHT_GET);
++	cmd_p->backlight_id = backlight_id;
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++	virtio_gpu_notify(vgdev);
++	ret = wait_for_completion_interruptible_timeout(&vbuf->notify, 100*HZ);
++	if (ret <= 0)
++		return -ETIME;
++	return 0;
++}
++
++static void virtio_gpu_cmd_get_backlight_info_cb(struct virtio_gpu_device *vgdev,
++					       struct virtio_gpu_vbuffer *vbuf)
++{
++	struct virtio_gpu_get_backlight_info *cmd_p =
++		(struct virtio_gpu_get_backlight_info *)vbuf->buf;
++	struct virtio_gpu_resp_backlight_info *resp =
++		(struct virtio_gpu_resp_backlight_info *)vbuf->resp_buf;
++	int32_t brightness = le32_to_cpu(resp->brightness);
++	int32_t max_brightness = le32_to_cpu(resp->max_brightness);
++	int32_t power = le32_to_cpu(resp->power);
++	int32_t type = le32_to_cpu(resp->type);
++	int32_t scale = le32_to_cpu(resp->scale);
++	uint32_t backlight_id = cmd_p->backlight_id;
++	if (backlight_id < vgdev->num_backlight) {
++		vgdev->backlight[backlight_id].brightness = brightness;
++		vgdev->backlight[backlight_id].max_brightness = max_brightness;
++		vgdev->backlight[backlight_id].power = power;
++		if (type > 0 && type < BACKLIGHT_TYPE_MAX)
++			vgdev->backlight[backlight_id].type = type;
++		else
++			vgdev->backlight[backlight_id].type = BACKLIGHT_RAW;
++		if (scale >= BACKLIGHT_SCALE_UNKNOWN && scale <= BACKLIGHT_SCALE_NON_LINEAR)
++			vgdev->backlight[backlight_id].scale = scale;
++		else
++			vgdev->backlight[backlight_id].scale = BACKLIGHT_SCALE_UNKNOWN;
++	}
++	complete(&vbuf->notify);
++}
++
++int virtio_gpu_cmd_backlight_query(struct virtio_gpu_device *vgdev,
++				     uint32_t backlight_id)
++{
++	struct virtio_gpu_get_backlight_info *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++	void *resp_buf;
++	int ret = 0;
++
++	if (backlight_id >= vgdev->num_backlight)
++		return -EINVAL;
++	resp_buf = kzalloc(sizeof(struct virtio_gpu_resp_backlight_info),
++			   GFP_KERNEL);
++	if (!resp_buf)
++		return -ENOMEM;
++
++	cmd_p = virtio_gpu_alloc_cmd_resp
++		(vgdev, &virtio_gpu_cmd_get_backlight_info_cb, &vbuf,
++		 sizeof(*cmd_p), sizeof(struct virtio_gpu_resp_backlight_info),
++		 resp_buf);
++	init_completion(&vbuf->notify);
++	memset(cmd_p, 0, sizeof(*cmd_p));
++
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_BACKLIGHT_QUERY);
++	cmd_p->backlight_id = backlight_id;
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++	virtio_gpu_notify(vgdev);
++	ret = wait_for_completion_interruptible_timeout(&vbuf->notify, 100*HZ);
++	if (ret <= 0)
++		return -ETIME;
++	return 0;
++}
+diff --git a/include/uapi/linux/virtio_gpu.h b/include/uapi/linux/virtio_gpu.h
+index 1d05de645484..3873622f41d4 100644
+--- a/include/uapi/linux/virtio_gpu.h
++++ b/include/uapi/linux/virtio_gpu.h
+@@ -75,6 +75,8 @@
+ 
+ #define VIRTIO_GPU_F_VBLANK     7
+ 
++#define VIRTIO_GPU_F_BACKLIGHT     8
++
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+ 
+@@ -112,6 +114,11 @@ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_CMD_UPDATE_CURSOR = 0x0300,
+ 	VIRTIO_GPU_CMD_MOVE_CURSOR,
+ 
++	/* backlight cmd */
++	VIRTIO_GPU_CMD_BACKLIGHT_UPDATE_STATUS = 0x0400,
++	VIRTIO_GPU_CMD_BACKLIGHT_GET,
++	VIRTIO_GPU_CMD_BACKLIGHT_QUERY,
++
+ 	/* success responses */
+ 	VIRTIO_GPU_RESP_OK_NODATA = 0x1100,
+ 	VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+@@ -120,6 +127,8 @@ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_RESP_OK_EDID,
+ 	VIRTIO_GPU_RESP_OK_RESOURCE_UUID,
+ 	VIRTIO_GPU_RESP_OK_MAP_INFO,
++	VIRTIO_GPU_RESP_OK_BACKLIGHT_GET,
++	VIRTIO_GPU_RESP_OK_BACKLIGHT,
+ 
+ 	/* error responses */
+ 	VIRTIO_GPU_RESP_ERR_UNSPEC = 0x1200,
+@@ -223,6 +232,45 @@ struct virtio_gpu_set_scaling {
+ 	__le32 padding;
+ };
+ 
++/* VIRTIO_GPU_CMD_BACKLIGHT_UPDATE_STATUS */
++struct virtio_gpu_backlight_update_status {
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 backlight_id;
++	__le32 brightness;
++	__le32 power;
++	__le32 padding;
++};
++
++/* VIRTIO_GPU_CMD_BACKLIGHT_GET */
++struct virtio_gpu_get_brightness {
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 backlight_id;
++	__le32 padding;
++};
++
++struct virtio_gpu_resp_brightness {
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 brightness;
++	__le32 padding;
++};
++
++/* VIRTIO_GPU_CMD_BACKLIGHT_QUERY */
++struct virtio_gpu_get_backlight_info {
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 backlight_id;
++	__le32 padding;
++};
++
++struct virtio_gpu_resp_backlight_info {
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 brightness;
++	__le32 max_brightness;
++	__le32 power;
++	__le32 type;
++	__le32 scale;
++	__le32 padding;
++};
++
+ /* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: simple transfer to_host */
+ struct virtio_gpu_transfer_to_host_2d {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+@@ -382,6 +430,7 @@ struct virtio_gpu_config {
+ 	__le32 num_scanouts;
+ 	__le32 num_capsets;
+ 	__le32 num_pipe;
++	__le32 num_backlight;
+ };
+ 
+ /* simple formats for fbcon/X use */
+-- 
+2.34.1
+
