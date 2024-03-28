@@ -1,0 +1,176 @@
+From 3e7e775d55c0bc7786646210fc6bbabd18f1b75b Mon Sep 17 00:00:00 2001
+From: "Reddy, Alavala Srinivasa" <alavala.srinivasa.reddy@intel.com>
+Date: Fri, 10 Nov 2023 09:14:04 +0530
+Subject: [PATCH] Config changes to prefer perf variants of an .so
+
+This patch introduces changes in linkerconfig to
+prefer perf variants of an .so in searchpaths.
+Enables us to have One-image catering to multiple
+IA CPUs which may or may not support all ISA features.
+Example: Pentium SKUs dont support AVX.
+
+Signed-off-by: Vinay Kompella <vinay.kompella@intel.com>
+---
+ contents/namespace/rs.cc                   |  6 ++++++
+ contents/namespace/systemdefault.cc        |  7 +++++++
+ contents/namespace/vndk.cc                 |  6 ++++++
+ modules/environment.cc                     | 21 +++++++++++++++++++++
+ modules/include/linkerconfig/environment.h |  2 ++
+ modules/namespace.cc                       | 10 ++++++++++
+ 6 files changed, 52 insertions(+)
+
+diff --git a/contents/namespace/rs.cc b/contents/namespace/rs.cc
+index c360555..58e2aae 100644
+--- a/contents/namespace/rs.cc
++++ b/contents/namespace/rs.cc
+@@ -19,6 +19,7 @@
+ // the genuine characteristics of Renderscript; /data is in the permitted path
+ // to load the compiled *.so file and libmediandk.so can be used here.
+ 
++#include "linkerconfig/environment.h"
+ #include "linkerconfig/namespacebuilder.h"
+ 
+ #include <android-base/strings.h>
+@@ -34,6 +35,11 @@ Namespace BuildRsNamespace([[maybe_unused]] const Context& ctx) {
+ 
+   ns.AddSearchPath("/odm/${LIB}/vndk-sp");
+   ns.AddSearchPath("/vendor/${LIB}/vndk-sp");
++  if (modules::PlatformSupportsISAFeature("avx2")) {
++	ns.AddSearchPath("/apex/com.android.vndk.v" + Var("VENDOR_VNDK_VERSION") + 
++	"/${LIB}" +
++	modules::GetSearchPathForISAFeature("avx2"));
++  }
+   ns.AddSearchPath("/apex/com.android.vndk.v" + Var("VENDOR_VNDK_VERSION") +
+                    "/${LIB}");
+   ns.AddSearchPath("/odm/${LIB}");
+diff --git a/contents/namespace/systemdefault.cc b/contents/namespace/systemdefault.cc
+index 4826637..a94b956 100644
+--- a/contents/namespace/systemdefault.cc
++++ b/contents/namespace/systemdefault.cc
+@@ -77,6 +77,10 @@ void SetupSystemPermittedPaths(Namespace* ns) {
+       "/vendor/${LIB}/arm/nb",
+   };
+ 
++  if (modules::PlatformSupportsISAFeature("avx2")) {
++    ns->AddPermittedPath("/system/${LIB}" + modules::GetSearchPathForISAFeature("avx2"));
++  }
++
+   for (const std::string& path : permitted_paths) {
+     ns->AddPermittedPath(path);
+   }
+@@ -97,6 +101,9 @@ Namespace BuildSystemDefaultNamespace([[maybe_unused]] const Context& ctx) {
+                /*is_isolated=*/is_fully_treblelized,
+                /*is_visible=*/true);
+ 
++  if (modules::PlatformSupportsISAFeature("avx2")) {
++    ns.AddSearchPath("/system/${LIB}" + modules::GetSearchPathForISAFeature("avx2"));
++  }
+   ns.AddSearchPath("/system/${LIB}");
+   ns.AddSearchPath(system_ext + "/${LIB}");
+   if (!IsProductVndkVersionDefined() || !is_fully_treblelized) {
+diff --git a/contents/namespace/vndk.cc b/contents/namespace/vndk.cc
+index d821eb7..13e71b4 100644
+--- a/contents/namespace/vndk.cc
++++ b/contents/namespace/vndk.cc
+@@ -78,6 +78,12 @@ Namespace BuildVndkNamespace([[maybe_unused]] const Context& ctx,
+     }
+   }
+ 
++  if (modules::PlatformSupportsISAFeature("avx2")) {
++    ns.AddSearchPath(
++        "/apex/com.android.vndk.v" + vndk_version + "/${LIB}" +
++         modules::GetSearchPathForISAFeature("avx2"));
++  }
++
+   // 2. VNDK APEX
+   ns.AddSearchPath("/apex/com.android.vndk.v" + vndk_version + "/${LIB}");
+ 
+diff --git a/modules/environment.cc b/modules/environment.cc
+index 82801f3..4b8c4e1 100644
+--- a/modules/environment.cc
++++ b/modules/environment.cc
+@@ -23,6 +23,9 @@
+ namespace android {
+ namespace linkerconfig {
+ namespace modules {
++
++static int kPlatformSupportsAvx2 = -1;
++
+ bool IsLegacyDevice() {
+   return !Variables::GetValue("ro.vndk.version").has_value() ||
+          Variables::GetValue("ro.treble.enabled") == "false";
+@@ -51,6 +54,24 @@ bool IsProductVndkVersionDefined() {
+ bool IsRecoveryMode() {
+   return access("/system/bin/recovery", F_OK) == 0;
+ }
++
++bool PlatformSupportsISAFeature(const char* isa_feature) {
++  if (strcmp(isa_feature, "avx2") == 0) {
++    if (kPlatformSupportsAvx2 == -1) {
++      __builtin_cpu_init();
++      kPlatformSupportsAvx2 = (__builtin_cpu_supports("avx2")) ? 1 : 0;
++    }
++    return kPlatformSupportsAvx2;
++  }
++  return false;
++}
++
++std::string GetSearchPathForISAFeature(const char* isa_feature) {
++  std::string searchPath = "/IA-Perf/";
++  searchPath += isa_feature;
++  return searchPath;
++}
++
+ }  // namespace modules
+ }  // namespace linkerconfig
+ }  // namespace android
+diff --git a/modules/include/linkerconfig/environment.h b/modules/include/linkerconfig/environment.h
+index 3aa0d32..4a4b324 100644
+--- a/modules/include/linkerconfig/environment.h
++++ b/modules/include/linkerconfig/environment.h
+@@ -26,6 +26,8 @@ std::string GetVendorVndkVersion();
+ std::string GetProductVndkVersion();
+ bool IsProductVndkVersionDefined();
+ bool IsRecoveryMode();
++bool PlatformSupportsISAFeature(const char* isa_feature);
++std::string GetSearchPathForISAFeature(const char* isa_feature);
+ }  // namespace modules
+ }  // namespace linkerconfig
+ }  // namespace android
+diff --git a/modules/namespace.cc b/modules/namespace.cc
+index 531ff3d..eead627 100644
+--- a/modules/namespace.cc
++++ b/modules/namespace.cc
+@@ -20,6 +20,7 @@
+ 
+ #include "linkerconfig/apex.h"
+ #include "linkerconfig/log.h"
++#include "linkerconfig/environment.h"
+ 
+ using android::base::Result;
+ 
+@@ -53,12 +54,21 @@ namespace linkerconfig {
+ namespace modules {
+ 
+ void InitializeWithApex(Namespace& ns, const ApexInfo& apex_info) {
++  if (PlatformSupportsISAFeature("avx2")) {
++    ns.AddSearchPath(apex_info.path + "/${LIB}" + GetSearchPathForISAFeature("avx2"));
++  }  
+   ns.AddSearchPath(apex_info.path + "/${LIB}");
++  if (PlatformSupportsISAFeature("avx2")) {
++    ns.AddPermittedPath(apex_info.path + "/${LIB}" + GetSearchPathForISAFeature("avx2"));
++  }    
+   if (apex_info.InVendor()) {
+     ns.AddSearchPath(apex_info.path + "/${LIB}/hw");
+     ns.AddSearchPath(apex_info.path + "/${LIB}/egl");
+   }
+   ns.AddPermittedPath(apex_info.path + "/${LIB}");
++  if (PlatformSupportsISAFeature("avx2")) {
++    ns.AddPermittedPath("/system/${LIB}" + GetSearchPathForISAFeature("avx2"));
++  }    
+   ns.AddPermittedPath("/system/${LIB}");
+   ns.AddPermittedPath("/system_ext/${LIB}");
+   for (const auto& permitted_path : apex_info.permitted_paths) {
+-- 
+2.17.1
+
