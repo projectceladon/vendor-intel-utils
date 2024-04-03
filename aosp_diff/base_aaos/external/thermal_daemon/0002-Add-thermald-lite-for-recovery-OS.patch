@@ -1,0 +1,348 @@
+From aab3eda9c85165054dbc8419df8037d8933a167c Mon Sep 17 00:00:00 2001
+From: "Cui, Yuxin" <yuxin.cui@intel.com>
+Date: Tue, 2 Apr 2024 10:21:24 +0000
+Subject: [PATCH] Add thermald-lite for recovery OS
+
+Add thermald-lite for software shutdown in recovery OS.
+
+Tracked-On: OAM-116981
+Signed-off-by: Cui, Yuxin <yuxin.cui@intel.com>
+---
+ thermald-lite/Android.bp        |  18 ++
+ thermald-lite/thermald_lite.cpp | 299 ++++++++++++++++++++++++++++++++
+ 2 files changed, 317 insertions(+)
+ create mode 100644 thermald-lite/Android.bp
+ create mode 100644 thermald-lite/thermald_lite.cpp
+
+diff --git a/thermald-lite/Android.bp b/thermald-lite/Android.bp
+new file mode 100644
+index 0000000..26bdb8b
+--- /dev/null
++++ b/thermald-lite/Android.bp
+@@ -0,0 +1,18 @@
++package {
++    default_applicable_licenses: ["Android-Apache-2.0"],
++}
++
++cc_binary {
++    name: "thermald-lite",
++    recovery_available: true,
++    srcs: ["thermald_lite.cpp"],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++    ],
++    shared_libs: ["libbase","libcutils"],
++    sanitize: {
++        misc_undefined: ["signed-integer-overflow"],
++    },
++}
+diff --git a/thermald-lite/thermald_lite.cpp b/thermald-lite/thermald_lite.cpp
+new file mode 100644
+index 0000000..8c1bb94
+--- /dev/null
++++ b/thermald-lite/thermald_lite.cpp
+@@ -0,0 +1,299 @@
++#define LOG_TAG "thermald-lite"
++
++#include <getopt.h>
++#include <string>
++#include <cmath>
++#include <signal.h>
++#include <errno.h>
++#include <vector>
++#include <glob.h>
++#include <cutils/properties.h>
++#include <cutils/klog.h>
++#include <android-base/logging.h>
++#include <unistd.h>
++
++#define DEV_NAME "/dev/thermald-lite"
++
++namespace fs = std::filesystem;
++bool log_enable = false;
++
++std::vector<std::string> get_thermal_zone_paths() {
++    std::vector<std::string> thermalZonePaths;
++
++    glob_t globResult;
++    if (glob("/sys/class/thermal/thermal_zone*", 0, nullptr, &globResult) == 0) {
++        for (size_t i = 0; i < globResult.gl_pathc; ++i) {
++            thermalZonePaths.push_back(globResult.gl_pathv[i]);
++        }
++        globfree(&globResult);
++    }
++
++    return thermalZonePaths;
++}
++
++std::vector<std::string> get_trip_point_type_paths(const std::string &thermal_zone_path) {
++    std::vector<std::string> tripPointTypePaths;
++    
++    glob_t glob_result;
++    std::string pattern = thermal_zone_path + "/trip_point_*_type";
++
++    int ret = glob(pattern.c_str(), GLOB_TILDE, NULL, &glob_result);
++    if (ret == 0) {
++        for (size_t i = 0; i < glob_result.gl_pathc; ++i) {
++            tripPointTypePaths.push_back(std::string(glob_result.gl_pathv[i]));
++        }
++    } else {
++        if(log_enable)
++            LOG(ERROR) << "Can not find file named trip_point_*_type!";
++    }
++
++    globfree(&glob_result);
++    return tripPointTypePaths;
++}
++
++static int get_attribute(const std::string &sysAttPath, std::string &attribute) {
++    int len = 0;
++    FILE *file = NULL;
++    const int BUFFER_SIZE = 256;
++    char buffer[BUFFER_SIZE];
++
++    if (sysAttPath.empty()) {
++        if (log_enable)
++            LOG(ERROR) << "Failed to get path";
++        return -errno;
++    }
++
++    file = fopen(sysAttPath.c_str(), "r");
++    if (file == NULL) {
++        if (log_enable)
++            LOG(ERROR) << "Failed to open file";    
++        return -errno;
++    }
++
++    len = fscanf(file, "%255s", buffer);
++    if (len < 1) {
++        if (log_enable)
++            LOG(ERROR) << "Failed to read file";
++        fclose(file);
++        return -errno;
++    }
++
++    attribute = std::string(buffer);
++    fclose(file);
++
++    return 0;
++}
++
++static int get_temperature(std::string sysTempPath, int* temp) {
++    int len = 0;
++    FILE *file = NULL;
++
++    if (sysTempPath.empty()) {
++        if (log_enable)
++            LOG(ERROR) << "Failed to get path";
++        return -errno;
++    }
++
++    file = fopen(sysTempPath.c_str(), "r");
++    if (file == NULL) {
++        if (log_enable)
++            LOG(ERROR) << "Failed to open file";
++        return -errno;
++    }
++
++    len = fscanf(file, "%d", temp);
++    if (len < 0) {
++        if (log_enable)
++            LOG(ERROR) << "Failed to read file";
++        fclose(file);
++        return -errno;
++    }
++
++    fclose(file);
++
++    return 0;
++}
++
++std::string convert_type_to_temp(const std::string& input) {
++    std::string output = input;
++    std::string suffix = "_type";
++    std::string newSuffix = "_temp";
++
++    if (output.size() >= suffix.size() && output.substr(output.size() - suffix.size()) == suffix) {
++        output.erase(output.size() - suffix.size());
++        output += newSuffix;
++    }
++
++    return output;
++}
++
++static int search_critical_temp_path(const std::string &thermal_zone_path, std::string &critical_temp_path){
++    std::vector<std::string> tripPointTypePaths = get_trip_point_type_paths(thermal_zone_path);
++
++    for (const std::string& tripPointTypePath : tripPointTypePaths) {
++        std::string tripPointType;
++        int res_type = -1;
++        res_type = get_attribute(tripPointTypePath, tripPointType);
++        if (res_type) {
++            if (log_enable)
++                LOG(ERROR) << "Can not get trip point type! Trip point type path: " << tripPointType;
++            return -1;
++        }
++        if (tripPointType == "critical") {
++            critical_temp_path = convert_type_to_temp(tripPointTypePath);
++            return 0;
++        }
++    }
++    if (log_enable)
++        LOG(ERROR) << "Can not find critical trip point! Thermal zone path: " << thermal_zone_path;
++    return -1;
++}
++
++static int search_thermal_zone(const std::string &type_name, std::string &temp_path, std::string &critical_temp_path){
++    std::vector<std::string> thermalZonePaths = get_thermal_zone_paths();
++    int res_critical = -1;
++    for (const std::string& thermalZonePath : thermalZonePaths) {
++        std::string thermalType;
++        int res_type = -1;
++        res_type = get_attribute(thermalZonePath + "/type", thermalType);
++        if (res_type) {
++            if (log_enable)
++               LOG(ERROR) << "Can not get thermal zone type! Thermal zone path: " << thermalZonePath;
++            return -1;
++        }
++        if (thermalType == type_name) {
++            if(log_enable)
++                LOG(INFO) << "Find thermal zone " << type_name << "! Thermal zone path: " << thermalZonePath;
++            temp_path = thermalZonePath + "/temp";
++            res_critical = search_critical_temp_path(thermalZonePath, critical_temp_path);
++            if (res_critical) {
++                LOG(ERROR) << "Can not get critical temp! Thermal zone path: " << thermalZonePath;
++                return -1;
++            }
++            return 0;
++        }
++    }
++    if (log_enable)
++        LOG(ERROR) << "Can not find thermal zone named: " << type_name;
++    return -1;
++}
++
++static void print_usage(FILE* stream, int exit_code) {
++    fprintf(stream, "Usage:  thermald-lite options [ ... ]\n");
++    fprintf(stream, "  --help Display this usage information.\n"
++        "  --poll-interval Poll interval 0 to disable.\n"
++        "  --log-enable To see thermald-lite logs in dmesg.\n"
++        "  --select-thermal-zone Choose thermal zone type to graceful shutdown.\n");
++    exit(exit_code);
++}
++
++int main(int argc, char** argv) {
++    android::base::InitLogging(argv, &android::base::KernelLogger);
++
++    int c;
++    int option_index = 0;
++    // poll mode
++    int thd_poll_interval = 4; //in seconds
++    // log mode
++    int ret_l = -1;
++    log_enable = property_get_bool("persist.vendor.thermald_lite.logs.enabled", false);
++    //select shutdown thermal zone
++    std::string select_thermal_zone = "TCPU";
++    std::string temp_path;
++    std::string critical_temp_path;
++
++    const char* const short_options = "hpls";
++    static struct option long_options[] = {
++    { "help", no_argument, 0, 'h' },
++    { "poll-interval", required_argument, 0, 'p' },
++    { "log-enable", no_argument, 0, 'l' },
++    { "select-thermal-zone", required_argument, 0, 's'},
++    { NULL, 0, NULL, 0 }
++    };
++    
++    if (argc > 1) {
++        while ((c = getopt_long(argc, argv, short_options, long_options,
++            &option_index)) != -1) {
++            switch (c) {
++                case 'h':
++                    print_usage(stdout, 0);
++                    break;
++                case 'p':
++                    thd_poll_interval = atoi(optarg);
++                    break;
++                case 'l':
++                    log_enable = true;
++                    ret_l = property_set("persist.vendor.thermald_lite.logs.enabled", "true");
++                    if (ret_l != 0) {
++                        LOG(INFO) << "set persist.vendor.thermald_lite.logs.enabled=true failed ret= " << ret_l << " err= " << strerror(errno);
++                    }else{
++                        LOG(INFO) << "set persist.vendor.thermald_lite.logs.enabled=true";
++                    }
++                    break;
++                case 's':
++                    select_thermal_zone = optarg;
++                    break;
++                case -1:
++                case 0:
++                    break;
++                default:
++                    break;
++            }
++        }
++    }
++ 
++    int temp = NAN;
++    int critical_temp = NAN;
++    int res_c = -1;
++    int res_t = -1;
++
++    if (log_enable)
++        LOG(INFO) << "Thermald Lite is starting mode: poll_interval " << thd_poll_interval << " select_thermal_zone " << select_thermal_zone;
++    int res_search = -1;
++    res_search = search_thermal_zone(select_thermal_zone, temp_path, critical_temp_path);
++    if (res_search) {
++        if (log_enable)
++            LOG(ERROR) << "Can not select thermal zone " << select_thermal_zone << " for graceful shutdown!";        
++        return 0;
++    }else{
++        if (log_enable)
++            LOG(INFO) << "sensor_update: type " << select_thermal_zone;
++    }
++    
++    res_c = get_temperature(critical_temp_path, &critical_temp);
++    if (res_c) {
++        if (log_enable)
++            LOG(ERROR) << "Can not get critical temperature in thermal zone " << select_thermal_zone;
++            return 0;
++    }else{
++        if (log_enable)
++            LOG(INFO) << "Critical temperature: " << critical_temp;
++    }
++
++    while (1) {
++        res_t = get_temperature(temp_path, &temp);
++        if (res_t) {
++            if (log_enable)
++                LOG(ERROR) << "Can not get temperature!";
++                return 0;
++        }
++        if (log_enable) {
++            LOG(INFO) << "Sensor " << select_thermal_zone << " temp: " << temp;
++            LOG(INFO) << "temp " << temp << " trip " << critical_temp;
++        }
++        if (temp >= critical_temp) {
++            if (log_enable)
++                LOG(INFO) << "critical temp reached";
++            int ret_s = -1;
++            ret_s = property_set("sys.powerctl", "shutdown,thermal");
++            if (ret_s != 0){
++                if (log_enable)
++                    LOG(ERROR) << "power off failed ret= " << ret_s << " err= " << strerror(errno);
++            }else{
++                if (log_enable)
++                    LOG(INFO) << "power off initiated";
++            }
++        }
++        sleep(thd_poll_interval);
++    }
++}
+-- 
+2.34.1
+
