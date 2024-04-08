@@ -28,7 +28,7 @@ cd ../
 
 git clone https://github.com/projectceladon/linux-intel-lts2022-chromium.git
 cd linux-intel-lts2022-chromium
-git checkout 6cc9132e351d53cfdf6f596fbcde10f89aafbf90
+git checkout 3ac5aa048639a40e29d2c773c5451afdc661c47f
 
 cp ../vendor-intel-utils/host/kernel/lts2022-chromium/x86_64_defconfig .config
 patch_list=`find ../vendor-intel-utils/host/kernel/lts2022-chromium -iname "*.patch" | sort -u`
