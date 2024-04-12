@@ -23,7 +23,7 @@ cd host_kernel
 
 git clone https://github.com/projectceladon/vendor-intel-utils.git
 cd vendor-intel-utils
-git checkout bcac42cad4f5f39218044fd7e02751660befa323
+git checkout b29ac676304fe6d9df26e45ac7a6f197ae8f68e2
 cd ../
 
 git clone https://github.com/projectceladon/linux-intel-lts2022-chromium.git
