@@ -1,0 +1,191 @@
+From 8531f9bfb303cd0707f94cfcb27e7188efb9960c Mon Sep 17 00:00:00 2001
+From: Ankit Agarwal <ankit.agarwal@intel.com>
+Date: Mon, 15 Apr 2024 17:20:15 +0530
+Subject: [PATCH] Fixed for crash during Monkey test run.
+
+Following crash was observed-java.lang.RuntimeException Unable to
+create service com.android.car.messenger.core.service.MessengerService
+android.app.ForegroundServiceStartNotAllowedException: Service
+.startForeground() not allowed.
+
+Fix FGS race condition with service binding
+Remove binding from AppFactory to MessengerService
+Persist MessengerService on reinstall and crash.
+
+Reference from following google commits
+4cd492422152b8aa1e02e77cd5c21760a91f6093
+802ca97289dda67a8de9f7d568b650a3eed0abf5
+
+Tests:
+Run monkey test and observe, test is pass.
+
+Tracked-On: OAM-117208
+Signed-off-by: Ankit Agarwal <ankit.agarwal@intel.com>
+---
+ AndroidManifest.xml                           |  2 ++
+ .../core/service/OnBootReceiver.java          |  4 ++-
+ .../ui/launcher/MessageLauncherActivity.java  |  7 +++-
+ .../car/messenger/impl/AppFactoryImpl.java    | 35 +------------------
+ .../car/messenger/impl/CarMessengerApp.java   |  1 +
+ 5 files changed, 13 insertions(+), 36 deletions(-)
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 11014dd..f0a9603 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -86,6 +86,7 @@
+             android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+             <intent-filter>
+                 <action android:name="android.intent.action.BOOT_COMPLETED" />
++                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+             </intent-filter>
+         </receiver>
+ 
+@@ -132,5 +133,6 @@
+          checking the projection state and more etc.
+     -->
+     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
++    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+ 
+ </manifest>
+diff --git a/src/com/android/car/messenger/core/service/OnBootReceiver.java b/src/com/android/car/messenger/core/service/OnBootReceiver.java
+index fdadfe0..e6c56da 100644
+--- a/src/com/android/car/messenger/core/service/OnBootReceiver.java
++++ b/src/com/android/car/messenger/core/service/OnBootReceiver.java
+@@ -31,9 +31,11 @@ public class OnBootReceiver extends BroadcastReceiver {
+ 
+     @Override
+     public void onReceive(@NonNull Context context, @NonNull Intent intent) {
+-        L.d("BootReceiver received!");
++        L.d("BootReceiver received " + intent.getAction());
+         if (Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) {
+             context.startService(new Intent(context, MessengerService.class));
++        } else if (Intent.ACTION_MY_PACKAGE_REPLACED.equals(intent.getAction())) {
++            context.startService(new Intent(context, MessengerService.class));
+         }
+     }
+ }
+diff --git a/src/com/android/car/messenger/core/ui/launcher/MessageLauncherActivity.java b/src/com/android/car/messenger/core/ui/launcher/MessageLauncherActivity.java
+index beed82c..bced641 100644
+--- a/src/com/android/car/messenger/core/ui/launcher/MessageLauncherActivity.java
++++ b/src/com/android/car/messenger/core/ui/launcher/MessageLauncherActivity.java
+@@ -16,6 +16,7 @@
+ 
+ package com.android.car.messenger.core.ui.launcher;
+ 
++import android.content.Intent;
+ import android.os.Bundle;
+ import androidx.fragment.app.Fragment;
+ import androidx.fragment.app.FragmentActivity;
+@@ -25,6 +26,7 @@ import androidx.lifecycle.ViewModelProvider;
+ 
+ import com.android.car.messenger.core.interfaces.AppFactory;
+ import com.android.car.messenger.core.models.UserAccount;
++import com.android.car.messenger.core.service.MessengerService;
+ import com.android.car.messenger.core.ui.conversationlist.ConversationListFragment;
+ import com.android.car.messenger.core.util.L;
+ import com.android.car.ui.baselayout.Insets;
+@@ -38,11 +40,14 @@ public class MessageLauncherActivity extends FragmentActivity implements InsetsC
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
++        L.d("onCreate: MessageLauncher");
+         super.onCreate(savedInstanceState);
+         MessageLauncherViewModel viewModel =
+                 new ViewModelProvider(this).get(MessageLauncherViewModel.class);
+ 
+-        L.d("In onCreate: MessageLauncher");
++        L.d("Starting MessengerService");
++        startService(new Intent(this, MessengerService.class));
++
+         viewModel
+                 .getAccounts()
+                 .observe(
+diff --git a/src/com/android/car/messenger/impl/AppFactoryImpl.java b/src/com/android/car/messenger/impl/AppFactoryImpl.java
+index cceb716..35bff37 100644
+--- a/src/com/android/car/messenger/impl/AppFactoryImpl.java
++++ b/src/com/android/car/messenger/impl/AppFactoryImpl.java
+@@ -16,20 +16,14 @@
+ 
+ package com.android.car.messenger.impl;
+ 
+-import android.content.ComponentName;
+ import android.content.Context;
+-import android.content.Intent;
+-import android.content.ServiceConnection;
+ import android.content.SharedPreferences;
+-import android.os.IBinder;
+ 
+ import androidx.annotation.NonNull;
+-import androidx.annotation.Nullable;
+ import androidx.preference.PreferenceManager;
+ 
+ import com.android.car.messenger.core.interfaces.AppFactory;
+ import com.android.car.messenger.core.interfaces.DataModel;
+-import com.android.car.messenger.core.service.MessengerService;
+ import com.android.car.messenger.impl.datamodels.TelephonyDataModel;
+ 
+ /* App Factory Implementation */
+@@ -37,23 +31,6 @@ class AppFactoryImpl extends AppFactory {
+     @NonNull private Context mApplicationContext;
+     @NonNull private DataModel mDataModel;
+     @NonNull private SharedPreferences mSharedPreferences;
+-    @Nullable private MessengerService mMessengerService;
+-
+-    @NonNull
+-    private final ServiceConnection mServiceConnection =
+-            new ServiceConnection() {
+-                @Override
+-                public void onServiceConnected(
+-                        @NonNull ComponentName className, @NonNull IBinder service) {
+-                    MessengerService.LocalBinder binder = (MessengerService.LocalBinder) service;
+-                    mMessengerService = binder.getService();
+-                }
+-
+-                @Override
+-                public void onServiceDisconnected(@NonNull ComponentName arg0) {
+-                    mMessengerService = null;
+-                }
+-            };
+ 
+     private AppFactoryImpl() {}
+ 
+@@ -73,22 +50,12 @@ class AppFactoryImpl extends AppFactory {
+         factory.mSharedPreferences =
+                 PreferenceManager.getDefaultSharedPreferences(factory.mApplicationContext);
+ 
+-        // Create Messenger Service
+-        Intent intent = new Intent(factory.mApplicationContext, MessengerService.class);
+-        factory.mApplicationContext.bindService(
+-                intent, factory.mServiceConnection, Context.BIND_AUTO_CREATE);
+     }
+ 
+     @Override
+     @NonNull
+     public Context getContext() {
+-        // prefer the messenger service context
+-        // to avoid warnings on using app context for UI constants
+-        if (mMessengerService != null) {
+-            return mMessengerService;
+-        } else {
+-            return mApplicationContext;
+-        }
++        return mApplicationContext;
+     }
+ 
+     @Override
+diff --git a/src/com/android/car/messenger/impl/CarMessengerApp.java b/src/com/android/car/messenger/impl/CarMessengerApp.java
+index 98fbf58..86ab890 100644
+--- a/src/com/android/car/messenger/impl/CarMessengerApp.java
++++ b/src/com/android/car/messenger/impl/CarMessengerApp.java
+@@ -32,6 +32,7 @@ public class CarMessengerApp extends Application implements UncaughtExceptionHan
+ 
+     @Override
+     public void onCreate() {
++        L.d("CarMessengerApp onCreate");
+         super.onCreate();
+         AppFactoryImpl.register(this);
+         sSystemUncaughtExceptionHandler = Thread.getDefaultUncaughtExceptionHandler();
+-- 
+2.34.1
+
