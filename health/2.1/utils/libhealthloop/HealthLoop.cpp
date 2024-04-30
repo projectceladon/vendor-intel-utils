@@ -68,8 +68,6 @@ int HealthLoop::RegisterEvent(int fd, BoundFunction func, EventWakeup wakeup) {
 
     ev.events = EPOLLIN;
 
-    if (wakeup == EVENT_WAKEUP_FD) ev.events |= EPOLLWAKEUP;
-
     ev.data.ptr = reinterpret_cast<void*>(event_handler);
 
     if (epoll_ctl(epollfd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
