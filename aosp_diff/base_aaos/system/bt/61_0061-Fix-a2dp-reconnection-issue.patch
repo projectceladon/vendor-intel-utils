@@ -1,0 +1,168 @@
+From 5231385840a7a17128324026b172fa46732cc7a6 Mon Sep 17 00:00:00 2001
+From: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+Date: Mon, 6 May 2024 09:39:32 +0530
+Subject: [PATCH] Fix a2dp reconnection issue
+
+When two reference devices are connected, switching media profile
+between them is causing frequent disconnection. The BTIF AV stream
+state machine is allowing incoming remote a2dp connection even
+if we disconnect from DUT side.
+
+Handle the stream close properly in all of the AV stream states
+transition in BTIF.
+Following commits are ported from latest Android BT codebase:
+Add for fix audio track null point
+Immediately disable to prevent unstable state inspection
+A2DP: Only apply valid BtifAvPeer to be active
+Ignore a2dp connection request in StateClosing
+
+Tests done:
+1. Build, flash and boot as BM
+2. Connect 1st Pixel 3XL and see media profile is connected
+3. Connect 2nd Pixel 3XL and see media profile is disconnected
+4. Toggle the media profile between the pixel devices
+5. 10 trails of 25-30 iterations were tested
+6. Media profile is connected successfully based on toggle
+7. Remote a2dp connection is discarded on DUT side
+
+Tracked-On: OAM-115660
+Signed-off-by: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+---
+ btif/include/btif_a2dp_sink.h |  3 +++
+ btif/src/btif_a2dp_sink.cc    |  5 +++++
+ btif/src/btif_av.cc           | 35 ++++++++++++++++++++++++++++-------
+ 3 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/btif/include/btif_a2dp_sink.h b/btif/include/btif_a2dp_sink.h
+index f5f2a0c39..e9993eb5f 100644
+--- a/btif/include/btif_a2dp_sink.h
++++ b/btif/include/btif_a2dp_sink.h
+@@ -137,4 +137,7 @@ void btif_a2dp_sink_set_focus_state_req(btif_a2dp_sink_focus_state_t state);
+ // |gain| is the audio track gain value to use.
+ void btif_a2dp_sink_set_audio_track_gain(float gain);
+ 
++// Get audio track handle
++void * btif_a2dp_sink_get_audio_track(void);
++
+ #endif /* BTIF_A2DP_SINK_H */
+diff --git a/btif/src/btif_a2dp_sink.cc b/btif/src/btif_a2dp_sink.cc
+index fa02a8682..c66eece50 100644
+--- a/btif/src/btif_a2dp_sink.cc
++++ b/btif/src/btif_a2dp_sink.cc
+@@ -733,6 +733,11 @@ void btif_a2dp_sink_set_audio_track_gain(float gain) {
+ #endif
+ }
+ 
++void * btif_a2dp_sink_get_audio_track(void)
++{
++  return btif_a2dp_sink_cb.audio_track;
++}
++
+ static void btif_a2dp_sink_clear_track_event_req() {
+   LOG_INFO("%s", __func__);
+   BT_HDR_RIGID* p_buf =
+diff --git a/btif/src/btif_av.cc b/btif/src/btif_av.cc
+index 50717d9eb..8834b949d 100644
+--- a/btif/src/btif_av.cc
++++ b/btif/src/btif_av.cc
+@@ -484,8 +484,8 @@ class BtifAvSource {
+     }
+ 
+     BtifAvPeer* peer = FindPeer(peer_address);
+-    if (peer != nullptr && !peer->IsConnected()) {
+-      LOG(ERROR) << __func__ << ": Error setting " << peer->PeerAddress()
++    if (peer == nullptr || !peer->IsConnected()) {
++      LOG(ERROR) << __func__ << ": Error setting " << peer_address
+                  << " as active Source peer";
+       peer_ready_promise.set_value();
+       return false;
+@@ -496,6 +496,9 @@ class BtifAvSource {
+       // cannot set promise but need to be handled within restart_session
+       return false;
+     }
++    LOG(INFO) << "Setting the active peer to peer address %s"
++              << peer_address.ToString().c_str();
++
+     active_peer_ = peer_address;
+     return true;
+   }
+@@ -623,8 +626,8 @@ class BtifAvSink {
+     }
+ 
+     BtifAvPeer* peer = FindPeer(peer_address);
+-    if (peer != nullptr && !peer->IsConnected()) {
+-      LOG(ERROR) << __func__ << ": Error setting " << peer->PeerAddress()
++    if (peer == nullptr || !peer->IsConnected()) {
++      LOG(ERROR) << __func__ << ": Error setting " << peer_address
+                  << " as active Sink peer";
+       peer_ready_promise.set_value();
+       return false;
+@@ -964,6 +967,7 @@ bt_status_t BtifAvSource::Init(
+   LOG_INFO("%s: max_connected_audio_devices=%d", __PRETTY_FUNCTION__,
+            max_connected_audio_devices);
+   if (enabled_) return BT_STATUS_SUCCESS;
++  enabled_ = false;
+   CleanupAllPeers();
+   max_connected_peers_ = max_connected_audio_devices;
+ 
+@@ -1010,7 +1014,6 @@ void BtifAvSource::Cleanup() {
+   CleanupAllPeers();
+ 
+   callbacks_ = nullptr;
+-  enabled_ = false;
+ }
+ 
+ BtifAvPeer* BtifAvSource::FindPeer(const RawAddress& peer_address) {
+@@ -1181,6 +1184,7 @@ bt_status_t BtifAvSink::Init(btav_sink_callbacks_t* callbacks,
+   LOG_INFO("%s(max_connected_audio_devices=%d)", __PRETTY_FUNCTION__,
+            max_connected_audio_devices);
+   if (enabled_) return BT_STATUS_SUCCESS;
++  enabled_ = false;
+ 
+   CleanupAllPeers();
+   max_connected_peers_ = max_connected_audio_devices;
+@@ -1215,7 +1219,6 @@ void BtifAvSink::Cleanup() {
+   CleanupAllPeers();
+ 
+   callbacks_ = nullptr;
+-  enabled_ = false;
+ }
+ 
+ BtifAvPeer* BtifAvSink::FindPeer(const RawAddress& peer_address) {
+@@ -1305,6 +1308,17 @@ bool BtifAvSink::AllowedToConnect(const RawAddress& peer_address) const {
+         }
+         connected++;
+         break;
++      case BtifAvStateMachine::kStateClosing:
++      case BtifAvStateMachine::kStateIdle:
++        if ((btif_a2dp_sink_get_audio_track() != nullptr) &&
++          (peer->PeerAddress() != peer_address)) {
++          LOG_INFO("%s: there is another peer with audio track(%p), another=%s, peer=%s",
++            __PRETTY_FUNCTION__, btif_a2dp_sink_get_audio_track(),
++            peer->PeerAddress().ToString().c_str(),
++            peer_address.ToString().c_str());
++          connected++;
++        }
++        break;
+       default:
+         break;
+     }
+@@ -2303,7 +2317,14 @@ bool BtifAvStateMachine::StateClosing::ProcessEvent(uint32_t event,
+                        BtifAvEvent::EventName(event).c_str());
+       btif_a2dp_on_offload_started(peer_.PeerAddress(), BTA_AV_FAIL);
+       break;
+-
++    case BTIF_AV_CONNECT_REQ_EVT:
++      BTIF_TRACE_WARNING("%s: Peer %s : Ignore %s in StateClosing",
++                         __PRETTY_FUNCTION__,
++                         peer_.PeerAddress().ToString().c_str(),
++                         BtifAvEvent::EventName(event).c_str());
++      btif_queue_advance();
++      peer_.StateMachine().TransitionTo(BtifAvStateMachine::kStateIdle);
++      break;
+     default:
+       BTIF_TRACE_WARNING("%s: Peer %s : Unhandled event=%s",
+                          __PRETTY_FUNCTION__,
+-- 
+2.17.1
+
