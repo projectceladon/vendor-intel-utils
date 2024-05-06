@@ -28,6 +28,8 @@
 #include <sys/inotify.h>
 #include <regex>
 
+#define MAX_RETRY 3
+
 namespace android {
 namespace hardware {
 namespace camera {
@@ -187,13 +189,20 @@ void ExternalCameraProvider::addExternalCamera(const char* devName) {
 }
 
 void ExternalCameraProvider::deviceAdded(const char* devName) {
-    {
+    int status = 0;
+    // sometimes device nodes not enumated hence it fails retry before confirm
+    for (int i = 0; i < MAX_RETRY; i++) {
+        if (status == 1)
+            break; 
         base::unique_fd fd(::open(devName, O_RDWR));
         if (fd.get() < 0) {
-            ALOGE("%s open v4l2 device %s failed:%s", __FUNCTION__, devName, strerror(errno));
-            return;
+            ALOGE("%s open v4l2 device %s failed:%s and iteration %d", __FUNCTION__, devName, strerror(errno), i);
+            if(usleep(200000) < 0) {
+                ALOGE("%s Failed to sleep %s :%s and iteration %d", __FUNCTION__, devName, strerror(errno), i);
+            }
+            continue;
         }
-
+        status = 1;
         struct v4l2_capability capability;
         int ret = ioctl(fd.get(), VIDIOC_QUERYCAP, &capability);
         if (ret < 0) {
