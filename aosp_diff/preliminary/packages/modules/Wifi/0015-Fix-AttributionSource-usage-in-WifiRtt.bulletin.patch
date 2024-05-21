@@ -1,0 +1,128 @@
+From e6ca0c031758d8b1511f6a359bec316b6d2e22fe Mon Sep 17 00:00:00 2001
+From: Oscar Shu <xshu@google.com>
+Date: Thu, 2 Feb 2023 00:09:54 +0000
+Subject: [PATCH] Fix AttributionSource usage in WifiRtt
+
+Avoid creating AttributionSource outside of Binder thread.
+
+Bug: 267231571
+Bug: 244465118
+Test: atest com.android.server.wifi
+(cherry picked from commit 0317c109ab6bb2ebcf4a3391279b51a77677bd8e)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:af9c66acbaac56b7813d79e2346b2a95197273d7)
+Merged-In: Ie8c41292f28f40e44d486db4e1eec688425196c8
+Change-Id: Ie8c41292f28f40e44d486db4e1eec688425196c8
+---
+ .../server/wifi/rtt/RttServiceImpl.java       | 22 ++++++++++++-------
+ .../server/wifi/rtt/RttServiceImplTest.java   |  4 +++-
+ 2 files changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/service/java/com/android/server/wifi/rtt/RttServiceImpl.java b/service/java/com/android/server/wifi/rtt/RttServiceImpl.java
+index 7cd1ea940..58428899b 100644
+--- a/service/java/com/android/server/wifi/rtt/RttServiceImpl.java
++++ b/service/java/com/android/server/wifi/rtt/RttServiceImpl.java
+@@ -22,6 +22,7 @@ import static com.android.server.wifi.WifiSettingsConfigStore.WIFI_VERBOSE_LOGGI
+ 
+ import android.annotation.NonNull;
+ import android.app.ActivityManager;
++import android.content.AttributionSource;
+ import android.content.BroadcastReceiver;
+ import android.content.Context;
+ import android.content.Intent;
+@@ -434,17 +435,21 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
+         // check if only Aware APs are ranged.
+         boolean onlyAwareApRanged = request.mRttPeers.stream().allMatch(
+                 config -> config.responderType == ResponderConfig.RESPONDER_AWARE);
++        final Object attributionSource;
+         if (onlyAwareApRanged && SdkLevel.isAtLeastT()) {
+             // Special case: if only aware APs are ranged, then allow this request if the caller
+             // has nearby permission.
+-            if (!mWifiPermissionsUtil.checkNearbyDevicesPermission(extras.getParcelable(
+-                            WifiManager.EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE), true,
++            attributionSource = extras.getParcelable(
++                    WifiManager.EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE);
++            if (!mWifiPermissionsUtil.checkNearbyDevicesPermission(
++                    (AttributionSource) attributionSource, true,
+                     "wifi aware ranging")) {
+                 // No nearby permission. Still check for location permission.
+                 mWifiPermissionsUtil.enforceFineLocationPermission(
+                         callingPackage, callingFeatureId, uid);
+             }
+         } else {
++            attributionSource = null;
+             mWifiPermissionsUtil.enforceFineLocationPermission(
+                     callingPackage, callingFeatureId, uid);
+         }
+@@ -490,7 +495,7 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
+             }
+             mRttServiceSynchronized.queueRangingRequest(uid, sourceToUse, binder, dr,
+                     callingPackage, callingFeatureId, request, callback,
+-                    isCalledFromPrivilegedContext, extras);
++                    isCalledFromPrivilegedContext, attributionSource);
+         });
+     }
+ 
+@@ -699,7 +704,7 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
+         private void queueRangingRequest(int uid, WorkSource workSource, IBinder binder,
+                 IBinder.DeathRecipient dr, String callingPackage, String callingFeatureId,
+                 RangingRequest request, IRttCallback callback,
+-                boolean isCalledFromPrivilegedContext, Bundle extras) {
++                boolean isCalledFromPrivilegedContext, Object attributionSource) {
+             mRttMetrics.recordRequest(workSource, request);
+ 
+             if (isRequestorSpamming(workSource)) {
+@@ -726,7 +731,7 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
+             newRequest.request = request;
+             newRequest.callback = callback;
+             newRequest.isCalledFromPrivilegedContext = isCalledFromPrivilegedContext;
+-            newRequest.extras = extras;
++            newRequest.attributionSource = attributionSource;
+             mRttRequestQueue.add(newRequest);
+ 
+             if (VDBG) {
+@@ -1099,8 +1104,7 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
+                 // Special case: if only aware APs are ranged, then allow this request if the caller
+                 // has nearby permission.
+                 permissionGranted = mWifiPermissionsUtil.checkNearbyDevicesPermission(
+-                        topOfQueueRequest.extras.getParcelable(
+-                                WifiManager.EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE), true,
++                        (AttributionSource) topOfQueueRequest.attributionSource, true,
+                         "wifi aware on ranging result");
+             }
+             if (!permissionGranted) {
+@@ -1242,7 +1246,9 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
+         public RangingRequest request;
+         public IRttCallback callback;
+         public boolean isCalledFromPrivilegedContext;
+-        public Bundle extras;
++        // This should be of Class AttributionSource, not is declared as Object for mainline
++        // backward compatibility.
++        public Object attributionSource;
+ 
+         public int cmdId = 0; // uninitialized cmdId value
+         public boolean dispatchedToNative = false;
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/rtt/RttServiceImplTest.java b/service/tests/wifitests/src/com/android/server/wifi/rtt/RttServiceImplTest.java
+index 517f92c03..68aeb5bb8 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/rtt/RttServiceImplTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/rtt/RttServiceImplTest.java
+@@ -45,6 +45,7 @@ import android.app.ActivityManager;
+ import android.app.AlarmManager;
+ import android.app.test.MockAnswerUtil;
+ import android.app.test.TestAlarmManager;
++import android.content.AttributionSource;
+ import android.content.BroadcastReceiver;
+ import android.content.Context;
+ import android.content.Intent;
+@@ -412,7 +413,8 @@ public class RttServiceImplTest extends WifiBaseTest {
+     @Test
+     public void testRangingOnlyAwareAps() throws Exception {
+         assumeTrue(SdkLevel.isAtLeastT());
+-        mExtras.putParcelable(WifiManager.EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE, null);
++        mExtras.putParcelable(WifiManager.EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE, mock(
++                AttributionSource.class));
+         when(mockPermissionUtil.checkNearbyDevicesPermission(any(), eq(true), any()))
+                 .thenReturn(true);
+         RangingRequest request = new RangingRequest.Builder()
+-- 
+2.44.0.396.g6e790dbe36-goog
+

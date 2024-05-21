@@ -1,0 +1,226 @@
+From e7b7f0833dc47ade981eddfbf462dcc143dddd10 Mon Sep 17 00:00:00 2001
+From: Paul Duffin <paulduffin@google.com>
+Date: Tue, 27 Sep 2022 12:41:52 +0100
+Subject: [PATCH] java_sdk_library_import: Copy all prebuilt properties to
+ child modules
+
+Previously, only the prefer property was copied from the
+java_sdk_library_import module to its child modules which meant that if
+the use_source_config_var property was used to control the prefer
+property that the child modules would never be used. That can cause
+build breakages when building against prebuilts as some parts of the
+build will use prebuilt files from java_sdk_library_import and some
+will use source files from the corresponding java_sdk_library.
+
+This change copies the use_source_config_var property too.
+
+It also adds tests to verify that dependencies on child modules of a
+java_sdk_library use the prebuilt child modules of the corresponding
+java_sdk_library_import. That revealed a bug with the handling of stub
+sources where the prefer property was set after creating the module
+which has also been fixed.
+
+Bug: 249192297
+Test: m nothing
+      # Cherry pick into branch broken by previous behavior and make
+      # sure that it fixes it.
+(cherry picked from commit on android-review.googlesource.com host: bf4de041de611de4b3ec24c5f261c4293522961a)
+(cherry picked from commit 8ab8056a4f9de6cec1fdedc7d49502439ea7aef6)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:6fa44c197335a8bea4f96cce3296f5c92d8dd7e7)
+Merged-In: I5719c257f8457bcb2238bc7965215512a20f1095
+Change-Id: I5719c257f8457bcb2238bc7965215512a20f1095
+---
+ android/prebuilt.go      | 14 +++++++-
+ java/sdk_library.go      | 17 ++++++----
+ java/sdk_library_test.go | 70 ++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 91 insertions(+), 10 deletions(-)
+
+diff --git a/android/prebuilt.go b/android/prebuilt.go
+index 584348767..e7f221b6d 100644
+--- a/android/prebuilt.go
++++ b/android/prebuilt.go
+@@ -56,7 +56,9 @@ func (t prebuiltDependencyTag) ExcludeFromApexContents() {}
+ var _ ExcludeFromVisibilityEnforcementTag = PrebuiltDepTag
+ var _ ExcludeFromApexContentsTag = PrebuiltDepTag
+ 
+-type PrebuiltProperties struct {
++// UserSuppliedPrebuiltProperties contains the prebuilt properties that can be specified in an
++// Android.bp file.
++type UserSuppliedPrebuiltProperties struct {
+ 	// When prefer is set to true the prebuilt will be used instead of any source module with
+ 	// a matching name.
+ 	Prefer *bool `android:"arch_variant"`
+@@ -70,6 +72,16 @@ type PrebuiltProperties struct {
+ 	// If specified then the prefer property is ignored in favor of the value of the Soong config
+ 	// variable.
+ 	Use_source_config_var *ConfigVarProperties
++}
++
++// CopyUserSuppliedPropertiesFromPrebuilt copies the user supplied prebuilt properties from the
++// prebuilt properties.
++func (u *UserSuppliedPrebuiltProperties) CopyUserSuppliedPropertiesFromPrebuilt(p *Prebuilt) {
++	*u = p.properties.UserSuppliedPrebuiltProperties
++}
++
++type PrebuiltProperties struct {
++	UserSuppliedPrebuiltProperties
+ 
+ 	SourceExists bool `blueprint:"mutated"`
+ 	UsePrebuilt  bool `blueprint:"mutated"`
+diff --git a/java/sdk_library.go b/java/sdk_library.go
+index 47ffc6afc..cb4805823 100644
+--- a/java/sdk_library.go
++++ b/java/sdk_library.go
+@@ -2119,8 +2119,9 @@ func (module *SdkLibraryImport) createJavaImportForStubs(mctx android.Defaultabl
+ 		Sdk_version *string
+ 		Libs        []string
+ 		Jars        []string
+-		Prefer      *bool
+ 		Compile_dex *bool
++
++		android.UserSuppliedPrebuiltProperties
+ 	}{}
+ 	props.Name = proptools.StringPtr(module.stubsLibraryModuleName(apiScope))
+ 	props.Sdk_version = scopeProperties.Sdk_version
+@@ -2130,7 +2131,7 @@ func (module *SdkLibraryImport) createJavaImportForStubs(mctx android.Defaultabl
+ 	props.Jars = scopeProperties.Jars
+ 
+ 	// The imports are preferred if the java_sdk_library_import is preferred.
+-	props.Prefer = proptools.BoolPtr(module.prebuilt.Prefer())
++	props.CopyUserSuppliedPropertiesFromPrebuilt(&module.prebuilt)
+ 
+ 	// The imports need to be compiled to dex if the java_sdk_library_import requests it.
+ 	compileDex := module.properties.Compile_dex
+@@ -2144,16 +2145,18 @@ func (module *SdkLibraryImport) createJavaImportForStubs(mctx android.Defaultabl
+ 
+ func (module *SdkLibraryImport) createPrebuiltStubsSources(mctx android.DefaultableHookContext, apiScope *apiScope, scopeProperties *sdkLibraryScopeProperties) {
+ 	props := struct {
+-		Name   *string
+-		Srcs   []string
+-		Prefer *bool
++		Name *string
++		Srcs []string
++
++		android.UserSuppliedPrebuiltProperties
+ 	}{}
+ 	props.Name = proptools.StringPtr(module.stubsSourceModuleName(apiScope))
+ 	props.Srcs = scopeProperties.Stub_srcs
+-	mctx.CreateModule(PrebuiltStubsSourcesFactory, &props)
+ 
+ 	// The stubs source is preferred if the java_sdk_library_import is preferred.
+-	props.Prefer = proptools.BoolPtr(module.prebuilt.Prefer())
++	props.CopyUserSuppliedPropertiesFromPrebuilt(&module.prebuilt)
++
++	mctx.CreateModule(PrebuiltStubsSourcesFactory, &props)
+ }
+ 
+ // Add the dependencies on the child module in the component deps mutator so that it
+diff --git a/java/sdk_library_test.go b/java/sdk_library_test.go
+index 3500c84d2..ec971a8fe 100644
+--- a/java/sdk_library_test.go
++++ b/java/sdk_library_test.go
+@@ -867,11 +867,12 @@ func TestJavaSdkLibraryImport_WithSource(t *testing.T) {
+ 	})
+ }
+ 
+-func TestJavaSdkLibraryImport_Preferred(t *testing.T) {
++func testJavaSdkLibraryImport_Preferred(t *testing.T, prefer string, preparer android.FixturePreparer) {
+ 	result := android.GroupFixturePreparers(
+ 		prepareForJavaTest,
+ 		PrepareForTestWithJavaSdkLibraryFiles,
+ 		FixtureWithLastReleaseApis("sdklib"),
++		preparer,
+ 	).RunTestWithBp(t, `
+ 		java_sdk_library {
+ 			name: "sdklib",
+@@ -885,11 +886,37 @@ func TestJavaSdkLibraryImport_Preferred(t *testing.T) {
+ 
+ 		java_sdk_library_import {
+ 			name: "sdklib",
+-			prefer: true,
++			`+prefer+`
+ 			public: {
+ 				jars: ["a.jar"],
++				stub_srcs: ["a.java"],
++				current_api: "current.txt",
++				removed_api: "removed.txt",
++				annotations: "annotations.zip",
+ 			},
+ 		}
++
++		java_library {
++			name: "combined",
++			static_libs: [
++				"sdklib.stubs",
++			],
++			java_resources: [
++				":sdklib.stubs.source",
++				":sdklib{.public.api.txt}",
++				":sdklib{.public.removed-api.txt}",
++				":sdklib{.public.annotations.zip}",
++			],
++			sdk_version: "none",
++			system_modules: "none",
++		}
++
++		java_library {
++			name: "public",
++			srcs: ["a.java"],
++			libs: ["sdklib"],
++			sdk_version: "current",
++		}
+ 		`)
+ 
+ 	CheckModuleDependencies(t, result.TestContext, "sdklib", "android_common", []string{
+@@ -903,9 +930,48 @@ func TestJavaSdkLibraryImport_Preferred(t *testing.T) {
+ 	CheckModuleDependencies(t, result.TestContext, "prebuilt_sdklib", "android_common", []string{
+ 		`dex2oatd`,
+ 		`prebuilt_sdklib.stubs`,
++		`prebuilt_sdklib.stubs.source`,
+ 		`sdklib.impl`,
+ 		`sdklib.xml`,
+ 	})
++
++	// Make sure that dependencies on child modules use the prebuilt when preferred.
++	CheckModuleDependencies(t, result.TestContext, "combined", "android_common", []string{
++		// Each use of :sdklib{...} adds a dependency onto prebuilt_sdklib.
++		`prebuilt_sdklib`,
++		`prebuilt_sdklib`,
++		`prebuilt_sdklib`,
++		`prebuilt_sdklib.stubs`,
++		`prebuilt_sdklib.stubs.source`,
++	})
++
++	// Make sure that dependencies on sdklib that resolve to one of the child libraries use the
++	// prebuilt library.
++	public := result.ModuleForTests("public", "android_common")
++	rule := public.Output("javac/public.jar")
++	inputs := rule.Implicits.Strings()
++	expected := "out/soong/.intermediates/prebuilt_sdklib.stubs/android_common/combined/sdklib.stubs.jar"
++	if !android.InList(expected, inputs) {
++		t.Errorf("expected %q to contain %q", inputs, expected)
++	}
++}
++
++func TestJavaSdkLibraryImport_Preferred(t *testing.T) {
++	t.Run("prefer", func(t *testing.T) {
++		testJavaSdkLibraryImport_Preferred(t, "prefer: true,", android.NullFixturePreparer)
++	})
++
++	t.Run("use_source_config_var", func(t *testing.T) {
++		testJavaSdkLibraryImport_Preferred(t,
++			"use_source_config_var: {config_namespace: \"acme\", var_name: \"use_source\"},",
++			android.FixtureModifyProductVariables(func(variables android.FixtureProductVariables) {
++				variables.VendorVars = map[string]map[string]string{
++					"acme": {
++						"use_source": "false",
++					},
++				}
++			}))
++	})
+ }
+ 
+ func TestJavaSdkLibraryEnforce(t *testing.T) {
+-- 
+2.44.0.396.g6e790dbe36-goog
+
