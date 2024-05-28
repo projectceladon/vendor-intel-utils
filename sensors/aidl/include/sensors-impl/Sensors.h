@@ -33,6 +33,7 @@ using ::android::AidlMessageQueue;
 using ::android::OK;
 using ::android::status_t;
 using ::android::hardware::EventFlag;
+using ::aidl::android::hardware::sensors::AdditionalInfo;
 
 class Sensors : public BnSensors, public ISensorsEventCallback {
     static constexpr const char* kWakeLockName = "SensorsHAL_WAKEUP";

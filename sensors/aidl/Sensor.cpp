@@ -18,12 +18,14 @@
 
 #include <log/log.h>
 #include "utils/SystemClock.h"
+#include <string.h>
 
 #include <cmath>
 #include <vector>
 #undef DEBUG
 
 using ::ndk::ScopedAStatus;
+using ::aidl::android::hardware::sensors::AdditionalInfo;
 
 namespace aidl {
 namespace android {
@@ -38,7 +40,10 @@ Sensor::Sensor(ISensorsEventCallback* callback)
       mLastSampleTimeNs(0),
       mCallback(callback),
       mMode(OperationMode::NORMAL) {
-      iioc = iioClient::get_iioClient();
+    #ifndef FEATURE_AUTOMOTIVE
+    setAdditionalInfoFrames();
+    #endif
+    iioc = iioClient::get_iioClient();
     mRunThread = std::thread(startThread, this);
 }
 
@@ -122,7 +127,7 @@ void Sensor::run() {
             });
         } else {
             timespec curTime;
-            clock_gettime(CLOCK_REALTIME, &curTime);
+            clock_gettime(CLOCK_BOOTTIME, &curTime);
             int64_t now = (curTime.tv_sec * kNanosecondsInSeconds) + curTime.tv_nsec;
             int64_t nextSampleTime = mLastSampleTimeNs + mSamplingPeriodNs;
 
@@ -205,6 +210,37 @@ std::vector<Event> Sensor::readEvents() {
                 event.payload.set<EventPayload::Tag::scalar>((float)iioc->devlist[mSensorInfo.sensorHandle].data[0]);
                 break;
             }
+            case SensorType::ACCELEROMETER_LIMITED_AXES:
+            case SensorType::GYROSCOPE_LIMITED_AXES: {
+            Event::EventPayload::LimitedAxesImu limitedAxesImu;
+                limitedAxesImu ={
+                    .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
+                    .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
+                    .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
+                    .xSupported = iioc->devlist[mSensorInfo.sensorHandle].data[3],
+                    .ySupported = iioc->devlist[mSensorInfo.sensorHandle].data[4],
+                    .zSupported = iioc->devlist[mSensorInfo.sensorHandle].data[5]};
+                event.payload.set<Event::EventPayload::Tag::limitedAxesImu>(limitedAxesImu);
+            break;
+            }
+
+            case SensorType::ACCELEROMETER_LIMITED_AXES_UNCALIBRATED:
+            case SensorType::GYROSCOPE_LIMITED_AXES_UNCALIBRATED: {
+            Event::EventPayload::LimitedAxesImuUncal limitedAxesImuUncal;
+                limitedAxesImuUncal = {
+                    .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
+                    .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
+                    .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
+                    .xBias = iioc->devlist[mSensorInfo.sensorHandle].data[3],
+                    .yBias = iioc->devlist[mSensorInfo.sensorHandle].data[4],
+                    .zBias = iioc->devlist[mSensorInfo.sensorHandle].data[5],
+                    .xSupported = iioc->devlist[mSensorInfo.sensorHandle].data[6],
+                    .ySupported = iioc->devlist[mSensorInfo.sensorHandle].data[7],
+                    .zSupported = iioc->devlist[mSensorInfo.sensorHandle].data[8]};
+                event.payload.set<Event::EventPayload::Tag::limitedAxesImuUncal>(limitedAxesImuUncal);
+            break;
+            }
+
             default :{
                 vec3 = {
                     .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
@@ -220,10 +256,19 @@ std::vector<Event> Sensor::readEvents() {
                 vec3 = {
                     .x = 0,
                     .y = 0,
-                    .z = -9.8,
+                    .z = 9.8,
                     .status = SensorStatus::ACCURACY_HIGH,
                     };
                 event.payload.set<EventPayload::Tag::vec3>(vec3);
+                #ifndef FEATURE_AUTOMOTIVE
+                events.push_back(event);
+                for (const auto& frame : mAdditionalInfoFrames) {
+                    event.sensorType = SensorType::ADDITIONAL_INFO;
+                    event.payload.set<Event::EventPayload::Tag::additional>(frame);
+                    events.push_back(event);
+                }
+                return events;
+                #endif
                 break;
             }
             case SensorType::MAGNETIC_FIELD:{
@@ -233,10 +278,36 @@ std::vector<Event> Sensor::readEvents() {
                     .z = 50.0,
                     .status = SensorStatus::ACCURACY_HIGH,};
                 event.payload.set<EventPayload::Tag::vec3>(vec3);
+                #ifndef FEATURE_AUTOMOTIVE
+                events.push_back(event);
+                for (const auto& frame : mAdditionalInfoFrames) {
+                    event.sensorType = SensorType::ADDITIONAL_INFO;
+                    event.payload.set<Event::EventPayload::Tag::additional>(frame);
+                    events.push_back(event);
+                }
+                return events;
+                #endif
+                break;
+            }
+            case SensorType::GYROSCOPE:{
+                vec3 = {
+                    .x = 0,
+                    .y = 0,
+                    .z = 0,
+                    .status = SensorStatus::ACCURACY_HIGH,};
+                event.payload.set<EventPayload::Tag::vec3>(vec3);
+                #ifndef FEATURE_AUTOMOTIVE
+                events.push_back(event);
+                for (const auto& frame : mAdditionalInfoFrames) {
+                    event.sensorType = SensorType::ADDITIONAL_INFO;
+                    event.payload.set<Event::EventPayload::Tag::additional>(frame);
+                    events.push_back(event);
+                }
+                return events;
+                #endif
                 break;
             }
             case SensorType::ORIENTATION:
-            case SensorType::GYROSCOPE:
             case SensorType::GRAVITY:
             case SensorType::LINEAR_ACCELERATION: {
                 event.payload.set<EventPayload::Tag::vec3>(vec3);
@@ -252,6 +323,13 @@ std::vector<Event> Sensor::readEvents() {
                 break;
             }
             case SensorType::GYROSCOPE_UNCALIBRATED: {
+                uncal={
+                    .x = -0.009562,
+                    .y = -0.002142,
+                    .z = -0.174638,
+                    .xBias = 0,
+                    .yBias = 0,
+                    .zBias = 0};
                 event.payload.set<EventPayload::Tag::uncal>(uncal);
                 break;
             }
@@ -281,6 +359,39 @@ std::vector<Event> Sensor::readEvents() {
             }
             case SensorType::HINGE_ANGLE: {
                 event.payload.set<EventPayload::Tag::scalar>(180.0f);
+                break;
+            }
+            case SensorType::ACCELEROMETER_LIMITED_AXES:
+            case SensorType::GYROSCOPE_LIMITED_AXES: {
+            Event::EventPayload::LimitedAxesImu limitedAxesImu;
+                limitedAxesImu ={
+                    .x = 0,
+                    .y = 0,
+                    .z = 0,
+                    .xSupported = 0,
+                    .ySupported = 0,
+                    .zSupported = 0};
+                event.payload.set<Event::EventPayload::Tag::limitedAxesImu>(limitedAxesImu);
+            break;
+            }
+
+            case SensorType::ACCELEROMETER_LIMITED_AXES_UNCALIBRATED:
+            case SensorType::GYROSCOPE_LIMITED_AXES_UNCALIBRATED: {
+            Event::EventPayload::LimitedAxesImuUncal limitedAxesImuUncal;
+                limitedAxesImuUncal = {
+                    .x = 0,
+                    .y = 0,
+                    .z = 0,
+                    .xBias = 0,
+                    .yBias = 0,
+                    .zBias = 0,
+                    .xSupported = 0,
+                    .ySupported = 0,
+                    .zSupported = 0};
+                event.payload.set<Event::EventPayload::Tag::limitedAxesImuUncal>(limitedAxesImuUncal);
+            break;
+            }
+            case SensorType::ADDITIONAL_INFO:{
                 break;
             }
             default :{
@@ -329,7 +440,6 @@ ScopedAStatus Sensor::injectEvent(const Event& event) {
         mCallback->postEvents(std::vector<Event>{event}, isWakeUpSensor());
         return ScopedAStatus::ok();
     }
-
     return ScopedAStatus::fromServiceSpecificError(
             static_cast<int32_t>(BnSensors::ERROR_BAD_VALUE));
 }
@@ -360,6 +470,29 @@ std::vector<Event> OnChangeSensor::readEvents() {
     return outputEvents;
 }
 
+void Sensor::setAdditionalInfoFrames() {
+    // https://developer.android.com/reference/android/hardware/SensorAdditionalInfo#TYPE_SENSOR_PLACEMENT
+
+    AdditionalInfo::AdditionalInfoPayload::FloatValues data;
+    float placement[14]={0, 1, 0, 0, -1, 0, 0, 10, 0, 0, 1, -2.5};
+    memcpy(data.values.data(), placement, sizeof(placement));
+
+    AdditionalInfo additionalInfoSensorPlacement;
+    additionalInfoSensorPlacement.type = AdditionalInfo::AdditionalInfoType::AINFO_SENSOR_PLACEMENT;
+    additionalInfoSensorPlacement.serial = 0;
+    additionalInfoSensorPlacement.payload.set<AdditionalInfo::AdditionalInfoPayload::Tag::dataFloat>(data);
+
+    const AdditionalInfo additionalInfoBegin = {
+            .type = AdditionalInfo::AdditionalInfoType::AINFO_BEGIN,
+            .serial = 0,
+    };
+    const AdditionalInfo additionalInfoEnd = {
+            .type = AdditionalInfo::AdditionalInfoType::AINFO_END,
+            .serial = 0,
+    };
+    mAdditionalInfoFrames.insert(mAdditionalInfoFrames.end(),{additionalInfoBegin,additionalInfoSensorPlacement,additionalInfoEnd});
+}
+
 AccelSensor::AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Accel Sensor";
@@ -375,10 +508,14 @@ AccelSensor::AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback) 
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
+    #ifndef FEATURE_AUTOMOTIVE
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION |
+                                             SensorInfo::SENSOR_FLAG_BITS_ADDITIONAL_INFO);
+    #elif
     mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
+    #endif
 
 }
-
 PressureSensor::PressureSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
@@ -414,7 +551,12 @@ MagnetometerSensor::MagnetometerSensor(int32_t sensorHandle, ISensorsEventCallba
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
-    mSensorInfo.flags = 0;
+    #ifndef FEATURE_AUTOMOTIVE
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION |
+                                             SensorInfo::SENSOR_FLAG_BITS_ADDITIONAL_INFO);
+    #elif
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
+    #endif
 }
 
 LightSensor::LightSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
@@ -461,7 +603,7 @@ GyroSensor::GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : 
     mSensorInfo.name = "Gyro Sensor";
     mSensorInfo.vendor = "Intel";
     mSensorInfo.version = 1;
-    mSensorInfo.type = SensorType::GYROSCOPE_UNCALIBRATED;
+    mSensorInfo.type = SensorType::GYROSCOPE;
     mSensorInfo.typeAsString = "";
     mSensorInfo.maxRange = 1000.0f * M_PI / 180.0f;
     mSensorInfo.resolution = 1000.0f * M_PI / (180.0f * 32768.0f);
@@ -471,7 +613,12 @@ GyroSensor::GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : 
     mSensorInfo.fifoReservedEventCount = 0;
     mSensorInfo.fifoMaxEventCount = 0;
     mSensorInfo.requiredPermission = "";
-    mSensorInfo.flags = 0;
+    #ifndef FEATURE_AUTOMOTIVE
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION |
+                                             SensorInfo::SENSOR_FLAG_BITS_ADDITIONAL_INFO);
+    #elif
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
+    #endif
 }
 
 AmbientTempSensor::AmbientTempSensor(int32_t sensorHandle, ISensorsEventCallback* callback)

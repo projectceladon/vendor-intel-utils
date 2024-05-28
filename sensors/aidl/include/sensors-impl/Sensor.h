@@ -18,6 +18,8 @@
 #include "iioClient.h"
 #include <aidl/android/hardware/sensors/BnSensors.h>
 
+using ::aidl::android::hardware::sensors::AdditionalInfo;
+
 namespace aidl {
 namespace android {
 namespace hardware {
@@ -41,6 +43,7 @@ class Sensor {
     using MetaDataEventType =
             ::aidl::android::hardware::sensors::Event::EventPayload::MetaData::MetaDataEventType;
     
+    using AdditionalInfo = ::aidl::android::hardware::sensors::AdditionalInfo;
     iioClient *iioc;
 
     Sensor(ISensorsEventCallback* callback);
@@ -54,6 +57,8 @@ class Sensor {
     void setOperationMode(OperationMode mode);
     bool supportsDataInjection() const;
     ndk::ScopedAStatus injectEvent(const Event& event);
+    void setAdditionalInfoFrames();
+    std::vector<AdditionalInfo> mAdditionalInfoFrames;
 
   protected:
     void run();
