@@ -30,14 +30,18 @@ function lunch
     if [[ $(find device/intel -path "*mixins*" -prune -o -name ${TARGET_PRODUCT}.mk -print) ]]; then
         product_dir=$(dirname $(find device/intel -path "*mixins*" -prune -o -name ${TARGET_PRODUCT}.mk -print))
 	echo "Executing mixin update..."
-        mixinup -s $product_dir/mixins.spec
+	if [[ ${TARGET_PRODUCT} == "aaos_iasw" ]]; then
+          mixinup -s device/intel/project-celadon/base_aaos/mixins.spec
+	else
+          mixinup -s $product_dir/mixins.spec
+	fi
     fi
 }
 
 # Get the exact value of a build variable.
 function get_build_var()
 {
-    if [ "$1" = "COMMON_LUNCH_CHOICES" ]
+    if [ "$1" = "COMMON_LUNCH_CHOICESS" ]
     then
         valid_targets=`mixinup -t`
         save=`build/soong/soong_ui.bash --dumpvar-mode $1`
