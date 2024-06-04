@@ -1,0 +1,246 @@
+From 748055291460bcaafa3e53c7da1601a687959477 Mon Sep 17 00:00:00 2001
+From: Beth Thibodeau <ethibodeau@google.com>
+Date: Tue, 19 Mar 2024 16:49:51 -0500
+Subject: [PATCH] Update media visibility on lock screen
+
+Media carousel visibility on lock screen follows the notification
+setting - if notifications are disabled on lock screen, hide media carousel
+everywhere, not just in the keyguard layout
+
+Bug: 314333719
+Test: manual
+Test: atest MediaHierarchyManagerTest
+Flag: NONE
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:0d533a9c5107d47d6259028f1371c9bba276bb40)
+Merged-In: I4f618e4013db894291e6fca9d49bceb1cb7e4bd9
+Change-Id: I4f618e4013db894291e6fca9d49bceb1cb7e4bd9
+---
+ .../systemui/media/KeyguardMediaController.kt |  5 +--
+ .../systemui/media/MediaCarouselController.kt |  1 +
+ .../systemui/media/MediaHierarchyManager.kt   | 13 ++++++
+ .../com/android/systemui/media/MediaHost.kt   | 10 ++++-
+ .../media/KeyguardMediaControllerTest.kt      | 16 --------
+ .../media/MediaHierarchyManagerTest.kt        | 40 ++++++++++++++++++-
+ 6 files changed, 62 insertions(+), 23 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/media/KeyguardMediaController.kt b/packages/SystemUI/src/com/android/systemui/media/KeyguardMediaController.kt
+index 2bf102f724f4..e8bf596c35ab 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/KeyguardMediaController.kt
++++ b/packages/SystemUI/src/com/android/systemui/media/KeyguardMediaController.kt
+@@ -25,7 +25,6 @@ import com.android.systemui.dagger.SysUISingleton
+ import com.android.systemui.media.dagger.MediaModule.KEYGUARD
+ import com.android.systemui.plugins.statusbar.StatusBarStateController
+ import com.android.systemui.statusbar.FeatureFlags
+-import com.android.systemui.statusbar.NotificationLockscreenUserManager
+ import com.android.systemui.statusbar.StatusBarState
+ import com.android.systemui.statusbar.SysuiStatusBarStateController
+ import com.android.systemui.statusbar.notification.stack.MediaHeaderView
+@@ -44,7 +43,6 @@ class KeyguardMediaController @Inject constructor(
+     @param:Named(KEYGUARD) private val mediaHost: MediaHost,
+     private val bypassController: KeyguardBypassController,
+     private val statusBarStateController: SysuiStatusBarStateController,
+-    private val notifLockscreenUserManager: NotificationLockscreenUserManager,
+     private val featureFlags: FeatureFlags,
+     private val context: Context,
+     configurationController: ConfigurationController
+@@ -166,8 +164,7 @@ class KeyguardMediaController @Inject constructor(
+         // mediaHost.visible required for proper animations handling
+         visible = mediaHost.visible &&
+                 !bypassController.bypassEnabled &&
+-                keyguardOrUserSwitcher &&
+-                notifLockscreenUserManager.shouldShowLockscreenNotifications()
++                keyguardOrUserSwitcher
+         if (visible) {
+             showMediaPlayer()
+         } else {
+diff --git a/packages/SystemUI/src/com/android/systemui/media/MediaCarouselController.kt b/packages/SystemUI/src/com/android/systemui/media/MediaCarouselController.kt
+index 2facf3dedd18..af2c1c56f006 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/MediaCarouselController.kt
++++ b/packages/SystemUI/src/com/android/systemui/media/MediaCarouselController.kt
+@@ -169,6 +169,7 @@ class MediaCarouselController @Inject constructor(
+      * It will be called when the container is out of view.
+      */
+     lateinit var updateUserVisibility: () -> Unit
++    lateinit var updateHostVisibility: () -> Unit
+ 
+     init {
+         dumpManager.registerDumpable(TAG, this)
+diff --git a/packages/SystemUI/src/com/android/systemui/media/MediaHierarchyManager.kt b/packages/SystemUI/src/com/android/systemui/media/MediaHierarchyManager.kt
+index fb601e310702..14f7e38f0142 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/MediaHierarchyManager.kt
++++ b/packages/SystemUI/src/com/android/systemui/media/MediaHierarchyManager.kt
+@@ -409,6 +409,7 @@ class MediaHierarchyManager @Inject constructor(
+                     mediaCarouselController.logSmartspaceImpression(qsExpanded)
+                 }
+                 mediaCarouselController.mediaCarouselScrollHandler.visibleToUser = isVisibleToUser()
++                mediaCarouselController.updateHostVisibility()
+             }
+ 
+             override fun onDozeAmountChanged(linear: Float, eased: Float) {
+@@ -462,6 +463,11 @@ class MediaHierarchyManager @Inject constructor(
+         mediaCarouselController.updateUserVisibility = {
+             mediaCarouselController.mediaCarouselScrollHandler.visibleToUser = isVisibleToUser()
+         }
++        mediaCarouselController.updateHostVisibility = {
++            mediaHosts.forEach {
++                it?.updateViewVisibility()
++            }
++        }
+     }
+ 
+     private fun updateConfiguration() {
+@@ -506,6 +512,13 @@ class MediaHierarchyManager @Inject constructor(
+         mediaCarouselController.closeGuts()
+     }
+ 
++    /** Return true if the carousel should be hidden because lockscreen is currently visible */
++    fun isLockedAndHidden(): Boolean {
++        return !notifLockscreenUserManager.shouldShowLockscreenNotifications() &&
++                (statusbarState == StatusBarState.SHADE_LOCKED ||
++                        statusbarState == StatusBarState.KEYGUARD)
++    }
++
+     private fun createUniqueObjectHost(): UniqueObjectHostView {
+         val viewHost = UniqueObjectHostView(context)
+         viewHost.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+diff --git a/packages/SystemUI/src/com/android/systemui/media/MediaHost.kt b/packages/SystemUI/src/com/android/systemui/media/MediaHost.kt
+index ff085c36ef9c..0d6a3af2e1f4 100644
+--- a/packages/SystemUI/src/com/android/systemui/media/MediaHost.kt
++++ b/packages/SystemUI/src/com/android/systemui/media/MediaHost.kt
+@@ -159,8 +159,14 @@ class MediaHost constructor(
+         }
+     }
+ 
+-    private fun updateViewVisibility() {
+-        state.visible = if (showsOnlyActiveMedia) {
++    /**
++     * Updates this host's state based on the current media data's status, and invokes listeners if
++     * the visibility has changed
++     */
++    fun updateViewVisibility() {
++        state.visible = if (mediaHierarchyManager.isLockedAndHidden()) {
++            false
++        } else if (showsOnlyActiveMedia) {
+             mediaDataManager.hasActiveMedia()
+         } else {
+             mediaDataManager.hasAnyMedia()
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/media/KeyguardMediaControllerTest.kt b/packages/SystemUI/tests/src/com/android/systemui/media/KeyguardMediaControllerTest.kt
+index 25ae67baa9be..fcb5231d2aed 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/media/KeyguardMediaControllerTest.kt
++++ b/packages/SystemUI/tests/src/com/android/systemui/media/KeyguardMediaControllerTest.kt
+@@ -23,7 +23,6 @@ import android.widget.FrameLayout
+ import androidx.test.filters.SmallTest
+ import com.android.systemui.SysuiTestCase
+ import com.android.systemui.statusbar.FeatureFlags
+-import com.android.systemui.statusbar.NotificationLockscreenUserManager
+ import com.android.systemui.statusbar.StatusBarState
+ import com.android.systemui.statusbar.SysuiStatusBarStateController
+ import com.android.systemui.statusbar.notification.stack.MediaHeaderView
+@@ -54,8 +53,6 @@ class KeyguardMediaControllerTest : SysuiTestCase() {
+     private lateinit var configurationController: ConfigurationController
+     @Mock
+     private lateinit var featureFlags: FeatureFlags
+-    @Mock
+-    private lateinit var notificationLockscreenUserManager: NotificationLockscreenUserManager
+     @JvmField @Rule
+     val mockito = MockitoJUnit.rule()
+ 
+@@ -68,15 +65,12 @@ class KeyguardMediaControllerTest : SysuiTestCase() {
+         // default state is positive, media should show up
+         whenever(mediaHost.visible).thenReturn(true)
+         whenever(statusBarStateController.state).thenReturn(StatusBarState.KEYGUARD)
+-        whenever(notificationLockscreenUserManager.shouldShowLockscreenNotifications())
+-                .thenReturn(true)
+         whenever(mediaHost.hostView).thenReturn(hostView)
+ 
+         keyguardMediaController = KeyguardMediaController(
+             mediaHost,
+             bypassController,
+             statusBarStateController,
+-            notificationLockscreenUserManager,
+             featureFlags,
+             context,
+             configurationController
+@@ -107,16 +101,6 @@ class KeyguardMediaControllerTest : SysuiTestCase() {
+         assertThat(mediaHeaderView.visibility).isEqualTo(visibility)
+     }
+ 
+-    @Test
+-    fun testHiddenOnKeyguard_whenNotificationsAreHidden() {
+-        whenever(notificationLockscreenUserManager.shouldShowLockscreenNotifications())
+-                .thenReturn(false)
+-
+-        keyguardMediaController.refreshMediaPosition()
+-
+-        assertThat(mediaHeaderView.visibility).isEqualTo(GONE)
+-    }
+-
+     @Test
+     fun testActivatesSplitShadeContainerInSplitShadeMode() {
+         val splitShadeContainer = FrameLayout(context)
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/media/MediaHierarchyManagerTest.kt b/packages/SystemUI/tests/src/com/android/systemui/media/MediaHierarchyManagerTest.kt
+index bf87a4a59c49..55acb793331e 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/media/MediaHierarchyManagerTest.kt
++++ b/packages/SystemUI/tests/src/com/android/systemui/media/MediaHierarchyManagerTest.kt
+@@ -35,6 +35,7 @@ import com.android.systemui.statusbar.policy.ConfigurationController
+ import com.android.systemui.statusbar.policy.KeyguardStateController
+ import com.android.systemui.util.animation.UniqueObjectHostView
+ import junit.framework.Assert
++import com.google.common.truth.Truth.assertThat
+ import org.junit.Assert.assertNotNull
+ import org.junit.Before
+ import org.junit.Rule
+@@ -108,6 +109,7 @@ class MediaHierarchyManagerTest : SysuiTestCase() {
+                 statusBarKeyguardViewManager)
+         verify(wakefulnessLifecycle).addObserver(wakefullnessObserver.capture())
+         verify(statusBarStateController).addCallback(statusBarCallback.capture())
++        `when`(mediaCarouselController.updateHostVisibility).thenReturn({})
+         setupHost(lockHost, MediaHierarchyManager.LOCATION_LOCKSCREEN)
+         setupHost(qsHost, MediaHierarchyManager.LOCATION_QS)
+         setupHost(qqsHost, MediaHierarchyManager.LOCATION_QQS)
+@@ -245,4 +247,40 @@ class MediaHierarchyManagerTest : SysuiTestCase() {
+ 
+         verify(mediaCarouselController).closeGuts()
+     }
+-}
+\ No newline at end of file
++
++    @Test
++    fun keyguardState_allowedOnLockscreen_updateVisibility() {
++        `when`(notificationLockscreenUserManager.shouldShowLockscreenNotifications())
++                .thenReturn(true)
++
++        statusBarCallback.value.onStatePreChange(StatusBarState.SHADE, StatusBarState.KEYGUARD)
++        statusBarCallback.value.onStateChanged(StatusBarState.KEYGUARD)
++
++        verify(mediaCarouselController).updateHostVisibility
++        assertThat(mediaHiearchyManager.isLockedAndHidden()).isFalse()
++    }
++
++    @Test
++    fun keyguardState_notAllowedOnLockscreen_updateVisibility() {
++        `when`(notificationLockscreenUserManager.shouldShowLockscreenNotifications())
++                .thenReturn(false)
++
++        statusBarCallback.value.onStatePreChange(StatusBarState.SHADE, StatusBarState.KEYGUARD)
++        statusBarCallback.value.onStateChanged(StatusBarState.KEYGUARD)
++
++        verify(mediaCarouselController).updateHostVisibility
++        assertThat(mediaHiearchyManager.isLockedAndHidden()).isTrue()
++    }
++
++    @Test
++    fun keyguardGone_updateVisibility() {
++        `when`(notificationLockscreenUserManager.shouldShowLockscreenNotifications())
++                .thenReturn(false)
++
++        statusBarCallback.value.onStatePreChange(StatusBarState.KEYGUARD, StatusBarState.SHADE)
++        statusBarCallback.value.onStateChanged(StatusBarState.SHADE)
++
++        verify(mediaCarouselController).updateHostVisibility
++        assertThat(mediaHiearchyManager.isLockedAndHidden()).isFalse()
++    }
++}
+-- 
+2.44.0.396.g6e790dbe36-goog
+
