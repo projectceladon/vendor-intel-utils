@@ -1,11 +1,17 @@
-/*
- * Copyright (C) 2022 The Android Open Source Project
+/**
+ * @file RemoteCameraDevice.cpp
+ * @author Shiva Kumara (shiva.kumara.rudrappa@intel.com)
+ * @brief  Implementation of remote camera device api.
+ * @version 0.1
+ * @date 2024-06-18
+ *
+ * Copyright (c) 2021 Intel Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,12 +20,12 @@
  * limitations under the License.
  */
 
-#define LOG_TAG "ExtCamDev"
+#define LOG_TAG "RemoteCamDev"
 //#define LOG_NDEBUG 0
 #include <log/log.h>
 
-#include "ExternalCameraDevice.h"
-
+#include "RemoteCameraDevice.h"
+#include "CameraSocketCommand.h"
 #include <aidl/android/hardware/camera/common/Status.h>
 #include <convert.h>
 #include <linux/videodev2.h>
@@ -32,38 +38,27 @@ namespace camera {
 namespace device {
 namespace implementation {
 
+
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define UPDATE(tag, data, size)                        \
+    do {                                               \
+        if (metadata->update((tag), (data), (size))) { \
+            ALOGE("Update " #tag " failed!");          \
+            return -EINVAL;                            \
+        }                                              \
+    } while (0)
+
+
 using ::aidl::android::hardware::camera::common::Status;
 
-namespace {
-// Only support MJPEG for now as it seems to be the one supports higher fps
-// Other formats to consider in the future:
-// * V4L2_PIX_FMT_YVU420 (== YV12)
-// * V4L2_PIX_FMT_YVYU (YVYU: can be converted to YV12 or other YUV420_888 formats)
-const std::array<uint32_t, /*size*/ 2> kSupportedFourCCs{
-        {V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_Z16}};  // double braces required in C++11
-
-constexpr int MAX_RETRY = 5;                  // Allow retry v4l2 open failures a few times.
-constexpr int OPEN_RETRY_SLEEP_US = 100'000;  // 100ms * MAX_RETRY = 0.5 seconds
-
-const std::regex kDevicePathRE("/dev/video([0-9]+)");
-}  // namespace
-
-std::string ExternalCameraDevice::kDeviceVersion = "1.1";
-
-ExternalCameraDevice::ExternalCameraDevice(const std::string& devicePath,
+RemoteCameraDevice::RemoteCameraDevice(const std::string& devicePath, const int clientFd,
                                            const ExternalCameraConfig& config)
-    : mCameraId("-1"), mDevicePath(devicePath), mCfg(config) {
-    std::smatch sm;
-    if (std::regex_match(mDevicePath, sm, kDevicePathRE)) {
-        mCameraId = std::to_string(mCfg.cameraIdOffset + std::stoi(sm[1]));
-    } else {
-        ALOGE("%s: device path match failed for %s", __FUNCTION__, mDevicePath.c_str());
-    }
+    : mFd(clientFd), mCameraId(devicePath), mCfg(config) {    
 }
 
-ExternalCameraDevice::~ExternalCameraDevice() {}
+RemoteCameraDevice::~RemoteCameraDevice() {}
 
-ndk::ScopedAStatus ExternalCameraDevice::getCameraCharacteristics(CameraMetadata* _aidl_return) {
+ndk::ScopedAStatus RemoteCameraDevice::getCameraCharacteristics(CameraMetadata* _aidl_return) {
     Mutex::Autolock _l(mLock);
     if (_aidl_return == nullptr) {
         return fromStatus(Status::ILLEGAL_ARGUMENT);
@@ -79,13 +74,13 @@ ndk::ScopedAStatus ExternalCameraDevice::getCameraCharacteristics(CameraMetadata
     return fromStatus(Status::OK);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::getPhysicalCameraCharacteristics(const std::string&,
+ndk::ScopedAStatus RemoteCameraDevice::getPhysicalCameraCharacteristics(const std::string&,
                                                                           CameraMetadata*) {
     ALOGE("%s: Physical camera functions are not supported for external cameras.", __FUNCTION__);
     return fromStatus(Status::ILLEGAL_ARGUMENT);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::getResourceCost(CameraResourceCost* _aidl_return) {
+ndk::ScopedAStatus RemoteCameraDevice::getResourceCost(CameraResourceCost* _aidl_return) {
     if (_aidl_return == nullptr) {
         return fromStatus(Status::ILLEGAL_ARGUMENT);
     }
@@ -94,19 +89,19 @@ ndk::ScopedAStatus ExternalCameraDevice::getResourceCost(CameraResourceCost* _ai
     return fromStatus(Status::OK);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::isStreamCombinationSupported(
+ndk::ScopedAStatus RemoteCameraDevice::isStreamCombinationSupported(
         const StreamConfiguration& in_streams, bool* _aidl_return) {
     if (isInitFailed()) {
         ALOGE("%s: camera %s. camera init failed!", __FUNCTION__, mCameraId.c_str());
         return fromStatus(Status::INTERNAL_ERROR);
     }
-    Status s = ExternalCameraDeviceSession::isStreamCombinationSupported(in_streams,
-                                                                         mSupportedFormats, mCfg);
+    Status s = RemoteCameraDeviceSession::isStreamCombinationSupported(in_streams,
+                                                                         mSupportedFormats);
     *_aidl_return = s == Status::OK;
     return fromStatus(Status::OK);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::open(
+ndk::ScopedAStatus RemoteCameraDevice::open(
         const std::shared_ptr<ICameraDeviceCallback>& in_callback,
         std::shared_ptr<ICameraDeviceSession>* _aidl_return) {
     if (_aidl_return == nullptr) {
@@ -121,34 +116,44 @@ ndk::ScopedAStatus ExternalCameraDevice::open(
         return fromStatus(Status::INTERNAL_ERROR);
     }
 
-    std::shared_ptr<ExternalCameraDeviceSession> session;
-    ALOGV("%s: Initializing device for camera %s", __FUNCTION__, mCameraId.c_str());
+    std::shared_ptr<RemoteCameraDeviceSession> session;
+    ALOGI("%s: Initializing device for camera %s", __FUNCTION__, mCameraId.c_str());
     session = mSession.lock();
 
     if (session != nullptr && !session->isClosed()) {
         ALOGE("%s: cannot open an already opened camera!", __FUNCTION__);
         return fromStatus(Status::CAMERA_IN_USE);
-    }
+    }    
+    status_t status = INVALID_OPERATION;
+    size_t config_cmd_packet_size = sizeof(camera_header_t) + sizeof(camera_config_cmd_t);
+    camera_config_cmd_t config_cmd = {};
+    config_cmd.version = CAMERA_VHAL_VERSION_2;
+    config_cmd.cmd = camera_cmd_t::CMD_OPEN;
+    camera_packet_t *config_cmd_packet = NULL;
 
-    int numAttempt = 0;
-    unique_fd fd(::open(mDevicePath.c_str(), O_RDWR));
-    while (fd.get() < 0 && numAttempt < MAX_RETRY) {
-        // Previous retry attempts failed. Retry opening the device at most MAX_RETRY times
-        ALOGW("%s: v4l2 device %s open failed, wait 33ms and try again", __FUNCTION__,
-              mDevicePath.c_str());
-        usleep(OPEN_RETRY_SLEEP_US);  // sleep and try again
-        fd.reset(::open(mDevicePath.c_str(), O_RDWR));
-        numAttempt++;
-    }
-
-    if (fd.get() < 0) {
-        ALOGE("%s: v4l2 device open %s failed: %s", __FUNCTION__, mDevicePath.c_str(),
-              strerror(errno));
+    ALOGI(" sending open command ");
+    config_cmd_packet = (camera_packet_t *)malloc(config_cmd_packet_size);
+    if (config_cmd_packet == NULL) {
+        ALOGE(LOG_TAG "%s: config camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
         return fromStatus(Status::INTERNAL_ERROR);
     }
 
-    session = createSession(in_callback, mCfg, mSupportedFormats, mCroppingType,
-                            mCameraCharacteristics, mCameraId, std::move(fd));
+    config_cmd_packet->header.type = CAMERA_CONFIG;
+    config_cmd_packet->header.size = sizeof(camera_config_cmd_t);
+    memcpy(config_cmd_packet->payload, &config_cmd, sizeof(camera_config_cmd_t));
+
+    if (send(mFd, config_cmd_packet, config_cmd_packet_size, 0) < 0) {
+        ALOGE(LOG_TAG "%s: Failed to send Camera %s command to client, err %s ", __FUNCTION__,
+              (config_cmd.cmd == camera_cmd_t::CMD_CLOSE) ? "CloseCamera" : "OpenCamera", strerror(errno));
+        free(config_cmd_packet);
+        return fromStatus(Status::INTERNAL_ERROR);
+    }
+    status = OK;
+    free(config_cmd_packet);
+    
+    session = createSession(in_callback, mSupportedFormats, mCroppingType,
+                            mCameraCharacteristics, mFd);
+    
     if (session == nullptr) {
         ALOGE("%s: camera device session allocation failed", __FUNCTION__);
         return fromStatus(Status::INTERNAL_ERROR);
@@ -164,38 +169,37 @@ ndk::ScopedAStatus ExternalCameraDevice::open(
     return fromStatus(Status::OK);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::openInjectionSession(
+ndk::ScopedAStatus RemoteCameraDevice::openInjectionSession(
         const std::shared_ptr<ICameraDeviceCallback>&, std::shared_ptr<ICameraInjectionSession>*) {
     return fromStatus(Status::OPERATION_NOT_SUPPORTED);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::setTorchMode(bool) {
+ndk::ScopedAStatus RemoteCameraDevice::setTorchMode(bool) {
     return fromStatus(Status::OPERATION_NOT_SUPPORTED);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::turnOnTorchWithStrengthLevel(int32_t) {
+ndk::ScopedAStatus RemoteCameraDevice::turnOnTorchWithStrengthLevel(int32_t) {
     return fromStatus(Status::OPERATION_NOT_SUPPORTED);
 }
 
-ndk::ScopedAStatus ExternalCameraDevice::getTorchStrengthLevel(int32_t*) {
+ndk::ScopedAStatus RemoteCameraDevice::getTorchStrengthLevel(int32_t*) {
     return fromStatus(Status::OPERATION_NOT_SUPPORTED);
 }
 
-std::shared_ptr<ExternalCameraDeviceSession> ExternalCameraDevice::createSession(
-        const std::shared_ptr<ICameraDeviceCallback>& cb, const ExternalCameraConfig& cfg,
+std::shared_ptr<RemoteCameraDeviceSession> RemoteCameraDevice::createSession(
+        const std::shared_ptr<ICameraDeviceCallback>& cb,
         const std::vector<SupportedV4L2Format>& sortedFormats, const CroppingType& croppingType,
-        const common::V1_0::helper::CameraMetadata& chars, const std::string& cameraId,
-        unique_fd v4l2Fd) {
-    return ndk::SharedRefBase::make<ExternalCameraDeviceSession>(
-            cb, cfg, sortedFormats, croppingType, chars, cameraId, std::move(v4l2Fd));
+        const common::V1_0::helper::CameraMetadata& chars, int vsockFd) {
+    return ndk::SharedRefBase::make<RemoteCameraDeviceSession>(
+            cb, sortedFormats, croppingType, chars, vsockFd);
 }
 
-bool ExternalCameraDevice::isInitFailed() {
+bool RemoteCameraDevice::isInitFailed() {
     Mutex::Autolock _l(mLock);
     return isInitFailedLocked();
 }
 
-bool ExternalCameraDevice::isInitFailedLocked() {
+bool RemoteCameraDevice::isInitFailedLocked() {
     if (!mInitialized) {
         status_t ret = initCameraCharacteristics();
         if (ret != OK) {
@@ -207,75 +211,23 @@ bool ExternalCameraDevice::isInitFailedLocked() {
     return mInitFailed;
 }
 
-void ExternalCameraDevice::initSupportedFormatsLocked(int fd) {
-    std::vector<SupportedV4L2Format> horizontalFmts =
-            getCandidateSupportedFormatsLocked(fd, HORIZONTAL, mCfg.fpsLimits, mCfg.depthFpsLimits,
-                                               mCfg.minStreamSize, mCfg.depthEnabled);
-    std::vector<SupportedV4L2Format> verticalFmts =
-            getCandidateSupportedFormatsLocked(fd, VERTICAL, mCfg.fpsLimits, mCfg.depthFpsLimits,
-                                               mCfg.minStreamSize, mCfg.depthEnabled);
-
-    size_t horiSize = horizontalFmts.size();
-    size_t vertSize = verticalFmts.size();
-
-    if (horiSize == 0 && vertSize == 0) {
+void RemoteCameraDevice::initSupportedFormatsLocked() {
+    std::vector<SupportedV4L2Format> fmts = getCandidateSupportedFormatsLocked();
+    if (fmts.size() == 0) {
         ALOGE("%s: cannot find suitable cropping type!", __FUNCTION__);
         return;
     }
 
-    if (horiSize == 0) {
-        mSupportedFormats = verticalFmts;
-        mCroppingType = VERTICAL;
-        return;
-    } else if (vertSize == 0) {
-        mSupportedFormats = horizontalFmts;
-        mCroppingType = HORIZONTAL;
-        return;
-    }
-
-    const auto& maxHoriSize = horizontalFmts[horizontalFmts.size() - 1];
-    const auto& maxVertSize = verticalFmts[verticalFmts.size() - 1];
-
-    // Try to keep the largest possible output size
-    // When they are the same or ambiguous, pick the one support more sizes
-    if (maxHoriSize.width == maxVertSize.width && maxHoriSize.height == maxVertSize.height) {
-        if (horiSize > vertSize) {
-            mSupportedFormats = horizontalFmts;
-            mCroppingType = HORIZONTAL;
-        } else {
-            mSupportedFormats = verticalFmts;
-            mCroppingType = VERTICAL;
-        }
-    } else if (maxHoriSize.width >= maxVertSize.width && maxHoriSize.height >= maxVertSize.height) {
-        mSupportedFormats = horizontalFmts;
-        mCroppingType = HORIZONTAL;
-    } else if (maxHoriSize.width <= maxVertSize.width && maxHoriSize.height <= maxVertSize.height) {
-        mSupportedFormats = verticalFmts;
-        mCroppingType = VERTICAL;
-    } else {
-        if (horiSize > vertSize) {
-            mSupportedFormats = horizontalFmts;
-            mCroppingType = HORIZONTAL;
-        } else {
-            mSupportedFormats = verticalFmts;
-            mCroppingType = VERTICAL;
-        }
-    }
+    mSupportedFormats = fmts;
+    mCroppingType = HORIZONTAL;
+    return;
 }
 
-status_t ExternalCameraDevice::initCameraCharacteristics() {
+status_t RemoteCameraDevice::initCameraCharacteristics() {
     if (!mCameraCharacteristics.isEmpty()) {
         // Camera Characteristics previously initialized. Skip.
         return OK;
     }
-
-    // init camera characteristics
-    unique_fd fd(::open(mDevicePath.c_str(), O_RDWR));
-    if (fd.get() < 0) {
-        ALOGE("%s: v4l2 device open %s failed", __FUNCTION__, mDevicePath.c_str());
-        return DEAD_OBJECT;
-    }
-
     status_t ret;
     ret = initDefaultCharsKeys(&mCameraCharacteristics);
     if (ret != OK) {
@@ -284,14 +236,14 @@ status_t ExternalCameraDevice::initCameraCharacteristics() {
         return ret;
     }
 
-    ret = initCameraControlsCharsKeys(fd.get(), &mCameraCharacteristics);
+    ret = initCameraControlsCharsKeys(&mCameraCharacteristics);
     if (ret != OK) {
         ALOGE("%s: init camera control characteristics key failed: errorno %d", __FUNCTION__, ret);
         mCameraCharacteristics.clear();
         return ret;
     }
 
-    ret = initOutputCharsKeys(fd.get(), &mCameraCharacteristics);
+    ret = initOutputCharsKeys(&mCameraCharacteristics);
     if (ret != OK) {
         ALOGE("%s: init output characteristics key failed: errorno %d", __FUNCTION__, ret);
         mCameraCharacteristics.clear();
@@ -308,53 +260,23 @@ status_t ExternalCameraDevice::initCameraCharacteristics() {
     return OK;
 }
 
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
-#define UPDATE(tag, data, size)                        \
-    do {                                               \
-        if (metadata->update((tag), (data), (size))) { \
-            ALOGE("Update " #tag " failed!");          \
-            return -EINVAL;                            \
-        }                                              \
-    } while (0)
-
-status_t ExternalCameraDevice::initAvailableCapabilities(
+status_t RemoteCameraDevice::initAvailableCapabilities(
         ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata) {
+    ALOGI("%s", __FUNCTION__);
     if (mSupportedFormats.empty()) {
         ALOGE("%s: Supported formats list is empty", __FUNCTION__);
         return UNKNOWN_ERROR;
     }
 
-    bool hasDepth = false;
-    bool hasColor = false;
-    for (const auto& fmt : mSupportedFormats) {
-        switch (fmt.fourcc) {
-            case V4L2_PIX_FMT_Z16:
-                hasDepth = true;
-                break;
-            case V4L2_PIX_FMT_MJPEG:
-                hasColor = true;
-                break;
-            default:
-                ALOGW("%s: Unsupported format found", __FUNCTION__);
-        }
-    }
-
     std::vector<uint8_t> availableCapabilities;
-    if (hasDepth) {
-        availableCapabilities.push_back(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_DEPTH_OUTPUT);
-    }
-    if (hasColor) {
-        availableCapabilities.push_back(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE);
-    }
-    if (!availableCapabilities.empty()) {
-        UPDATE(ANDROID_REQUEST_AVAILABLE_CAPABILITIES, availableCapabilities.data(),
-               availableCapabilities.size());
-    }
+    availableCapabilities.push_back(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_BACKWARD_COMPATIBLE);
+    UPDATE(ANDROID_REQUEST_AVAILABLE_CAPABILITIES, availableCapabilities.data(),
+            availableCapabilities.size());
 
     return OK;
 }
 
-status_t ExternalCameraDevice::initDefaultCharsKeys(
+status_t RemoteCameraDevice::initDefaultCharsKeys(
         ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata) {
     const uint8_t hardware_level = ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL_EXTERNAL;
     UPDATE(ANDROID_INFO_SUPPORTED_HARDWARE_LEVEL, &hardware_level, 1);
@@ -400,8 +322,7 @@ status_t ExternalCameraDevice::initDefaultCharsKeys(
     UPDATE(ANDROID_HOT_PIXEL_AVAILABLE_HOT_PIXEL_MODES, &hotPixelMode, 1);
 
     // android.jpeg
-    const int32_t jpegAvailableThumbnailSizes[] = {0,   0,   176, 144, 240, 144, 256,
-                                                   144, 240, 160, 256, 154, 240, 180};
+    const int32_t jpegAvailableThumbnailSizes[] = {0,   0,  240, 180};
     UPDATE(ANDROID_JPEG_AVAILABLE_THUMBNAIL_SIZES, jpegAvailableThumbnailSizes,
            ARRAY_SIZE(jpegAvailableThumbnailSizes));
 
@@ -438,8 +359,8 @@ status_t ExternalCameraDevice::initDefaultCharsKeys(
     // YUV_420_888 or YV12.
     const int32_t requestMaxNumOutputStreams[] = {
             /*RAW*/ 0,
-            /*Processed*/ ExternalCameraDeviceSession::kMaxProcessedStream,
-            /*Stall*/ ExternalCameraDeviceSession::kMaxStallStream};
+            /*Processed*/2,// RemoteCameraDeviceSession::kMaxProcessedStream,
+            /*Stall*/1};// RemoteCameraDeviceSession::kMaxStallStream};
     UPDATE(ANDROID_REQUEST_MAX_NUM_OUTPUT_STREAMS, requestMaxNumOutputStreams,
            ARRAY_SIZE(requestMaxNumOutputStreams));
 
@@ -456,8 +377,7 @@ status_t ExternalCameraDevice::initDefaultCharsKeys(
     const uint8_t croppingType = ANDROID_SCALER_CROPPING_TYPE_CENTER_ONLY;
     UPDATE(ANDROID_SCALER_CROPPING_TYPE, &croppingType, 1);
 
-    const int32_t testPatternModes[] = {ANDROID_SENSOR_TEST_PATTERN_MODE_OFF,
-                                        ANDROID_SENSOR_TEST_PATTERN_MODE_SOLID_COLOR};
+    const int32_t testPatternModes[] = {ANDROID_SENSOR_TEST_PATTERN_MODE_OFF};
     UPDATE(ANDROID_SENSOR_AVAILABLE_TEST_PATTERN_MODES, testPatternModes,
            ARRAY_SIZE(testPatternModes));
 
@@ -469,7 +389,7 @@ status_t ExternalCameraDevice::initDefaultCharsKeys(
     // natural display orientation. For devices with natural landscape display (ex: tablet/TV), the
     // orientation should be 0. For devices with natural portrait display (phone), the orientation
     // should be 270.
-    const int32_t orientation = mCfg.orientation;
+    const int32_t orientation = 0;//mCfg.orientation;
     UPDATE(ANDROID_SENSOR_ORIENTATION, &orientation, 1);
 
     // android.shading
@@ -575,8 +495,8 @@ status_t ExternalCameraDevice::initDefaultCharsKeys(
     return OK;
 }
 
-status_t ExternalCameraDevice::initCameraControlsCharsKeys(
-        int, ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata) {
+status_t RemoteCameraDevice::initCameraControlsCharsKeys(
+        ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata) {
     // android.sensor.info.sensitivityRange   -> V4L2_CID_ISO_SENSITIVITY
     // android.sensor.info.exposureTimeRange  -> V4L2_CID_EXPOSURE_ABSOLUTE
     // android.sensor.info.maxFrameDuration   -> TBD
@@ -616,95 +536,79 @@ status_t ExternalCameraDevice::initCameraControlsCharsKeys(
     return OK;
 }
 
-status_t ExternalCameraDevice::initOutputCharsKeys(
-        int fd, ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata) {
-    initSupportedFormatsLocked(fd);
+status_t RemoteCameraDevice::initOutputCharsKeys(
+        ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata) {
+
+    initSupportedFormatsLocked();
     if (mSupportedFormats.empty()) {
         ALOGE("%s: Init supported format list failed", __FUNCTION__);
         return UNKNOWN_ERROR;
     }
-
-    bool hasDepth = false;
-    bool hasColor = false;
-
-    // For V4L2_PIX_FMT_Z16
-    std::array<int, /*size*/ 1> halDepthFormats{{HAL_PIXEL_FORMAT_Y16}};
-    // For V4L2_PIX_FMT_MJPEG
     std::array<int, /*size*/ 3> halFormats{{HAL_PIXEL_FORMAT_BLOB, HAL_PIXEL_FORMAT_YCbCr_420_888,
                                             HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED}};
-
+    if (mSupportedFormats.empty()) {
+        ALOGE("%s: init supported format list failed.", __FUNCTION__);
+        return UNKNOWN_ERROR;
+    }
     for (const auto& supportedFormat : mSupportedFormats) {
         switch (supportedFormat.fourcc) {
-            case V4L2_PIX_FMT_Z16:
-                hasDepth = true;
-                break;
-            case V4L2_PIX_FMT_MJPEG:
-                hasColor = true;
-                break;
-            default:
-                ALOGW("%s: format %c%c%c%c is not supported!", __FUNCTION__,
-                      supportedFormat.fourcc & 0xFF, (supportedFormat.fourcc >> 8) & 0xFF,
-                      (supportedFormat.fourcc >> 16) & 0xFF, (supportedFormat.fourcc >> 24) & 0xFF);
+        case V4L2_PIX_FMT_YUYV:
+
+            initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_YUYV, halFormats,
+                                        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+                                        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
+                                        ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
+                                        ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
+            break;
+        case V4L2_PIX_FMT_UYVY:
+
+            initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_UYVY, halFormats,
+                                        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+                                        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
+                                        ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
+                                        ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
+            break;
+        case HAL_PIXEL_FORMAT_YCbCr_420_888:
+
+            initOutputCharsKeysByFormat(metadata, HAL_PIXEL_FORMAT_YCbCr_420_888, halFormats,
+                                        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
+                                        ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
+                                        ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
+                                        ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
+            break;
+        default:
+            ALOGE("%s: format %c%c%c%c is not supported!", __FUNCTION__,
+                  supportedFormat.fourcc & 0xFF, (supportedFormat.fourcc >> 8) & 0xFF,
+                  (supportedFormat.fourcc >> 16) & 0xFF, (supportedFormat.fourcc >> 24) & 0xFF);
         }
     }
 
-    if (hasDepth) {
-        status_t ret = initOutputCharsKeysByFormat(
-                metadata, V4L2_PIX_FMT_Z16, halDepthFormats,
-                ANDROID_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS_OUTPUT,
-                ANDROID_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS,
-                ANDROID_DEPTH_AVAILABLE_DEPTH_MIN_FRAME_DURATIONS,
-                ANDROID_DEPTH_AVAILABLE_DEPTH_STALL_DURATIONS);
-        if (ret != OK) {
-            ALOGE("%s: Unable to initialize depth format keys: %s", __FUNCTION__,
-                  statusToString(ret).c_str());
-            return ret;
-        }
-    }
-    if (hasColor) {
-        status_t ret =
-                initOutputCharsKeysByFormat(metadata, V4L2_PIX_FMT_MJPEG, halFormats,
-                                            ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_OUTPUT,
-                                            ANDROID_SCALER_AVAILABLE_STREAM_CONFIGURATIONS,
-                                            ANDROID_SCALER_AVAILABLE_MIN_FRAME_DURATIONS,
-                                            ANDROID_SCALER_AVAILABLE_STALL_DURATIONS);
-        if (ret != OK) {
-            ALOGE("%s: Unable to initialize color format keys: %s", __FUNCTION__,
-                  statusToString(ret).c_str());
-            return ret;
-        }
-    }
+    // Caculate fps, we set it as fixed 30fps.
+    calculateMinFps(metadata);
+    int32_t activeArraySize[] = {0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT};
+    activeArraySize[2] = DEFAULT_WIDTH;//mCaptureManager->getWidth(mCameraId);
+    activeArraySize[3] = DEFAULT_HEIGHT;//mCaptureManager->getHeight(mCameraId);
 
-    status_t ret = calculateMinFps(metadata);
-    if (ret != OK) {
-        ALOGE("%s: Unable to update fps metadata: %s", __FUNCTION__, statusToString(ret).c_str());
-        return ret;
-    }
-
-    SupportedV4L2Format maximumFormat{.width = 0, .height = 0};
-    for (const auto& supportedFormat : mSupportedFormats) {
-        if (supportedFormat.width >= maximumFormat.width &&
-            supportedFormat.height >= maximumFormat.height) {
-            maximumFormat = supportedFormat;
-        }
-    }
-    int32_t activeArraySize[] = {0, 0, static_cast<int32_t>(maximumFormat.width),
-                                 static_cast<int32_t>(maximumFormat.height)};
+    // int32_t pixelArraySize[] = {0, 0, 1920, 1080};
+    // pixelArraySize[2] = mCaptureManager->getWidth(mCameraId);
+    // pixelArraySize[3] = mCaptureManager->getHeight(mCameraId);
+    int32_t pixelArraySize[] = {DEFAULT_WIDTH, DEFAULT_HEIGHT};
+    pixelArraySize[0] = DEFAULT_WIDTH;//mCaptureManager->getWidth(mCameraId);
+    pixelArraySize[1] = DEFAULT_HEIGHT;//mCaptureManager->getHeight(mCameraId);
     UPDATE(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE, activeArraySize,
            ARRAY_SIZE(activeArraySize));
     UPDATE(ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE, activeArraySize, ARRAY_SIZE(activeArraySize));
-
-    int32_t pixelArraySize[] = {static_cast<int32_t>(maximumFormat.width),
-                                static_cast<int32_t>(maximumFormat.height)};
     UPDATE(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE, pixelArraySize, ARRAY_SIZE(pixelArraySize));
+
     return OK;
 }
 
 template <size_t SIZE>
-status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
+status_t RemoteCameraDevice::initOutputCharsKeysByFormat(
         ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata,
         uint32_t fourcc, const std::array<int, SIZE>& halFormats, int streamConfigTag,
-        int streamConfigurationKey, int minFrameDurationKey, int stallDurationKey) {
+        int streamConfiguration, int minFrameDuration, int stallDuration) {
+    ALOGI("%s", __FUNCTION__);
     if (mSupportedFormats.empty()) {
         ALOGE("%s: Init supported format list failed", __FUNCTION__);
         return UNKNOWN_ERROR;
@@ -713,13 +617,14 @@ status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
     std::vector<int32_t> streamConfigurations;
     std::vector<int64_t> minFrameDurations;
     std::vector<int64_t> stallDurations;
-
     for (const auto& supportedFormat : mSupportedFormats) {
         if (supportedFormat.fourcc != fourcc) {
             // Skip 4CCs not meant for the halFormats
             continue;
         }
+
         for (const auto& format : halFormats) {
+            ALOGD("streamconf [%dx%d] %d %s", supportedFormat.width, supportedFormat.height, __LINE__, __FILE__);
             streamConfigurations.push_back(format);
             streamConfigurations.push_back(supportedFormat.width);
             streamConfigurations.push_back(supportedFormat.height);
@@ -727,28 +632,35 @@ status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
         }
 
         int64_t minFrameDuration = std::numeric_limits<int64_t>::max();
+        ALOGI("minFrameDuration=%lld", (long long)minFrameDuration);
         for (const auto& fr : supportedFormat.frameRates) {
             // 1000000000LL < (2^32 - 1) and
             // fr.durationNumerator is uint32_t, so no overflow here
-            int64_t frameDuration = 1000000000LL * fr.durationNumerator / fr.durationDenominator;
+            int64_t frameDuration = 1000000000LL * fr.durationNumerator /
+                    fr.durationDenominator;
+            ALOGD("%s: frameDuration=%lld", __FUNCTION__, (long long)frameDuration);
             if (frameDuration < minFrameDuration) {
                 minFrameDuration = frameDuration;
             }
         }
 
+        minFrameDuration = 1000000000LL / 30;
+        ALOGI("%s minFrameDuration = %d", __FUNCTION__, (int32_t)minFrameDuration);
         for (const auto& format : halFormats) {
             minFrameDurations.push_back(format);
             minFrameDurations.push_back(supportedFormat.width);
             minFrameDurations.push_back(supportedFormat.height);
             minFrameDurations.push_back(minFrameDuration);
         }
+        ALOGI("%s minFrameDurations.size() = %d", __FUNCTION__, (int32_t)minFrameDurations.size());
 
         // The stall duration is 0 for non-jpeg formats. For JPEG format, stall
         // duration can be 0 if JPEG is small. Here we choose 1 sec for JPEG.
         // TODO: b/72261675. Maybe set this dynamically
         for (const auto& format : halFormats) {
-            const int64_t NS_TO_SECOND = 1E9;
-            int64_t stall_duration = (format == HAL_PIXEL_FORMAT_BLOB) ? NS_TO_SECOND : 0;
+            const int64_t NS_TO_SECOND = 1000000000;
+            int64_t stall_duration =
+                    (format == HAL_PIXEL_FORMAT_BLOB) ? NS_TO_SECOND : 0;
             stallDurations.push_back(format);
             stallDurations.push_back(supportedFormat.width);
             stallDurations.push_back(supportedFormat.height);
@@ -756,187 +668,53 @@ status_t ExternalCameraDevice::initOutputCharsKeysByFormat(
         }
     }
 
-    UPDATE(streamConfigurationKey, streamConfigurations.data(), streamConfigurations.size());
+    UPDATE(streamConfiguration, streamConfigurations.data(), streamConfigurations.size());
 
-    UPDATE(minFrameDurationKey, minFrameDurations.data(), minFrameDurations.size());
+    UPDATE(minFrameDuration, minFrameDurations.data(), minFrameDurations.size());
 
-    UPDATE(stallDurationKey, stallDurations.data(), stallDurations.size());
-
+    UPDATE(stallDuration, stallDurations.data(), stallDurations.size());
     return OK;
 }
 
-status_t ExternalCameraDevice::calculateMinFps(
+status_t RemoteCameraDevice::calculateMinFps(
         ::android::hardware::camera::common::V1_0::helper::CameraMetadata* metadata) {
     std::set<int32_t> framerates;
     int32_t minFps = std::numeric_limits<int32_t>::max();
-
-    for (const auto& supportedFormat : mSupportedFormats) {
-        for (const auto& fr : supportedFormat.frameRates) {
-            int32_t frameRateInt = static_cast<int32_t>(fr.getFramesPerSecond());
-            if (minFps > frameRateInt) {
-                minFps = frameRateInt;
-            }
-            framerates.insert(frameRateInt);
-        }
-    }
-
     std::vector<int32_t> fpsRanges;
-    // FPS ranges
-    for (const auto& framerate : framerates) {
-        // Empirical: webcams often have close to 2x fps error and cannot support fixed fps range
-        fpsRanges.push_back(framerate / 2);
-        fpsRanges.push_back(framerate);
-    }
-    minFps /= 2;
+    minFps = 15;
+    fpsRanges.push_back(15);
+    fpsRanges.push_back(30);
     int64_t maxFrameDuration = 1000000000LL / minFps;
-
     UPDATE(ANDROID_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES, fpsRanges.data(), fpsRanges.size());
 
     UPDATE(ANDROID_SENSOR_INFO_MAX_FRAME_DURATION, &maxFrameDuration, 1);
-
     return OK;
 }
 
-#undef ARRAY_SIZE
-#undef UPDATE
-
-void ExternalCameraDevice::getFrameRateList(int fd, double fpsUpperBound,
-                                            SupportedV4L2Format* format) {
-    format->frameRates.clear();
-
-    v4l2_frmivalenum frameInterval{
-            .index = 0,
-            .pixel_format = format->fourcc,
-            .width = static_cast<__u32>(format->width),
-            .height = static_cast<__u32>(format->height),
-    };
-
-    for (frameInterval.index = 0;
-         TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &frameInterval)) == 0;
-         ++frameInterval.index) {
-        if (frameInterval.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
-            if (frameInterval.discrete.numerator != 0) {
-                SupportedV4L2Format::FrameRate fr = {frameInterval.discrete.numerator,
-                                                     frameInterval.discrete.denominator};
-                double framerate = fr.getFramesPerSecond();
-                if (framerate > fpsUpperBound) {
-                    continue;
-                }
-                ALOGV("index:%d, format:%c%c%c%c, w %d, h %d, framerate %f", frameInterval.index,
-                      frameInterval.pixel_format & 0xFF, (frameInterval.pixel_format >> 8) & 0xFF,
-                      (frameInterval.pixel_format >> 16) & 0xFF,
-                      (frameInterval.pixel_format >> 24) & 0xFF, frameInterval.width,
-                      frameInterval.height, framerate);
-                format->frameRates.push_back(fr);
-            }
-        }
-    }
-
-    if (format->frameRates.empty()) {
-        ALOGE("%s: failed to get supported frame rates for format:%c%c%c%c w %d h %d", __FUNCTION__,
-              frameInterval.pixel_format & 0xFF, (frameInterval.pixel_format >> 8) & 0xFF,
-              (frameInterval.pixel_format >> 16) & 0xFF, (frameInterval.pixel_format >> 24) & 0xFF,
-              frameInterval.width, frameInterval.height);
-    }
-}
-
-void ExternalCameraDevice::updateFpsBounds(
-        int fd, CroppingType cropType,
-        const std::vector<ExternalCameraConfig::FpsLimitation>& fpsLimits,
-        SupportedV4L2Format format, std::vector<SupportedV4L2Format>& outFmts) {
-    double fpsUpperBound = -1.0;
-    for (const auto& limit : fpsLimits) {
-        if (cropType == VERTICAL) {
-            if (format.width <= limit.size.width) {
-                fpsUpperBound = limit.fpsUpperBound;
-                break;
-            }
-        } else {  // HORIZONTAL
-            if (format.height <= limit.size.height) {
-                fpsUpperBound = limit.fpsUpperBound;
-                break;
-            }
-        }
-    }
-    if (fpsUpperBound < 0.f) {
-        return;
-    }
-
-    getFrameRateList(fd, fpsUpperBound, &format);
-    if (!format.frameRates.empty()) {
-        outFmts.push_back(format);
-    }
-}
-
-std::vector<SupportedV4L2Format> ExternalCameraDevice::getCandidateSupportedFormatsLocked(
-        int fd, CroppingType cropType,
-        const std::vector<ExternalCameraConfig::FpsLimitation>& fpsLimits,
-        const std::vector<ExternalCameraConfig::FpsLimitation>& depthFpsLimits,
-        const Size& minStreamSize, bool depthEnabled) {
+std::vector<SupportedV4L2Format> RemoteCameraDevice::getCandidateSupportedFormatsLocked() {
     std::vector<SupportedV4L2Format> outFmts;
-    struct v4l2_fmtdesc fmtdesc {
-        .index = 0, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE
+    SupportedV4L2Format format {
+            .width = 1920,//mCaptureManager->getWidth(mCameraId),
+            .height = 1080,//mCaptureManager->getHeight(mCameraId),
+            .fourcc = HAL_PIXEL_FORMAT_YCbCr_420_888,//V4L2_PIX_FMT_UYVY,//mCaptureManager->getFormat(mCameraId),
     };
-    int ret = 0;
-    while (ret == 0) {
-        ret = TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_ENUM_FMT, &fmtdesc));
-        ALOGV("index:%d,ret:%d, format:%c%c%c%c", fmtdesc.index, ret, fmtdesc.pixelformat & 0xFF,
-              (fmtdesc.pixelformat >> 8) & 0xFF, (fmtdesc.pixelformat >> 16) & 0xFF,
-              (fmtdesc.pixelformat >> 24) & 0xFF);
-
-        if (ret != 0 || (fmtdesc.flags & V4L2_FMT_FLAG_EMULATED)) {
-            // Skip if IOCTL failed, or if the format is emulated
-            fmtdesc.index++;
-            continue;
-        }
-        auto it =
-                std::find(kSupportedFourCCs.begin(), kSupportedFourCCs.end(), fmtdesc.pixelformat);
-        if (it == kSupportedFourCCs.end()) {
-            fmtdesc.index++;
-            continue;
-        }
-
-        // Found supported format
-        v4l2_frmsizeenum frameSize{.index = 0, .pixel_format = fmtdesc.pixelformat};
-        for (; TEMP_FAILURE_RETRY(ioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frameSize)) == 0;
-             ++frameSize.index) {
-            if (frameSize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
-                ALOGV("index:%d, format:%c%c%c%c, w %d, h %d", frameSize.index,
-                      fmtdesc.pixelformat & 0xFF, (fmtdesc.pixelformat >> 8) & 0xFF,
-                      (fmtdesc.pixelformat >> 16) & 0xFF, (fmtdesc.pixelformat >> 24) & 0xFF,
-                      frameSize.discrete.width, frameSize.discrete.height);
-
-                // Disregard h > w formats so all aspect ratio (h/w) <= 1.0
-                // This will simplify the crop/scaling logic down the road
-                if (frameSize.discrete.height > frameSize.discrete.width) {
-                    continue;
-                }
-
-                // Discard all formats which is smaller than minStreamSize
-                if (frameSize.discrete.width < minStreamSize.width ||
-                    frameSize.discrete.height < minStreamSize.height) {
-                    continue;
-                }
-
-                SupportedV4L2Format format{
-                        .width = static_cast<int32_t>(frameSize.discrete.width),
-                        .height = static_cast<int32_t>(frameSize.discrete.height),
-                        .fourcc = fmtdesc.pixelformat};
-
-                if (format.fourcc == V4L2_PIX_FMT_Z16 && depthEnabled) {
-                    updateFpsBounds(fd, cropType, depthFpsLimits, format, outFmts);
-                } else {
-                    updateFpsBounds(fd, cropType, fpsLimits, format, outFmts);
-                }
-            }
-        }
-        fmtdesc.index++;
-    }
-    trimSupportedFormats(cropType, &outFmts);
+    outFmts.push_back(format);
+    SupportedV4L2Format hd {
+            .width = 1280,//mCaptureManager->getWidth(mCameraId),
+            .height = 720,//mCaptureManager->getHeight(mCameraId),
+            .fourcc = HAL_PIXEL_FORMAT_YCbCr_420_888,//V4L2_PIX_FMT_UYVY,//mCaptureManager->getFormat(mCameraId),
+    };
+    outFmts.push_back(hd);
+    SupportedV4L2Format vga {
+            .width = 640,//mCaptureManager->getWidth(mCameraId),
+            .height = 480,//mCaptureManager->getHeight(mCameraId),
+            .fourcc = HAL_PIXEL_FORMAT_YCbCr_420_888,//V4L2_PIX_FMT_UYVY,//mCaptureManager->getFormat(mCameraId),
+    };
+    outFmts.push_back(vga);
     return outFmts;
 }
 
-void ExternalCameraDevice::trimSupportedFormats(CroppingType cropType,
+void RemoteCameraDevice::trimSupportedFormats(CroppingType cropType,
                                                 std::vector<SupportedV4L2Format>* pFmts) {
     std::vector<SupportedV4L2Format>& sortedFmts = *pFmts;
     if (cropType == VERTICAL) {
@@ -984,8 +762,8 @@ void ExternalCameraDevice::trimSupportedFormats(CroppingType cropType,
     sortedFmts = out;
 }
 
-binder_status_t ExternalCameraDevice::dump(int fd, const char** args, uint32_t numArgs) {
-    std::shared_ptr<ExternalCameraDeviceSession> session = mSession.lock();
+binder_status_t RemoteCameraDevice::dump(int fd, const char** args, uint32_t numArgs) {
+    std::shared_ptr<RemoteCameraDeviceSession> session = mSession.lock();
     if (session == nullptr) {
         dprintf(fd, "No active camera device session instance\n");
         return STATUS_OK;
@@ -993,6 +771,7 @@ binder_status_t ExternalCameraDevice::dump(int fd, const char** args, uint32_t n
 
     return session->dump(fd, args, numArgs);
 }
+
 
 }  // namespace implementation
 }  // namespace device

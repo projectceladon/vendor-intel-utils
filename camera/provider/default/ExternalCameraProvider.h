@@ -66,12 +66,21 @@ class ExternalCameraProvider : public BnCameraProvider {
     ndk::ScopedAStatus isConcurrentStreamCombinationSupported(
             const std::vector<CameraIdAndStreamCombination>& in_configs,
             bool* _aidl_return) override;
-
+    bool configureCapabilities();
+    int mClientFd;
   private:
     void addExternalCamera(const char* devName);
     void deviceAdded(const char* devName);
     void deviceRemoved(const char* devName);
     void updateAttachedCameras();
+    int mNumOfCamerasRequested;
+    
+        struct ValidateClientCapability {
+        bool validCodecType = false;
+        bool validResolution = false;
+        bool validOrientation = false;
+        bool validCameraFacing = false;
+    };
 
     // A separate thread to monitor '/dev' directory for '/dev/video*' entries
     // This thread calls back into ExternalCameraProvider when an actionable change is detected.

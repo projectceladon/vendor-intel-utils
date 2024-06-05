@@ -251,8 +251,19 @@ V4L2Frame::~V4L2Frame() {
 }
 
 int V4L2Frame::getData(uint8_t** outData, size_t* dataSize) {
+    if(*outData == nullptr) {
+        ALOGV("%s: outData is null", __FUNCTION__);
+    }
+    
     return map(outData, dataSize);
 }
+
+int V4L2Frame::getRemoteData(uint8_t** outData, size_t* dataSize) {
+    *outData = mData;
+    *dataSize = mDataSize;
+    return 0;
+}
+
 
 int V4L2Frame::map(uint8_t** data, size_t* dataSize) {
     if (data == nullptr || dataSize == nullptr) {
@@ -304,6 +315,11 @@ int AllocatedFrame::getData(uint8_t** outData, size_t* dataSize) {
     return 0;
 }
 
+int AllocatedFrame::getRemoteData(uint8_t** outData, size_t* dataSize) {
+    ALOGI("%p and %p", outData, dataSize);
+    return 0;
+}
+
 int AllocatedFrame::allocate(YCbCrLayout* out) {
     std::lock_guard<std::mutex> lk(mLock);
     if ((mWidth % 2) || (mHeight % 2)) {
@@ -334,7 +350,7 @@ int AllocatedFrame::allocate(YCbCrLayout* out) {
     // reading the last row. Effectively, we only need to ensure that the last row of Cr component
     // has width that is an integral multiple of DCTSIZE.
 
-    size_t dataSize = mWidth * mHeight * 3 / 2;  // YUV420
+    size_t dataSize = mWidth * mHeight * 2;  // YUV420
 
     size_t cbWidth = mWidth / 2;
     size_t requiredCbWidth = DCTSIZE * ((cbWidth + DCTSIZE - 1) / DCTSIZE);
@@ -850,6 +866,12 @@ int AllocatedV4L2Frame::getData(uint8_t** outData, size_t* dataSize) {
 
     *outData = mData.data();
     *dataSize = mData.size();
+    return 0;
+}
+
+
+int AllocatedV4L2Frame::getRemoteData(uint8_t** outData, size_t* dataSize) {
+    ALOGV("%p and %p", outData, dataSize);
     return 0;
 }
 

@@ -20,6 +20,8 @@
 #include "ExternalCameraProvider.h"
 
 #include <ExternalCameraDevice.h>
+#include <RemoteCameraDevice.h>
+
 #include <aidl/android/hardware/camera/common/Status.h>
 #include <convert.h>
 #include <cutils/properties.h>
@@ -27,6 +29,15 @@
 #include <log/log.h>
 #include <sys/inotify.h>
 #include <regex>
+#include "CameraSocketCommand.h"
+#include <pthread.h> 
+
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/types.h>
+#include <linux/vm_sockets.h>
+pthread_t thread_id; 
 
 #define MAX_RETRY 3
 
@@ -38,6 +49,7 @@ namespace implementation {
 
 using ::aidl::android::hardware::camera::common::Status;
 using ::android::hardware::camera::device::implementation::ExternalCameraDevice;
+using ::android::hardware::camera::device::implementation::RemoteCameraDevice;
 using ::android::hardware::camera::device::implementation::fromStatus;
 using ::android::hardware::camera::external::common::ExternalCameraConfig;
 
@@ -66,9 +78,314 @@ bool matchDeviceName(int cameraIdOffset, const std::string& deviceName, std::str
 }
 }  // namespace
 
+std::vector<std::string> split(std::string s, std::string delimiter) {
+    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
+    std::string token;
+    std::vector<std::string> res;
+
+    while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
+        token = s.substr (pos_start, pos_end - pos_start);
+        pos_start = pos_end + delim_len;
+        res.push_back (token);
+    }
+    res.push_back (s.substr (pos_start));
+    return res;
+}
+
+
+bool ExternalCameraProvider::configureCapabilities() {
+
+    bool valid_client_cap_info = false;
+    int camera_id, expctd_cam_id;
+    struct ValidateClientCapability val_client_cap[2];
+    size_t ack_packet_size = sizeof(camera_header_t) + sizeof(camera_ack_t);
+    size_t cap_packet_size = sizeof(camera_header_t) + sizeof(camera_capability_t);
+    ssize_t recv_size = 0;
+    camera_ack_t ack_payload = ACK_CONFIG;
+
+    camera_info_t camera_info[2] = {};
+    camera_capability_t capability = {};
+
+    camera_packet_t *cap_packet = NULL;
+    camera_packet_t *ack_packet = NULL;
+    camera_header_t header = {};
+   
+    if ((recv_size = recv(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
+        ALOGE(LOG_TAG "%s: Failed to receive header, err: %s ", __FUNCTION__, strerror(errno));
+        goto out;
+    }
+
+    if (header.type != REQUEST_CAPABILITY) {
+        ALOGE(LOG_TAG "%s: Invalid packet type\n", __FUNCTION__);
+        goto out;
+    }
+    ALOGI(LOG_TAG "%s: Received REQUEST_CAPABILITY header from client", __FUNCTION__);
+
+    cap_packet = (camera_packet_t *)malloc(cap_packet_size);
+    if (cap_packet == NULL) {
+        ALOGE(LOG_TAG "%s: cap camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
+        return false;
+    }
+
+    cap_packet->header.type = CAPABILITY;
+    cap_packet->header.size = sizeof(camera_capability_t);
+    capability.codec_type = (uint32_t)VideoCodecType::kAll;
+    capability.resolution = (uint32_t)FrameResolution::kAll;
+    capability.maxNumberOfCameras = 2;
+
+    memcpy(cap_packet->payload, &capability, sizeof(camera_capability_t));
+    if (send(mClientFd, cap_packet, cap_packet_size, 0) < 0) {
+        ALOGE(LOG_TAG "%s: Failed to send camera capabilities, err: %s ", __FUNCTION__,
+              strerror(errno));
+        goto out;
+    }
+
+    cap_packet = (camera_packet_t *)malloc(cap_packet_size);
+    if (cap_packet == NULL) {
+        ALOGE(LOG_TAG "%s: cap camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
+        return false;
+    }
+
+    cap_packet->header.type = CAPABILITY;
+    cap_packet->header.size = sizeof(camera_capability_t);
+    capability.codec_type = (uint32_t)VideoCodecType::kAll;
+    capability.resolution = (uint32_t)FrameResolution::kAll;
+    capability.maxNumberOfCameras = 2;
+
+    memcpy(cap_packet->payload, &capability, sizeof(camera_capability_t));
+    if (send(mClientFd, cap_packet, cap_packet_size, 0) < 0) {
+        ALOGE(LOG_TAG "%s: Failed to send camera capabilities, err: %s ", __FUNCTION__,
+              strerror(errno));
+        goto out;
+    }
+    ALOGI(LOG_TAG " %s: Sent CAPABILITY packet to client", __FUNCTION__);
+
+    if ((recv_size = recv(mClientFd, (char *)&header, sizeof(camera_header_t), MSG_WAITALL)) < 0) {
+        ALOGE(LOG_TAG "%s: Failed to receive header, err: %s ", __FUNCTION__, strerror(errno));
+        goto out;
+    }
+
+
+    if (header.type != CAMERA_INFO) {
+        ALOGE(LOG_TAG "%s: invalid camera_packet_type: %s", __FUNCTION__,
+              camera_type_to_str(header.type));
+        goto out;
+    }
+
+    // Get the number fo cameras requested to support from client.
+    for (int i = 1; i <= MAX_NUMBER_OF_SUPPORTED_CAMERAS; i++) {
+        if (header.size == i * sizeof(camera_info_t)) {
+            mNumOfCamerasRequested = i;
+            break;
+        } else if (mNumOfCamerasRequested == 0 && i == MAX_NUMBER_OF_SUPPORTED_CAMERAS) {
+            ALOGE(LOG_TAG
+                  "%s: Failed to support number of cameras requested by client "
+                  "which is higher than the max number of cameras supported in the HAL",
+                  __FUNCTION__);
+            goto out;
+        }
+    }
+
+    if (mNumOfCamerasRequested == 0) {
+        ALOGE(LOG_TAG "%s: invalid header size received, size = %zu", __FUNCTION__, recv_size);
+        goto out;
+    }
+
+
+    if ((recv_size = recv(mClientFd, (char *)&camera_info,
+                          mNumOfCamerasRequested * sizeof(camera_info_t), MSG_WAITALL)) < 0) {
+        ALOGE(LOG_TAG "%s: Failed to receive camera info, err: %s ", __FUNCTION__, strerror(errno));
+        goto out;
+    }
+
+    ALOGI(LOG_TAG "%s: Received CAMERA_INFO packet from client with recv_size: %zd ", __FUNCTION__,
+          recv_size);
+    ALOGI(LOG_TAG "%s: Number of cameras requested = %d", __FUNCTION__, mNumOfCamerasRequested);
+
+    // validate capability info received from the client.
+    for (int i = 0; i < mNumOfCamerasRequested; i++) {
+        expctd_cam_id = i;
+        if (expctd_cam_id == (int)camera_info[i].cameraId)
+            ALOGE(LOG_TAG
+                   "%s: Camera Id number %u received from client is matching with expected Id",
+                   __FUNCTION__, camera_info[i].cameraId);
+        else
+            ALOGE(LOG_TAG
+                  "%s: [Warning] Camera Id number %u received from client is not matching with "
+                  "expected Id %d",
+                  __FUNCTION__, camera_info[i].cameraId, expctd_cam_id);
+
+        ALOGI("received codec type %d", camera_info[i].codec_type);
+        switch (camera_info[i].codec_type) {
+            case uint32_t(VideoCodecType::kH264):
+                //gIsInFrameH264 = true;
+                val_client_cap[i].validCodecType = true;
+                break;
+            case uint32_t(VideoCodecType::kI420):
+                //gIsInFrameI420 = true;
+                val_client_cap[i].validCodecType = true;
+                break;
+            case uint32_t(VideoCodecType::kMJPEG):
+                //gIsInFrameMJPG = true;
+                val_client_cap[i].validCodecType = true;
+                break;
+            default:
+                val_client_cap[i].validCodecType = false;
+                break;
+        }
+
+        switch (camera_info[i].resolution) {
+            case uint32_t(FrameResolution::k480p):
+            case uint32_t(FrameResolution::k720p):
+            case uint32_t(FrameResolution::k1080p):
+                val_client_cap[i].validResolution = true;
+                break;
+            default:
+                val_client_cap[i].validResolution = false;
+                break;
+        }
+
+        switch (camera_info[i].sensorOrientation) {
+            case uint32_t(SensorOrientation::ORIENTATION_0):
+            case uint32_t(SensorOrientation::ORIENTATION_90):
+            case uint32_t(SensorOrientation::ORIENTATION_180):
+            case uint32_t(SensorOrientation::ORIENTATION_270):
+                val_client_cap[i].validOrientation = true;
+                break;
+            default:
+                val_client_cap[i].validOrientation = false;
+                break;
+        }
+
+        switch (camera_info[i].facing) {
+            case uint32_t(CameraFacing::BACK_FACING):
+            case uint32_t(CameraFacing::FRONT_FACING):
+                val_client_cap[i].validCameraFacing = true;
+                break;
+            default:
+                val_client_cap[i].validCameraFacing = false;
+                break;
+        }
+    }
+
+
+    // Check whether recceived any invalid capability info or not.
+    // ACK packet to client would be updated based on this verification.
+    for (int i = 0; i < mNumOfCamerasRequested; i++) {
+        if (!val_client_cap[i].validCodecType || !val_client_cap[i].validResolution ||
+            !val_client_cap[i].validOrientation || !val_client_cap[i].validCameraFacing) {
+            valid_client_cap_info = false;
+            ALOGE("%s: capability info received from client is not completely correct and expected",
+                  __FUNCTION__);
+            break;
+        } else {
+            ALOGE("%s: capability info received from client is correct and expected",
+                   __FUNCTION__);
+            valid_client_cap_info = true;
+        }
+    }
+
+    // Updating metadata for each camera seperately with its capability info received.
+    for (int i = 0; i < mNumOfCamerasRequested; i++) {
+        camera_id = i;
+        ALOGI(LOG_TAG
+              "%s - Client requested for codec_type: %s, resolution: %s, orientation: %u, and "
+              "facing: %u for camera Id %d",
+              __FUNCTION__, codec_type_to_str(camera_info[i].codec_type),
+              resolution_to_str(camera_info[i].resolution), camera_info[i].sensorOrientation,
+              camera_info[i].facing, camera_id);
+        // Start updating metadata for one camera, so update the status.
+
+        // Wait till complete the metadata update for a camera.
+        while (mCallback == nullptr) {
+            ALOGE("%s: wait till complete the metadata update for a camera", __FUNCTION__);
+            // 200us sleep for this thread.
+            usleep(20000);
+        }
+        std::string deviceName =
+            std::string("device@") + ExternalCameraDevice::kDeviceVersion + "/external/"+ std::string("127");
+        mCameraStatusMap[deviceName] = CameraDeviceStatus::PRESENT;
+        if (mCallback != nullptr) {
+            mCallback->cameraDeviceStatusChange(deviceName, CameraDeviceStatus::PRESENT);
+        }
+
+    }
+
+    ack_packet = (camera_packet_t *)malloc(ack_packet_size);
+    if (ack_packet == NULL) {
+        ALOGE(LOG_TAG "%s: ack camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
+        goto out;
+    }
+    ack_payload = (valid_client_cap_info) ? ACK_CONFIG : NACK_CONFIG;
+
+    ack_packet->header.type = ACK;
+    ack_packet->header.size = sizeof(camera_ack_t);
+
+    memcpy(ack_packet->payload, &ack_payload, sizeof(camera_ack_t));
+    if (send(mClientFd, ack_packet, ack_packet_size, 0) < 0) {
+        ALOGE(LOG_TAG "%s: Failed to send camera capabilities, err: %s ", __FUNCTION__,
+              strerror(errno));
+        goto out;
+    }
+    ALOGI(LOG_TAG "%s: Sent ACK packet to client with ack_size: %zu ", __FUNCTION__,
+          ack_packet_size);
+out:
+    free(ack_packet);
+    free(cap_packet);
+    return true;
+}
+void *RemoteThreadFun(void *argv)
+{
+    bool status;
+    struct sockaddr_un addr_un;
+    memset(&addr_un, 0, sizeof(addr_un));
+    addr_un.sun_family = AF_UNIX;
+    ExternalCameraProvider *threadHandle = (ExternalCameraProvider*)argv;
+    int transMode = 1;
+    struct sockaddr_vm addr_vm ;
+    if(transMode == 1) {
+        addr_vm.svm_family = AF_VSOCK;
+        addr_vm.svm_port = 1982;
+        addr_vm.svm_cid = 3;
+        int ret = 0;
+        ALOGI("Waiting for connection ");
+        int mSocketServerFd = ::socket(AF_VSOCK, SOCK_STREAM, 0);
+        if (mSocketServerFd < 0) {
+        ALOGV(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
+        __FUNCTION__, __LINE__, strerror(errno));
+        return NULL;
+        }
+        ret = ::bind(mSocketServerFd, (struct sockaddr *)&addr_vm,
+            sizeof(struct sockaddr_vm));
+        if (ret < 0) {
+            ALOGV(LOG_TAG " %s Failed to bind port(%d). ret: %d, %s", __func__, addr_vm.svm_port, ret,
+            strerror(errno));
+            return NULL;
+        }
+        ret = listen(mSocketServerFd, 32);
+        if (ret < 0) {
+        ALOGV("%s Failed to listen on ", __FUNCTION__);
+        return NULL;
+        }
+
+        socklen_t alen = sizeof(struct sockaddr_un);
+        threadHandle->mClientFd = ::accept(mSocketServerFd, (struct sockaddr *)&addr_un, &alen);
+        ALOGE("Vsock connected");
+        if (threadHandle->mClientFd > 0) {
+            status = threadHandle->configureCapabilities();
+            if(!status) {
+                ALOGE("Fail to configure ");
+            }
+        }
+    }
+    pthread_join(thread_id, NULL);
+    return argv;
+}
+
 ExternalCameraProvider::ExternalCameraProvider() : mCfg(ExternalCameraConfig::loadFromCfg()) {
     mHotPlugThread = std::make_shared<HotplugThread>(this);
     mHotPlugThread->run();
+    pthread_create(&thread_id, NULL, RemoteThreadFun, this);
 }
 
 ExternalCameraProvider::~ExternalCameraProvider() {
@@ -132,22 +449,46 @@ ndk::ScopedAStatus ExternalCameraProvider::getCameraDeviceInterface(
         return fromStatus(Status::ILLEGAL_ARGUMENT);
     }
 
-    ALOGV("Constructing external camera device");
-    std::shared_ptr<ExternalCameraDevice> deviceImpl =
-            ndk::SharedRefBase::make<ExternalCameraDevice>(cameraDevicePath, mCfg);
-    if (deviceImpl == nullptr || deviceImpl->isInitFailed()) {
-        ALOGE("%s: camera device %s init failed!", __FUNCTION__, cameraDevicePath.c_str());
-        *_aidl_return = nullptr;
-        return fromStatus(Status::INTERNAL_ERROR);
-    }
+    ALOGI("Constructing external camera device %s enumerate", cameraDevicePath.c_str());
 
-    IF_ALOGV() {
-        int interfaceVersion;
-        deviceImpl->getInterfaceVersion(&interfaceVersion);
-        ALOGV("%s: device interface version: %d", __FUNCTION__, interfaceVersion);
-    }
+    std::string delimiter = "/";
+    std::vector<std::string> camId = split (in_cameraDeviceName, delimiter);
+    
+    if(std::stoi(camId[2]) >= 127) {
+        
+        std::shared_ptr<RemoteCameraDevice> deviceImpl =
+                ndk::SharedRefBase::make<RemoteCameraDevice>(camId[2], mClientFd, mCfg);
+        if (deviceImpl == nullptr || deviceImpl->isInitFailed()) {
+            ALOGE("%s: camera device %s init failed!", __FUNCTION__, cameraDevicePath.c_str());
+            *_aidl_return = nullptr;
+            return fromStatus(Status::INTERNAL_ERROR);
+        }
+        
+        IF_ALOGV() {
+            int interfaceVersion;
+            deviceImpl->getInterfaceVersion(&interfaceVersion);
+            ALOGV("%s: device interface version: %d", __FUNCTION__, interfaceVersion);
+        }
 
-    *_aidl_return = deviceImpl;
+        *_aidl_return = deviceImpl;
+
+    }else {
+        std::shared_ptr<ExternalCameraDevice> deviceImpl =
+                ndk::SharedRefBase::make<ExternalCameraDevice>(cameraDevicePath, mCfg);
+        if (deviceImpl == nullptr || deviceImpl->isInitFailed()) {
+            ALOGE("%s: camera device %s init failed!", __FUNCTION__, cameraDevicePath.c_str());
+            *_aidl_return = nullptr;
+            return fromStatus(Status::INTERNAL_ERROR);
+        }
+        
+        IF_ALOGV() {
+            int interfaceVersion;
+            deviceImpl->getInterfaceVersion(&interfaceVersion);
+            ALOGV("%s: device interface version: %d", __FUNCTION__, interfaceVersion);
+        }
+
+        *_aidl_return = deviceImpl;
+    }
     return fromStatus(Status::OK);
 }
 

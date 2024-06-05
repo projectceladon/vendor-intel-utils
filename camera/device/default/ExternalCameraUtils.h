@@ -136,9 +136,11 @@ struct Frame : public std::enable_shared_from_this<Frame> {
     const int32_t mWidth;
     const int32_t mHeight;
     const uint32_t mFourcc;
-
+    ErrorCode mErrorCode;
     // getData might involve map/allocation
     virtual int getData(uint8_t** outData, size_t* dataSize) = 0;
+    virtual int getRemoteData(uint8_t** outData, size_t* dataSize) = 0;
+    
 };
 
 // A class provide access to a dequeued V4L2 frame buffer (mostly in MJPG format)
@@ -150,16 +152,33 @@ class V4L2Frame : public Frame {
     virtual ~V4L2Frame();
 
     virtual int getData(uint8_t** outData, size_t* dataSize) override;
-
-    const int mBufferIndex;  // for later enqueue
+    virtual int getRemoteData(uint8_t** outData, size_t* dataSize) override;
+    int mBufferIndex;  // for later enqueue
     int map(uint8_t** data, size_t* dataSize);
     int unmap();
+    int setData(uint8_t* buf) {
+        mData = buf;
+        //mMapped = true;
+        return 0;
+    }
 
+    int delData() {
+        ALOGI("%s", __FUNCTION__);
+        if (mData != nullptr) {
+            delete [] mData;
+            mData = nullptr;
+        }
+        return 0;
+    }
+
+    uint8_t* Data() {
+        return mData;
+    }
   private:
     std::mutex mLock;
-    const int mFd;  // used for mmap but doesn't claim ownership
-    const size_t mDataSize;
-    const uint64_t mOffset;  // used for mmap
+    int mFd;  // used for mmap but doesn't claim ownership
+    size_t mDataSize;
+    uint64_t mOffset;  // used for mmap
     uint8_t* mData = nullptr;
     bool mMapped = false;
 };
@@ -172,6 +191,7 @@ class AllocatedFrame : public Frame {
     ~AllocatedFrame() override;
 
     virtual int getData(uint8_t** outData, size_t* dataSize) override;
+    virtual int getRemoteData(uint8_t** outData, size_t* dataSize) override;
 
     int allocate(YCbCrLayout* out = nullptr);
     int getLayout(YCbCrLayout* out);
@@ -286,6 +306,7 @@ class AllocatedV4L2Frame : public Frame {
     AllocatedV4L2Frame(std::shared_ptr<V4L2Frame> frameIn);
     ~AllocatedV4L2Frame() override;
     virtual int getData(uint8_t** outData, size_t* dataSize) override;
+    virtual int getRemoteData(uint8_t** outData, size_t* dataSize) override;
 
   private:
     std::vector<uint8_t> mData;
