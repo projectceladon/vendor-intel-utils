@@ -1,0 +1,1599 @@
+From 2cd43a38bf6cbc8d0995aa3fe63928e0b0bc257d Mon Sep 17 00:00:00 2001
+From: Neo Fang <neo.fang@intel.com>
+Date: Thu, 25 Jan 2024 13:27:00 +0000
+Subject: [PATCH] Enable HKR driver to support raw sensors.
+
+Issue Details: HKR with raw/IR sensors do not work based on
+base_aaos image.
+
+Fix Details: Modify hkr and ipu drivers.
+
+Tracked-On: OAM-115379
+Signed-off-by: Neo Fang <neo.fang@intel.com>
+---
+ drivers/media/pci/intel/hkrcam/hkr-cam.c      | 355 +++++++++++++-----
+ drivers/media/pci/intel/hkrcam/hkr-cam.h      |  11 +-
+ drivers/media/pci/intel/hkrcam/hkr-hid.c      |   1 +
+ drivers/media/pci/intel/hkrcam/hkr-hid.h      |   1 +
+ .../media/pci/intel/hkrcam/hkr-pcie-hostdev.h | 277 +++++++++-----
+ drivers/media/pci/intel/ipu-isys-video.c      |  18 +
+ drivers/media/pci/intel/ipu-isys.c            |  28 ++
+ drivers/media/pci/intel/ipu-isys.h            |   3 +
+ drivers/media/pci/intel/ipu-psys.c            |  52 +++
+ drivers/media/pci/intel/ipu-psys.h            |   1 +
+ .../intel/ipu6/ipu-platform-buttress-regs.h   |   6 +
+ 11 files changed, 563 insertions(+), 190 deletions(-)
+
+diff --git a/drivers/media/pci/intel/hkrcam/hkr-cam.c b/drivers/media/pci/intel/hkrcam/hkr-cam.c
+index 00da38c89b67..25bdeade893e 100644
+--- a/drivers/media/pci/intel/hkrcam/hkr-cam.c
++++ b/drivers/media/pci/intel/hkrcam/hkr-cam.c
+@@ -60,12 +60,20 @@
+ 
+ #define HKR_INFO(dev, ...) \
+ do { \
+-	if (enable_log) \
++	if (enable_log_info) \
+ 		dev_info(dev, ##__VA_ARGS__); \
+ } while (0)
+ 
+-static int enable_log = 0;
+-module_param(enable_log, int, 0644);
++#define HKR_ERR(dev, ...) \
++do { \
++	if (enable_log_err) \
++		dev_err(dev, ##__VA_ARGS__); \
++} while (0)
++
++static int enable_log_info = 0;
++static int enable_log_err = 1;
++module_param(enable_log_info, int, 0644);
++module_param(enable_log_err, int, 0644);
+ 
+ struct hkr_fmt {
+ 	char  *name;
+@@ -73,7 +81,13 @@ struct hkr_fmt {
+ 	int   depth;
+ };
+ 
++
+ static struct hkr_fmt hkr_formats[] = {
++	{
++		.name     = "GREY",
++		.fourcc   = V4L2_PIX_FMT_GREY,
++		.depth    = 8,
++	},
+ 	{
+ 		.name     = "4:2:2, packed, YUYV",
+ 		.fourcc   = V4L2_PIX_FMT_YUYV,
+@@ -111,6 +125,9 @@ static inline u32 hkr_bytesperline(uint32_t pixelfmt, const unsigned int width)
+ 	case V4L2_PIX_FMT_UYVY:
+ 		bytesperline= width * 2;
+ 		break;
++	case V4L2_PIX_FMT_GREY:
++		bytesperline= width;
++		break;
+ 	default:
+ 		break;
+ 	}
+@@ -245,7 +262,9 @@ static void hkr_init_host2dev_msg_buf(struct hkr_device *hkr_dev)
+ 	struct hkr_msg_buf *msg_buf =
+ 	        (struct hkr_msg_buf *)(hkr_dev->base + HKR_HOST2DEV_MSG_OFF);
+ 
++#if defined __i386__ || defined __x86_64__
+ 	memset(msg_buf, 0, sizeof(*msg_buf));
++#endif
+ 	msg_buf->header.msg_num = MSG_ITEM_NUM;
+ 	msg_buf->header.item_size =  MSG_ITEM_SIZE;
+ 
+@@ -282,20 +301,25 @@ static void hkr_update_msg_wr_index(struct hkr_device *hkr_dev)
+ 	msg_buf->header.wr_idx = next_idx;
+ }
+ 
++
+ static int hkr_send_mbx_message(struct hkr_device *hkr_dev,
+                                 struct hkr_msg_header *head)
+ {
+ 	struct notify_param params = {};
++	struct device *dev = hkr_dev->dev;
+ 	params.header = MBX_DEFAULT_HEADER;
+ 	params.payload[0] = MBX_PL_TYPE_MSG;
+ 
+ 	if (head->msg_size) {
+ 		struct hkr_msg_item *item = hkr_get_msg_free_item(hkr_dev);
+-		if (item != NULL && head->msg_size <= sizeof(*item)) {
++		if (item != NULL && head->msg_size <= sizeof(struct hkr_msg_item)) {
+ 			memcpy((void *)item->data, (void *)head, head->msg_size);
+ 			/* Update msg write index */
+ 			hkr_update_msg_wr_index(hkr_dev);
+ 			hkr_mbx_notify_ep(hkr_dev, &params);
++			HKR_INFO(dev, "send msg to host\n");
++		} else {
++			HKR_ERR(dev, "no msg to host\n");
+ 		}
+ 	}
+ 
+@@ -305,7 +329,7 @@ static int hkr_send_mbx_message(struct hkr_device *hkr_dev,
+ int hkr_send_msg(struct hkr_device *hkr_dev,
+                  struct hkr_msg_header *snd_header)
+ {
+-        struct hkr_msg_ack_header *header;
++	struct hkr_msg_ack_header *header;
+ 	uint32_t val;
+ 
+ 	header = (struct hkr_msg_ack_header *)(hkr_dev->base +
+@@ -327,6 +351,32 @@ int hkr_send_msg(struct hkr_device *hkr_dev,
+ 	return 0;
+ }
+ 
++int hkr_send_calib_update_msg(struct hkr_device *hkr_dev,
++			      struct hkr_msg_header *msg)
++{
++	uint32_t val;
++
++	mutex_lock(&hkr_dev->msg_lock);
++	hkr_send_mbx_message(hkr_dev, msg);
++	val = wait_for_completion_timeout(&hkr_dev->calib_ack_comp,
++					  msecs_to_jiffies(2000));
++	if (val < 0) {
++		mutex_unlock(&hkr_dev->msg_lock);
++		HKR_ERR(hkr_dev->dev, "wait_for_completion_timeout return %d\n", val);
++		return -ENODEV;
++	} else if (val == 0) {
++		mutex_unlock(&hkr_dev->msg_lock);
++		HKR_ERR(hkr_dev->dev, "wait_for_completion_timeout timeout");
++		return -EIO;
++	} else {
++		HKR_INFO(hkr_dev->dev, "%d ms passed to send message\n",
++			 jiffies_to_msecs(val));
++	}
++	mutex_unlock(&hkr_dev->msg_lock);
++
++	return 0;
++}
++
+ /*
+  * Called after each buffer is allocated. As we are using contiguous
+  * memory, seems no special operation here.
+@@ -377,7 +427,7 @@ static void hkr_vb2_buf_queue(struct vb2_buffer *vb)
+ 		/* put dma address to ring */
+ 		if (((q->ring->wr_index + 1) % HKR_MAX_BUFFER_NUM) ==
+ 		                q->ring->rd_index) {
+-			dev_err(dev, "ring full. Should not happen");
++			HKR_ERR(dev, "ring full. Should not happen");
+ 		} else {
+ 			q->ring->dma_addr[q->ring->wr_index] =
+ 			        dma_addr;
+@@ -400,7 +450,7 @@ static void hkr_vb2_buf_queue(struct vb2_buffer *vb)
+ 		HKR_INFO(dev, "one buffer queued\n");
+ 	} else {
+ 		vb2_buffer_done(vb, VB2_BUF_STATE_ERROR);
+-		HKR_INFO(dev, "No buffer queued\n");
++		HKR_ERR(dev, "No buffer queued\n");
+ 	}
+ 
+ 	hkr_queque_buf_notify(hkr_dev, q->stream_index);
+@@ -430,9 +480,15 @@ static int hkr_vb2_queue_setup(struct vb2_queue *vq,
+ 	*num_planes = 1;
+ 
+ 	for (i = 0; i < *num_planes; i++) {
+-		sizes[i] = q->format.sizeimage;
++		if (q->vbq.type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {
++			sizes[i] = q->pix_fmt.sizeimage;
++		} else if(q->vbq.type == V4L2_BUF_TYPE_META_CAPTURE) {
++			sizes[i] = q->meta_fmt.buffersize;
++		} else {
++			HKR_INFO(dev, "Not supported buf type\n");
++		}
+ 		alloc_devs[i] = dev;
+-		HKR_INFO(dev, "size[%d]:%d\n", i, sizes[i]);
++		HKR_INFO(dev, "fmt:%x, size[%d]:%d\n", q->pix_fmt.pixelformat, i, sizes[i]);
+ 	}
+ 
+ 	/*
+@@ -561,26 +617,19 @@ static int hkr_v4l2_enum_fmt(struct file *file, void *fh,
+ 	return 0;
+ }
+ 
+-static int hkr_v4l2_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
+-{
+-	struct hkr_v4l2_queue *q = file_to_hkr_v4l2_queue(file);
+-
+-	f->fmt.pix = q->format;
+-
+-	return 0;
+-}
+-
+ /*
+  * hkr_find_format - lookup color format by fourcc
+  * @pixelformat: fourcc to match, ignored if null
+  */
+-static const struct hkr_fmt *hkr_find_format(const unsigned int *pixelformat)
++static const struct hkr_fmt *hkr_find_format(const uint32_t *pixelformat)
+ {
+ 	unsigned int i;
+ 	for (i = 0; i < ARRAY_SIZE(hkr_formats); i++) {
+-		if (pixelformat && *pixelformat != hkr_formats[i].fourcc)
++		if (pixelformat && *pixelformat != hkr_formats[i].fourcc) {
+ 			continue;
+-		return &hkr_formats[i];
++		} else {
++			return &hkr_formats[i];
++		}
+ 	}
+ 	return NULL;
+ }
+@@ -589,15 +638,16 @@ static int hkr_v4l2_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ {
+ 	const struct hkr_fmt *fmt;
+ 	struct v4l2_pix_format *pix = &f->fmt.pix;
++	struct v4l2_meta_format *meta = &f->fmt.meta;
+ 
+ 	fmt = hkr_find_format(&pix->pixelformat);
+ 	if (!fmt) {
+-		printk("failed to find format, use default\n");
+-		fmt = &hkr_formats[0];
+-		pix->width=640;
+-		pix->height=480;
++		printk("failed to find format %x, use default\n", pix->pixelformat);
++		fmt = &hkr_formats[3];
++		pix->width=1920;
++		pix->height=1280;
+ 	}
+-	/* Only supports up to 1920x1080 */
++	/* Only supports up to 3840x2160 */
+ 	if (pix->width > HKR_MAX_WIDTH)
+ 		pix->width = HKR_MAX_WIDTH;
+ 	if (pix->height > HKR_MAX_HEIGHT)
+@@ -616,12 +666,31 @@ static int hkr_v4l2_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ 	return 0;
+ }
+ 
++static int hkr_v4l2_g_fmt(struct file *file, void *fh, struct v4l2_format *f)
++{
++	struct hkr_v4l2_queue *q = file_to_hkr_v4l2_queue(file);
++
++	if (q->vbq.type == V4L2_BUF_TYPE_META_CAPTURE) {
++		f->fmt.meta.dataformat = q->meta_fmt.dataformat;
++		f->fmt.meta.buffersize = q->meta_fmt.buffersize;
++		return 0;
++	}
++
++	f->fmt.pix = q->pix_fmt;
++
++	return 0;
++}
++
+ static int hkr_v4l2_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
+ {
+ 	struct hkr_v4l2_queue *q = file_to_hkr_v4l2_queue(file);
+ 
++	if (f->type == V4L2_BUF_TYPE_META_CAPTURE) {
++		q->meta_fmt.dataformat = f->fmt.meta.dataformat;
++		return 0;
++	}
+ 	hkr_v4l2_try_fmt(file, fh, f);
+-	q->format = f->fmt.pix;
++	q->pix_fmt = f->fmt.pix;
+ 
+ 	return 0;
+ }
+@@ -653,6 +722,7 @@ static int hkr_video_s_input(struct file *file, void *fh,
+ 	return input == 0 ? 0 : -EINVAL;
+ }
+ 
++
+ static const struct v4l2_ioctl_ops hkr_v4l2_ioctl_ops = {
+ 	.vidioc_querycap = hkr_v4l2_querycap,
+ 	.vidioc_enum_fmt_vid_cap = hkr_v4l2_enum_fmt,
+@@ -662,6 +732,10 @@ static const struct v4l2_ioctl_ops hkr_v4l2_ioctl_ops = {
+ 	.vidioc_s_fmt_vid_cap = hkr_v4l2_s_fmt,
+ 	.vidioc_try_fmt_vid_cap = hkr_v4l2_try_fmt,
+ 	.vidioc_try_fmt_vid_cap_mplane = hkr_v4l2_try_fmt,
++	.vidioc_enum_fmt_meta_cap = hkr_v4l2_enum_fmt,
++	.vidioc_g_fmt_meta_cap = hkr_v4l2_g_fmt,
++	.vidioc_s_fmt_meta_cap = hkr_v4l2_s_fmt,
++	.vidioc_try_fmt_meta_cap = hkr_v4l2_try_fmt,
+ 	.vidioc_reqbufs = vb2_ioctl_reqbufs,
+ 	.vidioc_create_bufs = vb2_ioctl_create_bufs,
+ 	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
+@@ -687,7 +761,7 @@ static irqreturn_t hkr_irq(int irq, void *hkr_ptr)
+ 	struct vb2_buffer *vb;
+ 
+ 	if (bufs_queued < 0) {
+-		dev_err(dev, " No buffer available\n");
++		HKR_ERR(dev, " No buffer available\n");
+ 		goto irq_done;
+ 	}
+ 
+@@ -714,8 +788,8 @@ static irqreturn_t hkr_irq(int irq, void *hkr_ptr)
+ 
+ 		atomic_dec(&q->bufs_queued);
+ 		vb2_buffer_done(vb, VB2_BUF_STATE_DONE);
+-		HKR_INFO(dev, "stream-%d one buffer done, dma addr %llx\n", q->stream_index,
+-                                                                q->ring->dma_addr[q->ring->rd_index]);
++		HKR_INFO(dev, "timestamp: %ld, stream-%d one buffer done, dma addr %llx\n",
++			vb->timestamp/1000000, q->stream_index, q->ring->dma_addr[q->ring->rd_index]);
+ 	}
+ 
+ 	HKR_INFO(dev, "+++++%s %d next deq_index:%d\n", __func__, __LINE__,
+@@ -772,6 +846,18 @@ static void hkr_process_stop_ack(struct hkr_device *hkr_dev,
+ 	}
+ }
+ 
++static void hkr_process_ctrl_update_calib_ack(struct hkr_device *hkr_dev,
++                                	      struct hkr_msg_header *header)
++{
++	struct device *dev = hkr_dev->dev;
++	struct hkr_msg_ctrl_update_calib_done *done =
++		(struct hkr_msg_ctrl_update_calib_done*)header;
++
++	HKR_INFO(dev, "calib ack, size: %u", done->calib_size);
++	complete(&hkr_dev->calib_ack_comp);
++}
++
++
+ static void hkr_process_dev2host_message(struct hkr_device *hkr_dev)
+ {
+ 	struct hkr_msg_item item;
+@@ -786,6 +872,9 @@ static void hkr_process_dev2host_message(struct hkr_device *hkr_dev)
+ 		case HKR_MSG_STREAM_STOP_ACK:
+ 			hkr_process_stop_ack(hkr_dev, header);
+ 			break;
++		case HKR_MSG_CTRL_UPDATE_CALIB_ACK:
++			hkr_process_ctrl_update_calib_ack(hkr_dev, header);
++			break;
+ 		}
+ 	}
+ }
+@@ -807,12 +896,15 @@ static irqreturn_t hkr_dev_msg_irq(int irq, void *hkr_ptr)
+ 
+ 	/* Non message IRQ only handled here in IRQ_MODE_SINGLE */
+ 	if (hkr_dev->irq_mode == IRQ_MODE_SINGLE) {
+-		int img_idx = 0, imu_idx = 0;
++		int img_idx = 0, imu_idx = 0, meta_idx = 0;
+ 		for (i = 0; i < hkr_dev->stream_nums; i++) {
+ 			if (single_mode_satus & HKR_EP_INT_FRAME(i)) {
+ 				single_clear_status &= ~HKR_EP_INT_FRAME(i);
+ 				if (hkr_dev->stream_type[i] == HKR_STREAM_IMAGE)
+ 					hkr_irq(irq, &hkr_dev->queue[img_idx]);
++				else if (hkr_dev->stream_type[i] == HKR_STREAM_META) {
++					hkr_irq(irq, &hkr_dev->queue[meta_idx + HKR_USECASE_ALLCAM_IMAGE_NUM]);
++				}
+ #if 0
+ 				else if (hkr_dev->stream_type[i] == HKR_STREAM_IMU) {
+ 					hkr_hid_irq(irq, &hkr_dev->hid_data[imu_idx]);
+@@ -821,6 +913,8 @@ static irqreturn_t hkr_dev_msg_irq(int irq, void *hkr_ptr)
+ 			}
+ 			if (hkr_dev->stream_type[i] == HKR_STREAM_IMAGE)
+ 				img_idx++;
++			else if (hkr_dev->stream_type[i] == HKR_STREAM_META)
++				meta_idx++;
+ 			else if (hkr_dev->stream_type[i] == HKR_STREAM_IMU)
+ 				imu_idx++;
+ 		}
+@@ -846,7 +940,7 @@ static void hkr_destroy_v4l2_instances(struct hkr_device *hkr_dev)
+ {
+ 	int i;
+ 
+-	for (i = 0; i < hkr_dev->image_stream_num; i++)
++	for (i = 0; i < hkr_dev->image_stream_num + hkr_dev->meta_stream_num; i++)
+ 		hkr_destroy_v4l2_device(hkr_dev, &hkr_dev->queue[i]);
+ }
+ 
+@@ -859,30 +953,47 @@ static int hkr_create_v4l2_device(struct hkr_device *hkr_dev,
+ 	struct vb2_queue *vbq = &q->vbq;
+ 	struct hkr_cfg_info_header *header;
+ 	struct hkr_image_stream *image_stream;
++	struct hkr_meta_stream *meta_stream;
++	char* dev_name = NULL;
+ 
+ 	mutex_init(&q->lock);
+ 	header = (struct hkr_cfg_info_header *)config;
+ 
+ 	if (header->type == HKR_STREAM_IMAGE) {
+ 		image_stream = (struct hkr_image_stream *)config;
+-		q->format.width = image_stream->width;
+-		q->format.height = image_stream->height;
+-		q->format.pixelformat = image_stream->fourcc;
+-		q->format.colorspace = V4L2_COLORSPACE_DEFAULT;
+-		q->format.field = V4L2_FIELD_ANY;
+-		q->format.bytesperline = hkr_bytesperline(q->format.pixelformat,q->format.width);
+-		q->format.sizeimage = q->format.bytesperline * q->format.height;
++		q->pix_fmt.width = image_stream->width;
++		q->pix_fmt.height = image_stream->height;
++		q->pix_fmt.pixelformat = image_stream->fourcc;
++		q->pix_fmt.colorspace = V4L2_COLORSPACE_DEFAULT;
++		q->pix_fmt.field = V4L2_FIELD_ANY;
++		q->pix_fmt.bytesperline = hkr_bytesperline(q->pix_fmt.pixelformat,q->pix_fmt.width);
++		q->pix_fmt.sizeimage = q->pix_fmt.bytesperline * q->pix_fmt.height;
+ 		q->irq = hkr_dev->irq + image_stream->irq_index - 1;
+-
+-		HKR_INFO(dev, "hkr_dev->irq:%d index:%d\n", hkr_dev->irq,
++		/* TODO: may implement media framework or subdev later here */
++		vbq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++		vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
++		dev_name = image_stream->devname;
++		HKR_INFO(dev, "image hkr_dev->irq:%d index:%d\n", hkr_dev->irq,
+ 		         image_stream->irq_index);
++	} else if(header->type == HKR_STREAM_META) {
++		meta_stream = (struct hkr_meta_stream *)config;
++		q->meta_fmt.dataformat = meta_stream->fourcc;
++		q->meta_fmt.buffersize = meta_stream->size;
++		q->irq = hkr_dev->irq + meta_stream->irq_index - 1;
++		/* TODO: may implement media framework or subdev later here */
++		vbq->type = V4L2_BUF_TYPE_META_CAPTURE;
++		vdev->device_caps = V4L2_CAP_META_CAPTURE | V4L2_CAP_STREAMING;
++		dev_name = meta_stream->devname;
++		HKR_INFO(dev, "meta hkr_dev->irq:%d index:%d\n", hkr_dev->irq,
++		         meta_stream->irq_index);
+ 	} else {
+-		HKR_INFO(dev, "we only support image stream now");
++		HKR_INFO(dev, "we only support image/meta stream now");
+ 		return -EINVAL;
+ 	}
+ 
+ 	init_completion(&q->msg_ack_comp);
+ 
++
+ 	HKR_INFO(dev, "cpu:%p dma:%llx\n", q->ring, q->ring_bus_addr);
+ 	writel(q->ring_bus_addr & 0xFFFFFFFF,
+ 	       q->base + HKR_DMA_DESC_LOW_OFF);
+@@ -890,9 +1001,6 @@ static int hkr_create_v4l2_device(struct hkr_device *hkr_dev,
+ 	writel(q->ring_bus_addr >> 32,
+ 	       q->base + HKR_DMA_DESC_HIGH_OFF);
+ 
+-	/* TODO: may implement media framework or subdev later here */
+-	vbq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-
+ 	/* TODO: How to implement user ptr when no IOMMU? */
+ 	vbq->io_modes = VB2_MMAP;
+ 	vbq->ops = &hkr_vb2_ops;
+@@ -905,7 +1013,7 @@ static int hkr_create_v4l2_device(struct hkr_device *hkr_dev,
+ 	vbq->lock = &q->lock;
+ 	err = vb2_queue_init(vbq);
+ 	if (err) {
+-		dev_err(dev,
++		HKR_ERR(dev,
+ 		        "Failed to initialize videobuf2 queue (%d)\n", err);
+ 		goto fail_vbq;
+ 	}
+@@ -917,13 +1025,12 @@ static int hkr_create_v4l2_device(struct hkr_device *hkr_dev,
+ 		                  HKR_DRIVER_NAME, q);
+ 		if (err) {
+ 			/* when failed, devm will clean the irq */
+-			dev_err(dev, "failed to request IRQ (%d)\n", err);
++			HKR_ERR(dev, "failed to request IRQ (%d)\n", err);
+ 			goto irq_fail;
+ 		}
+ 	}
+ 
+-	snprintf(vdev->name, sizeof(vdev->name), "%s-%td", HKR_DRIVER_NAME,
+-	         q - hkr_dev->queue);
++	snprintf(vdev->name, sizeof(vdev->name), "%s", dev_name);
+ 	vdev->release = video_device_release_empty;
+ 	vdev->fops = &hkr_v4l2_fops;
+ 	vdev->ioctl_ops = &hkr_v4l2_ioctl_ops;
+@@ -932,12 +1039,11 @@ static int hkr_create_v4l2_device(struct hkr_device *hkr_dev,
+ 	/* binding queue */
+ 
+ 	vdev->queue = &q->vbq;
+-	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
+ 	HKR_INFO(dev, "**device cap:%x\n", vdev->device_caps);
+ 	video_set_drvdata(vdev, hkr_dev);
+ 	err = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
+ 	if (err) {
+-		dev_err(dev,
++		HKR_ERR(dev,
+ 		        "Failed to register video device(%d)\n", err);
+ 		goto fail_vdev;
+ 	}
+@@ -961,20 +1067,21 @@ static int hkr_create_v4l2_instances(struct hkr_device *hkr_dev)
+ 	int stream_idx;
+ 	struct device *dev = hkr_dev->dev;
+ 	struct hkr_stream_item *item;
+-	struct hkr_image_stream *stream;
++	struct hkr_image_stream *image;
++	struct hkr_meta_stream *meta;
+ 
+ 	snprintf(hkr_dev->v4l2_dev.name, sizeof(hkr_dev->v4l2_dev.name),
+ 	         "%s", HKR_DRIVER_NAME);
+ 	err = v4l2_device_register(dev, &hkr_dev->v4l2_dev);
+ 	if (err) {
+-		dev_err(dev, "Failed to register v4l2 device.\n");
++		HKR_ERR(dev, "Failed to register v4l2 device.\n");
+ 		return err;
+ 	}
+ 
+ 	list_for_each_entry(item, &hkr_dev->image_streams, list) {
+-		stream = (struct hkr_image_stream *)item->stream;
++		image = (struct hkr_image_stream *)item->stream;
+ 
+-		stream_idx = stream->stream_index;
++		stream_idx = image->stream_index;
+ 		hkr_dev->queue[idx].stream_index = stream_idx;
+ 		hkr_assign_queue_ring_descs(hkr_dev, &hkr_dev->queue[idx],
+ 		                            stream_idx);
+@@ -988,14 +1095,41 @@ static int hkr_create_v4l2_instances(struct hkr_device *hkr_dev)
+ 
+ 		idx++;
+ 	}
+-
+ 	hkr_dev->image_stream_num = idx;
+ 
+ 	if (hkr_dev->image_stream_num > HKR_MAX_STREAM_NUM) {
+ 		err = -EINVAL;
+-		dev_err(dev, "Stream number %d overflows maximum:%d\n",
++		HKR_ERR(dev, "Image Stream number %d overflows maximum:%d\n",
+ 		        hkr_dev->image_stream_num, HKR_MAX_STREAM_NUM);
+ 	}
++	if (err) {
++		for (idx--; idx >= 0; idx--)
++			hkr_destroy_v4l2_device(hkr_dev, &hkr_dev->queue[idx]);
++	}
++	list_for_each_entry(item, &hkr_dev->meta_streams, list) {
++		meta = (struct hkr_meta_stream *)item->stream;
++
++		stream_idx = meta->stream_index;
++		hkr_dev->queue[idx].stream_index = stream_idx;
++		hkr_assign_queue_ring_descs(hkr_dev, &hkr_dev->queue[idx],
++		                            stream_idx);
++		hkr_dev->queue[idx].base = hkr_dev->base +
++		                           HKR_STREAM_CRTL_OFF(stream_idx);
++		err = hkr_create_v4l2_device(hkr_dev, &hkr_dev->queue[idx],
++		                             item->stream);
++
++		if (err)
++			break;
++
++		idx++;
++	}
++	hkr_dev->meta_stream_num = idx - hkr_dev->image_stream_num;
++
++	if (hkr_dev->meta_stream_num > HKR_MAX_STREAM_NUM) {
++		err = -EINVAL;
++		HKR_ERR(dev, "Meta Stream number %d overflows maximum:%d\n",
++		        hkr_dev->meta_stream_num, HKR_MAX_STREAM_NUM);
++	}
+ 
+ 	if (err) {
+ 		for (idx--; idx >= 0; idx--)
+@@ -1062,7 +1196,7 @@ static int hkr_create_hid_instances(struct hkr_device *hkr_dev)
+ 
+ 		err = hkr_create_hid_device(&hkr_dev->hid_data[idx]);
+ 		if (err) {
+-			dev_err(dev, "create hid device failed\n");
++			HKR_ERR(dev, "create hid device failed\n");
+ 			break;
+ 		}
+ 
+@@ -1073,7 +1207,7 @@ static int hkr_create_hid_instances(struct hkr_device *hkr_dev)
+ 
+ 	if (hkr_dev->imu_stream_num > HKR_MAX_STREAM_NUM) {
+ 		err = -EINVAL;
+-		dev_err(dev, "Stream number %d overflows maximum:%d\n",
++		HKR_ERR(dev, "Stream number %d overflows maximum:%d\n",
+ 		        hkr_dev->imu_stream_num, HKR_MAX_STREAM_NUM);
+ 	}
+ 
+@@ -1096,22 +1230,23 @@ static int hkr_create_instances(struct hkr_device *hkr_dev)
+ 	int err = 0;
+ 	struct device *dev = hkr_dev->dev;
+ 
++
+ 	err = hkr_alloc_ring_descs(hkr_dev);
+ 	if (err) {
+-		dev_err(dev, "alloc ring descriptor buffers failed.\n");
++		HKR_ERR(dev, "alloc ring descriptor buffers failed.\n");
+ 		return err;
+ 	}
+ 
+ 	err =  hkr_create_v4l2_instances(hkr_dev);
+ 	if (err) {
+-		dev_err(dev, "create v4l2 devices failed\n");
++		HKR_ERR(dev, "create v4l2 devices failed\n");
+ 		goto create_v4l2_err;
+ 	}
+ 
+ #if 0
+ 	err = hkr_create_hid_instances(hkr_dev);
+ 	if (err) {
+-		dev_err(dev, "create hid devices failed\n");
++		HKR_ERR(dev, "create hid devices failed\n");
+ 		goto create_hid_err;
+ 	}
+ #endif
+@@ -1124,7 +1259,7 @@ static int hkr_create_instances(struct hkr_device *hkr_dev)
+ 	       hkr_dev->base + HKR_RING_EACH_SIZE_OFF);
+ 
+ 	HKR_INFO(dev, "%d streams registered ring_base:%llx\n",
+-	         hkr_dev->image_stream_num, hkr_dev->ring_bus_addr);
++	         hkr_dev->stream_nums, hkr_dev->ring_bus_addr);
+ 	return 0;
+ 
+ create_hid_err:
+@@ -1199,8 +1334,8 @@ static int hkr_add_meta_item(struct hkr_device *hkr_dev, void *base)
+ 	item->stream = (void *)stream;
+ 	list_add_tail(&item->list, &hkr_dev->meta_streams);
+ 
+-	HKR_INFO(hkr_dev->dev, "add meta item, type:%x size:%d",
+-	         stream->header.type, stream->header.size);
++	HKR_INFO(hkr_dev->dev, "add meta item, fourcc:%x, size:%d",
++	        stream->fourcc, stream->size);
+ 
+ 	return 0;
+ }
+@@ -1318,7 +1453,6 @@ static int hkr_ctl_open(struct inode *inode, struct file *file)
+ 	struct hkr_device *hkr_dev = hkr_ctl_to_hkr_dev(ctl_dev);
+ 
+ 	file->private_data = hkr_dev;
+-
+ 	HKR_INFO(hkr_dev->dev, "major:%d\n", ctl_dev->major);
+ 
+ 	return nonseekable_open(inode, file);
+@@ -1330,6 +1464,7 @@ enum {
+ 	HKR_PCIE_CTL_DEVICE_RST,
+ 	HKR_PCIE_CTL_GET_UC_CFG,
+ 	HKR_PCIE_CTL_SET_UC,
++	HKR_PCIE_CTL_UPDATE_DEV_CALIB,
+ };
+ 
+ enum {
+@@ -1345,7 +1480,44 @@ static int hkr_ctl_release(struct inode *inode, struct file *file)
+ static ssize_t hkr_ctl_write(struct file *file, const char __user *data,
+                              size_t len, loff_t *ppos)
+ {
+-	return 0;
++	struct hkr_device *hkr_dev = (struct hkr_device *)file->private_data;
++	struct hkr_msg_ctrl_update_calib message;
++	int err = 0;
++
++	if (len > HKR_CALIB_DATA_SIZE) {
++		HKR_ERR(hkr_dev->dev, "file length exceeds limit\n");
++		return -EFBIG;
++	}
++	if (!ppos) {
++		HKR_ERR(hkr_dev->dev, "no ppos\n");
++		return -EINVAL;
++	}
++	if (*ppos != 0) {
++		HKR_ERR(hkr_dev->dev, "ppos: %llu but will write from 0", *ppos);
++		*ppos = 0;
++	}
++
++	while (len > 0) {
++		uint32_t block_size = min(HKR_CALIB_DATA_PARTIAL_SIZE, len);
++		message.header.msg_size = sizeof(message);
++		message.header.msg_type = HKR_MSG_CTRL_UPDATE_CALIB;
++		message.length = block_size,
++		message.offset = (uint32_t)*ppos;
++
++		err = copy_from_user(hkr_dev->base + HKR_CALIB_DATA_OFF,
++				     data + *ppos, block_size);
++		if (err) {
++			HKR_ERR(hkr_dev->dev, "copy_from_user return %d\n", err);
++			return -EIO;
++		}
++		*ppos += block_size;
++		len -= block_size;
++		err = hkr_send_calib_update_msg(hkr_dev, &message.header);
++		if (err)
++			break;
++	}
++
++	return *ppos;
+ }
+ 
+ static ssize_t hkr_ctl_read(struct file *file, char __user *buf,
+@@ -1368,8 +1540,10 @@ static inline unsigned long hkr_copy_device_info(struct hkr_device *hkr_dev,
+ {
+ 	int bytes;
+ 
+-	bytes = copy_to_user((void __user *)arg, &hkr_dev->dev_info,
+-	                     sizeof(struct hkr_pcie_device_info));
++	void* src = hkr_dev->base + HKR_EEPROM_DATA_OFF;
++	bytes = copy_to_user(arg, src, HKR_SENSOR_EEPROM_SIZE * 4);
++
++	HKR_INFO(hkr_dev->dev, "eeprom offset in bar: %llx\n", src);
+ 
+ 	if (bytes)
+ 		return -EFAULT;
+@@ -1378,11 +1552,11 @@ static inline unsigned long hkr_copy_device_info(struct hkr_device *hkr_dev,
+ }
+ 
+ static inline unsigned long hkr_get_device_eeprom(struct hkr_device *hkr_dev,
+-               uint8_t *arg)
++               					  uint8_t *arg)
+ {
+ 	int bytes;
+ 	bytes = copy_to_user(arg, hkr_dev->base + HKR_EEPROM_DATA_OFF + HKR_SENSOR_EEPROM_SIZE,
+-			HKR_SENSOR_EEPROM_SIZE * 8);
++			HKR_SENSOR_EEPROM_SIZE * 4);
+ 
+ 	if (bytes)
+ 		return -EFAULT;
+@@ -1390,6 +1564,7 @@ static inline unsigned long hkr_get_device_eeprom(struct hkr_device *hkr_dev,
+ 	return 0;
+ }
+ 
++
+ static long hkr_ctl_ioctl(struct file *filp, unsigned int cmd,
+                           unsigned long arg)
+ {
+@@ -1407,6 +1582,10 @@ static long hkr_ctl_ioctl(struct file *filp, unsigned int cmd,
+ 	case HKR_PCIE_CTL_DEVICE_RST:
+ 		ret = hkr_ctrl_reset_device(hkr_dev);
+ 		break;
++	case HKR_PCIE_CTL_UPDATE_DEV_CALIB:
++		/* TODO: enable ioctl if needed */
++		HKR_INFO(dev, "ioctl HKR_PCIE_CTL_UPDATE_DEV_CALIB\n");
++		break;
+ 	default:
+ 		HKR_INFO(dev, "unsupported I/O control\n");
+ 		break;
+@@ -1449,7 +1628,7 @@ static int hkr_create_ctl_device(struct hkr_device *hkr_dev)
+ 	ctl_dev->major = MAJOR(ctl_dev->devid);
+ 
+ 	if (ret < 0) {
+-		dev_err(dev, "register ctl_dev region failed: %d\n", ret);
++		HKR_ERR(dev, "register ctl_dev region failed: %d\n", ret);
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -1457,13 +1636,13 @@ static int hkr_create_ctl_device(struct hkr_device *hkr_dev)
+ 	cdev_init(chr_dev, &hkr_ctl_fileops);
+ 	ret = cdev_add(chr_dev, ctl_dev->devid, 1);
+ 	if (ret) {
+-		dev_err(dev, "add cdev failed\n");
++		HKR_ERR(dev, "add cdev failed\n");
+ 		goto undo_register_region;
+ 	}
+ 
+ 	ctl_dev->class = class_create(THIS_MODULE, HKR_CTRL_DRIVER_NAME);
+ 	if (IS_ERR(ctl_dev->class)) {
+-		dev_err(dev, "create class failed\n");
++		HKR_ERR(dev, "create class failed\n");
+ 		goto undo_cdev_add;
+ 	}
+ 
+@@ -1471,11 +1650,11 @@ static int hkr_create_ctl_device(struct hkr_device *hkr_dev)
+ 	                             ctl_dev->devid,
+ 	                             NULL, HKR_CTRL_DRIVER_NAME);
+ 	if (IS_ERR(ctl_dev->dev)) {
+-		dev_err(dev, "failed to create device\n");
++		HKR_ERR(dev, "failed to create device\n");
+ 		goto undor_create_class;
+ 	}
+ 
+-	dev_info(dev, "%s register done\n", HKR_CTRL_DRIVER_NAME);
++	HKR_INFO(dev, "%s register done\n", HKR_CTRL_DRIVER_NAME);
+ 	return 0; /* succeed */
+ 
+ undor_create_class:
+@@ -1517,11 +1696,13 @@ static int hkr_probe(struct pci_dev *pdev,
+ 	hkr_dev->dev = dev;
+ 
+ 	hkr_dev->dev_info.host_drv_version = (HKR_DRV_VERSION_MAJOR << 20) |
+-	                                     (HKR_DRV_VERSION_MINOR << 10) | (HKR_DRV_VERSION_CHG);
++	                                     (HKR_DRV_VERSION_MINOR << 10) |
++					     (HKR_DRV_VERSION_CHG);
+ 
+ 	strncpy(hkr_dev->dev_info.name, "hrk-v00", HKR_DEV_NAME_LENGTH);
+ 
+ 	mutex_init(&hkr_dev->msg_lock);
++	init_completion(&hkr_dev->calib_ack_comp);
+ 
+ 	data = (struct hkr_pci_drv_data *) id->driver_data;
+ 	if (data)
+@@ -1531,13 +1712,13 @@ static int hkr_probe(struct pci_dev *pdev,
+ 
+ 	err = pci_enable_device(pdev);
+ 	if (err) {
+-		dev_err(dev, "Cannot enable HKR PCI device\n");
++		HKR_ERR(dev, "Cannot enable HKR PCI device\n");
+ 		return err;
+ 	}
+ 
+ 	err = pci_request_regions(pdev, HKR_DRIVER_NAME);
+ 	if (err) {
+-		dev_err(dev, "Cannot obtain HKR PCI resource\n");
++		HKR_ERR(dev, "Cannot obtain HKR PCI resource\n");
+ 		goto err_disable_dev;
+ 	}
+ 
+@@ -1545,7 +1726,7 @@ static int hkr_probe(struct pci_dev *pdev,
+ 	irq_nums = pci_alloc_irq_vectors(pdev, 1, 32, PCI_IRQ_MSI);
+ 	if (irq_nums < 0) {
+ 		err = irq_nums;
+-		dev_err(dev, "HKR alloc irq vectors failed\n");
++		HKR_ERR(dev, "HKR alloc irq vectors failed\n");
+ 		goto alloc_irq_fail;
+ 	}
+ 
+@@ -1568,7 +1749,7 @@ static int hkr_probe(struct pci_dev *pdev,
+ 	if (pci_resource_flags(pdev, BAR_0) & IORESOURCE_MEM) {
+ 		base = pci_ioremap_bar(pdev, BAR_0);
+ 		if (!base) {
+-			dev_err(dev, "Failed to map bar0\n");
++			HKR_ERR(dev, "Failed to map bar0\n");
+ 			err = -ENODEV;
+ 			goto ioremap_err;
+ 		}
+@@ -1586,7 +1767,7 @@ static int hkr_probe(struct pci_dev *pdev,
+ 		/* TODO: remove or add an output */
+ 		struct resource *res = &pdev->resource[0];
+ 
+-		dev_err(dev, "start:%pR\n", res);
++		HKR_ERR(dev, "start:%pR\n", res);
+ 	}
+ 
+ 	/* TODO: If each device is independent, should we use multiple lock? */
+@@ -1596,9 +1777,10 @@ static int hkr_probe(struct pci_dev *pdev,
+ 	INIT_LIST_HEAD(&hkr_dev->meta_streams);
+ 	INIT_LIST_HEAD(&hkr_dev->imu_streams);
+ 
++
+ 	err = hkr_parse_usecase(hkr_dev);
+ 	if (err) {
+-		dev_err(dev, "parse usecase fail\n");
++		HKR_ERR(dev, "parse usecase fail\n");
+ 		goto parse_usecase_fail;
+ 	}
+ 
+@@ -1607,7 +1789,7 @@ static int hkr_probe(struct pci_dev *pdev,
+ 	                  0, HKR_DRIVER_NAME, hkr_dev);
+ 
+ 	if (err) {
+-		dev_err(dev, "request msg irq failed\n");
++		HKR_ERR(dev, "request msg irq failed\n");
+ 		goto get_msg_irq_failed;
+ 	}
+ 
+@@ -1616,13 +1798,13 @@ static int hkr_probe(struct pci_dev *pdev,
+ 
+ 	err = hkr_create_instances(hkr_dev);
+ 	if (err) {
+-		dev_err(dev, "create instance failed\n");
++		HKR_ERR(dev, "create instance failed\n");
+ 		goto create_inst_fail;
+ 	}
+ 
+ 	err = hkr_create_ctl_device(hkr_dev);
+ 	if (err) {
+-		dev_err(dev, "create ctrl device failed\n");
++		HKR_ERR(dev, "create ctrl device failed\n");
+ 		goto create_ctrl_failed;
+ 	}
+ 
+@@ -1689,6 +1871,7 @@ static struct pci_driver hkr_pci_driver = {
+ 
+ module_pci_driver(hkr_pci_driver);
+ 
++
+ MODULE_AUTHOR("Shunyong Yang <shunyong.yang@intel.com>");
+ MODULE_LICENSE("GPL v2");
+ MODULE_DESCRIPTION("HKR camera driver");
+diff --git a/drivers/media/pci/intel/hkrcam/hkr-cam.h b/drivers/media/pci/intel/hkrcam/hkr-cam.h
+index 52d3334be60d..5759a92fdcc3 100644
+--- a/drivers/media/pci/intel/hkrcam/hkr-cam.h
++++ b/drivers/media/pci/intel/hkrcam/hkr-cam.h
+@@ -36,7 +36,8 @@ struct hkr_v4l2_queue {
+ 	/* Video device, /dev/videoX */
+ 	struct video_device vdev;
+ 	struct media_pad vdev_pad;
+-	struct v4l2_pix_format format;
++	struct v4l2_pix_format pix_fmt;
++	struct v4l2_meta_format	meta_fmt;
+ 	struct vb2_queue vbq;
+ 
+ 	struct completion msg_ack_comp; /* ack completion from client */
+@@ -61,6 +62,7 @@ struct hkr_stream_item {
+ 	struct list_head list;
+ };
+ 
++
+ struct hkr_control_dev {
+ 	int major;
+ 	dev_t devid;
+@@ -101,6 +103,13 @@ struct hkr_device {
+ 	dma_addr_t ring_bus_addr; /* ring desc DMA addr aligned*/
+ 	struct hkr_msg_buf *msg_buf;
+ 	struct mutex msg_lock;
++	struct completion calib_ack_comp; /* ack completion from client */
++};
++
++struct hkr_ioctl_data {
++	const char *data;
++	size_t size;
++	loff_t *offset;
+ };
+ 
+ struct hkr_pci_drv_data {
+diff --git a/drivers/media/pci/intel/hkrcam/hkr-hid.c b/drivers/media/pci/intel/hkrcam/hkr-hid.c
+index 1ef76c43754e..cfeef36f90df 100644
+--- a/drivers/media/pci/intel/hkrcam/hkr-hid.c
++++ b/drivers/media/pci/intel/hkrcam/hkr-hid.c
+@@ -199,6 +199,7 @@ irqreturn_t hkr_hid_irq(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++
+ static struct hid_ll_driver hkr_hid_ll_driver = {
+ 	.parse = hkr_hid_parse,
+ 	.start = hkr_hid_start,
+diff --git a/drivers/media/pci/intel/hkrcam/hkr-hid.h b/drivers/media/pci/intel/hkrcam/hkr-hid.h
+index 69548fb1c5ba..1e3292dd8b0e 100644
+--- a/drivers/media/pci/intel/hkrcam/hkr-hid.h
++++ b/drivers/media/pci/intel/hkrcam/hkr-hid.h
+@@ -35,6 +35,7 @@ struct hkr_hid_data {
+ 	struct hkr_ring_desc *ring; /* ring desc CPU addr aligned */
+ };
+ 
++
+ int hkr_create_hid_device(struct hkr_hid_data *hid_data);
+ void hkr_hid_remove(struct hkr_hid_data *hid_data);
+ irqreturn_t hkr_hid_irq(int irq, void *data);
+diff --git a/drivers/media/pci/intel/hkrcam/hkr-pcie-hostdev.h b/drivers/media/pci/intel/hkrcam/hkr-pcie-hostdev.h
+index 2f355706edea..f7d3204d5ace 100644
+--- a/drivers/media/pci/intel/hkrcam/hkr-pcie-hostdev.h
++++ b/drivers/media/pci/intel/hkrcam/hkr-pcie-hostdev.h
+@@ -1,44 +1,68 @@
++/*
++ * INTEL CONFIDENTIAL
++ *
++ * Copyright (C) 2021 Intel Corporation
++ *
++ * This software and the related documents are Intel copyrighted materials,
++ * and your use of them is governed by the express license under which they
++ * were provided to you ("License"). Unless the License provides otherwise,
++ * you may not use, modify, copy, publish, distribute, disclose or transmit
++ * this software or the related documents without Intel's prior written permission.
++ * This software and the related documents are provided as is, with no express
++ * or implied warranties, other than those that are expressly
++ * stated in the License.
++ */
++
+ #ifndef PCIE_HOSTDEV_INTF_H
+ #define PCIE_HOSTDEV_INTF_H
++
++#define HKR_MAX_USECASE_NUM 25U
++#define HKR_BASIC_USECASE_NUM 2U
++#define HKR_USECASE_ALLCAM_IMAGE_NUM 17U
++#define HKR_USECASE_ALLCAM_META_NUM 8U
++#define HKR_USECASE_ALLCAM_IMU_NUM 1U
++#define HKR_USECASE_ALLCAM_STREAM_NUM (HKR_USECASE_ALLCAM_IMAGE_NUM + \
++					HKR_USECASE_ALLCAM_META_NUM + \
++					HKR_USECASE_ALLCAM_IMU_NUM)
+ /* Memory layout */
+-#define HKR_MAX_BUFFER_NUM 4
++#define HKR_MAX_BUFFER_NUM 4UL
+ 
+-#define HKR_MAX_NUM_OF_STREAMS 16
++#define HKR_MAX_NUM_OF_STREAMS 26UL
+ #define HKR_MAX_STREAM_NUM HKR_MAX_NUM_OF_STREAMS
+ /* When using message buf. We should pay attention to buffer size*/
+ struct hkr_msg_buf;
+-#define MSG_ITEM_NUM  (32)
+-#define MSG_ITEM_SIZE (32) /* each message has 32 bytes */
++#define MSG_ITEM_NUM  (uint16_t)32U
++#define MSG_ITEM_SIZE (36UL)	/* each message has 36 bytes */
+ #define MSG_BUF_SIZE (sizeof(struct hkr_msg_buf))
+ 
+-#define HKR_IMU_MAX_REPORT_SIZE (MSG_BUF_SIZE - 64)
++#define HKR_IMU_MAX_REPORT_SIZE (MSG_BUF_SIZE - 64UL)
+ 
+-#define HKR_MEM_BAR_BASE (0x00)
+-#define HKR_HOST_INFO_SIZE (1 << 7)
++#define HKR_MEM_BAR_BASE (0x00UL)
++#define HKR_HOST_INFO_SIZE (0x01UL << 7UL)
+ 
+ /* 64bit for Device INIT status */
+-#define HKR_EP_INT_STAUS_OFF (HKR_MEM_BAR_BASE + 0x00)
++#define HKR_EP_INT_STAUS_OFF (HKR_MEM_BAR_BASE + 0x00UL)
+ 
+-#define HKR_DEVICE_INFO_OFF (HKR_MEM_BAR_BASE + 0x80)
+-#define HKR_DEVICE_CTRL_OFF (HKR_MEM_BAR_BASE + 0x400)
+-#define HKR_HOST_INFO_OFF (HKR_MEM_BAR_BASE + 0x480)
++#define HKR_DEVICE_INFO_OFF (HKR_MEM_BAR_BASE + 0x100UL)
++#define HKR_DEVICE_CTRL_OFF (HKR_DEVICE_INFO_OFF + 0x800UL)
++#define HKR_HOST_INFO_OFF (HKR_DEVICE_CTRL_OFF + 0x100UL)
+ #define HKR_HOST2DEV_MSG_OFF (HKR_HOST_INFO_OFF + \
+ 				(HKR_HOST_INFO_SIZE * HKR_MAX_STREAM_NUM))
+ #define HKR_DEV2HOST_MSG_OFF (HKR_HOST2DEV_MSG_OFF + MSG_BUF_SIZE)
+ #define HKR_RING_DESC_OFF_IN_BAR (HKR_DEV2HOST_MSG_OFF + MSG_BUF_SIZE)
+ 
+ /* HKR global control address */
+-#define HKR_HOST_STAT_IRQ_INIT_DONE 0x01
+-#define HKR_HOST_STAT_PROBE_DONE 0x02
+-
+-#define HKR_REST_DEVICE_BIT 0x01
+-#define HKR_HOST_DRV_STAT_OFF  (HKR_DEVICE_CTRL_OFF + 0x00)
+-#define HKR_RST_DEVICE_OFF  (HKR_DEVICE_CTRL_OFF + 0x04)
+-#define HKR_HOST_MSG_SEND_CMD_OFF (HKR_DEVICE_CTRL_OFF + 0x08)
+-#define HKR_DEV_MSG_SEND_CMD_OFF (HKR_DEVICE_CTRL_OFF + 0x0c)
+-#define HKR_RING_DESCS_LOW_OFF  (HKR_DEVICE_CTRL_OFF + 0x20)
+-#define HKR_RING_DESCS_HIGH_OFF  (HKR_DEVICE_CTRL_OFF + 0x24)
+-#define HKR_RING_EACH_SIZE_OFF  (HKR_DEVICE_CTRL_OFF + 0x2c)
++#define HKR_HOST_STAT_IRQ_INIT_DONE 0x01UL
++#define HKR_HOST_STAT_PROBE_DONE 0x02UL
++
++#define HKR_REST_DEVICE_BIT 0x01UL
++#define HKR_HOST_DRV_STAT_OFF  (HKR_DEVICE_CTRL_OFF + 0x00UL)
++#define HKR_RST_DEVICE_OFF  (HKR_DEVICE_CTRL_OFF + 0x04UL)
++#define HKR_HOST_MSG_SEND_CMD_OFF (HKR_DEVICE_CTRL_OFF + 0x08UL)
++#define HKR_DEV_MSG_SEND_CMD_OFF (HKR_DEVICE_CTRL_OFF + 0x0cUL)
++#define HKR_RING_DESCS_LOW_OFF  (HKR_DEVICE_CTRL_OFF + 0x20UL)
++#define HKR_RING_DESCS_HIGH_OFF  (HKR_DEVICE_CTRL_OFF + 0x24UL)
++#define HKR_RING_EACH_SIZE_OFF  (HKR_DEVICE_CTRL_OFF + 0x2cUL)
+ 
+ /*
+  * 128 byte for each stream
+@@ -49,19 +73,29 @@ struct hkr_msg_buf;
+ 
+ #define HKR_STREAM_CRTL_OFF(n) (HKR_HOST_INFO_OFF + \
+ 			(HKR_HOST_INFO_SIZE * n))
+-#define HKR_CMD_OFF				0x00  /* TODO: move to struct later */
+-#define HKR_CMD_PARAM_LOW_OFF	0x04
+-#define HKR_CMD_PARAM_HIGH_OFF	0x08
+-#define HKR_DMA_DESC_LOW_OFF	0x0C
+-#define HKR_DMA_DESC_HIGH_OFF	0x10
+-
+-#define HKR_EEPROM_DATA_OFF (HKR_MEM_BAR_BASE + 0x19000)
+-#define HKR_SENSOR_EEPROM_SIZE 0x5b
++#define HKR_CMD_OFF				0x00UL	/* TODO: move to struct later */
++#define HKR_CMD_PARAM_LOW_OFF	0x04UL
++#define HKR_CMD_PARAM_HIGH_OFF	0x08UL
++#define HKR_DMA_DESC_LOW_OFF	0x0CUL
++#define HKR_DMA_DESC_HIGH_OFF	0x10UL
++
+ /* End of Memory layout */
+ 
+ /* Define INT status from EP to host */
+-#define HKR_EP_INT_FRAME(n) (0x01ULL << n) /* n is 0..31 */
+-#define HKR_EP_INT_MSG (0x01ULL << 40U)
++#define HKR_EP_INT_FRAME(n) (0x01ULL << n)	/* n is 0..31 */
++#define HKR_EP_INT_MSG (0x01ULL << 40UL)
++
++#define HKR_EEPROM_DATA_OFF (HKR_MEM_BAR_BASE + 0x19000UL)
++#define HKR_SENSOR_EEPROM_SIZE 0x64U
++#define HKR_PCIE_METADATA_SIZE 76800U
++#define HKR_METADATA_OFF (HKR_EEPROM_DATA_OFF + \
++		HKR_USECASE_ALLCAM_IMAGE_NUM * HKR_SENSOR_EEPROM_SIZE)
++#define HKR_CALIB_DATA_OFF (HKR_METADATA_OFF + \
++		HKR_USECASE_ALLCAM_META_NUM * HKR_PCIE_METADATA_SIZE)
++#define HKR_EMPTY_SIZE (0x100000 - HKR_CALIB_DATA_OFF)
++#define HKR_CALIB_DATA_SIZE 0x1000000UL - 4U
++#define HKR_CALIB_DATA_PARTIAL_SIZE 0x32000UL
++#define HKR_DEV_NAME_LEN 50U
+ 
+ enum {
+ 	HKR_STREAM_CMD_NONE = 0,
+@@ -102,120 +136,154 @@ enum hkr_msg_type {
+ 	HKR_MSG_IMU_GET_REPORT_ACK,
+ 	HKR_MSG_IMU_SET_REPORT,
+ 	HKR_MSG_IMU_SET_REPORT_ACK,
++	HKR_MSG_CTRL_UPDATE_CALIB,
++	HKR_MSG_CTRL_UPDATE_CALIB_ACK,
+ 
+ 	HKR_MSG_N,
+ };
+ 
+-struct hkr_msg_buf_header
+-{
++struct hkr_msg_buf_header {
+ 	uint64_t msg_num;
+ 	uint64_t item_size;
+ 	uint64_t rd_idx;
+ 	uint64_t wr_idx;
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+-struct hkr_msg_item
+-{
++struct hkr_msg_item {
+ 	uint8_t data[MSG_ITEM_SIZE];
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+-struct hkr_msg_buf
+-{
++struct hkr_msg_buf {
+ 	struct hkr_msg_buf_header header;
+ 	struct hkr_msg_item items[MSG_ITEM_NUM];
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_header {
+-	uint8_t msg_type;           /**< The type of the message. */
+-	uint16_t msg_size;          /**< The total size of the message. */
+-	uint8_t reserved[1];        /**< Reserved for 32 bits alignment. */
+-} __attribute__ ((__packed__));
++	uint8_t msg_type;	/**< The type of the message. */
++	uint16_t msg_size;	/**< The total size of the message. */
++	uint8_t reserved[1];	/**< Reserved for 32 bits alignment. */
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_ack_header {
+-	uint8_t msg_type;           /**< The type of the ack message. */
+-	uint16_t msg_size;          /**< The total size of the ack message. */
+-	int8_t error_code;          /**< The status of the message. */
+-} __attribute__ ((__packed__));
++	uint8_t msg_type;	/**< The type of the ack message. */
++	uint16_t msg_size;	/**< The total size of the ack message. */
++	int8_t error_code;	/**< The status of the message. */
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_start {
+-	struct hkr_msg_header header;           /**< The header of the massage. */
+-	uint8_t num_of_stream;                  /**< How many streams need to be started. */
+-	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS]; /**< The actual stream IDs that need to be started. */
+-	uint8_t reserved[3];                    /**< Reserved for 32 bits alignment. */
+-} __attribute__ ((__packed__));
++	struct hkr_msg_header header;				  /**< The header of the massage. */
++	uint8_t num_of_stream;					  /**< How many streams need to be started. */
++	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS];		  /**< The actual stream IDs that need to be started. */
++#if ((HKR_MAX_NUM_OF_STREAMS + 1 ) & 3 != 0)
++	uint8_t reserved[(4 - ((HKR_MAX_NUM_OF_STREAMS + 1) & 3))];
++								  /**< Reserved for 32 bits alignment. */
++#endif
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_start_done {
+-	struct hkr_msg_ack_header header;  /**< The header of the massage. */
+-	uint8_t num_of_stream;                  /**< How many streams need to be started. */
+-	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS]; /**< The actual stream IDs that need to be started. */
+-	uint8_t reserved[3];
+-} __attribute__ ((__packed__));
++	struct hkr_msg_ack_header header;			  /**< The header of the massage. */
++	uint8_t num_of_stream;					  /**< How many streams need to be started. */
++	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS];		  /**< The actual stream IDs that need to be started. */
++#if ((HKR_MAX_NUM_OF_STREAMS + 1 ) & 3 != 0)
++	uint8_t reserved[(4 - ((HKR_MAX_NUM_OF_STREAMS + 1) & 3))];
++								  /**< Reserved for 32 bits alignment. */
++#endif
++} __attribute__((__packed__));
+ 
+ /**
+  * @brief The message for stop command
+  */
+ struct hkr_msg_stop {
+-	struct hkr_msg_header header;               /**< The header of the massage. */
+-	uint8_t num_of_stream;                      /**< How many streams need to be stopped. */
+-	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS]; /**< The actual stream IDs need to be stopped. */
+-	uint8_t reserved[3];                        /**< Reserved for 32 bits alignment. */
+-} __attribute__ ((__packed__));
++	struct hkr_msg_header header;				  /**< The header of the massage. */
++	uint8_t num_of_stream;					  /**< How many streams need to be started. */
++	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS];		  /**< The actual stream IDs that need to be started. */
++#if ((HKR_MAX_NUM_OF_STREAMS + 1 ) & 3 != 0)
++	uint8_t reserved[(4 - ((HKR_MAX_NUM_OF_STREAMS + 1) & 3))];
++								  /**< Reserved for 32 bits alignment. */
++#endif
++} __attribute__((__packed__));
+ 
+ /**
+  * @brief The ack message for stop command
+  */
+ struct hkr_msg_stop_done {
+-	struct hkr_msg_ack_header header;  /**< The header of the massage. */
+-	uint8_t num_of_stream;                      /**< How many streams need to be stopped. */
+-	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS]; /**< The actual stream IDs need to be stopped. */
+-	uint8_t reserved[3];
+-} __attribute__ ((__packed__));
++	struct hkr_msg_ack_header header;			  /**< The header of the massage. */
++	uint8_t num_of_stream;					  /**< How many streams need to be started. */
++	uint8_t stream_ids[HKR_MAX_NUM_OF_STREAMS];		  /**< The actual stream IDs that need to be started. */
++#if ((HKR_MAX_NUM_OF_STREAMS + 1 ) & 3 != 0)
++	uint8_t reserved[(4 - ((HKR_MAX_NUM_OF_STREAMS + 1) & 3))];
++								  /**< Reserved for 32 bits alignment. */
++#endif
++} __attribute__((__packed__));
++
++struct hkr_msg_ctrl_update_calib {
++	struct hkr_msg_header header;	/* The header of the massage */
++	uint32_t length;
++	uint32_t offset;
++} __attribute__((__packed__));
++
++struct hkr_msg_ctrl_update_calib_done {
++	struct hkr_msg_ack_header header;	/* The header of the massage */
++	uint32_t calib_size;
++} __attribute__((__packed__));
+ 
+ /* IMU related messaage */
+ struct hkr_msg_imu_get_desc {
+-	struct hkr_msg_header header;  /**< The header of the massage. */
+-	uint8_t stream_id;  /* stream id */
+-} __attribute__ ((__packed__));
++	struct hkr_msg_header header;
++				   /**< The header of the massage. */
++	uint8_t stream_id;	/* stream id */
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_imu_get_desc_done {
+-	struct hkr_msg_ack_header header;  /**< The header of the massage. */
++	struct hkr_msg_ack_header header;
++				       /**< The header of the massage. */
+ 	uint8_t stream_id;
+-	uint8_t reserved; /**< reserved for align */
++	uint8_t reserved;
++		      /**< reserved for align */
+ 	uint16_t desc_size;
+ 	uint8_t desc[HKR_IMU_MAX_REPORT_SIZE];
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_imu_get_report {
+-	struct hkr_msg_header header;  /**< The header of the massage. */
+-	uint8_t stream_id;  /* stream id */
+-	uint8_t report_id;  /**< report ID */
+-	uint8_t report_type;  /**< report type: input/output/featur */
++	struct hkr_msg_header header;
++				   /**< The header of the massage. */
++	uint8_t stream_id;	/* stream id */
++	uint8_t report_id;
++			/**< report ID */
++	uint8_t report_type;
++			  /**< report type: input/output/featur */
+ 	uint8_t reserved;
+-	uint32_t  count;
+-} __attribute__ ((__packed__));
++	uint32_t count;
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_imu_get_report_done {
+-	struct hkr_msg_ack_header header;  /**< The header of the massage. */
++	struct hkr_msg_ack_header header;
++				       /**< The header of the massage. */
+ 	uint8_t stream_id;
+-	uint8_t reserved; /**< reserved for align */
++	uint8_t reserved;
++		      /**< reserved for align */
+ 	uint16_t report_size;
+ 	uint8_t report[HKR_IMU_MAX_REPORT_SIZE];
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_imu_set_report {
+-	struct hkr_msg_header header;           /**< The header of the massage. */
++	struct hkr_msg_header header;	    /**< The header of the massage. */
+ 	uint8_t stream_id;
+-	uint8_t report_id;  /**< report ID */
+-	uint8_t report_type;  /**< report type: input/output/featur */
+-	uint8_t reserved;  /**< reserved for align */
++	uint8_t report_id;
++			/**< report ID */
++	uint8_t report_type;
++			  /**< report type: input/output/featur */
++	uint8_t reserved;
++		       /**< reserved for align */
+ 	uint16_t report_size;
+ 	uint8_t report[HKR_IMU_MAX_REPORT_SIZE];
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ struct hkr_msg_imu_set_report_done {
+-	struct hkr_msg_ack_header header;  /**< The header of the massage. */
++	struct hkr_msg_ack_header header;
++				       /**< The header of the massage. */
+ 	uint8_t stream_id;
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ /* End of IMU related messaage */
+ 
+@@ -226,14 +294,14 @@ struct hkr_ring_desc {
+ 	uint64_t wr_index;
+ 	uint64_t dma_addr[HKR_MAX_BUFFER_NUM];
+ 	uint64_t cpu_addr[HKR_MAX_BUFFER_NUM];
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ /* Use case ABI */
+ 
+ struct hkr_cfg_info_header {
+ 	uint16_t type;
+ 	uint16_t size;
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ /*
+  * We keep 128 bytes space for endpoint-test. 128 bytes is enough for
+@@ -243,35 +311,39 @@ struct hkr_cfg_info_header {
+ struct hkr_image_stream {
+ 	struct hkr_cfg_info_header header;
+ 	uint32_t stream_index;
+-	uint32_t cam_index; /* the camera this stream binding to */
++	uint32_t cam_index;	/* the camera this stream binding to */
+ 	uint32_t irq_index;
+ 	uint32_t width;
+ 	uint32_t height;
+ 	uint32_t fourcc;
+ 	uint32_t depth;
+-} __attribute__ ((__packed__));
++	char devname[HKR_DEV_NAME_LEN];
++} __attribute__((__packed__));
+ 
+ struct hkr_meta_stream {
+ 	struct hkr_cfg_info_header header;
+ 	uint32_t stream_index;
+-	uint32_t cam_index; /* the camera this stream binding to */
++	uint32_t cam_index;	/* the camera this stream binding to */
+ 	uint32_t irq_index;
+ 	uint32_t size;
+-} __attribute__ ((__packed__));
++	uint32_t fourcc;
++	char devname[HKR_DEV_NAME_LEN];
++} __attribute__((__packed__));
+ 
+ struct hkr_imu_stream {
+ 	struct hkr_cfg_info_header header;
+ 	uint32_t stream_index;
+-	uint32_t dev_index; /* the camera this stream binding to */
++	uint32_t dev_index;	/* the camera this stream binding to */
+ 	uint32_t irq_index;
+ 	uint32_t size;
+-} __attribute__ ((__packed__));
++	char devname[HKR_DEV_NAME_LEN];
++} __attribute__((__packed__));
+ 
+ struct hkr_device_info {
+ 	uint32_t hw_version;
+ 	uint32_t fw_version;
+ 	uint32_t sw_version;
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ enum HKR_USECASE_TYPE {
+ 	HKR_USECASE_ALL_CAMERAS = 0,
+@@ -287,13 +359,13 @@ enum HKR_STREAM_TYPE {
+ struct hkr_usecase_info {
+ 	struct hkr_cfg_info_header header;
+ 	uint32_t stream_num;
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ struct hkr_device_config {
+ 	uint32_t usecase_num;
+ 	struct hkr_device_info device_info;
+ 	uint64_t usecase_data[HKR_MAX_STREAM_NUM];
+-} __attribute__ ((__packed__));
++} __attribute__((__packed__));
+ 
+ #define MBX_HEADER_VF1          (0xC00)
+ #define MBX_PAYLOAD0_VF1        (0xC04)
+@@ -316,5 +388,4 @@ struct notify_param {
+ 	uint32_t payload[8];
+ };
+ 
+-/* End of use case ABI */
+ #endif
+diff --git a/drivers/media/pci/intel/ipu-isys-video.c b/drivers/media/pci/intel/ipu-isys-video.c
+index 912c7fa39724..2e6e34d213c0 100644
+--- a/drivers/media/pci/intel/ipu-isys-video.c
++++ b/drivers/media/pci/intel/ipu-isys-video.c
+@@ -131,6 +131,9 @@ static int video_open(struct file *file)
+ 	struct ipu_isys *isys = av->isys;
+ 	struct ipu_bus_device *adev = to_ipu_bus_device(&isys->adev->dev);
+ 	struct ipu_device *isp = adev->isp;
++    const struct sched_param param = {
++			.sched_priority = MAX_RT_PRIO / 2,
++	};
+ 	int rval;
+ 	const struct ipu_isys_internal_pdata *ipdata;
+ 
+@@ -187,6 +190,17 @@ static int video_open(struct file *file)
+ 		ipu_fw_isys_cleanup(isys);
+ 	}
+ 
++    isys->isr_thread = kthread_run(ipu_isys_isr_run,
++				       av->isys,
++				       IPU_ISYS_ENTITY_PREFIX);
++
++	if (IS_ERR(isys->isr_thread)) {
++		rval = PTR_ERR(isys->isr_thread);
++		goto out_ipu_pipeline_pm_use;
++	}
++
++	sched_setscheduler(isys->isr_thread, SCHED_FIFO, &param);
++
+ 	rval = ipu_fw_isys_init(av->isys, ipdata->num_parallel_streams);
+ 	if (rval < 0)
+ 		goto out_lib_init;
+@@ -196,6 +210,9 @@ static int video_open(struct file *file)
+ 	return 0;
+ 
+ out_lib_init:
++    kthread_stop(isys->isr_thread);
++
++out_ipu_pipeline_pm_use:
+ 	isys->video_opened--;
+ 	mutex_unlock(&isys->mutex);
+ 	v4l2_pipeline_pm_put(&av->vdev.entity);
+@@ -231,6 +248,7 @@ static int video_release(struct file *file)
+ 	mutex_lock(&av->isys->mutex);
+ 
+ 	if (!--av->isys->video_opened) {
++    kthread_stop(av->isys->isr_thread);
+ 	dev_dbg(&av->isys->adev->dev, "release: %s: close fw\n",
+ 		av->vdev.name);
+ 		ipu_fw_isys_close(av->isys);
+diff --git a/drivers/media/pci/intel/ipu-isys.c b/drivers/media/pci/intel/ipu-isys.c
+index 2617e5ac2582..142f7faf6215 100644
+--- a/drivers/media/pci/intel/ipu-isys.c
++++ b/drivers/media/pci/intel/ipu-isys.c
+@@ -1172,6 +1172,34 @@ int isys_isr_one(struct ipu_bus_device *adev)
+ 	return 0;
+ }
+ 
++static void isys_isr_poll(struct ipu_bus_device *adev)
++{
++	struct ipu_isys *isys = ipu_bus_get_drvdata(adev);
++
++	if (!isys->fwcom) {
++		dev_dbg(&isys->adev->dev,
++			"got interrupt but device not configured yet\n");
++		return;
++	}
++
++	mutex_lock(&isys->mutex);
++	isys_isr(adev);
++	mutex_unlock(&isys->mutex);
++}
++
++int ipu_isys_isr_run(void *ptr)
++{
++	struct ipu_isys *isys = ptr;
++
++	while (!kthread_should_stop()) {
++		usleep_range(500, 1000);
++		if (isys->stream_opened)
++			isys_isr_poll(isys->adev);
++	}
++
++	return 0;
++}
++
+ static struct ipu_bus_driver isys_driver = {
+ 	.probe = isys_probe,
+ 	.remove = isys_remove,
+diff --git a/drivers/media/pci/intel/ipu-isys.h b/drivers/media/pci/intel/ipu-isys.h
+index fcd504a27a55..d85521a4b752 100644
+--- a/drivers/media/pci/intel/ipu-isys.h
++++ b/drivers/media/pci/intel/ipu-isys.h
+@@ -117,6 +117,8 @@ struct ipu_isys {
+ 	void *fwcom;
+ 	unsigned int line_align;
+ 	u32 phy_termcal_val;
++    /* for polling for events if interrupt delivery isn't available */
++	struct task_struct *isr_thread;
+ 	bool reset_needed;
+ 	bool icache_prefetch;
+ 	bool csi2_cse_ipc_not_supported;
+@@ -187,6 +189,7 @@ extern const struct v4l2_ioctl_ops ipu_isys_ioctl_ops;
+ 
+ void isys_setup_hw(struct ipu_isys *isys);
+ int isys_isr_one(struct ipu_bus_device *adev);
++int ipu_isys_isr_run(void *ptr);
+ irqreturn_t isys_isr(struct ipu_bus_device *adev);
+ #ifdef IPU_ISYS_GPC
+ int ipu_isys_gpc_init_debugfs(struct ipu_isys *isys);
+diff --git a/drivers/media/pci/intel/ipu-psys.c b/drivers/media/pci/intel/ipu-psys.c
+index 350172c3eace..62789c46198f 100644
+--- a/drivers/media/pci/intel/ipu-psys.c
++++ b/drivers/media/pci/intel/ipu-psys.c
+@@ -64,6 +64,7 @@ static struct fw_init_task {
+ 	struct ipu_psys *psys;
+ } fw_init_task;
+ 
++static int ipu_psys_isr_run(void *data);
+ static void ipu_psys_remove(struct ipu_bus_device *adev);
+ 
+ static struct bus_type ipu_psys_bus = {
+@@ -428,12 +429,34 @@ static int ipu_psys_open(struct inode *inode, struct file *file)
+ 		goto open_failed;
+ 
+ 	mutex_lock(&psys->mutex);
++
++    if (list_empty(&psys->fhs)) {
++		static const struct sched_param param = {
++			.sched_priority = MAX_RT_PRIO / 2,
++		};
++		psys->isr_thread = kthread_run(ipu_psys_isr_run, psys,
++					       IPU_PSYS_NAME);
++
++		if (IS_ERR(psys->isr_thread)) {
++			mutex_unlock(&psys->mutex);
++			goto open_failed;
++		}
++
++		sched_setscheduler(psys->isr_thread, SCHED_FIFO, &param);
++	}
++
+ 	list_add_tail(&fh->list, &psys->fhs);
+ 	mutex_unlock(&psys->mutex);
+ 
+ 	return 0;
+ 
+ open_failed:
++
++    if (list_empty(&psys->fhs) && psys->isr_thread) {
++		kthread_stop(psys->isr_thread);
++		psys->isr_thread = NULL;
++	}
++
+ 	mutex_destroy(&fh->mutex);
+ 	kfree(fh);
+ 	return rval;
+@@ -1549,6 +1572,35 @@ static irqreturn_t psys_isr_threaded(struct ipu_bus_device *adev)
+ 	return status ? IRQ_HANDLED : IRQ_NONE;
+ }
+ 
++static int ipu_psys_isr_run(void *data)
++{
++	struct ipu_psys *psys = data;
++	int r;
++
++	while (!kthread_should_stop()) {
++		usleep_range(100, 500);
++
++		r = mutex_trylock(&psys->mutex);
++		if (!r)
++			continue;
++#ifdef CONFIG_PM
++		r = pm_runtime_get_if_in_use(&psys->adev->dev);
++		if (!r || WARN_ON_ONCE(r < 0)) {
++			mutex_unlock(&psys->mutex);
++			continue;
++		}
++#endif
++
++		ipu_psys_handle_events(psys);
++
++		pm_runtime_mark_last_busy(&psys->adev->dev);
++		pm_runtime_put_autosuspend(&psys->adev->dev);
++		mutex_unlock(&psys->mutex);
++	}
++
++	return 0;
++}
++
+ static struct ipu_bus_driver ipu_psys_driver = {
+ 	.probe = ipu_psys_probe,
+ 	.remove = ipu_psys_remove,
+diff --git a/drivers/media/pci/intel/ipu-psys.h b/drivers/media/pci/intel/ipu-psys.h
+index 8ba314cfe1c2..3a5fb5d8c851 100644
+--- a/drivers/media/pci/intel/ipu-psys.h
++++ b/drivers/media/pci/intel/ipu-psys.h
+@@ -95,6 +95,7 @@ struct ipu_psys {
+ 	struct ia_css_syscom_context *dev_ctx;
+ 	struct ia_css_syscom_config *syscom_config;
+ 	struct ia_css_psys_server_init *server_init;
++    struct task_struct *isr_thread;
+ 	struct task_struct *sched_cmd_thread;
+ 	wait_queue_head_t sched_cmd_wq;
+ 	atomic_t wakeup_count;  /* Psys schedule thread wakeup count */
+diff --git a/drivers/media/pci/intel/ipu6/ipu-platform-buttress-regs.h b/drivers/media/pci/intel/ipu6/ipu-platform-buttress-regs.h
+index 0481fdc5f283..515f00f54f19 100644
+--- a/drivers/media/pci/intel/ipu6/ipu-platform-buttress-regs.h
++++ b/drivers/media/pci/intel/ipu6/ipu-platform-buttress-regs.h
+@@ -304,10 +304,16 @@ enum {
+ #define BUTTRESS_PS_FREQ_CAPABILITIES_MIN_RATIO_SHIFT		0
+ #define BUTTRESS_PS_FREQ_CAPABILITIES_MIN_RATIO_MASK		(0xff)
+ 
++/*
+ #define BUTTRESS_IRQS		(BUTTRESS_ISR_IPC_FROM_CSE_IS_WAITING |	\
+ 				 BUTTRESS_ISR_IPC_EXEC_DONE_BY_CSE |	\
+ 				 BUTTRESS_ISR_IS_IRQ |			\
+ 				 BUTTRESS_ISR_PS_IRQ)
++*/
++#define BUTTRESS_IRQS		(BUTTRESS_ISR_IPC_FROM_CSE_IS_WAITING |	\
++				 BUTTRESS_ISR_IPC_EXEC_DONE_BY_CSE)
++
++
+ 
+ #define IPU6SE_ISYS_PHY_0_BASE		0x10000
+ 
+-- 
+2.17.1
+
