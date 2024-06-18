@@ -493,6 +493,66 @@ void Sensor::setAdditionalInfoFrames() {
     mAdditionalInfoFrames.insert(mAdditionalInfoFrames.end(),{additionalInfoBegin,additionalInfoSensorPlacement,additionalInfoEnd});
 }
 
+int32_t Sensor::getHandle() {
+    return mSensorInfo.sensorHandle;
+}
+
+std::string Sensor::getName() {
+    return mSensorInfo.name;
+}
+
+std::string Sensor::getStringType() {
+    return mSensorInfo.typeAsString;
+}
+
+std::string Sensor::getVendor() {
+    return mSensorInfo.vendor;
+}
+
+int32_t Sensor::getVersion() {
+    return mSensorInfo.version;
+}
+
+float Sensor::getResolution() {
+    return mSensorInfo.resolution;
+}
+
+float Sensor::getMaximumRange() {
+    return mSensorInfo.maxRange;
+}
+
+float Sensor::getPower() {
+    return mSensorInfo.power;
+}
+
+int32_t Sensor::getType() {
+    return (int32_t)mSensorInfo.type;
+}
+
+int32_t Sensor::getMinDelay() {
+    return mSensorInfo.minDelayUs;
+}
+
+int32_t Sensor::getMaxDelay() {
+    return mSensorInfo.maxDelayUs;
+}
+
+uint32_t Sensor::getFifoReservedEventCount() {
+    return mSensorInfo.fifoReservedEventCount;
+}
+
+uint32_t Sensor::getFifoMaxEventCount() {
+    return mSensorInfo.fifoMaxEventCount;
+}
+
+std::string Sensor::getRequiredPermission() {
+    return mSensorInfo.requiredPermission;
+}
+
+uint32_t Sensor::getFlags() {
+    return mSensorInfo.flags;
+}
+
 AccelSensor::AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
     mSensorInfo.name = "Accel Sensor";

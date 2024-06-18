@@ -59,6 +59,21 @@ class Sensor {
     ndk::ScopedAStatus injectEvent(const Event& event);
     void setAdditionalInfoFrames();
     std::vector<AdditionalInfo> mAdditionalInfoFrames;
+    int32_t getHandle();
+    std::string getName();
+    std::string getStringType();
+    std::string getVendor();
+    int32_t getVersion();
+    float getResolution();
+    float getMaximumRange();
+    float getPower();
+    int32_t getType();
+    int32_t getMinDelay();
+    int32_t getMaxDelay();
+    uint32_t getFifoReservedEventCount();
+    uint32_t getFifoMaxEventCount();
+    std::string getRequiredPermission();
+    uint32_t getFlags();
 
   protected:
     void run();
