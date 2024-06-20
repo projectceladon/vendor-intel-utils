@@ -1,0 +1,130 @@
+From 333c01280de84e5de8328160c1b4ecb922d10849 Mon Sep 17 00:00:00 2001
+From: Anoob Anto K <anoob.anto.kodankandath@intel.com>
+Date: Wed, 19 Jul 2023 09:26:41 +0000
+Subject: [PATCH] Fix crashes observed during VTS execution
+
+Fixed the following:
+- Call loadNetwork for all execute APIs
+- Check the status of fetching output after remote inference
+- Return INVALID_ARGUMENT for failures in setting PoolInfos
+
+Tracked-On: OAM-111268
+Signed-off-by: Anoob Anto K <anoob.anto.kodankandath@intel.com>
+---
+ BasePreparedModel.cpp | 28 +++++++++++++++++++++++++---
+ DetectionClient.cpp   |  6 ++++--
+ DetectionClient.h     |  2 +-
+ 3 files changed, 30 insertions(+), 6 deletions(-)
+
+diff --git a/BasePreparedModel.cpp b/BasePreparedModel.cpp
+index a88f782..24a1a48 100644
+--- a/BasePreparedModel.cpp
++++ b/BasePreparedModel.cpp
+@@ -304,6 +304,10 @@ void asyncExecute(const Request& request, MeasureTiming measure, BasePreparedMod
+ 
+         ov::Tensor destTensor;
+         try {
++            if (!plugin->queryState()) {
++                ALOGI("%s native model not loaded, starting model load", __func__);
++                plugin->loadNetwork(preparedModel->mXmlFile);
++            }
+             destTensor = plugin->getInputTensor(tensorIndex);
+         } catch (const std::exception& ex) {
+             ALOGE("%s Exception !!! %s", __func__, ex.what());
+@@ -494,7 +498,7 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
+     auto errorStatus = modelInfo->setRunTimePoolInfosFromHidlMemories(request.pools);
+     if (errorStatus != V1_3::ErrorStatus::NONE) {
+         ALOGE("Failed to set runtime pool info from HIDL memories");
+-        return {ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
++        return {ErrorStatus::INVALID_ARGUMENT, {}, kNoTiming};
+     }
+ 
+     for (size_t i = 0; i < request.inputs.size(); i++) {
+@@ -532,7 +536,7 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
+             ov::Tensor destTensor;
+             try {
+                 if (!plugin->queryState()) {
+-                    ALOGI("native model not loaded, starting model load");
++                    ALOGI("%s native model not loaded, starting model load", __func__);
+                     plugin->loadNetwork(preparedModel->mXmlFile);
+                 }
+                 destTensor = plugin->getInputTensor(tensorIndex);
+@@ -613,8 +617,22 @@ static std::tuple<ErrorStatus, hidl_vec<V1_2::OutputShape>, Timing> executeSynch
+         void* destPtr = modelInfo->getBlobFromMemoryPoolOut(request, i, expectedLength);
+         if (preparedModel->mRemoteCheck && preparedModel->mDetectionClient &&
+             preparedModel->mDetectionClient->get_status()) {
+-            preparedModel->mDetectionClient->get_output_data(std::to_string(i), (uint8_t*)destPtr,
++            const auto& copied = preparedModel->mDetectionClient->get_output_data(std::to_string(i), (uint8_t*)destPtr,
+                                                              expectedLength);
++            if ( copied == 0 ) {
++                ALOGE("Output not populated");
++                return {ErrorStatus::GENERAL_FAILURE, {}, kNoTiming};
++            } else if ( copied != expectedLength ) {
++                const auto& opDims = modelInfo->getOperand(outIndex).dimensions;
++                std::vector<size_t> dims;
++                for ( const auto& dim : opDims ) { dims.push_back(dim); }
++                modelInfo->updateOutputshapes(i, dims, false);
++                ALOGE(
++                    "Mismatch in actual and exepcted output sizes. Return with "
++                    "OUTPUT_INSUFFICIENT_SIZE error");
++                return {ErrorStatus::OUTPUT_INSUFFICIENT_SIZE, modelInfo->getOutputShapes(),
++                        kNoTiming};
++            }
+         } else {
+             try {
+                 srcTensor = plugin->getOutputTensor(tensorIndex);
+@@ -856,6 +874,10 @@ Return<void> BasePreparedModel::executeFenced(const V1_3::Request& request1_3,
+ 
+         ov::Tensor destTensor;
+         try {
++            if (!mPlugin->queryState()) {
++                ALOGI("%s native model not loaded, starting model load", __func__);
++                mPlugin->loadNetwork(mXmlFile);
++            }
+             destTensor = mPlugin->getInputTensor(tensorIndex);
+         } catch (const std::exception& ex) {
+             ALOGE("%s Exception !!! %s", __func__, ex.what());
+diff --git a/DetectionClient.cpp b/DetectionClient.cpp
+index 751c0eb..8c3e7f0 100644
+--- a/DetectionClient.cpp
++++ b/DetectionClient.cpp
+@@ -172,7 +172,7 @@ void DetectionClient::add_input_data(std::string label, const uint8_t* buffer,
+     input->set_data(buffer, size);
+ }
+ 
+-void DetectionClient::get_output_data(std::string label, uint8_t* buffer, uint32_t expectedLength) {
++size_t DetectionClient::get_output_data(std::string label, uint8_t* buffer, uint32_t expectedLength) {
+     std::string src;
+     size_t index;
+ 
+@@ -182,11 +182,13 @@ void DetectionClient::get_output_data(std::string label, uint8_t* buffer, uint32
+             if (expectedLength != src.length()) {
+                 ALOGE("Length mismatch error: expected length %u , actual length %lu",
+                       expectedLength, src.length());
++                return src.length();
+             }
+             memcpy(buffer, src.data(), src.length());
+-            break;
++            return src.length();
+         }
+     }
++    return 0;
+ }
+ 
+ void DetectionClient::clear_data() {
+diff --git a/DetectionClient.h b/DetectionClient.h
+index c812950..d0b0789 100644
+--- a/DetectionClient.h
++++ b/DetectionClient.h
+@@ -40,7 +40,7 @@ public:
+     void add_input_data(std::string label, const uint8_t* buffer, std::vector<uint32_t> shape,
+                         uint32_t size,
+                         android::hardware::neuralnetworks::nnhal::OperandType operandType);
+-    void get_output_data(std::string label, uint8_t* buffer, uint32_t expectedLength);
++    size_t get_output_data(std::string label, uint8_t* buffer, uint32_t expectedLength);
+     void clear_data();
+     std::string remote_infer();
+     bool get_status();
+-- 
+2.17.1
+
