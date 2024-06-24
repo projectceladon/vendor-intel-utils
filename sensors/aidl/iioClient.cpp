@@ -30,7 +30,7 @@ iioClient *iioClient::iioc = NULL;
  * name@sensor_map should be matched with iio sensor name and returns sensor-id.
  * Where stuct iio_sensor_map -> {name, id};
  */
-struct iio_sensor_map sensor_map[10] = {
+struct iio_sensor_map sensor_map[12] = {
     {"unknown", 0},
     {"accel_3d", 1},
     {"gyro_3d", 2},
@@ -41,6 +41,8 @@ struct iio_sensor_map sensor_map[10] = {
     {"geomagnetic_orientation", 7},
     {"relative_orientation", 8},
     {"incli_3d", 9},
+    {"AccelSensor_uncalibrated", 10},
+    {"GyroSensor_uncalibrated", 11},
 };
 
 /**

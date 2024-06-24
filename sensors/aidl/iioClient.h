@@ -36,7 +36,7 @@
 
 #include "libiio_client/iio.h"
 
-#define MAX_SENSOR 9
+#define MAX_SENSOR 11
 #define MAX_CHANNEL 3
 #define SENSOR_PORT "30431"
 #define USE_VM_CONTEXT

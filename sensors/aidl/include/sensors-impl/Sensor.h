@@ -116,9 +116,19 @@ class AccelSensor : public Sensor {
     AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
 };
 
+class AccelSensor_uncalibrated : public Sensor {
+  public:
+    AccelSensor_uncalibrated(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
+
 class GyroSensor : public Sensor {
   public:
     GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback);
+};
+
+class GyroSensor_uncalibrated : public Sensor {
+  public:
+    GyroSensor_uncalibrated(int32_t sensorHandle, ISensorsEventCallback* callback);
 };
 
 class AmbientTempSensor : public OnChangeSensor {

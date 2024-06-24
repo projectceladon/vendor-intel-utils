@@ -189,6 +189,7 @@ std::vector<Event> Sensor::readEvents() {
                 event.payload.set<EventPayload::Tag::data>(data);
                 break;
             }
+            case SensorType::ACCELEROMETER_UNCALIBRATED:
             case SensorType::GYROSCOPE_UNCALIBRATED: {
                 uncal = {
                     .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
@@ -213,7 +214,7 @@ std::vector<Event> Sensor::readEvents() {
             case SensorType::ACCELEROMETER_LIMITED_AXES:
             case SensorType::GYROSCOPE_LIMITED_AXES: {
             Event::EventPayload::LimitedAxesImu limitedAxesImu;
-                limitedAxesImu ={
+                limitedAxesImu = {
                     .x = iioc->devlist[mSensorInfo.sensorHandle].data[0],
                     .y = iioc->devlist[mSensorInfo.sensorHandle].data[1],
                     .z = iioc->devlist[mSensorInfo.sensorHandle].data[2],
@@ -322,8 +323,19 @@ std::vector<Event> Sensor::readEvents() {
                 event.payload.set<EventPayload::Tag::data>(data);
                 break;
             }
+            case SensorType::ACCELEROMETER_UNCALIBRATED: {
+                uncal = {
+                    .x = 0,
+                    .y = 0,
+                    .z = 9.8,
+                    .xBias = 0,
+                    .yBias = 0,
+                    .zBias = 0};
+                event.payload.set<EventPayload::Tag::uncal>(uncal);
+                break;
+            }
             case SensorType::GYROSCOPE_UNCALIBRATED: {
-                uncal={
+                uncal = {
                     .x = -0.009562,
                     .y = -0.002142,
                     .z = -0.174638,
@@ -364,7 +376,7 @@ std::vector<Event> Sensor::readEvents() {
             case SensorType::ACCELEROMETER_LIMITED_AXES:
             case SensorType::GYROSCOPE_LIMITED_AXES: {
             Event::EventPayload::LimitedAxesImu limitedAxesImu;
-                limitedAxesImu ={
+                limitedAxesImu = {
                     .x = 0,
                     .y = 0,
                     .z = 0,
@@ -576,6 +588,25 @@ AccelSensor::AccelSensor(int32_t sensorHandle, ISensorsEventCallback* callback) 
     #endif
 
 }
+
+AccelSensor_uncalibrated::AccelSensor_uncalibrated(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "Accel Sensor uncalibrated";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::ACCELEROMETER_UNCALIBRATED;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 78.4f;  // +/- 8g
+    mSensorInfo.resolution = 1.52e-5;
+    mSensorInfo.power = 0.001f;        // mA
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
+}
+
 PressureSensor::PressureSensor(int32_t sensorHandle, ISensorsEventCallback* callback)
     : Sensor(callback) {
     mSensorInfo.sensorHandle = sensorHandle;
@@ -679,6 +710,24 @@ GyroSensor::GyroSensor(int32_t sensorHandle, ISensorsEventCallback* callback) : 
     #elif
     mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
     #endif
+}
+
+GyroSensor_uncalibrated::GyroSensor_uncalibrated(int32_t sensorHandle, ISensorsEventCallback* callback) : Sensor(callback) {
+    mSensorInfo.sensorHandle = sensorHandle;
+    mSensorInfo.name = "GyroSensor_uncalibrated";
+    mSensorInfo.vendor = "Intel";
+    mSensorInfo.version = 1;
+    mSensorInfo.type = SensorType::GYROSCOPE_UNCALIBRATED;
+    mSensorInfo.typeAsString = "";
+    mSensorInfo.maxRange = 1000.0f * M_PI / 180.0f;
+    mSensorInfo.resolution = 1000.0f * M_PI / (180.0f * 32768.0f);
+    mSensorInfo.power = 0.001f;
+    mSensorInfo.minDelayUs = 10 * 1000;  // microseconds
+    mSensorInfo.maxDelayUs = 10 * 1000 * 10;  // microseconds
+    mSensorInfo.fifoReservedEventCount = 0;
+    mSensorInfo.fifoMaxEventCount = 0;
+    mSensorInfo.requiredPermission = "";
+    mSensorInfo.flags = static_cast<uint32_t>(SensorInfo::SENSOR_FLAG_BITS_DATA_INJECTION);
 }
 
 AmbientTempSensor::AmbientTempSensor(int32_t sensorHandle, ISensorsEventCallback* callback)

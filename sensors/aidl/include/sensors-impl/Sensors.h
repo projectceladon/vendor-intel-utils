@@ -56,6 +56,10 @@ class Sensors : public BnSensors, public ISensorsEventCallback {
         AddSensor<GeomagnaticRotationVector>();
         AddSensor<OrientationSensor>();
         AddSensor<InclinometerSensor>();
+#ifndef FEATURE_AUTOMOTIVE
+        AddSensor<AccelSensor_uncalibrated>();
+        AddSensor<GyroSensor_uncalibrated>();
+#endif
 #endif  
     }
 
