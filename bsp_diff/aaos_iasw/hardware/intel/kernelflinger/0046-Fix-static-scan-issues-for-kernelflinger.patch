@@ -1,0 +1,491 @@
+From a24f8eb4e33626d0b0882faedfa96c33bae47c37 Mon Sep 17 00:00:00 2001
+From: xianju6x <xianjunx.zheng@intel.com>
+Date: Wed, 20 Mar 2024 18:01:37 +0800
+Subject: [PATCH 46/54] Fix static scan issues for kernelflinger
+
+Tracked-On: OAM-117281
+Signed-off-by: Zheng, XianjunX <xianjunx.zheng@intel.com>
+Signed-off-by: Chen, Gang G <gang.g.chen@intel.com>
+---
+ avb/libavb/avb_slot_verify.c   |  4 +++
+ avb/libavb_user/uefi_avb_ops.c | 51 ++++++++++++++++++++++++++--------
+ libedk2_tpm/Tpm2Capability.c   |  1 +
+ libfastboot/fastboot.c         |  1 +
+ libfastboot/hashes.c           |  2 +-
+ libkernelflinger/android.c     | 39 ++++++++++++++++++++------
+ libkernelflinger/gpt.c         |  2 +-
+ libkernelflinger/lib.c         |  7 ++++-
+ libkernelflinger/oemvars.c     |  1 +
+ libkernelflinger/slot_avb.c    | 23 +++++++--------
+ libsslsupport/wrapper.c        |  6 ++--
+ 11 files changed, 97 insertions(+), 40 deletions(-)
+
+diff --git a/avb/libavb/avb_slot_verify.c b/avb/libavb/avb_slot_verify.c
+index 75b26d6..b780e03 100755
+--- a/avb/libavb/avb_slot_verify.c
++++ b/avb/libavb/avb_slot_verify.c
+@@ -905,6 +905,10 @@ static AvbSlotVerifyResult load_and_verify_vbmeta(
+    */
+   descriptors =
+       avb_descriptor_get_all(vbmeta_buf, vbmeta_num_read, &num_descriptors);
++  if (!descriptors) {
++      ret = AVB_SLOT_VERIFY_RESULT_ERROR_OOM;
++      goto out;
++  }
+   for (n = 0; n < num_descriptors; n++) {
+     AvbDescriptor desc;
+ 
+diff --git a/avb/libavb_user/uefi_avb_ops.c b/avb/libavb_user/uefi_avb_ops.c
+index 11e11f7..01c5c04 100644
+--- a/avb/libavb_user/uefi_avb_ops.c
++++ b/avb/libavb_user/uefi_avb_ops.c
+@@ -46,6 +46,7 @@ static AvbIOResult read_from_partition(__attribute__((unused)) AvbOps* ops,
+                                        size_t num_bytes,
+                                        void* buf,
+                                        size_t* out_num_read) {
++  AvbIOResult ret;
+   EFI_STATUS efi_ret;
+   struct gpt_partition_interface gpart;
+   int64_t partition_size;
+@@ -65,7 +66,8 @@ static AvbIOResult read_from_partition(__attribute__((unused)) AvbOps* ops,
+   efi_ret = gpt_get_partition_by_label(label, &gpart, LOGICAL_UNIT_USER);
+   if (EFI_ERROR(efi_ret)) {
+     error(L"Partition %s not found", label);
+-    return AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION;
++    ret = AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION;
++    goto failed;
+   }
+ 
+   partition_size =
+@@ -75,7 +77,8 @@ static AvbIOResult read_from_partition(__attribute__((unused)) AvbOps* ops,
+   if (offset_from_partition < 0) {
+     if ((-offset_from_partition) > partition_size) {
+       avb_error("Offset outside range.\n");
+-      return AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION;
++      ret = AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION;
++      goto failed;
+     }
+     offset_from_partition = partition_size - (-offset_from_partition);
+   }
+@@ -100,10 +103,15 @@ static AvbIOResult read_from_partition(__attribute__((unused)) AvbOps* ops,
+   if (EFI_ERROR(efi_ret)) {
+     avb_error("Could not read from Disk.\n");
+     *out_num_read = 0;
+-    return AVB_IO_RESULT_ERROR_IO;
++    ret = AVB_IO_RESULT_ERROR_IO;
++    goto failed;
+   }
+-
++  FreePool((VOID *)label);
+   return AVB_IO_RESULT_OK;
++
++failed:
++  FreePool((VOID *)label);
++  return ret;
+ }
+ 
+ static AvbIOResult write_to_partition(__attribute__((unused)) AvbOps* ops,
+@@ -111,6 +119,7 @@ static AvbIOResult write_to_partition(__attribute__((unused)) AvbOps* ops,
+                                       int64_t offset_from_partition,
+                                       size_t num_bytes,
+                                       const void* buf) {
++  AvbIOResult ret;
+   EFI_STATUS efi_ret;
+   struct gpt_partition_interface gpart;
+   uint64_t partition_size;
+@@ -128,7 +137,8 @@ static AvbIOResult write_to_partition(__attribute__((unused)) AvbOps* ops,
+   efi_ret = gpt_get_partition_by_label(label, &gpart, LOGICAL_UNIT_USER);
+   if (EFI_ERROR(efi_ret)) {
+     error(L"Partition %s not found", label);
+-    return AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION;
++    ret = AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION;
++    goto failed;
+   }
+ 
+   partition_size =
+@@ -138,7 +148,8 @@ static AvbIOResult write_to_partition(__attribute__((unused)) AvbOps* ops,
+   if (offset_from_partition < 0) {
+     if ((-offset_from_partition) > (int)partition_size) {
+       avb_error("Offset outside range.\n");
+-      return AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION;
++      ret = AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION;
++      goto failed;
+     }
+     offset_from_partition = partition_size - (-offset_from_partition);
+   }
+@@ -148,7 +159,8 @@ static AvbIOResult write_to_partition(__attribute__((unused)) AvbOps* ops,
+    */
+   if (num_bytes > partition_size - offset_from_partition) {
+     avb_error("Cannot write beyond partition boundary.\n");
+-    return AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION;
++    ret = AVB_IO_RESULT_ERROR_RANGE_OUTSIDE_PARTITION;
++    goto failed;
+   }
+ 
+   efi_ret = uefi_call_wrapper(
+@@ -163,10 +175,15 @@ static AvbIOResult write_to_partition(__attribute__((unused)) AvbOps* ops,
+ 
+   if (EFI_ERROR(efi_ret)) {
+     avb_error("Could not write to Disk.\n");
+-    return AVB_IO_RESULT_ERROR_IO;
++    ret = AVB_IO_RESULT_ERROR_IO;
++    goto failed;
+   }
+-
++  FreePool((VOID *)label);
+   return AVB_IO_RESULT_OK;
++
++failed:
++  FreePool((VOID *)label);
++  return ret;
+ }
+ 
+ static AvbIOResult get_size_of_partition(__attribute__((unused)) AvbOps* ops,
+@@ -188,6 +205,7 @@ static AvbIOResult get_size_of_partition(__attribute__((unused)) AvbOps* ops,
+   efi_ret = gpt_get_partition_by_label(label, &gpart, LOGICAL_UNIT_USER);
+   if (EFI_ERROR(efi_ret)) {
+     error(L"Partition %s not found", label);
++    FreePool((VOID *)label);
+     return AVB_IO_RESULT_ERROR_NO_SUCH_PARTITION;
+   }
+ 
+@@ -198,7 +216,7 @@ static AvbIOResult get_size_of_partition(__attribute__((unused)) AvbOps* ops,
+   if (out_size != NULL) {
+     *out_size = partition_size;
+   }
+-
++  FreePool((VOID *)label);
+   return AVB_IO_RESULT_OK;
+ }
+ 
+@@ -299,6 +317,7 @@ static AvbIOResult get_unique_guid_for_partition(__attribute__((unused)) AvbOps*
+                                                  const char* partition,
+                                                  char* guid_buf,
+                                                  size_t guid_buf_size) {
++  AvbIOResult ret;
+   EFI_STATUS efi_ret;
+   struct gpt_partition_interface gpart;
+   uint8_t * unique_guid;
+@@ -318,12 +337,14 @@ static AvbIOResult get_unique_guid_for_partition(__attribute__((unused)) AvbOps*
+   efi_ret = gpt_get_partition_by_label(label, &gpart, LOGICAL_UNIT_USER);
+   if (EFI_ERROR(efi_ret)) {
+     error(L"Partition %s not found", label);
+-    return AVB_IO_RESULT_ERROR_IO;
++    ret = AVB_IO_RESULT_ERROR_IO;
++    goto failed;
+   }
+ 
+   if (guid_buf_size < 37) {
+     avb_error("GUID buffer size too small.\n");
+-    return AVB_IO_RESULT_ERROR_IO;
++    ret = AVB_IO_RESULT_ERROR_IO;
++    goto failed;
+   }
+ 
+   unique_guid =(uint8_t *)&(gpart.part.unique);
+@@ -351,7 +372,13 @@ static AvbIOResult get_unique_guid_for_partition(__attribute__((unused)) AvbOps*
+   set_hex(guid_buf + 32, unique_guid[14]);
+   set_hex(guid_buf + 34, unique_guid[15]);
+   guid_buf[36] = '\0';
++
++  FreePool((VOID *)label);
+   return AVB_IO_RESULT_OK;
++
++failed:
++  FreePool((VOID *)label);
++  return ret;
+ }
+ 
+ AvbOps* uefi_avb_ops_new(void) {
+diff --git a/libedk2_tpm/Tpm2Capability.c b/libedk2_tpm/Tpm2Capability.c
+index d94cf18..4c444bc 100644
+--- a/libedk2_tpm/Tpm2Capability.c
++++ b/libedk2_tpm/Tpm2Capability.c
+@@ -566,6 +566,7 @@ Tpm2TestParms (
+     default:
+       return EFI_INVALID_PARAMETER;
+     }
++    break;
+   case TPM_ALG_SYMCIPHER:
+     WriteUnaligned16 ((UINT16 *)Buffer, SwapBytes16 (Parameters->parameters.symDetail.algorithm));
+     Buffer += sizeof(UINT16);
+diff --git a/libfastboot/fastboot.c b/libfastboot/fastboot.c
+index 92bc98a..d2e0849 100644
+--- a/libfastboot/fastboot.c
++++ b/libfastboot/fastboot.c
+@@ -831,6 +831,7 @@ static void cmd_flash(INTN argc, CHAR8 **argv)
+ 
+ 	if (!can_erase_or_flash_partition(label)) {
+ 		fastboot_fail("Currently virtual a/b ota is in progress...");
++		FreePool(label);
+ 		return;
+ 	}
+ 
+diff --git a/libfastboot/hashes.c b/libfastboot/hashes.c
+index 903ba1e..f2e535f 100644
+--- a/libfastboot/hashes.c
++++ b/libfastboot/hashes.c
+@@ -653,7 +653,7 @@ static EFI_STATUS get_ext4_len(struct gpt_partition_interface *gparti, UINT64 *l
+ 		debug(L"Ext4 invalid FS [%02x]", sb.s_state);
+ 		return EFI_INVALID_PARAMETER;
+ 	}
+-	block_size = 1024 << sb.s_log_block_size;
++	block_size = (UINT64)1024 << sb.s_log_block_size;
+ 	len_blocks = ((UINT64) sb.s_blocks_count_hi << 32) + sb.s_blocks_count_lo;
+ 	*len = block_size * len_blocks;
+ 
+diff --git a/libkernelflinger/android.c b/libkernelflinger/android.c
+index 63d2992..0c97415 100644
+--- a/libkernelflinger/android.c
++++ b/libkernelflinger/android.c
+@@ -674,15 +674,17 @@ static EFI_STATUS setup_ramdisk(UINT8 *bootimage, UINT8 *vendorbootimage, UINT8
+                     goto out;
+ 
+             if (androidcmd != NULL) {
+-                    ret = addBootConfigParameters(androidcmd, androidcmd_size,
++                    int iret;
++                    iret = addBootConfigParameters(androidcmd, androidcmd_size,
+                                     (UINTN)ramdisk_addr + rboffset, vendor_hdr->bootconfig_size);
+-                    if (ret < 0) {
++                    if (iret < 0) {
+                             ret = EFI_INVALID_PARAMETER;
+                             goto out;
+                     }
+             } else {
+-                    ret = addBootConfigTrailer((UINTN)ramdisk_addr + rboffset, vendor_hdr->bootconfig_size);
+-                    if (ret < 0) {
++                    int iret;
++                    iret = addBootConfigTrailer((UINTN)ramdisk_addr + rboffset, vendor_hdr->bootconfig_size);
++                    if (iret < 0) {
+                             ret = EFI_INVALID_PARAMETER;
+                             goto out;
+                     }
+@@ -943,7 +945,7 @@ static CHAR16 *get_command_line(IN struct boot_img_hdr *aosp_header,
+                     ret = memcpy_s(full_cmdline, sizeof(full_cmdline), aosp_header->cmdline,
+                                    BOOT_ARGS_SIZE);
+                     if (EFI_ERROR(ret))
+-                            return NULL;
++                            goto failed;
+ 
+                     /* if there is extra cmdline arguments */
+                     if (aosp_header->extra_cmdline[0]) {
+@@ -953,7 +955,7 @@ static CHAR16 *get_command_line(IN struct boot_img_hdr *aosp_header,
+                             ret = memcpy_s(full_cmdline + offset, sizeof(full_cmdline),
+                                            aosp_header->extra_cmdline, BOOT_EXTRA_ARGS_SIZE);
+                             if (EFI_ERROR(ret))
+-                                    return NULL;
++                                    goto failed;
+                     }
+                     cmdline16 = stra_to_str(full_cmdline);
+                 } else {
+@@ -962,7 +964,7 @@ static CHAR16 *get_command_line(IN struct boot_img_hdr *aosp_header,
+                 }
+ 
+                 if (!cmdline16)
+-                        return NULL;
++                        goto failed;
+ #ifndef USER
+         } else {
+                 error(L"Boot image command line overridden with '%s'", cmdline16);
+@@ -1004,6 +1006,17 @@ static CHAR16 *get_command_line(IN struct boot_img_hdr *aosp_header,
+ #endif
+ 
+         return cmdline16;
++
++failed:
++#ifndef USER
++        if (cmdline_append) {
++                FreePool(cmdline_append);
++        }
++        if (cmdline_prepend) {
++                FreePool(cmdline_prepend);
++        }
++#endif
++        return NULL;
+ }
+ 
+ EFI_STATUS get_bootimage_2nd(VOID *bootimage, VOID **second, UINT32 *size)
+@@ -1614,7 +1627,9 @@ out:
+                 FreePool(serialport);
+         if (time_str16)
+                 FreePool(time_str16);
+-
++        if (bootreason) {
++                FreePool(bootreason);
++        }
+         return ret;
+ }
+ 
+@@ -1851,11 +1866,13 @@ EFI_STATUS android_image_load_file(
+                         &SimpleFileSystemProtocol, (void **)&drive);
+         if (EFI_ERROR(ret)) {
+                 efi_perror(ret, L"HandleProtocol (SimpleFileSystemProtocol)");
++                FreePool(path);
+                 return ret;
+         }
+         ret = uefi_call_wrapper(drive->OpenVolume, 2, drive, &root);
+         if (EFI_ERROR(ret)) {
+                 efi_perror(ret, L"OpenVolume");
++                FreePool(path);
+                 return ret;
+         }
+ 
+@@ -1865,10 +1882,12 @@ EFI_STATUS android_image_load_file(
+                         EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+         if (EFI_ERROR(ret)) {
+                 efi_perror(ret, L"Open");
++                FreePool(path);
+                 return ret;
+         }
+         fileinfo = AllocatePool(buffersize);
+         if (!fileinfo)
++                FreePool(path);
+                 return EFI_OUT_OF_RESOURCES;
+ 
+         ret = uefi_call_wrapper(imagefile->GetInfo, 4, imagefile,
+@@ -1879,6 +1898,7 @@ EFI_STATUS android_image_load_file(
+                 FreePool(fileinfo);
+                 fileinfo = AllocatePool(buffersize);
+                 if (!fileinfo)
++                        FreePool(path);
+                         return EFI_OUT_OF_RESOURCES;
+                 ret = uefi_call_wrapper(imagefile->GetInfo, 4, imagefile,
+                         &EfiFileInfoId, &buffersize, fileinfo);
+@@ -1947,6 +1967,7 @@ out:
+         }
+ 
+ out_free:
++        FreePool(path);
+         FreePool(fileinfo);
+         if (ret == EFI_SUCCESS) {
+                 *bootimage_p = bootimage;
+@@ -2063,7 +2084,7 @@ out_cmdline:
+ #if DEBUG_MESSAGES
+ VOID dump_bcb(IN struct bootloader_message *bcb)
+ {
+-        if (bcb->command && bcb->status)
++        if (bcb)
+                 debug(L"BCB: cmd '%a' status '%a'", bcb->command, bcb->status);
+ }
+ #else
+diff --git a/libkernelflinger/gpt.c b/libkernelflinger/gpt.c
+index ba3957a..173c722 100644
+--- a/libkernelflinger/gpt.c
++++ b/libkernelflinger/gpt.c
+@@ -712,7 +712,7 @@ static EFI_STATUS gpt_write_table_to_disk(struct gpt_header *gh)
+ 	UINT64 entries_offset, header_offset, entries_size;
+ 	EFI_STATUS ret;
+ 
+-	entries_size = gh->number_of_entries * gh->size_of_entry;
++	entries_size = (UINT64) gh->number_of_entries * gh->size_of_entry;
+ 	header_offset = gh->my_lba * sdisk.bio->Media->BlockSize;
+ 	entries_offset = gh->entries_lba * sdisk.bio->Media->BlockSize;
+ 
+diff --git a/libkernelflinger/lib.c b/libkernelflinger/lib.c
+index cc729f2..4eeb6c3 100644
+--- a/libkernelflinger/lib.c
++++ b/libkernelflinger/lib.c
+@@ -645,7 +645,11 @@ char *strdup(const char *s)
+ 		return NULL;
+ 
+ 	ret = memcpy_s(new, size, s, size);
+-	return (ret == EFI_SUCCESS) ? (new) : (NULL);
++    if (ret == EFI_SUCCESS) {
++        return new;
++    }
++    FreePool(new);
++    return NULL;
+ }
+ 
+ char *strcasestr(const char *s, const char *find)
+@@ -1430,6 +1434,7 @@ EFI_STATUS memdump(void *dest, size_t dest_size, const void *source, size_t coun
+ 
+         if (source == NULL) {
+                 debug(L"<memcpy_s source NULL");
++                return EFI_INVALID_PARAMETER;
+         }
+ 
+         CopyMem(dest, source, (UINTN)count);
+diff --git a/libkernelflinger/oemvars.c b/libkernelflinger/oemvars.c
+index 7482991..79b024a 100644
+--- a/libkernelflinger/oemvars.c
++++ b/libkernelflinger/oemvars.c
+@@ -231,6 +231,7 @@ static EFI_STATUS parse_line(char *line, VOID *context)
+ 
+ 	if (!memcmp(&ctx->guid, &fastboot_guid, sizeof(ctx->guid))) {
+ 		error(L"fastboot GUID is reserved for Kernelflinger use");
++		FreePool(varname);
+ 		return EFI_ACCESS_DENIED;
+ 	}
+ 
+diff --git a/libkernelflinger/slot_avb.c b/libkernelflinger/slot_avb.c
+index 0a058f5..cd3772f 100644
+--- a/libkernelflinger/slot_avb.c
++++ b/libkernelflinger/slot_avb.c
+@@ -198,22 +198,19 @@ static EFI_STATUS select_highest_priority_slot(void)
+ 	slot_metadata_t *slot;
+ 
+ 	cur_suffix = NULL;
+-	for (;;) {
+-		slot = highest_priority_slot();
+-		if (!slot)
+-			return EFI_NOT_FOUND;
+-
+-		if (slot->tries_remaining == 0 &&
+-		    slot->successful_boot == 0) {
+-			ret = disable_slot(slot, TRUE);
+-			if (EFI_ERROR(ret))
+-				return ret;
+-		}
++	slot = highest_priority_slot();
++	if (!slot)
++		return EFI_NOT_FOUND;
+ 
+-		cur_suffix = suffixes[slot - slots];
+-		break;
++	if (slot->tries_remaining == 0 &&
++		slot->successful_boot == 0) {
++		ret = disable_slot(slot, TRUE);
++		if (EFI_ERROR(ret))
++			return ret;
+ 	}
+ 
++	cur_suffix = suffixes[slot - slots];
++
+ 	return EFI_SUCCESS;
+ }
+ 
+diff --git a/libsslsupport/wrapper.c b/libsslsupport/wrapper.c
+index a2cfb8b..ecfa4de 100644
+--- a/libsslsupport/wrapper.c
++++ b/libsslsupport/wrapper.c
+@@ -411,7 +411,7 @@ struct tm *gmtime_r(const time_t *timep, struct tm *tmp)
+ 
+ 	y = EPOCH_YEAR;
+ 	tdays = *timep / SECSPERDAY;
+-	rem = *timep - tdays * SECSPERDAY;
++	rem = (long long) (*timep - tdays * SECSPERDAY);
+ 	while (tdays < 0 || tdays >= year_lengths[isleap(y)]) {
+ 		int newy;
+ 		time_t tdelta;
+@@ -430,7 +430,7 @@ struct tm *gmtime_r(const time_t *timep, struct tm *tmp)
+ 			return NULL;
+ 		leapdays = leaps_thru_end_of(newy - 1) -
+ 			leaps_thru_end_of(y - 1);
+-		tdays -= ((time_t) newy - y) * DAYSPERNYEAR;
++		tdays -= (time_t) (((time_t) newy - y) * DAYSPERNYEAR);
+ 		tdays -= leapdays;
+ 		y = newy;
+ 	}
+@@ -439,7 +439,7 @@ struct tm *gmtime_r(const time_t *timep, struct tm *tmp)
+ 
+ 		seconds = tdays * SECSPERDAY;
+ 		tdays = seconds / SECSPERDAY;
+-		rem += seconds - tdays * SECSPERDAY;
++		rem += seconds - (long long) tdays * SECSPERDAY;
+ 	}
+ 	 /* Given the range, we can now fearlessly cast... */
+ 	idays = tdays;
+-- 
+2.25.1
+
