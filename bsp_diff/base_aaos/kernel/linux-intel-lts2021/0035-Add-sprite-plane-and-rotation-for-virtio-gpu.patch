@@ -1,0 +1,997 @@
+From 2d77cab70eaec1c8a605f48536ca06f9ebee15fe Mon Sep 17 00:00:00 2001
+From: hangliu1 <hang1.liu@linux.intel.com>
+Date: Wed, 2 Aug 2023 04:17:27 -0400
+Subject: [PATCH] Add sprite plane and rotation for virtio gpu
+
+Sprite planes of physical pipe are exposed to guest through
+virtio gpu, and all the supported format and modifier and rotation
+capabilities are transferred to frontend driver, so that user space
+graphic software could easily utilize them to avoid unnecessary
+gpu computing resource waste.
+
+Tracked-On: OAM-114060
+Signed-off-by: hangliu1 <hang1.liu@intel.com>
+Signed-off-by: Xue.Bosheng <bosheng.xue@intel.com>
+
+Changes to be committed:
+---
+ drivers/gpu/drm/virtio/virtgpu_display.c |  45 +++-
+ drivers/gpu/drm/virtio/virtgpu_drv.c     |   2 +
+ drivers/gpu/drm/virtio/virtgpu_drv.h     |  41 ++++
+ drivers/gpu/drm/virtio/virtgpu_kms.c     |  33 ++-
+ drivers/gpu/drm/virtio/virtgpu_plane.c   | 280 ++++++++++++++++++++++-
+ drivers/gpu/drm/virtio/virtgpu_vq.c      | 178 +++++++++++++-
+ include/uapi/linux/virtio_gpu.h          |  84 +++++++
+ 7 files changed, 652 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_display.c b/drivers/gpu/drm/virtio/virtgpu_display.c
+index 7d096f6dbb0b..830274079853 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_display.c
++++ b/drivers/gpu/drm/virtio/virtgpu_display.c
+@@ -139,9 +139,32 @@ static void virtio_gpu_crtc_atomic_disable(struct drm_crtc *crtc,
+ static int virtio_gpu_crtc_atomic_check(struct drm_crtc *crtc,
+ 					struct drm_atomic_state *state)
+ {
++	struct virtio_gpu_output *output = NULL;
++	struct drm_device *dev = crtc->dev;
++	int num_scalers_need;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++
++	output = drm_crtc_to_virtio_gpu_output(crtc);
++	if(vgdev->has_scaling) {
++		num_scalers_need = hweight32(output->scaler_users);
++		if(num_scalers_need > SKL_NUM_SCALERS) {
++			drm_dbg_kms(dev, "Too many scaling requests %d > %d\n", num_scalers_need, SKL_NUM_SCALERS);
++			output->scaler_users = 0;
++			return -EINVAL;
++		}
++	}
+ 	return 0;
+ }
+ 
++static void virtio_gpu_resource_flush_sync(struct drm_crtc *crtc)
++{
++	struct drm_device *dev = crtc->dev;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	struct virtio_gpu_output *output = drm_crtc_to_virtio_gpu_output(crtc);
++	virtio_gpu_cmd_flush_sync(vgdev, output->index);
++	virtio_gpu_notify(vgdev);
++}
++
+ static void virtio_gpu_crtc_atomic_flush(struct drm_crtc *crtc,
+ 					 struct drm_atomic_state *state)
+ {
+@@ -149,15 +172,18 @@ static void virtio_gpu_crtc_atomic_flush(struct drm_crtc *crtc,
+ 									  crtc);
+ 	struct virtio_gpu_output *output = drm_crtc_to_virtio_gpu_output(crtc);
+ 	struct drm_device *drm = crtc->dev;
++	struct virtio_gpu_device *vgdev = drm->dev_private;
+ 
+-	spin_lock_irq(&drm->event_lock);
+-
++	if(vgdev->has_multi_plane)
++		virtio_gpu_resource_flush_sync(crtc);
+ 
++	if(vgdev->has_scaling)
++		output->scaler_users = 0;
++	spin_lock_irq(&drm->event_lock);
+ 	if (crtc->state->event) {
+ 		drm_crtc_send_vblank_event(crtc, crtc->state->event);
+ 		crtc->state->event = NULL;
+ 	}
+-
+ 	spin_unlock_irq(&drm->event_lock);
+ 
+ 	/*
+@@ -303,12 +329,25 @@ static int vgdev_output_init(struct virtio_gpu_device *vgdev, int index)
+ 		output->info.r.height = cpu_to_le32(YRES_DEF);
+ 	}
+ 
++	if(vgdev->has_scaling)
++		output->scaler_users = 0;
+ 	primary = virtio_gpu_plane_init(vgdev, DRM_PLANE_TYPE_PRIMARY, index);
+ 	if (IS_ERR(primary))
+ 		return PTR_ERR(primary);
+ 	cursor = virtio_gpu_plane_init(vgdev, DRM_PLANE_TYPE_CURSOR, index);
+ 	if (IS_ERR(cursor))
+ 		return PTR_ERR(cursor);
++
++	if(vgdev->has_multi_plane) {
++		struct drm_plane *sprite;
++		int i;
++		for(i=0; i< vgdev->outputs[index].plane_num; i++) {
++			sprite = virtio_gpu_plane_init(vgdev, DRM_PLANE_TYPE_OVERLAY, index);
++			if (IS_ERR(sprite))
++				return PTR_ERR(sprite);
++		}
++	}
++
+ 	drm_crtc_init_with_planes(dev, crtc, primary, cursor,
+ 				  &virtio_gpu_crtc_funcs, NULL);
+ 	drm_crtc_helper_add(crtc, &virtio_gpu_crtc_helper_funcs);
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index c10ab13c580c..23c799a6cf8a 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -161,6 +161,8 @@ static unsigned int features[] = {
+ 	VIRTIO_GPU_F_MODIFIER,
+ 	VIRTIO_GPU_F_SCALING,
+ 	VIRTIO_GPU_F_VBLANK,
++	VIRTIO_GPU_F_MULTI_PLANE,
++	VIRTIO_GPU_F_ROTATION,
+ };
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index 313f9508f85f..6e489c377875 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -44,6 +44,8 @@
+ #include <drm/drm_probe_helper.h>
+ #include <drm/virtgpu_drm.h>
+ 
++
++
+ #define DRIVER_NAME "virtio_gpu"
+ #define DRIVER_DESC "virtio GPU"
+ #define DRIVER_DATE "0"
+@@ -174,6 +176,9 @@ struct virtio_gpu_vbuffer {
+ 	struct list_head list;
+ };
+ 
++#define VIRTIO_GPU_MAX_PLANES 6
++/*hardcode igpu scaler number ver>11 */
++#define SKL_NUM_SCALERS 2
+ struct virtio_gpu_output {
+ 	int index;
+ 	struct drm_crtc crtc;
+@@ -185,6 +190,9 @@ struct virtio_gpu_output {
+ 	int cur_x;
+ 	int cur_y;
+ 	bool needs_modeset;
++	int plane_num;
++	uint64_t rotation[VIRTIO_GPU_MAX_PLANES];
++	unsigned scaler_users;
+ };
+ #define drm_crtc_to_virtio_gpu_output(x) \
+ 	container_of(x, struct virtio_gpu_output, crtc)
+@@ -253,6 +261,8 @@ struct virtio_gpu_device {
+ 	bool has_modifier;
+ 	bool has_scaling;
+ 	bool has_vblank;
++	bool has_multi_plane;
++	bool has_rotation;
+ 	bool has_indirect;
+ 	bool has_resource_assign_uuid;
+ 	bool has_resource_blob;
+@@ -355,6 +365,20 @@ void virtio_gpu_cmd_set_scanout(struct virtio_gpu_device *vgdev,
+ 				uint32_t scanout_id, uint32_t resource_id,
+ 				uint32_t width, uint32_t height,
+ 				uint32_t x, uint32_t y);
++
++void virtio_gpu_cmd_flush_sync(struct virtio_gpu_device *vgdev,
++				   uint32_t scanout_id);
++
++void virtio_gpu_cmd_resource_flush_sprite(struct virtio_gpu_device *vgdev,
++				   uint32_t scanout_id,
++				   uint32_t plane_indx,
++				   struct drm_framebuffer *fb,
++				   uint32_t resource_id,
++				   uint32_t x, uint32_t y,
++				   uint32_t width, uint32_t height,
++				   struct virtio_gpu_object_array *objs,
++				   struct virtio_gpu_fence *fence);
++
+ void virtio_gpu_object_attach(struct virtio_gpu_device *vgdev,
+ 			      struct virtio_gpu_object *obj,
+ 			      struct virtio_gpu_mem_entry *ents,
+@@ -433,6 +457,14 @@ virtio_gpu_cmd_resource_create_blob(struct virtio_gpu_device *vgdev,
+ 				    struct virtio_gpu_object_params *params,
+ 				    struct virtio_gpu_mem_entry *ents,
+ 				    uint32_t nents);
++
++
++int virtio_gpu_cmd_get_planes_info(struct virtio_gpu_device *vgdev, int idx);
++
++
++int virtio_gpu_cmd_get_plane_rotation(struct virtio_gpu_device *vgdev,
++				      uint32_t plane_id, uint32_t scanout_indx);
++
+ void
+ virtio_gpu_cmd_set_scanout_blob(struct virtio_gpu_device *vgdev,
+ 				uint32_t scanout_id,
+@@ -448,6 +480,14 @@ void virtio_gpu_cmd_set_scaling(struct virtio_gpu_device *vgdev,
+ 				     uint32_t scanout_id,
+ 				     struct drm_rect *rect_dst);
+ 
++void virtio_gpu_cmd_set_sprite_scaling(struct virtio_gpu_device *vgdev,
++				     uint32_t scanout_id,
++				     uint32_t plane_id,
++				     struct drm_rect *rect_dst);
++
++void virtio_gpu_cmd_set_rotation(struct virtio_gpu_device *vgdev,
++				     uint32_t plane_id,
++				     uint64_t rotation);
+ /* virtgpu_display.c */
+ int virtio_gpu_modeset_init(struct virtio_gpu_device *vgdev);
+ void virtio_gpu_modeset_fini(struct virtio_gpu_device *vgdev);
+@@ -457,6 +497,7 @@ uint32_t virtio_gpu_translate_format(uint32_t drm_fourcc);
+ struct drm_plane *virtio_gpu_plane_init(struct virtio_gpu_device *vgdev,
+ 					enum drm_plane_type type,
+ 					int index);
++void virtio_update_planes_info(int index, int num, u32 *info);
+ 
+ /* virtgpu_fence.c */
+ struct virtio_gpu_fence *virtio_gpu_fence_alloc(struct virtio_gpu_device *vgdev,
+diff --git a/drivers/gpu/drm/virtio/virtgpu_kms.c b/drivers/gpu/drm/virtio/virtgpu_kms.c
+index 670a7f112269..23175e1e3bde 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_kms.c
++++ b/drivers/gpu/drm/virtio/virtgpu_kms.c
+@@ -112,6 +112,19 @@ static void virtio_gpu_get_capsets(struct virtio_gpu_device *vgdev,
+ 	vgdev->num_capsets = num_capsets;
+ }
+ 
++static void virtio_gpu_get_planes(struct virtio_gpu_device *vgdev)
++{
++	int i;
++	for(i=0; i < vgdev->num_scanouts; i++) {
++		printk("sprite get planes scanoutid_%d \r\n",i);
++		vgdev->outputs[i].plane_num = 0;
++		virtio_gpu_cmd_get_planes_info(vgdev, i);
++		virtio_gpu_notify(vgdev);
++		wait_event_timeout(vgdev->resp_wq,
++				vgdev->outputs[i].plane_num, 5 * HZ);
++	}
++}
++
+ int virtio_gpu_find_vqs(struct virtio_gpu_device *vgdev)
+ {
+ 	vq_callback_t **callbacks;
+@@ -218,6 +231,13 @@ int virtio_gpu_init(struct virtio_device *vdev, struct drm_device *dev)
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_VBLANK)) {
+ 		vgdev->has_vblank = true;
+ 	}
++	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_MULTI_PLANE)) {
++		vgdev->has_multi_plane = true;
++	}
++	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_ROTATION)) {
++		vgdev->has_rotation = true;
++	}
++
+ 	if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_RESOURCE_BLOB)) {
+ 		vgdev->has_resource_blob = true;
+ 		if (virtio_has_feature(vgdev->vdev, VIRTIO_GPU_F_MODIFIER)) {
+@@ -291,17 +311,20 @@ int virtio_gpu_init(struct virtio_device *vdev, struct drm_device *dev)
+ 			num_capsets, &num_capsets);
+ 	DRM_INFO("number of cap sets: %d\n", num_capsets);
+ 
++	virtio_device_ready(vgdev->vdev);
++
++	if (num_capsets)
++		virtio_gpu_get_capsets(vgdev, num_capsets);
++
++	if(vgdev->has_multi_plane)
++		virtio_gpu_get_planes(vgdev);
++
+ 	ret = virtio_gpu_modeset_init(vgdev);
+ 	if (ret) {
+ 		DRM_ERROR("modeset init failed\n");
+ 		goto err_scanouts;
+ 	}
+ 
+-	virtio_device_ready(vgdev->vdev);
+-
+-	if (num_capsets)
+-		virtio_gpu_get_capsets(vgdev, num_capsets);
+-
+ 	virtio_gpu_vblankq_notify(vgdev);
+ 
+ 	for(i=0; i < vgdev->num_vblankq; i++)
+diff --git a/drivers/gpu/drm/virtio/virtgpu_plane.c b/drivers/gpu/drm/virtio/virtgpu_plane.c
+index ac9132c5b22f..f6adcc6757e1 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_plane.c
++++ b/drivers/gpu/drm/virtio/virtgpu_plane.c
+@@ -26,6 +26,7 @@
+ #include <drm/drm_atomic_helper.h>
+ #include <drm/drm_damage_helper.h>
+ #include <drm/drm_fourcc.h>
++#include <drm/drm_blend.h>
+ 
+ #include "virtgpu_drv.h"
+ 
+@@ -44,6 +45,20 @@ static const uint32_t virtio_gpu_cursor_formats[] = {
+ 	DRM_FORMAT_HOST_ARGB8888,
+ };
+ 
++static struct plane_format {
++	uint32_t size;
++	uint32_t format_info[128];
++};
++
++static struct output_planes_format {
++
++	/* presumably take 5 as the max, since i915 only has 5 planes per pipe */
++	struct plane_format planes[5];
++	int sprite_plane_index;
++
++} virtio_gpu_output_planes_formats[16];
++
++
+ uint32_t virtio_gpu_translate_format(uint32_t drm_fourcc)
+ {
+ 	uint32_t format;
+@@ -120,6 +135,105 @@ static struct drm_plane_funcs virtio_gpu_plane_funcs = {
+ 	.atomic_destroy_state	= drm_atomic_helper_plane_destroy_state,
+ };
+ 
++static int virtio_gpu_check_plane_rotation(struct drm_plane_state *state,
++						struct virtio_gpu_output *output)
++{
++	int index;
++	index = state->plane->index;
++
++	if(!(state->rotation & output->rotation[index])) {
++		DRM_DEBUG("sprite plane rotation check failed \n");
++		return -EINVAL;
++	}
++	return 0;
++}
++
++#define ICL_MAX_SRC_W 5120
++#define ICL_MAX_SRC_H 4096
++#define ICL_MAX_DST_W 5120
++#define ICL_MAX_DST_H 4096
++#define SKL_MIN_SRC_W 8
++#define SKL_MIN_SRC_H 8
++#define SKL_MIN_DST_W 8
++#define SKL_MIN_DST_H 8
++
++static int virtio_gpu_check_plane_scaling(struct drm_plane_state *state,
++						struct virtio_gpu_output *output)
++{
++	int scaler_user = drm_plane_index(state->plane);
++	int src_w, src_h, dst_w, dst_h;
++	struct drm_framebuffer *fb = state->fb;
++	output = drm_crtc_to_virtio_gpu_output(state->crtc);
++	src_w = state->src_w >> 16;
++	src_h = state->src_h >> 16;
++	dst_w = state->crtc_w;
++	dst_h = state->crtc_h;
++
++	if (src_w == dst_w && src_h == dst_h)
++		return 0;
++	/*hard code the format and scale check as physical gpu */
++	if (src_w > ICL_MAX_SRC_W || src_h > ICL_MAX_SRC_H ||
++		dst_w > ICL_MAX_DST_W || dst_h > ICL_MAX_DST_H ||
++		src_w < SKL_MIN_SRC_W || src_h < SKL_MIN_SRC_H ||
++		dst_w < SKL_MIN_DST_W || dst_h < SKL_MIN_DST_H) {
++
++		drm_dbg_kms(state->plane->dev,
++				"scaler_user index %u: src %ux%u dst %ux%u "
++				"size is out of scaler range\n",
++				scaler_user, src_w, src_h,
++				dst_w, dst_h);
++
++		return -EINVAL;
++
++	}
++
++	if(fb) {
++		switch (fb->format->format) {
++			case DRM_FORMAT_RGB565:
++			case DRM_FORMAT_XBGR8888:
++			case DRM_FORMAT_XRGB8888:
++			case DRM_FORMAT_ABGR8888:
++			case DRM_FORMAT_ARGB8888:
++			case DRM_FORMAT_XRGB2101010:
++			case DRM_FORMAT_XBGR2101010:
++			case DRM_FORMAT_ARGB2101010:
++			case DRM_FORMAT_ABGR2101010:
++			case DRM_FORMAT_YUYV:
++			case DRM_FORMAT_YVYU:
++			case DRM_FORMAT_UYVY:
++			case DRM_FORMAT_VYUY:
++			case DRM_FORMAT_NV12:
++			case DRM_FORMAT_XYUV8888:
++			case DRM_FORMAT_P010:
++			case DRM_FORMAT_P012:
++			case DRM_FORMAT_P016:
++			case DRM_FORMAT_Y210:
++			case DRM_FORMAT_Y212:
++			case DRM_FORMAT_Y216:
++			case DRM_FORMAT_XVYU2101010:
++			case DRM_FORMAT_XVYU12_16161616:
++			case DRM_FORMAT_XVYU16161616:
++			case DRM_FORMAT_XBGR16161616F:
++			case DRM_FORMAT_ABGR16161616F:
++			case DRM_FORMAT_XRGB16161616F:
++			case DRM_FORMAT_ARGB16161616F:
++				break;
++			default:
++				drm_dbg_kms(state->plane->dev,
++						"[PLANE:%d:%s] FB:%d unsupported scaling format 0x%x\n",
++						state->plane->index, state->plane->name,
++						fb->base.id, fb->format->format);
++				return -EINVAL;
++		}
++	}
++	output->scaler_users |= (1 << scaler_user);
++	drm_dbg_kms(state->plane->dev,
++		    "staged scaling request for %ux%u->%ux%u in scale check ",
++		     src_w, src_h, dst_w, dst_h);
++
++	return 0;
++}
++
+ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+ 					 struct drm_atomic_state *state)
+ {
+@@ -127,7 +241,13 @@ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+ 										 plane);
+ 	struct drm_device *dev = plane->dev;
+ 	struct virtio_gpu_device *vgdev = dev->dev_private;
+-	bool is_cursor = plane->type == DRM_PLANE_TYPE_CURSOR;
++	bool is_cursor = 1;
++	struct virtio_gpu_output *output = NULL;
++	output = drm_crtc_to_virtio_gpu_output(new_plane_state->crtc);
++
++	if(plane->type == DRM_PLANE_TYPE_PRIMARY && !vgdev->has_multi_plane)
++		is_cursor = 0;
++
+ 	struct drm_crtc_state *crtc_state;
+ 	int ret;
+ 	int min_scale = DRM_PLANE_NO_SCALING;
+@@ -149,7 +269,21 @@ static int virtio_gpu_plane_atomic_check(struct drm_plane *plane,
+ 						  min_scale,
+ 						  max_scale,
+ 						  is_cursor, true);
+-	return ret;
++	if(ret) {
++		DRM_DEBUG("sprite plane scaling check failed ret:%d \n", ret);
++		return ret;
++	}
++
++	if(min_scale == 1) {
++		ret = virtio_gpu_check_plane_scaling(new_plane_state, output);
++		if(ret)
++			return ret;
++	}
++
++	if(new_plane_state->rotation) {
++		return virtio_gpu_check_plane_rotation(new_plane_state, output);
++	}
++	return 0;
+ }
+ 
+ static void virtio_gpu_update_dumb_bo(struct virtio_gpu_device *vgdev,
+@@ -211,6 +345,88 @@ static void virtio_gpu_resource_flush(struct drm_plane *plane,
+ 	}
+ }
+ 
++static void virtio_gpu_resource_flush_sprite(struct drm_plane *plane, int indx,
++				      struct drm_framebuffer *fb,
++				      uint32_t x, uint32_t y,
++				      uint32_t width, uint32_t height)
++{
++	struct drm_device *dev = plane->dev;
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	struct virtio_gpu_framebuffer *vgfb;
++	struct virtio_gpu_object *bo;
++	struct virtio_gpu_object_array *objs = NULL;
++	struct virtio_gpu_fence *fence = NULL;
++
++	vgfb = to_virtio_gpu_framebuffer(plane->state->fb);
++	bo = gem_to_virtio_gpu_obj(vgfb->base.obj[0]);
++	fence = virtio_gpu_fence_alloc(vgdev, vgdev->fence_drv.context, 0);
++
++	if (fence) {
++		objs = virtio_gpu_array_alloc(1);
++		if (!objs) {
++			kfree(fence);
++			return;
++		}
++		virtio_gpu_array_add_obj(objs, vgfb->base.obj[0]);
++		virtio_gpu_array_lock_resv(objs);
++	}
++
++	virtio_gpu_cmd_resource_flush_sprite(vgdev, indx, plane->index,fb, bo->hw_res_handle, x, y,
++				      width, height, objs, fence);
++	virtio_gpu_notify(vgdev);
++
++	if (fence) {
++		dma_fence_wait_timeout(&fence->f, true,
++				       msecs_to_jiffies(50));
++		dma_fence_put(&fence->f);
++	}
++}
++
++static void virtio_gpu_sprite_plane_update(struct drm_plane *plane,
++					    struct drm_atomic_state *state)
++{
++	struct drm_device *dev = plane->dev;
++	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
++									   plane);
++	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state,
++									   plane);
++	struct drm_framebuffer *fb = new_state->fb;
++
++	struct virtio_gpu_device *vgdev = dev->dev_private;
++	struct virtio_gpu_output *output = NULL;
++
++	if (plane->state->crtc)
++		output = drm_crtc_to_virtio_gpu_output(plane->state->crtc);
++	if (old_state->crtc)
++		output = drm_crtc_to_virtio_gpu_output(old_state->crtc);
++	if (WARN_ON(!output))
++		return;
++
++	if (!plane->state->fb || !output->crtc.state->active) {
++		DRM_DEBUG("sprite nofb\n");
++		return;
++	}
++
++	if ((vgdev->has_rotation) && plane->state->rotation)
++		virtio_gpu_cmd_set_rotation(vgdev, plane->index, plane->state->rotation);
++
++	if (vgdev->has_scaling) {
++		struct drm_rect rect_dst;
++		rect_dst.x1 = plane->state->crtc_x;
++		rect_dst.y1 = plane->state->crtc_y;
++		rect_dst.x2 = plane->state->crtc_w;
++		rect_dst.y2 = plane->state->crtc_h;
++		virtio_gpu_cmd_set_sprite_scaling(vgdev, output->index, plane->index, &rect_dst);
++	}
++	virtio_gpu_resource_flush_sprite(plane,
++				  output->index,
++				  fb,
++				  plane->state->src_x >> 16,
++				  plane->state->src_y >> 16,
++				  plane->state->src_w >> 16,
++				  plane->state->src_h >> 16);
++}
++
+ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 					    struct drm_atomic_state *state)
+ {
+@@ -294,6 +510,9 @@ static void virtio_gpu_primary_plane_update(struct drm_plane *plane,
+ 		virtio_gpu_cmd_set_scaling(vgdev, output->index, &rect_dst);
+ 	}
+ 
++	if ((vgdev->has_rotation) && plane->state->rotation)
++		virtio_gpu_cmd_set_rotation(vgdev, plane->index, plane->state->rotation);
++
+ 	virtio_gpu_resource_flush(plane,
+ 				  rect.x1,
+ 				  rect.y1,
+@@ -398,6 +617,11 @@ static const struct drm_plane_helper_funcs virtio_gpu_cursor_helper_funcs = {
+ 	.atomic_update		= virtio_gpu_cursor_plane_update,
+ };
+ 
++static const struct drm_plane_helper_funcs virtio_gpu_sprite_helper_funcs = {
++	.atomic_check		= virtio_gpu_plane_atomic_check,
++	.atomic_update		= virtio_gpu_sprite_plane_update,
++};
++
+ static const uint64_t virtio_gpu_format_modifiers[] = {
+ 	DRM_FORMAT_MOD_LINEAR,
+ 	I915_FORMAT_MOD_X_TILED,
+@@ -419,6 +643,38 @@ static bool virtio_gpu_plane_format_mod_supported(struct drm_plane *_plane,
+         }
+ }
+ 
++void virtio_update_planes_info(int index, int num, u32 *info)
++{
++	int plane_indx, format_indx;
++	int size = 0;
++	int pos = 0;
++
++	for(plane_indx=0; plane_indx<num; plane_indx++) {
++
++		size = info[pos];
++		pos++;
++		virtio_gpu_output_planes_formats[index].planes[plane_indx]
++				.size = size;
++
++		for(format_indx = 0; format_indx < size; format_indx++,pos++) {
++			virtio_gpu_output_planes_formats[index].planes[plane_indx]
++				.format_info[format_indx] = info[pos];
++		}
++	}
++	virtio_gpu_output_planes_formats[index].sprite_plane_index = 0;
++}
++
++static void virtio_gpu_get_plane_rotation(struct virtio_gpu_device *vgdev, uint32_t plane_id,
++						uint32_t scanout_indx)
++{
++	virtio_gpu_cmd_get_plane_rotation(vgdev, plane_id, scanout_indx);
++	virtio_gpu_notify(vgdev);
++
++	wait_event_timeout(vgdev->resp_wq,
++                               vgdev->outputs[scanout_indx].rotation[plane_id], 5 * HZ);
++
++}
++
+ struct drm_plane *virtio_gpu_plane_init(struct virtio_gpu_device *vgdev,
+ 					enum drm_plane_type type,
+ 					int index)
+@@ -433,6 +689,15 @@ struct drm_plane *virtio_gpu_plane_init(struct virtio_gpu_device *vgdev,
+ 		formats = virtio_gpu_cursor_formats;
+ 		nformats = ARRAY_SIZE(virtio_gpu_cursor_formats);
+ 		funcs = &virtio_gpu_cursor_helper_funcs;
++
++	} else if (type == DRM_PLANE_TYPE_OVERLAY) {
++		formats = virtio_gpu_output_planes_formats[index].
++			planes[virtio_gpu_output_planes_formats[index].sprite_plane_index].format_info;
++		nformats = virtio_gpu_output_planes_formats[index].
++			planes[virtio_gpu_output_planes_formats[index].sprite_plane_index].size;
++		funcs = &virtio_gpu_sprite_helper_funcs;
++		virtio_gpu_output_planes_formats[index].sprite_plane_index++;
++
+ 	} else {
+ 		formats = virtio_gpu_formats;
+ 		nformats = ARRAY_SIZE(virtio_gpu_formats);
+@@ -451,6 +716,17 @@ struct drm_plane *virtio_gpu_plane_init(struct virtio_gpu_device *vgdev,
+ 						   formats, nformats, NULL, type, NULL);
+ 	}
+ 
++	if (vgdev->has_rotation) {
++		vgdev->outputs[index].rotation[plane->index] = 0;
++		virtio_gpu_get_plane_rotation(vgdev, plane->index, index);
++		vgdev->outputs[index].rotation[plane->index] =
++			DRM_MODE_ROTATE_0|vgdev->outputs[index].rotation[plane->index];
++
++		drm_plane_create_rotation_property(plane,
++						   DRM_MODE_ROTATE_0,
++						   vgdev->outputs[index].rotation[plane->index]);
++	}
++
+ 	if (IS_ERR(plane))
+ 		return plane;
+ 
+diff --git a/drivers/gpu/drm/virtio/virtgpu_vq.c b/drivers/gpu/drm/virtio/virtgpu_vq.c
+index c95e53a32e0a..1e644e2a3e63 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_vq.c
++++ b/drivers/gpu/drm/virtio/virtgpu_vq.c
+@@ -38,7 +38,7 @@
+ #include "virtgpu_drv.h"
+ #include "virtgpu_trace.h"
+ 
+-#define MAX_INLINE_CMD_SIZE   96
++#define MAX_INLINE_CMD_SIZE  112
+ #define MAX_INLINE_RESP_SIZE  24
+ #define VBUFFER_SIZE          (sizeof(struct virtio_gpu_vbuffer) \
+ 			       + MAX_INLINE_CMD_SIZE		 \
+@@ -639,6 +639,62 @@ void virtio_gpu_cmd_set_scanout(struct virtio_gpu_device *vgdev,
+ 	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
+ }
+ 
++
++void virtio_gpu_cmd_flush_sync(struct virtio_gpu_device *vgdev,
++				   uint32_t scanout_id)
++{
++	struct virtio_gpu_flush_sync *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++
++	cmd_p = virtio_gpu_alloc_cmd(vgdev, &vbuf, sizeof(*cmd_p));
++	memset(cmd_p, 0, sizeof(*cmd_p));
++
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_FLUSH_SYNC);
++	cmd_p->scanout_id = cpu_to_le32(scanout_id);
++
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++
++}
++
++void virtio_gpu_cmd_resource_flush_sprite(struct virtio_gpu_device *vgdev,
++				   uint32_t scanout_id,
++				   uint32_t plane_indx,
++				   struct drm_framebuffer *fb,
++				   uint32_t resource_id,
++				   uint32_t x, uint32_t y,
++				   uint32_t width, uint32_t height,
++				   struct virtio_gpu_object_array *objs,
++				   struct virtio_gpu_fence *fence)
++{
++	struct virtio_gpu_flush_sprite *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++	uint32_t format = fb->format->format;
++	int i;
++	cmd_p = virtio_gpu_alloc_cmd(vgdev, &vbuf, sizeof(*cmd_p));
++	memset(cmd_p, 0, sizeof(*cmd_p));
++	vbuf->objs = objs;
++
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_FLUSH_SPRITE);
++	cmd_p->scanout_id = cpu_to_le32(scanout_id);
++	cmd_p->resource_id = cpu_to_le32(resource_id);
++	cmd_p->plane_id = cpu_to_le32(plane_indx);
++	cmd_p->r.width = cpu_to_le32(width);
++	cmd_p->r.height = cpu_to_le32(height);
++	cmd_p->r.x = cpu_to_le32(x);
++	cmd_p->r.y = cpu_to_le32(y);
++	cmd_p->width = cpu_to_le32(fb->width);
++	cmd_p->height = cpu_to_le32(fb->height);
++	cmd_p->format = cpu_to_le32(format);
++	cmd_p->modifier = cpu_to_le64(fb->modifier);
++
++	for (i = 0; i < 4; i++) {
++		cmd_p->strides[i] = cpu_to_le32(fb->pitches[i]);
++		cmd_p->offsets[i] = cpu_to_le32(fb->offsets[i]);
++	}
++
++	virtio_gpu_queue_fenced_ctrl_buffer(vgdev, vbuf, fence);
++}
++
+ void virtio_gpu_cmd_resource_flush(struct virtio_gpu_device *vgdev,
+ 				   uint32_t resource_id,
+ 				   uint32_t x, uint32_t y,
+@@ -746,6 +802,23 @@ static void virtio_gpu_cmd_get_display_info_cb(struct virtio_gpu_device *vgdev,
+ 		drm_kms_helper_hotplug_event(vgdev->ddev);
+ }
+ 
++static void virtio_gpu_cmd_get_plane_info_cb(struct virtio_gpu_device *vgdev,
++					      struct virtio_gpu_vbuffer *vbuf)
++{
++	struct virtio_gpu_cmd_get_planes *cmd =
++		(struct virtio_gpu_cmd_get_planes *)vbuf->buf;
++	struct virtio_gpu_resp_planes *resp =
++		(struct virtio_gpu_resp_planes *)vbuf->resp_buf;
++	int indx = le32_to_cpu(cmd->scanout);
++
++	spin_lock(&vgdev->display_info_lock);
++	vgdev->outputs[indx].plane_num = le32_to_cpu(resp->plane_num);
++	if(vgdev->outputs[indx].plane_num)
++		virtio_update_planes_info(indx, le32_to_cpu(resp->plane_num), resp->info);
++	spin_unlock(&vgdev->display_info_lock);
++	wake_up(&vgdev->resp_wq);
++}
++
+ static void virtio_gpu_cmd_get_capset_info_cb(struct virtio_gpu_device *vgdev,
+ 					      struct virtio_gpu_vbuffer *vbuf)
+ {
+@@ -854,6 +927,71 @@ int virtio_gpu_cmd_get_display_info(struct virtio_gpu_device *vgdev)
+ 	return 0;
+ }
+ 
++static void virtio_gpu_cmd_get_plane_rotation_cb(struct virtio_gpu_device *vgdev,
++				       struct virtio_gpu_vbuffer *vbuf)
++{
++	struct virtio_gpu_cmd_get_plane_rotation *cmd =
++		(struct virtio_gpu_cmd_get_plane_rotation *)vbuf->buf;
++	struct virtio_gpu_resp_plane_rotation *resp =
++		(struct virtio_gpu_resp_plane_rotation *)vbuf->resp_buf;
++
++	int indx = le32_to_cpu(cmd->scanout_id);
++	int plane_indx = le32_to_cpu(cmd->plane_id);
++	spin_lock(&vgdev->display_info_lock);
++	vgdev->outputs[indx].rotation[plane_indx] = le64_to_cpu(resp->rotation[0]);
++	spin_unlock(&vgdev->display_info_lock);
++	wake_up(&vgdev->resp_wq);
++}
++
++int virtio_gpu_cmd_get_plane_rotation(struct virtio_gpu_device *vgdev,
++				uint32_t plane_id, uint32_t scanout_indx)
++{
++	struct virtio_gpu_cmd_get_plane_rotation *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++	void *resp_buf;
++
++	resp_buf = kzalloc(sizeof(struct virtio_gpu_resp_plane_rotation),
++			   GFP_KERNEL);
++	if (!resp_buf)
++		return -ENOMEM;
++
++	cmd_p = virtio_gpu_alloc_cmd_resp
++		(vgdev, &virtio_gpu_cmd_get_plane_rotation_cb, &vbuf,
++		 sizeof(*cmd_p), sizeof(struct virtio_gpu_resp_plane_rotation),
++		 resp_buf);
++	memset(cmd_p, 0, sizeof(*cmd_p));
++
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_GET_PLANE_ROTATION);
++	cmd_p->plane_id = cpu_to_le32(plane_id);
++	cmd_p->scanout_id = cpu_to_le32(scanout_indx);
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++	return 0;
++
++}
++
++int virtio_gpu_cmd_get_planes_info(struct virtio_gpu_device *vgdev, int idx)
++{
++	struct virtio_gpu_cmd_get_planes *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++	void *resp_buf;
++
++	resp_buf = kzalloc(sizeof(struct virtio_gpu_resp_planes),
++			   GFP_KERNEL);
++	if (!resp_buf)
++		return -ENOMEM;
++
++	cmd_p = virtio_gpu_alloc_cmd_resp
++		(vgdev, &virtio_gpu_cmd_get_plane_info_cb, &vbuf,
++		 sizeof(*cmd_p), sizeof(struct virtio_gpu_resp_planes),
++		 resp_buf);
++	memset(cmd_p, 0, sizeof(*cmd_p));
++
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_GET_PLANES);
++	cmd_p->scanout = cpu_to_le32(idx);
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++	return 0;
++}
++
+ int virtio_gpu_cmd_get_capset_info(struct virtio_gpu_device *vgdev, int idx)
+ {
+ 	struct virtio_gpu_get_capset_info *cmd_p;
+@@ -1410,3 +1548,41 @@ void virtio_gpu_cmd_set_scaling(struct virtio_gpu_device *vgdev,
+ 
+ 	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
+ }
++
++void virtio_gpu_cmd_set_sprite_scaling(struct virtio_gpu_device *vgdev,
++				     uint32_t scanout_id,
++				     uint32_t plane_id,
++				     struct drm_rect *rect_dst)
++{
++	struct virtio_gpu_set_sprite_scaling *cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++
++	cmd_p = virtio_gpu_alloc_cmd(vgdev, &vbuf, sizeof(*cmd_p));
++	memset(cmd_p, 0, sizeof(*cmd_p));
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_SET_SPRITE_SCALING);
++	cmd_p->scanout_id = cpu_to_le32(scanout_id);
++	cmd_p->plane_id = cpu_to_le32(plane_id);
++
++	cmd_p->dst.width = cpu_to_le32(rect_dst->x2);
++	cmd_p->dst.height = cpu_to_le32(rect_dst->y2);
++	cmd_p->dst.x = cpu_to_le32(rect_dst->x1);
++	cmd_p->dst.y = cpu_to_le32(rect_dst->y1);
++
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++}
++
++void virtio_gpu_cmd_set_rotation(struct virtio_gpu_device *vgdev,
++				     uint32_t plane_id,
++				     uint64_t rotation)
++{
++	struct virtio_gpu_set_rotation*cmd_p;
++	struct virtio_gpu_vbuffer *vbuf;
++
++	cmd_p = virtio_gpu_alloc_cmd(vgdev, &vbuf, sizeof(*cmd_p));
++	memset(cmd_p, 0, sizeof(*cmd_p));
++	cmd_p->hdr.type = cpu_to_le32(VIRTIO_GPU_CMD_SET_ROTATION);
++	cmd_p->plane_id = cpu_to_le32(plane_id);
++	cmd_p->rotation = cpu_to_le64(rotation);
++
++	virtio_gpu_queue_ctrl_buffer(vgdev, vbuf);
++}
+diff --git a/include/uapi/linux/virtio_gpu.h b/include/uapi/linux/virtio_gpu.h
+index 1d05de645484..e7063f9bdc78 100644
+--- a/include/uapi/linux/virtio_gpu.h
++++ b/include/uapi/linux/virtio_gpu.h
+@@ -75,6 +75,19 @@
+ 
+ #define VIRTIO_GPU_F_VBLANK     7
+ 
++/*
++ * VIRTIO_GPU_CMD_FLUSH_SPRITE
++ * VIRTIO_GPU_CMD_FLUSH_SYNC
++ * VIRTIO_GPU_CMD_GET_PLANES
++ */
++#define VIRTIO_GPU_F_MULTI_PLANE 8
++
++/*
++ *VIRTIO_GPU_CMD_GET_PLANE_ROTATION
++ *VIRTIO_GPU_CMD_SET_ROTATION
++ */
++#define VIRTIO_GPU_F_ROTATION   9
++
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+ 
+@@ -95,6 +108,12 @@ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_CMD_SET_SCANOUT_BLOB,
+ 	VIRTIO_GPU_CMD_SET_MODIFIER,
+ 	VIRTIO_GPU_CMD_SET_SCALING,
++	VIRTIO_GPU_CMD_FLUSH_SPRITE,
++	VIRTIO_GPU_CMD_FLUSH_SYNC,
++	VIRTIO_GPU_CMD_GET_PLANES,
++	VIRTIO_GPU_CMD_GET_PLANE_ROTATION,
++	VIRTIO_GPU_CMD_SET_ROTATION,
++	VIRTIO_GPU_CMD_SET_SPRITE_SCALING,
+ 
+ 	/* 3d commands */
+ 	VIRTIO_GPU_CMD_CTX_CREATE = 0x0200,
+@@ -207,6 +226,14 @@ struct virtio_gpu_set_scanout {
+ 	__le32 resource_id;
+ };
+ 
++/* VIRTIO_GPU_CMD_FLUSH_SYNC*/
++struct virtio_gpu_flush_sync{
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 scanout_id;
++	__le32 padding;
++};
++
++
+ /* VIRTIO_GPU_CMD_RESOURCE_FLUSH */
+ struct virtio_gpu_resource_flush {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+@@ -215,6 +242,27 @@ struct virtio_gpu_resource_flush {
+ 	__le32 padding;
+ };
+ 
++/* VIRTIO_GPU_CMD_FLUSH_SPRITE */
++struct virtio_gpu_flush_sprite {
++	struct virtio_gpu_ctrl_hdr hdr;
++	struct virtio_gpu_rect r;
++	__le32 scanout_id;
++	__le32 plane_id;
++	__le32 resource_id;
++	__le32 format;
++	__le32 width;
++	__le32 height;
++	__le64 modifier;
++	__le32 strides[4];
++	__le32 offsets[4];
++};
++/* VIRTIO_GPU_CMD_SET_ROTATION*/
++struct virtio_gpu_set_rotation{
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 scanout_id;
++	__le32 plane_id;
++	__le64 rotation;
++};
+ /* VIRTIO_GPU_CMD_SET_SCALING */
+ struct virtio_gpu_set_scaling {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+@@ -223,6 +271,14 @@ struct virtio_gpu_set_scaling {
+ 	__le32 padding;
+ };
+ 
++/* VIRTIO_GPU_CMD_SET_SPRITE_SCALING */
++struct virtio_gpu_set_sprite_scaling {
++	struct virtio_gpu_ctrl_hdr hdr;
++	struct virtio_gpu_rect dst;
++	__le32 scanout_id;
++	__le32 plane_id;
++};
++
+ /* VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: simple transfer to_host */
+ struct virtio_gpu_transfer_to_host_2d {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+@@ -359,6 +415,34 @@ struct virtio_gpu_resp_capset {
+ 	__u8 capset_data[];
+ };
+ 
++/*VIRTIO_GPU_CMD_GET_PLANE_ROTATION*/
++struct virtio_gpu_cmd_get_plane_rotation{
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 scanout_id;
++	__le32 plane_id;
++};
++/* VIRTIO_GPU_RESP_OK_PLANE_ROTATION */
++struct virtio_gpu_resp_plane_rotation{
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 count;
++	__le32 padding;
++	__le64 rotation[10];
++};
++
++/* VIRTIO_GPU_CMD_GET_PLANES*/
++struct virtio_gpu_cmd_get_planes{
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 scanout;
++	__le32 padding;
++};
++/* VIRTIO_GPU_RESP_OK_PLANES*/
++struct virtio_gpu_resp_planes{
++	struct virtio_gpu_ctrl_hdr hdr;
++	__le32 plane_num;
++	__le32 size;
++	__le32 info[1024];
++};
++
+ /* VIRTIO_GPU_CMD_GET_EDID */
+ struct virtio_gpu_cmd_get_edid {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+-- 
+2.43.2
+
