@@ -1,0 +1,223 @@
+From 81e55dc41d2752c156123f6d7263df76a386575f Mon Sep 17 00:00:00 2001
+From: "Ni, Erchang" <erchang.ni@intel.com>
+Date: Fri, 5 Jul 2024 08:41:14 +0000
+Subject: [PATCH 2/2] Fix Resource leaks and 32-bit time_t usage
+
+Tracked-On: OAM-122022
+Signed-off-by: Ni, Erchang <erchang.ni@intel.com>
+---
+ libadb/lspartition.c        |  5 ++++-
+ libfastboot/fastboot.c      | 13 ++++++++++---
+ libkernelflinger/android.c  |  9 ++++++++-
+ libkernelflinger/efilinux.c |  4 +++-
+ libkernelflinger/storage.c  |  4 +++-
+ libsslsupport/wrapper.c     | 34 +++++++++++++++++++---------------
+ 6 files changed, 47 insertions(+), 22 deletions(-)
+
+diff --git a/libadb/lspartition.c b/libadb/lspartition.c
+index 66ec68e..1ea6f41 100644
+--- a/libadb/lspartition.c
++++ b/libadb/lspartition.c
+@@ -48,8 +48,11 @@ static EFI_STATUS lspartition_main(INTN argc,
+ 
+ 
+ 	ret = gpt_list_partition(&gparti, &part_count, LOGICAL_UNIT_USER);
+-	if (EFI_ERROR(ret) || part_count == 0)
++	if (EFI_ERROR(ret) || part_count == 0) {
++		if (gparti) 
++			FreePool(gparti);
+ 		return EFI_SUCCESS;
++	}
+ 
+ 	for (i = 0; i < part_count; i++)
+ 		max_len = max(max_len, StrLen(gparti[i].part.name));
+diff --git a/libfastboot/fastboot.c b/libfastboot/fastboot.c
+index e888b54..30e7df1 100644
+--- a/libfastboot/fastboot.c
++++ b/libfastboot/fastboot.c
+@@ -522,8 +522,11 @@ static EFI_STATUS publish_partsize(void)
+ 	UINTN i;
+ 
+ 	ret = gpt_list_partition(&gparti, &part_count, LOGICAL_UNIT_USER);
+-	if (EFI_ERROR(ret) || part_count == 0)
++	if (EFI_ERROR(ret) || part_count == 0) {
++		if (gparti)
++			FreePool(gparti);
+ 		return EFI_SUCCESS;
++	}
+ 
+ 	for (i = 0; i < part_count; i++) {
+ 		UINT64 size;
+@@ -538,12 +541,16 @@ static EFI_STATUS publish_partsize(void)
+ 		/* stay compatible with userdata/data naming */
+ 		if (!StrCmp(gparti[i].part.name, L"data")) {
+ 			ret = publish_part(L"userdata", size, &gparti[i].part.type);
+-			if (EFI_ERROR(ret))
++			if (EFI_ERROR(ret)) {
++				FreePool(gparti);
+ 				return ret;
++			}
+ 		} else if (!StrCmp(gparti[i].part.name, L"userdata")) {
+ 			ret = publish_part(L"data", size, &gparti[i].part.type);
+-			if (EFI_ERROR(ret))
++			if (EFI_ERROR(ret)) {
++				FreePool(gparti);
+ 				return ret;
++			}
+ 		}
+ 	}
+ 
+diff --git a/libkernelflinger/android.c b/libkernelflinger/android.c
+index 2cdb769..ad38296 100644
+--- a/libkernelflinger/android.c
++++ b/libkernelflinger/android.c
+@@ -1293,7 +1293,7 @@ static EFI_STATUS setup_command_line(
+         char   *serialno = NULL;
+         CHAR16 *serialport = NULL;
+         CHAR16 *bootreason = NULL;
+-        EFI_PHYSICAL_ADDRESS cmdline_addr;
++        EFI_PHYSICAL_ADDRESS cmdline_addr = 0;
+         CHAR8 *cmdline;
+         CHAR8 *cmd_conf= NULL;
+         UINTN cmdlen;
+@@ -1651,6 +1651,13 @@ out:
+         if (bootreason) {
+                 FreePool(bootreason);
+         }
++        if (EFI_ERROR(ret) && cmdline_addr) {
++                if (is_uefi) {
++                        free_pages(cmdline_addr, EFI_SIZE_TO_PAGES(cmdsize));
++                } else {
++                        FreePool((void *)(UINTN)cmdline_addr);
++                }
++        }
+         return ret;
+ }
+ 
+diff --git a/libkernelflinger/efilinux.c b/libkernelflinger/efilinux.c
+index 0d5b66e..452d2be 100644
+--- a/libkernelflinger/efilinux.c
++++ b/libkernelflinger/efilinux.c
+@@ -129,8 +129,10 @@ EFI_STATUS emalloc(UINTN size, UINTN align, EFI_PHYSICAL_ADDRESS *addr, BOOLEAN
+         if (d == map_end)
+                 err = EFI_OUT_OF_RESOURCES;
+ 
+-        free_pool(map_buf);
+ fail:
++        if (map_buf) {
++                free_pool(map_buf);
++        }
+         return err;
+ }
+ 
+diff --git a/libkernelflinger/storage.c b/libkernelflinger/storage.c
+index 8776c8d..966c52b 100644
+--- a/libkernelflinger/storage.c
++++ b/libkernelflinger/storage.c
+@@ -546,7 +546,9 @@ EFI_STATUS storage_get_erase_block_size(UINTN *erase_blk_size)
+ 		if (i == nb_handle)
+ 			goto notfound;
+ 
+-		return cur_storage->get_erase_block_size(handles[i], erase_blk_size);
++		ret = cur_storage->get_erase_block_size(handles[i], erase_blk_size);
++		FreePool(handles);
++		return ret;
+ 	}
+ 
+ notfound:
+diff --git a/libsslsupport/wrapper.c b/libsslsupport/wrapper.c
+index ecfa4de..a6e2a13 100644
+--- a/libsslsupport/wrapper.c
++++ b/libsslsupport/wrapper.c
+@@ -1,6 +1,7 @@
+ #include <efi.h>
+ #include <efilib.h>
+ #include <lib.h>
++#include <stdint.h>
+ #include "openssl_support.h"
+ 
+ FILE  *__sF = NULL;
+@@ -399,11 +400,11 @@ struct tm
+ 	char *tm_zone;		/* Timezone abbreviation.  */
+ };
+ 
+-struct tm *gmtime_r(const time_t *timep, struct tm *tmp)
++struct tm *gmtime_r(const int64_t *timep, struct tm *tmp)
+ 	__attribute__((weak));
+-struct tm *gmtime_r(const time_t *timep, struct tm *tmp)
++struct tm *gmtime_r(const int64_t *timep, struct tm *tmp)
+ {
+-	time_t tdays;
++	int64_t tdays;
+ 	int idays;  /* unsigned would be so 2003 */
+ 	long long rem;
+ 	int y;
+@@ -414,12 +415,12 @@ struct tm *gmtime_r(const time_t *timep, struct tm *tmp)
+ 	rem = (long long) (*timep - tdays * SECSPERDAY);
+ 	while (tdays < 0 || tdays >= year_lengths[isleap(y)]) {
+ 		int newy;
+-		time_t tdelta;
++		int64_t tdelta;
+ 		int idelta;
+ 		int leapdays;
+ 
+ 		tdelta = tdays / DAYSPERLYEAR;
+-		if (! ((! TYPE_SIGNED(time_t) || INT_MIN <= tdelta)
++		if (! ((! TYPE_SIGNED(int64_t) || INT_MIN <= tdelta)
+ 		       && tdelta <= INT_MAX))
+ 			return NULL;
+ 		idelta = tdelta;
+@@ -430,7 +431,7 @@ struct tm *gmtime_r(const time_t *timep, struct tm *tmp)
+ 			return NULL;
+ 		leapdays = leaps_thru_end_of(newy - 1) -
+ 			leaps_thru_end_of(y - 1);
+-		tdays -= (time_t) (((time_t) newy - y) * DAYSPERNYEAR);
++		tdays -= (int64_t) (((int64_t) newy - y) * DAYSPERNYEAR);
+ 		tdays -= leapdays;
+ 		y = newy;
+ 	}
+@@ -528,29 +529,32 @@ static UINTN CumulativeDays[2][14] = {
+ 	}
+ };
+ 
+-time_t time(time_t *timer)
++int64_t time(int64_t *timer)
+ 	__attribute__((weak));
+-time_t time(time_t *timer)
++int64_t time(int64_t *timer)
+ {
+ 	EFI_TIME  Time;
+ 	UINTN     Year;
+ 
++	/* Defaultly set timezone as EFI_UNSPECIFIED_TIMEZONE */
++	Time.TimeZone = EFI_UNSPECIFIED_TIMEZONE;
++
+ 	/* Get the current time and date information */
+ 	uefi_call_wrapper(RT->GetTime, 2, &Time, NULL);
+ 
+ 	/* Years Handling
+ 	 * UTime should now be set to 00:00:00 on Jan 1 of the current year. */
+ 	for (Year = 1970, *timer = 0; Year != Time.Year; Year++)
+-		*timer = *timer + (time_t)(CumulativeDays[isleap(Year)][13] * SECSPERDAY);
++		*timer = *timer + (int64_t)(CumulativeDays[isleap(Year)][13] * SECSPERDAY);
+ 
+ 	/* Add in number of seconds for current Month, Day, Hour, Minute, Seconds, and TimeZone adjustment */
+ 	*timer = *timer +
+-		(time_t)((Time.TimeZone != EFI_UNSPECIFIED_TIMEZONE) ? (Time.TimeZone * 60) : 0) +
+-		(time_t)(CumulativeDays[isleap(Time.Year)][Time.Month] * SECSPERDAY) +
+-		(time_t)(((Time.Day > 0) ? (time_t)Time.Day - 1 : 0) * SECSPERDAY) +
+-		(time_t)((time_t)Time.Hour * SECSPERHOUR) +
+-		(time_t)((time_t)Time.Minute * 60) +
+-		(time_t)Time.Second;
++		(int64_t)((Time.TimeZone != EFI_UNSPECIFIED_TIMEZONE) ? (Time.TimeZone * 60) : 0) +
++		(int64_t)(CumulativeDays[isleap(Time.Year)][Time.Month] * SECSPERDAY) +
++		(int64_t)(((Time.Day > 0) ? (int64_t)Time.Day - 1 : 0) * SECSPERDAY) +
++		(int64_t)((int64_t)Time.Hour * SECSPERHOUR) +
++		(int64_t)((int64_t)Time.Minute * 60) +
++		(int64_t)Time.Second;
+ 
+ 	return *timer;
+ }
+-- 
+2.34.1
+
