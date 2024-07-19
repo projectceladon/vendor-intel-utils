@@ -1,0 +1,163 @@
+From 07df1d8dd95fb6af803f6f44905f2d473bdf7efa Mon Sep 17 00:00:00 2001
+From: Devin Moore <devinmoore@google.com>
+Date: Fri, 23 Feb 2024 19:19:38 +0000
+Subject: [PATCH] libmediatranscoding: handle death recipient cookie ownership
+ differently
+
+The ownership of the death recipient cookie is now limited to the
+TranscodingResourcePolicy object and the binderDied callback.
+They both must be able to delete the cookie object and they both must be
+aware of it already being deleted.
+
+In all cases, the TranscodingResourcePolicy object that needs to be
+unregistered will outlive the cookie and the death recipient.
+
+Calling unlinkToDeath is unneccessary because the last strong ref to the
+binder that was linked to death is removed in the unregisterSelf method
+which will unlink the binder and death recipient.
+
+Test: atest CtsMediaTranscodingTestCases MediaSampleReaderNDKTests
+Test: adb shell kill -9 `pid  media.resource_observer`
+Test: delete mResourcePolicy.get() to force destructor after linkToDeath
+Bug: 319210610
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:0c674f5ff68daa64b90e1a234061ba9bebe6173c)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:0213a7d62ea5545b954145cc53e2bd65ed5dc609)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:686987b9613678fe6540079e85e0d94519551738)
+Merged-In: I8e6ba40fe3da30bf8753e7a16ad5c8cd5dfda40b
+Change-Id: I8e6ba40fe3da30bf8753e7a16ad5c8cd5dfda40b
+---
+ .../TranscodingResourcePolicy.cpp             | 58 +++++++++++++++++--
+ .../include/media/TranscodingResourcePolicy.h |  4 ++
+ 2 files changed, 57 insertions(+), 5 deletions(-)
+
+diff --git a/media/libmediatranscoding/TranscodingResourcePolicy.cpp b/media/libmediatranscoding/TranscodingResourcePolicy.cpp
+index af53f64671..1b91362463 100644
+--- a/media/libmediatranscoding/TranscodingResourcePolicy.cpp
++++ b/media/libmediatranscoding/TranscodingResourcePolicy.cpp
+@@ -24,6 +24,8 @@
+ #include <media/TranscodingResourcePolicy.h>
+ #include <utils/Log.h>
+ 
++#include <map>
++
+ namespace android {
+ 
+ using Status = ::ndk::ScopedAStatus;
+@@ -66,11 +68,31 @@ struct TranscodingResourcePolicy::ResourceObserver : public BnResourceObserver {
+     TranscodingResourcePolicy* mOwner;
+ };
+ 
++// cookie used for death recipients. The TranscodingResourcePolicy
++// that this cookie is associated with must outlive this cookie. It is
++// either deleted by binderDied, or in unregisterSelf which is also called
++// in the destructor of TranscodingResourcePolicy
++class TranscodingResourcePolicyCookie {
++public:
++    TranscodingResourcePolicyCookie(TranscodingResourcePolicy* policy) : mPolicy(policy) {}
++    TranscodingResourcePolicyCookie() = delete;
++    TranscodingResourcePolicy* mPolicy;
++};
++
++static std::map<uintptr_t, std::unique_ptr<TranscodingResourcePolicyCookie>> sCookies;
++static uintptr_t sCookieKeyCounter;
++static std::mutex sCookiesMutex;
++
+ // static
+ void TranscodingResourcePolicy::BinderDiedCallback(void* cookie) {
+-    TranscodingResourcePolicy* owner = reinterpret_cast<TranscodingResourcePolicy*>(cookie);
+-    if (owner != nullptr) {
+-        owner->unregisterSelf();
++    std::lock_guard<std::mutex> guard(sCookiesMutex);
++    if (auto it = sCookies.find(reinterpret_cast<uintptr_t>(cookie)); it != sCookies.end()) {
++        ALOGI("BinderDiedCallback unregistering TranscodingResourcePolicy");
++        auto policy = reinterpret_cast<TranscodingResourcePolicy*>(it->second->mPolicy);
++        if (policy) {
++            policy->unregisterSelf();
++        }
++        sCookies.erase(it);
+     }
+     // TODO(chz): retry to connecting to IResourceObserverService after failure.
+     // Also need to have back-up logic if IResourceObserverService is offline for
+@@ -88,6 +110,24 @@ TranscodingResourcePolicy::TranscodingResourcePolicy()
+ }
+ 
+ TranscodingResourcePolicy::~TranscodingResourcePolicy() {
++    {
++        std::lock_guard<std::mutex> guard(sCookiesMutex);
++
++        // delete all of the cookies associated with this TranscodingResourcePolicy
++        // instance since they are holding pointers to this object that will no
++        // longer be valid.
++        for (auto it = sCookies.begin(); it != sCookies.end();) {
++            const uintptr_t key = it->first;
++            std::lock_guard guard(mCookieKeysLock);
++            if (mCookieKeys.find(key) != mCookieKeys.end()) {
++                // No longer need to track this cookie
++                mCookieKeys.erase(key);
++                it = sCookies.erase(it);
++            } else {
++                it++;
++            }
++        }
++    }
+     unregisterSelf();
+ }
+ 
+@@ -123,7 +163,16 @@ void TranscodingResourcePolicy::registerSelf() {
+         return;
+     }
+ 
+-    AIBinder_linkToDeath(binder.get(), mDeathRecipient.get(), reinterpret_cast<void*>(this));
++    std::unique_ptr<TranscodingResourcePolicyCookie> cookie =
++            std::make_unique<TranscodingResourcePolicyCookie>(this);
++    uintptr_t cookieKey = sCookieKeyCounter++;
++    sCookies.emplace(cookieKey, std::move(cookie));
++    {
++        std::lock_guard guard(mCookieKeysLock);
++        mCookieKeys.insert(cookieKey);
++    }
++
++    AIBinder_linkToDeath(binder.get(), mDeathRecipient.get(), reinterpret_cast<void*>(cookieKey));
+ 
+     ALOGD("@@@ registered observer");
+     mRegistered = true;
+@@ -141,7 +190,6 @@ void TranscodingResourcePolicy::unregisterSelf() {
+     ::ndk::SpAIBinder binder = mService->asBinder();
+     if (binder.get() != nullptr) {
+         Status status = mService->unregisterObserver(mObserver);
+-        AIBinder_unlinkToDeath(binder.get(), mDeathRecipient.get(), reinterpret_cast<void*>(this));
+     }
+ 
+     mService = nullptr;
+diff --git a/media/libmediatranscoding/include/media/TranscodingResourcePolicy.h b/media/libmediatranscoding/include/media/TranscodingResourcePolicy.h
+index ee232e7551..4d762b5832 100644
+--- a/media/libmediatranscoding/include/media/TranscodingResourcePolicy.h
++++ b/media/libmediatranscoding/include/media/TranscodingResourcePolicy.h
+@@ -22,6 +22,7 @@
+ #include <utils/Condition.h>
+ 
+ #include <mutex>
++#include <set>
+ namespace aidl {
+ namespace android {
+ namespace media {
+@@ -48,6 +49,8 @@ private:
+     bool mRegistered GUARDED_BY(mRegisteredLock);
+     std::shared_ptr<IResourceObserverService> mService GUARDED_BY(mRegisteredLock);
+     std::shared_ptr<ResourceObserver> mObserver;
++    mutable std::mutex mCookieKeysLock;
++    std::set<uintptr_t> mCookieKeys;
+ 
+     mutable std::mutex mCallbackLock;
+     std::weak_ptr<ResourcePolicyCallbackInterface> mResourcePolicyCallback
+@@ -59,6 +62,7 @@ private:
+     static void BinderDiedCallback(void* cookie);
+ 
+     void registerSelf();
++    // must delete the associated TranscodingResourcePolicyCookie any time this is called
+     void unregisterSelf();
+     void onResourceAvailable(pid_t pid);
+ };  // class TranscodingUidPolicy
+-- 
+2.45.2.505.gda0bf45e8d-goog
+
