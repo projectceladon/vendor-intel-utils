@@ -1,0 +1,136 @@
+From 4e796e3a023aee5647d2071b3ad0cb3a11cf8fcf Mon Sep 17 00:00:00 2001
+From: Hongwei Wang <hwwang@google.com>
+Date: Tue, 1 Aug 2023 16:00:31 -0700
+Subject: [PATCH] Rate limiting PiP aspect ratio change request
+
+Using CountQuotaTrack to limit how frequent an app can request aspect
+ratio change via PictureInPictureParams, which could result flood of PiP
+resizing requests and freeze the PiP window.
+
+Note that CountQuotaTrack is initialized out of the WM lock to avoid
+dead lock with the AM one.
+
+Bug: 283103220
+Test: Manually, using the POC app
+Test: Manually, switching YT PiP video functions at a regular rate
+Test: atest WindowOrganizerTests ActivityThreadTest
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:add219bcb2aa3654ed8614f150b664be1161812d)
+Merged-In: Icb7dd17bbf7df573a9bb28f3dc56e90e78384f4f
+Change-Id: Icb7dd17bbf7df573a9bb28f3dc56e90e78384f4f
+---
+ .../server/wm/ActivityClientController.java   | 39 +++++++++++++++++++
+ .../server/wm/WindowOrganizerTests.java       |  6 +++
+ 2 files changed, 45 insertions(+)
+
+diff --git a/services/core/java/com/android/server/wm/ActivityClientController.java b/services/core/java/com/android/server/wm/ActivityClientController.java
+index e02e8671f211..c783630be113 100644
+--- a/services/core/java/com/android/server/wm/ActivityClientController.java
++++ b/services/core/java/com/android/server/wm/ActivityClientController.java
+@@ -73,6 +73,7 @@ import android.util.Slog;
+ import android.view.RemoteAnimationDefinition;
+ import android.window.SizeConfigurationBuckets;
+ 
++import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.app.AssistUtils;
+ import com.android.internal.policy.IKeyguardDismissCallback;
+ import com.android.internal.protolog.common.ProtoLog;
+@@ -80,6 +81,9 @@ import com.android.server.LocalServices;
+ import com.android.server.Watchdog;
+ import com.android.server.pm.parsing.pkg.AndroidPackage;
+ import com.android.server.uri.NeededUriGrants;
++import com.android.server.utils.quota.Categorizer;
++import com.android.server.utils.quota.Category;
++import com.android.server.utils.quota.CountQuotaTracker;
+ import com.android.server.vr.VrManagerInternal;
+ 
+ /**
+@@ -95,6 +99,13 @@ class ActivityClientController extends IActivityClientController.Stub {
+     private final ActivityTaskSupervisor mTaskSupervisor;
+     private final Context mContext;
+ 
++    // Prevent malicious app abusing the Activity#setPictureInPictureParams API
++    @VisibleForTesting CountQuotaTracker mSetPipAspectRatioQuotaTracker;
++    // Limit to 60 times / minute
++    private static final int SET_PIP_ASPECT_RATIO_LIMIT = 60;
++    // The timeWindowMs here can not be smaller than QuotaTracker#MIN_WINDOW_SIZE_MS
++    private static final long SET_PIP_ASPECT_RATIO_TIME_WINDOW_MS = 60_000;
++
+     /** Wrapper around VoiceInteractionServiceManager. */
+     private AssistUtils mAssistUtils;
+ 
+@@ -691,6 +702,7 @@ class ActivityClientController extends IActivityClientController.Stub {
+     public boolean enterPictureInPictureMode(IBinder token, final PictureInPictureParams params) {
+         final long origId = Binder.clearCallingIdentity();
+         try {
++            ensureSetPipAspectRatioQuotaTracker();
+             synchronized (mGlobalLock) {
+                 final ActivityRecord r = ensureValidPictureInPictureActivityParams(
+                         "enterPictureInPictureMode", token, params);
+@@ -705,6 +717,7 @@ class ActivityClientController extends IActivityClientController.Stub {
+     public void setPictureInPictureParams(IBinder token, final PictureInPictureParams params) {
+         final long origId = Binder.clearCallingIdentity();
+         try {
++            ensureSetPipAspectRatioQuotaTracker();
+             synchronized (mGlobalLock) {
+                 final ActivityRecord r = ensureValidPictureInPictureActivityParams(
+                         "setPictureInPictureParams", token, params);
+@@ -738,6 +751,19 @@ class ActivityClientController extends IActivityClientController.Stub {
+         Binder.restoreCallingIdentity(origId);
+     }
+ 
++    /**
++     * Initialize the {@link #mSetPipAspectRatioQuotaTracker} if applicable, which should happen
++     * out of {@link #mGlobalLock} to avoid deadlock (AM lock is used in QuotaTrack ctor).
++     */
++    private void ensureSetPipAspectRatioQuotaTracker() {
++        if (mSetPipAspectRatioQuotaTracker == null) {
++            mSetPipAspectRatioQuotaTracker = new CountQuotaTracker(mContext,
++                    Categorizer.SINGLE_CATEGORIZER);
++            mSetPipAspectRatioQuotaTracker.setCountLimit(Category.SINGLE_CATEGORY,
++                    SET_PIP_ASPECT_RATIO_LIMIT, SET_PIP_ASPECT_RATIO_TIME_WINDOW_MS);
++        }
++    }
++
+     /**
+      * Checks the state of the system and the activity associated with the given {@param token} to
+      * verify that picture-in-picture is supported for that activity.
+@@ -762,6 +788,19 @@ class ActivityClientController extends IActivityClientController.Stub {
+                     + ": Current activity does not support picture-in-picture.");
+         }
+ 
++        // Rate limit how frequent an app can request aspect ratio change via
++        // Activity#setPictureInPictureParams
++        final int userId = UserHandle.getCallingUserId();
++        if (r.pictureInPictureArgs.hasSetAspectRatio()
++                && params.hasSetAspectRatio()
++                && !r.pictureInPictureArgs.getAspectRatioRational().equals(
++                params.getAspectRatioRational())
++                && !mSetPipAspectRatioQuotaTracker.noteEvent(
++                userId, r.packageName, "setPipAspectRatio")) {
++            throw new IllegalStateException(caller
++                    + ": Too many PiP aspect ratio change requests from " + r.packageName);
++        }
++
+         if (params.hasSetAspectRatio()
+                 && !mService.mWindowManager.isValidPictureInPictureAspectRatio(
+                 r.mDisplayContent, params.getAspectRatio())) {
+diff --git a/services/tests/wmtests/src/com/android/server/wm/WindowOrganizerTests.java b/services/tests/wmtests/src/com/android/server/wm/WindowOrganizerTests.java
+index ab496cf34acc..cb1a69339044 100644
+--- a/services/tests/wmtests/src/com/android/server/wm/WindowOrganizerTests.java
++++ b/services/tests/wmtests/src/com/android/server/wm/WindowOrganizerTests.java
+@@ -851,6 +851,12 @@ public class WindowOrganizerTests extends WindowTestsBase {
+         assertNotNull(o.mInfo);
+         assertNotNull(o.mInfo.pictureInPictureParams);
+ 
++        // Bypass the quota check, which causes NPE in current test setup.
++        if (mWm.mAtmService.mActivityClientController.mSetPipAspectRatioQuotaTracker != null) {
++            mWm.mAtmService.mActivityClientController.mSetPipAspectRatioQuotaTracker
++                    .setEnabled(false);
++        }
++
+         final PictureInPictureParams p2 = new PictureInPictureParams.Builder()
+                 .setAspectRatio(new Rational(3, 4)).build();
+         mWm.mAtmService.mActivityClientController.setPictureInPictureParams(record.token, p2);
+-- 
+2.25.1
+
