@@ -1,0 +1,188 @@
+From 68e25d5e9d8a0fca1e73fc4a517a17c3559a6cf7 Mon Sep 17 00:00:00 2001
+From: Devin Moore <devinmoore@google.com>
+Date: Tue, 9 Apr 2024 21:50:41 +0000
+Subject: [PATCH] Keep track of DeathMonitor cookies
+
+This change keeps track of the objects that the cookies points to so the
+serviceDied callback knows when it can use the cookie.
+
+Test: atest neuralnetworks_utils_hal_aidl_test
+Tets: atest NeuralNetworksTest_static
+Bug: 319210610
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:def7a3cf59fa17ba7faa9af14a24f4161bc276bd)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:d6f965fab9739d35f69fd042a95e783dc1859f32)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:37c395758d0c495d2122be19e1d4dbba93342ec2)
+Merged-In: I418cbc6baa19aa702d9fd2e7d8096fe1a02b7794
+Change-Id: I418cbc6baa19aa702d9fd2e7d8096fe1a02b7794
+---
+ .../include/nnapi/hal/aidl/ProtectCallback.h  | 11 ++++
+ .../aidl/utils/src/ProtectCallback.cpp        | 56 ++++++++++++++++---
+ neuralnetworks/aidl/utils/test/DeviceTest.cpp |  6 +-
+ 3 files changed, 64 insertions(+), 9 deletions(-)
+
+diff --git a/neuralnetworks/aidl/utils/include/nnapi/hal/aidl/ProtectCallback.h b/neuralnetworks/aidl/utils/include/nnapi/hal/aidl/ProtectCallback.h
+index ab1108c18..558212d71 100644
+--- a/neuralnetworks/aidl/utils/include/nnapi/hal/aidl/ProtectCallback.h
++++ b/neuralnetworks/aidl/utils/include/nnapi/hal/aidl/ProtectCallback.h
+@@ -37,6 +37,8 @@ namespace aidl::android::hardware::neuralnetworks::utils {
+ // Thread safe class
+ class DeathMonitor final {
+   public:
++    explicit DeathMonitor(uintptr_t cookieKey) : kCookieKey(cookieKey) {}
++
+     static void serviceDied(void* cookie);
+     void serviceDied();
+     // Precondition: `killable` must be non-null.
+@@ -44,9 +46,18 @@ class DeathMonitor final {
+     // Precondition: `killable` must be non-null.
+     void remove(hal::utils::IProtectedCallback* killable) const;
+ 
++    uintptr_t getCookieKey() const { return kCookieKey; }
++
++    ~DeathMonitor();
++    DeathMonitor(const DeathMonitor&) = delete;
++    DeathMonitor(DeathMonitor&&) noexcept = delete;
++    DeathMonitor& operator=(const DeathMonitor&) = delete;
++    DeathMonitor& operator=(DeathMonitor&&) noexcept = delete;
++
+   private:
+     mutable std::mutex mMutex;
+     mutable std::vector<hal::utils::IProtectedCallback*> mObjects GUARDED_BY(mMutex);
++    const uintptr_t kCookieKey;
+ };
+ 
+ class DeathHandler final {
+diff --git a/neuralnetworks/aidl/utils/src/ProtectCallback.cpp b/neuralnetworks/aidl/utils/src/ProtectCallback.cpp
+index 124641cbb..b68e9755c 100644
+--- a/neuralnetworks/aidl/utils/src/ProtectCallback.cpp
++++ b/neuralnetworks/aidl/utils/src/ProtectCallback.cpp
+@@ -26,6 +26,7 @@
+ 
+ #include <algorithm>
+ #include <functional>
++#include <map>
+ #include <memory>
+ #include <mutex>
+ #include <vector>
+@@ -34,6 +35,16 @@
+ 
+ namespace aidl::android::hardware::neuralnetworks::utils {
+ 
++namespace {
++
++// Only dereference the cookie if it's valid (if it's in this set)
++// Only used with ndk
++std::mutex sCookiesMutex;
++uintptr_t sCookieKeyCounter GUARDED_BY(sCookiesMutex) = 0;
++std::map<uintptr_t, std::weak_ptr<DeathMonitor>> sCookies GUARDED_BY(sCookiesMutex);
++
++}  // namespace
++
+ void DeathMonitor::serviceDied() {
+     std::lock_guard guard(mMutex);
+     std::for_each(mObjects.begin(), mObjects.end(),
+@@ -41,8 +52,24 @@ void DeathMonitor::serviceDied() {
+ }
+ 
+ void DeathMonitor::serviceDied(void* cookie) {
+-    auto deathMonitor = static_cast<DeathMonitor*>(cookie);
+-    deathMonitor->serviceDied();
++    std::shared_ptr<DeathMonitor> monitor;
++    {
++        std::lock_guard<std::mutex> guard(sCookiesMutex);
++        if (auto it = sCookies.find(reinterpret_cast<uintptr_t>(cookie)); it != sCookies.end()) {
++            monitor = it->second.lock();
++            sCookies.erase(it);
++        } else {
++            LOG(INFO)
++                    << "Service died, but cookie is no longer valid so there is nothing to notify.";
++            return;
++        }
++    }
++    if (monitor) {
++        LOG(INFO) << "Notifying DeathMonitor from serviceDied.";
++        monitor->serviceDied();
++    } else {
++        LOG(INFO) << "Tried to notify DeathMonitor from serviceDied but could not promote.";
++    }
+ }
+ 
+ void DeathMonitor::add(hal::utils::IProtectedCallback* killable) const {
+@@ -58,12 +85,25 @@ void DeathMonitor::remove(hal::utils::IProtectedCallback* killable) const {
+     mObjects.erase(removedIter);
+ }
+ 
++DeathMonitor::~DeathMonitor() {
++    // lock must be taken so object is not used in OnBinderDied"
++    std::lock_guard<std::mutex> guard(sCookiesMutex);
++    sCookies.erase(kCookieKey);
++}
++
+ nn::GeneralResult<DeathHandler> DeathHandler::create(std::shared_ptr<ndk::ICInterface> object) {
+     if (object == nullptr) {
+         return NN_ERROR(nn::ErrorStatus::INVALID_ARGUMENT)
+                << "utils::DeathHandler::create must have non-null object";
+     }
+-    auto deathMonitor = std::make_shared<DeathMonitor>();
++
++    std::shared_ptr<DeathMonitor> deathMonitor;
++    {
++        std::lock_guard<std::mutex> guard(sCookiesMutex);
++        deathMonitor = std::make_shared<DeathMonitor>(sCookieKeyCounter++);
++        sCookies[deathMonitor->getCookieKey()] = deathMonitor;
++    }
++
+     auto deathRecipient = ndk::ScopedAIBinder_DeathRecipient(
+             AIBinder_DeathRecipient_new(DeathMonitor::serviceDied));
+ 
+@@ -71,8 +111,9 @@ nn::GeneralResult<DeathHandler> DeathHandler::create(std::shared_ptr<ndk::ICInte
+     // STATUS_INVALID_OPERATION. We ignore this case because we only use local binders in tests
+     // where this is not an error.
+     if (object->isRemote()) {
+-        const auto ret = ndk::ScopedAStatus::fromStatus(AIBinder_linkToDeath(
+-                object->asBinder().get(), deathRecipient.get(), deathMonitor.get()));
++        const auto ret = ndk::ScopedAStatus::fromStatus(
++                AIBinder_linkToDeath(object->asBinder().get(), deathRecipient.get(),
++                                     reinterpret_cast<void*>(deathMonitor->getCookieKey())));
+         HANDLE_ASTATUS(ret) << "AIBinder_linkToDeath failed";
+     }
+ 
+@@ -92,8 +133,9 @@ DeathHandler::DeathHandler(std::shared_ptr<ndk::ICInterface> object,
+ 
+ DeathHandler::~DeathHandler() {
+     if (kObject != nullptr && kDeathRecipient.get() != nullptr && kDeathMonitor != nullptr) {
+-        const auto ret = ndk::ScopedAStatus::fromStatus(AIBinder_unlinkToDeath(
+-                kObject->asBinder().get(), kDeathRecipient.get(), kDeathMonitor.get()));
++        const auto ret = ndk::ScopedAStatus::fromStatus(
++                AIBinder_unlinkToDeath(kObject->asBinder().get(), kDeathRecipient.get(),
++                                       reinterpret_cast<void*>(kDeathMonitor->getCookieKey())));
+         const auto maybeSuccess = handleTransportError(ret);
+         if (!maybeSuccess.ok()) {
+             LOG(ERROR) << maybeSuccess.error().message;
+diff --git a/neuralnetworks/aidl/utils/test/DeviceTest.cpp b/neuralnetworks/aidl/utils/test/DeviceTest.cpp
+index f121acaf7..059f45254 100644
+--- a/neuralnetworks/aidl/utils/test/DeviceTest.cpp
++++ b/neuralnetworks/aidl/utils/test/DeviceTest.cpp
+@@ -669,7 +669,8 @@ TEST(DeviceTest, prepareModelAsyncCrash) {
+     const auto mockDevice = createMockDevice();
+     const auto device = Device::create(kName, mockDevice).value();
+     const auto ret = [&device]() {
+-        DeathMonitor::serviceDied(device->getDeathMonitor());
++        DeathMonitor::serviceDied(
++                reinterpret_cast<void*>(device->getDeathMonitor()->getCookieKey()));
+         return ndk::ScopedAStatus::ok();
+     };
+     EXPECT_CALL(*mockDevice, prepareModel(_, _, _, _, _, _, _, _))
+@@ -792,7 +793,8 @@ TEST(DeviceTest, prepareModelFromCacheAsyncCrash) {
+     const auto mockDevice = createMockDevice();
+     const auto device = Device::create(kName, mockDevice).value();
+     const auto ret = [&device]() {
+-        DeathMonitor::serviceDied(device->getDeathMonitor());
++        DeathMonitor::serviceDied(
++                reinterpret_cast<void*>(device->getDeathMonitor()->getCookieKey()));
+         return ndk::ScopedAStatus::ok();
+     };
+     EXPECT_CALL(*mockDevice, prepareModelFromCache(_, _, _, _, _))
+-- 
+2.45.2.505.gda0bf45e8d-goog
+
