@@ -1,0 +1,168 @@
+From 4d2fc746c34b6adc2bafe463fe264fc496c1f2f1 Mon Sep 17 00:00:00 2001
+From: chenyanxzhu <chenyanx.zhu@intel.com>
+Date: Mon, 22 Jul 2024 09:24:53 +0800
+Subject: [PATCH] dm: virtio-gpu: Add virtio-gpu plane format modifier support
+
+This patch adds a new virtio-gpu cmd to support tiling format.
+
+Signed-off-by: Yifan Liu <yifan1.liu@intel.com>
+Signed-off-by: chenyanxzhu <chenyanx.zhu@intel.com>
+---
+ hw/display/virtio-gpu-base.c                |  1 +
+ hw/display/virtio-gpu-udmabuf.c             |  7 +++++++
+ hw/display/virtio-gpu.c                     | 20 ++++++++++++++++++++
+ include/hw/virtio/virtio-gpu-bswap.h        |  9 +++++++++
+ include/hw/virtio/virtio-gpu.h              |  1 +
+ include/standard-headers/linux/virtio_gpu.h | 14 ++++++++++++++
+ 6 files changed, 52 insertions(+)
+
+diff --git a/hw/display/virtio-gpu-base.c b/hw/display/virtio-gpu-base.c
+index a29f191aa..3fff6f800 100644
+--- a/hw/display/virtio-gpu-base.c
++++ b/hw/display/virtio-gpu-base.c
+@@ -214,6 +214,7 @@ virtio_gpu_base_get_features(VirtIODevice *vdev, uint64_t features,
+     }
+     if (virtio_gpu_blob_enabled(g->conf)) {
+         features |= (1 << VIRTIO_GPU_F_RESOURCE_BLOB);
++        features |= (1 << VIRTIO_GPU_F_MODIFIER);
+     }
+ 
+     return features;
+diff --git a/hw/display/virtio-gpu-udmabuf.c b/hw/display/virtio-gpu-udmabuf.c
+index 8bdf4bac6..2d1b9f7ae 100644
+--- a/hw/display/virtio-gpu-udmabuf.c
++++ b/hw/display/virtio-gpu-udmabuf.c
+@@ -173,16 +173,23 @@ static VGPUDMABuf
+                           struct virtio_gpu_framebuffer *fb,
+                           struct virtio_gpu_rect *r)
+ {
++    struct virtio_gpu_scanout *scanout;
+     VGPUDMABuf *dmabuf;
+ 
+     if (res->dmabuf_fd < 0) {
+         return NULL;
+     }
+ 
++    if (scanout_id >= VIRTIO_GPU_MAX_SCANOUTS) {
++        return NULL;
++    }
++
++    scanout = &g->parent_obj.scanout[scanout_id];
+     dmabuf = g_new0(VGPUDMABuf, 1);
+     dmabuf->buf.width = fb->width;
+     dmabuf->buf.height = fb->height;
+     dmabuf->buf.stride = fb->stride;
++    dmabuf->buf.modifier = scanout->modifier;
+     dmabuf->buf.x = r->x;
+     dmabuf->buf.y = r->y;
+     dmabuf->buf.scanout_width = r->width;
+diff --git a/hw/display/virtio-gpu.c b/hw/display/virtio-gpu.c
+index 7d7a72169..ecc41322b 100644
+--- a/hw/display/virtio-gpu.c
++++ b/hw/display/virtio-gpu.c
+@@ -778,6 +778,23 @@ static void virtio_gpu_set_scanout_blob(VirtIOGPU *g,
+                               &fb, res, &ss.r, &cmd->error);
+ }
+ 
++static void
++virtio_gpu_set_modifier(VirtIOGPU *g,
++                        struct virtio_gpu_ctrl_command *cmd)
++{
++    struct virtio_gpu_scanout *scanout;
++    struct virtio_gpu_set_modifier sm;
++
++    VIRTIO_GPU_FILL_CMD(sm);
++    virtio_gpu_set_modifier_bswap(&sm);
++    if (sm.scanout_id >= VIRTIO_GPU_MAX_SCANOUTS) {
++        cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
++        return;
++    }
++    scanout = &g->parent_obj.scanout[sm.scanout_id];
++    scanout->modifier = sm.modifier;
++}
++
+ int virtio_gpu_create_mapping_iov(VirtIOGPU *g,
+                                   uint32_t nr_entries, uint32_t offset,
+                                   struct virtio_gpu_ctrl_command *cmd,
+@@ -986,6 +1003,9 @@ void virtio_gpu_simple_process_cmd(VirtIOGPU *g,
+     case VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING:
+         virtio_gpu_resource_detach_backing(g, cmd);
+         break;
++    case VIRTIO_GPU_CMD_SET_MODIFIER:
++        virtio_gpu_set_modifier(g, cmd);
++        break;
+     default:
+         cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+         break;
+diff --git a/include/hw/virtio/virtio-gpu-bswap.h b/include/hw/virtio/virtio-gpu-bswap.h
+index 912410848..a880d0e88 100644
+--- a/include/hw/virtio/virtio-gpu-bswap.h
++++ b/include/hw/virtio/virtio-gpu-bswap.h
+@@ -74,4 +74,13 @@ virtio_gpu_scanout_blob_bswap(struct virtio_gpu_set_scanout_blob *ssb)
+     le32_to_cpus(&ssb->offsets[3]);
+ }
+ 
++static inline void
++virtio_gpu_set_modifier_bswap(struct virtio_gpu_set_modifier *sm)
++{
++    virtio_gpu_ctrl_hdr_bswap(&sm->hdr);
++    le64_to_cpus(&sm->modifier);
++    le32_to_cpus(&sm->scanout_id);
++    le32_to_cpus(&sm->padding);
++}
++
+ #endif
+diff --git a/include/hw/virtio/virtio-gpu.h b/include/hw/virtio/virtio-gpu.h
+index d0ddd61d6..54bf50816 100644
+--- a/include/hw/virtio/virtio-gpu.h
++++ b/include/hw/virtio/virtio-gpu.h
+@@ -75,6 +75,7 @@ struct virtio_gpu_scanout {
+     uint32_t resource_id;
+     struct virtio_gpu_update_cursor cursor;
+     QEMUCursor *current_cursor;
++    uint64_t modifier;
+ };
+ 
+ struct virtio_gpu_requested_state {
+diff --git a/include/standard-headers/linux/virtio_gpu.h b/include/standard-headers/linux/virtio_gpu.h
+index 2da48d3d4..4d59c7a6e 100644
+--- a/include/standard-headers/linux/virtio_gpu.h
++++ b/include/standard-headers/linux/virtio_gpu.h
+@@ -65,6 +65,11 @@
+  */
+ #define VIRTIO_GPU_F_CONTEXT_INIT        4
+ 
++/*
++ * VIRTIO_GPU_CMD_SET_MODIFIER
++ */
++#define VIRTIO_GPU_F_MODIFIER		5
++
+ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_UNDEFINED = 0,
+ 
+@@ -83,6 +88,7 @@ enum virtio_gpu_ctrl_type {
+ 	VIRTIO_GPU_CMD_RESOURCE_ASSIGN_UUID,
+ 	VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB,
+ 	VIRTIO_GPU_CMD_SET_SCANOUT_BLOB,
++	VIRTIO_GPU_CMD_SET_MODIFIER,
+ 
+ 	/* 3d commands */
+ 	VIRTIO_GPU_CMD_CTX_CREATE = 0x0200,
+@@ -426,6 +432,14 @@ struct virtio_gpu_set_scanout_blob {
+ 	uint32_t offsets[4];
+ };
+ 
++/* VIRTIO_GPU_CMD_SET_MODIFIER */
++struct virtio_gpu_set_modifier {
++	struct virtio_gpu_ctrl_hdr hdr;
++	uint64_t modifier;
++	uint32_t scanout_id;
++	uint32_t padding;
++};
++
+ /* VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB */
+ struct virtio_gpu_resource_map_blob {
+ 	struct virtio_gpu_ctrl_hdr hdr;
+-- 
+2.34.1
+
