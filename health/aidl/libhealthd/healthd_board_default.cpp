@@ -86,6 +86,7 @@ static void parse_battery_type(uint8_t *type)
 
 static void parse_init_properties(struct initial_pkt *ipkt)
 {
+    ipkt->technology[8]='\0';
     s_props.batteryTechnology = (char *)ipkt->technology;
     s_props.batteryPresent = (strncmp((char *)ipkt->present, "1", 1) == 0);
     parse_battery_type(ipkt->type);
@@ -99,6 +100,7 @@ static void parse_battery_properties(struct monitor_pkt *mpkt)
     s_props.batteryFullCharge = mpkt->charge_full;
     s_props.batteryChargeCounter = mpkt->charge_now;
     parse_battery_status(mpkt->status);
+    mpkt->health[24]='\0';
 
     if (strcmp((const char*)mpkt->health,"\0") == 0)
         update_battery_health(mpkt);

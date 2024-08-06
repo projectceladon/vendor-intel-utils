@@ -19,7 +19,7 @@ struct initial_pkt {
     uint8_t model_name[28];
     uint8_t serial_number[52];
     uint8_t manufacturer[24];
-    uint8_t technology[8];
+    uint8_t technology[9];
     uint8_t type[8];
     uint8_t present[4];
 };
@@ -36,7 +36,7 @@ struct monitor_pkt {
     uint8_t charge_type[12];
     uint8_t capacity_level[12];
     uint8_t status[12];
-    uint8_t health[24];
+    uint8_t health[25];
 };
 
 /* TODO Below structure is not getting used in this version of code.
