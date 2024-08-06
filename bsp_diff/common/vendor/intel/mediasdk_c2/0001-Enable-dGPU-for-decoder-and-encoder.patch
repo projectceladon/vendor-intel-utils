@@ -1,0 +1,423 @@
+From 8a1e66e909663eade398316d48ca29954184fe8b Mon Sep 17 00:00:00 2001
+From: Shaofeng Tang <shaofeng.tang@intel.com>
+Date: Mon, 28 Aug 2023 14:58:35 +0800
+Subject: [PATCH] Enable dGPU for decoder and encoder
+
+1\ Enable ONEVPL_EXPERIMENTAL for init dGPU session and get deviceId
+2\ According to device id to judge if it is dGPU or iGPU
+3\ dGPU deviceid range: 0x5600 < deviceId < 0x56B3
+4\ After initializing dGPU, reset RateControl for dGPU.
+5\ Set buffer Tile4 for dGPU and Y-Tile for iGPU
+
+Tracked-On: OAM-112744
+Signed-off-by: Shaofeng Tang <shaofeng.tang@intel.com>
+---
+ c2_components/Android.bp                      |  4 +-
+ c2_components/include/mfx_c2_component.h      | 17 ++++
+ .../src/mfx_c2_decoder_component.cpp          | 72 +++++++++++++++-
+ .../src/mfx_c2_encoder_component.cpp          | 82 ++++++++++++++++++-
+ c2_utils/Android.bp                           |  1 +
+ c2_utils/include/mfx_defs.h                   |  2 +
+ c2_utils/include/mfx_dev.h                    |  7 ++
+ c2_utils/include/mfx_va_allocator.h           |  9 ++
+ c2_utils/src/mfx_dev_va.cpp                   |  4 +
+ c2_utils/src/mfx_va_allocator.cpp             |  6 +-
+ 10 files changed, 196 insertions(+), 8 deletions(-)
+
+diff --git a/c2_components/Android.bp b/c2_components/Android.bp
+index 1e560bd..1dbe0b6 100644
+--- a/c2_components/Android.bp
++++ b/c2_components/Android.bp
+@@ -76,8 +76,8 @@ cc_library_shared {
+     ],
+ 
+     cflags: [
+-        
++        "-DONEVPL_EXPERIMENTAL", // For enable dGPU
+     ],
+ 
+     vendor: true,
+-}
+\ No newline at end of file
++}
+diff --git a/c2_components/include/mfx_c2_component.h b/c2_components/include/mfx_c2_component.h
+index ead1531..8a2e10c 100755
+--- a/c2_components/include/mfx_c2_component.h
++++ b/c2_components/include/mfx_c2_component.h
+@@ -84,6 +84,9 @@ protected:
+ 
+ public:
+     virtual ~MfxC2Component();
++#ifdef ONEVPL_EXPERIMENTAL
++    bool isdGPU() { return dedicated;}
++#endif
+ 
+ private: // Non-virtual interface methods optionally overridden in descendants
+     virtual c2_status_t Init() = 0;
+@@ -174,6 +177,16 @@ protected:
+ 
+     std::unique_lock<std::mutex> AcquireRunningStateLock(bool may_block) const;
+ 
++#ifdef ONEVPL_EXPERIMENTAL
++    void detectdGPU(mfxU16 deviceId) {
++	// DG2 paiid from kernel/include/drm/i915_pciids.h#696
++        if (deviceId >= 0x5690 && deviceId <= 0x56B3)
++                dedicated = true;
++	else
++		dedicated = false;
++    }
++#endif
++
+ private:
+     c2_status_t CheckStateTransitionConflict(
+         const std::unique_lock<std::mutex>& state_lock,
+@@ -200,6 +213,10 @@ private:
+     std::list<std::shared_ptr<Listener>> m_listeners;
+ 
+     std::mutex m_listenersMutex;
++
++#ifdef ONEVPL_EXPERIMENTAL
++    bool dedicated = false;
++#endif
+ };
+ 
+ typedef MfxC2Component* (CreateMfxC2ComponentFunc)(const char* name,
+diff --git a/c2_components/src/mfx_c2_decoder_component.cpp b/c2_components/src/mfx_c2_decoder_component.cpp
+index f5985bb..1de67d2 100755
+--- a/c2_components/src/mfx_c2_decoder_component.cpp
++++ b/c2_components/src/mfx_c2_decoder_component.cpp
+@@ -874,8 +874,8 @@ mfxStatus MfxC2DecoderComponent::InitSession()
+     MFX_DEBUG_TRACE_FUNC;
+ 
+     mfxStatus mfx_res = MFX_ERR_NONE;
+-    mfxConfig cfg[2];
+-    mfxVariant cfgVal[2];
++    mfxConfig cfg[3];
++    mfxVariant cfgVal[3];
+ 
+     if (nullptr == m_mfxLoader)
+         m_mfxLoader = MFXLoad();
+@@ -918,6 +918,22 @@ mfxStatus MfxC2DecoderComponent::InitSession()
+         return MFX_ERR_UNKNOWN;
+     }
+ 
++    cfg[2] = MFXCreateConfig(m_mfxLoader);
++    if (!cfg[2]) {
++        ALOGE("Failed to create a MFX configuration");
++        MFXUnload(m_mfxLoader);
++        return MFX_ERR_UNKNOWN;
++    }
++
++    cfgVal[2].Type = MFX_VARIANT_TYPE_U32;
++    cfgVal[2].Data.U32 = DRM_RENDER_NODE_NUM;
++    mfx_res = MFXSetConfigFilterProperty(cfg[2], (const mfxU8 *) "mfxExtendedDeviceId.DRMRenderNodeNum", cfgVal[2]);
++    if (MFX_ERR_NONE != mfx_res) {
++        ALOGE("Failed to add an additional MFX configuration (%d)", mfx_res);
++        MFXUnload(m_mfxLoader);
++        return MFX_ERR_UNKNOWN;
++    }
++
+     while (1) {
+         /* Enumerate all implementations */
+         uint32_t idx = 0;
+@@ -940,7 +956,56 @@ mfxStatus MfxC2DecoderComponent::InitSession()
+ 
+         mfx_res = MFXCreateSession(m_mfxLoader, idx, &m_mfxSession);
+ 
++        MFX_LOG_INFO("ApiVersion:           %hu.%hu  ",
++            idesc->ApiVersion.Major,
++            idesc->ApiVersion.Minor);
++        MFX_LOG_INFO("   Implementation type:  %s\n",
++            (idesc->Impl == MFX_IMPL_TYPE_SOFTWARE) ? "SW" : "HW");
++        MFX_LOG_INFO("%2sApiVersion.Major: 0x%04X\n", "", idesc->ApiVersion.Major);
++        MFX_LOG_INFO("%2sApiVersion.Minor: 0x%04X\n", "", idesc->ApiVersion.Minor);
++        MFX_LOG_INFO("%2sImplementation Name: %s\n", "", idesc->ImplName);
++        MFX_LOG_INFO("%2sLicense: %s\n", "", idesc->License);
++        MFX_LOG_INFO("%2sKeywords: %s\n", "", idesc->Keywords);
++        MFX_LOG_INFO("%2sVendorID: 0x%04X\n", "", idesc->VendorID);
++        MFX_LOG_INFO("%2sVendorImplID: 0x%04X\n", "", idesc->VendorImplID);
++
+         MFXDispReleaseImplDescription(m_mfxLoader, idesc);
++#ifdef ONEVPL_EXPERIMENTAL
++        mfxExtendedDeviceId* idescDevice;
++
++        mfx_res = MFXEnumImplementations(m_mfxLoader,
++            0,
++            MFX_IMPLCAPS_DEVICE_ID_EXTENDED,
++            reinterpret_cast<mfxHDL*>(&idescDevice));
++        if (MFX_ERR_NONE != mfx_res) {
++            ALOGE("MFXEnumImplementations MFX_IMPLCAPS_DEVICE_ID_EXTENDED error=%d\n", mfx_res);
++        }
++        else {
++            MFX_LOG_INFO("%6sDeviceName: %s\n", "", idescDevice->DeviceName);
++            MFX_LOG_INFO("%6sExtended DeviceID's:\n", "");
++            MFX_LOG_INFO("%6sVendorID: 0x%04X\n", "", idescDevice->VendorID);
++            MFX_LOG_INFO("%6sDeviceID: 0x%04X\n", "", idescDevice->DeviceID);
++            MFX_LOG_INFO("%6sPCIDomain: 0x%08X\n", "", idescDevice->PCIDomain);
++            MFX_LOG_INFO("%6sPCIBus: 0x%08X\n", "", idescDevice->PCIBus);
++            MFX_LOG_INFO("%6sPCIdevice: 0x%08X\n", "", idescDevice->PCIDevice);
++            MFX_LOG_INFO("%6sPCIFunction: 0x%08X\n", "", idescDevice->PCIFunction);
++            MFX_LOG_INFO("%6sDRMRenderNodeNum: %d\n", "", idescDevice->DRMRenderNodeNum);
++            MFX_LOG_INFO("%6sDRMPrimaryNodeNum: 0x%04X\n", "", idescDevice->DRMPrimaryNodeNum);
++            MFX_LOG_INFO("%6sLUIDValid: 0x%04X\n", "", idescDevice->LUIDValid);
++
++	    detectdGPU(idescDevice->DeviceID);
++
++            if (idescDevice->LUIDValid) {
++                MFX_LOG_INFO("%6sDeviceLUID: ", "");
++                for (mfxU32 idx = 0; idx < 8; idx++) {
++                    MFX_LOG_INFO("%02x", idescDevice->DeviceLUID[7 - idx]);
++                }
++                MFX_LOG_INFO("%6sLUIDDeviceNodeMask: 0x%04X\n", "", idescDevice->LUIDDeviceNodeMask);
++            }
++	}
++
++	MFXDispReleaseImplDescription(m_mfxLoader, idescDevice);
++#endif
+ 
+         if (MFX_ERR_NONE == mfx_res)
+             break;
+@@ -957,6 +1022,9 @@ mfxStatus MfxC2DecoderComponent::InitSession()
+         return mfx_res;
+     }
+ 
++#ifdef ONEVPL_EXPERIMENTAL
++    m_device->setDedicated(isdGPU());
++#endif
+     mfx_res = m_device->InitMfxSession(m_mfxSession);
+ 
+     MFX_DEBUG_TRACE__mfxStatus(mfx_res);
+diff --git a/c2_components/src/mfx_c2_encoder_component.cpp b/c2_components/src/mfx_c2_encoder_component.cpp
+index 15d6227..c874160 100755
+--- a/c2_components/src/mfx_c2_encoder_component.cpp
++++ b/c2_components/src/mfx_c2_encoder_component.cpp
+@@ -523,6 +523,15 @@ c2_status_t MfxC2EncoderComponent::Init()
+ 
+     if(mfx_res == MFX_ERR_NONE) mfx_res = InitSession();
+ 
++    // Need to reset the RateControlMethod according to HW Capability
++    // Here is a WA to set RateControlMethod depend on iGPU or dGPU
++    if(mfx_res == MFX_ERR_NONE) {
++        if (isdGPU())
++            mfx_set_RateControlMethod(MFX_RATECONTROL_CQP, &m_mfxVideoParamsConfig);
++	else
++            mfx_set_RateControlMethod(MFX_RATECONTROL_CBR, &m_mfxVideoParamsConfig);
++    }
++
+     return MfxStatusToC2(mfx_res);
+ }
+ 
+@@ -678,8 +687,8 @@ mfxStatus MfxC2EncoderComponent::InitSession()
+     MFX_DEBUG_TRACE_FUNC;
+ 
+     mfxStatus mfx_res = MFX_ERR_NONE;
+-    mfxConfig cfg[2];
+-    mfxVariant cfgVal[2];
++    mfxConfig cfg[3];
++    mfxVariant cfgVal[3];
+ 
+     if (nullptr == m_mfxLoader)
+         m_mfxLoader = MFXLoad();
+@@ -722,6 +731,22 @@ mfxStatus MfxC2EncoderComponent::InitSession()
+         return MFX_ERR_UNKNOWN;
+     }
+ 
++    cfg[2] = MFXCreateConfig(m_mfxLoader);
++    if (!cfg[2]) {
++        ALOGE("Failed to create a MFX configuration");
++        MFXUnload(m_mfxLoader);
++        return MFX_ERR_UNKNOWN;
++    }
++
++    cfgVal[2].Type = MFX_VARIANT_TYPE_U32;
++    cfgVal[2].Data.U32 = DRM_RENDER_NODE_NUM;
++    mfx_res = MFXSetConfigFilterProperty(cfg[2], (const mfxU8 *) "mfxExtendedDeviceId.DRMRenderNodeNum", cfgVal[2]);
++    if (MFX_ERR_NONE != mfx_res) {
++        ALOGE("Failed to add an additional MFX configuration (%d)", mfx_res);
++        MFXUnload(m_mfxLoader);
++        return MFX_ERR_UNKNOWN;
++    }
++
+     while (1) {
+         /* Enumerate all implementations */
+         uint32_t idx = 0;
+@@ -744,8 +769,58 @@ mfxStatus MfxC2EncoderComponent::InitSession()
+ 
+         mfx_res = MFXCreateSession(m_mfxLoader, idx, &m_mfxSession);
+ 
++        MFX_LOG_INFO("ApiVersion:           %hu.%hu  ",
++            idesc->ApiVersion.Major,
++            idesc->ApiVersion.Minor);
++        MFX_LOG_INFO("   Implementation type:  %s\n",
++            (idesc->Impl == MFX_IMPL_TYPE_SOFTWARE) ? "SW" : "HW");
++        MFX_LOG_INFO("%2sApiVersion.Major: 0x%04X\n", "", idesc->ApiVersion.Major);
++        MFX_LOG_INFO("%2sApiVersion.Minor: 0x%04X\n", "", idesc->ApiVersion.Minor);
++        MFX_LOG_INFO("%2sImplementation Name: %s\n", "", idesc->ImplName);
++        MFX_LOG_INFO("%2sLicense: %s\n", "", idesc->License);
++        MFX_LOG_INFO("%2sKeywords: %s\n", "", idesc->Keywords);
++        MFX_LOG_INFO("%2sVendorID: 0x%04X\n", "", idesc->VendorID);
++        MFX_LOG_INFO("%2sVendorImplID: 0x%04X\n", "", idesc->VendorImplID);
++
+         MFXDispReleaseImplDescription(m_mfxLoader, idesc);
+ 
++#ifdef ONEVPL_EXPERIMENTAL
++        mfxExtendedDeviceId* idescDevice;
++
++        mfx_res = MFXEnumImplementations(m_mfxLoader,
++            0,
++            MFX_IMPLCAPS_DEVICE_ID_EXTENDED,
++            reinterpret_cast<mfxHDL*>(&idescDevice));
++        if (MFX_ERR_NONE != mfx_res) {
++            ALOGE("MFXEnumImplementations MFX_IMPLCAPS_DEVICE_ID_EXTENDED error=%d\n", mfx_res);
++        }
++        else {
++            MFX_LOG_INFO("%6sDeviceName: %s\n", "", idescDevice->DeviceName);
++            MFX_LOG_INFO("%6sExtended DeviceID's:\n", "");
++            MFX_LOG_INFO("%6sVendorID: 0x%04X\n", "", idescDevice->VendorID);
++            MFX_LOG_INFO("%6sDeviceID: 0x%04X\n", "", idescDevice->DeviceID);
++            MFX_LOG_INFO("%6sPCIDomain: 0x%08X\n", "", idescDevice->PCIDomain);
++            MFX_LOG_INFO("%6sPCIBus: 0x%08X\n", "", idescDevice->PCIBus);
++            MFX_LOG_INFO("%6sPCIdevice: 0x%08X\n", "", idescDevice->PCIDevice);
++            MFX_LOG_INFO("%6sPCIFunction: 0x%08X\n", "", idescDevice->PCIFunction);
++            MFX_LOG_INFO("%6sDRMRenderNodeNum: %d\n", "", idescDevice->DRMRenderNodeNum);
++            MFX_LOG_INFO("%6sDRMPrimaryNodeNum: 0x%04X\n", "", idescDevice->DRMPrimaryNodeNum);
++            MFX_LOG_INFO("%6sLUIDValid: 0x%04X\n", "", idescDevice->LUIDValid);
++
++            detectdGPU(idescDevice->DeviceID);
++
++            if (idescDevice->LUIDValid) {
++                MFX_LOG_INFO("%6sDeviceLUID: ", "");
++                for (mfxU32 idx = 0; idx < 8; idx++) {
++                    MFX_LOG_INFO("%02x", idescDevice->DeviceLUID[7 - idx]);
++                }
++                MFX_LOG_INFO("%6sLUIDDeviceNodeMask: 0x%04X\n", "", idescDevice->LUIDDeviceNodeMask);
++            }
++        }
++
++        MFXDispReleaseImplDescription(m_mfxLoader, idescDevice);
++#endif
++
+         if (MFX_ERR_NONE == mfx_res)
+             break;
+ 
+@@ -760,6 +835,9 @@ mfxStatus MfxC2EncoderComponent::InitSession()
+         return mfx_res;
+     }
+ 
++#ifdef ONEVPL_EXPERIMENTAL
++    m_device->setDedicated(isdGPU());
++#endif
+     mfx_res = m_device->InitMfxSession(m_mfxSession);
+ 
+     MFX_DEBUG_TRACE__mfxStatus(mfx_res);
+diff --git a/c2_utils/Android.bp b/c2_utils/Android.bp
+index 25438ad..9d4df54 100644
+--- a/c2_utils/Android.bp
++++ b/c2_utils/Android.bp
+@@ -43,6 +43,7 @@ cc_library_static {
+     ],
+ 
+     cflags: [
++        "-DONEVPL_EXPERIMENTAL"
+         //"-DMFX_BUFFER_QUEUE"
+     ],
+ 
+diff --git a/c2_utils/include/mfx_defs.h b/c2_utils/include/mfx_defs.h
+index e1ce4e1..cd69580 100755
+--- a/c2_utils/include/mfx_defs.h
++++ b/c2_utils/include/mfx_defs.h
+@@ -53,6 +53,8 @@
+ 
+ extern mfxVersion g_required_mfx_version;
+ 
++#define DRM_RENDER_NODE_NUM 128
++
+ #ifdef LIBVA_SUPPORT
+     #include <va/va.h>
+ #endif // #ifdef LIBVA_SUPPORT
+diff --git a/c2_utils/include/mfx_dev.h b/c2_utils/include/mfx_dev.h
+index 8e6233e..956ed10 100755
+--- a/c2_utils/include/mfx_dev.h
++++ b/c2_utils/include/mfx_dev.h
+@@ -54,4 +54,11 @@ public:
+     virtual mfxStatus InitMfxSession(MFXVideoSession* session) = 0;
+ #endif
+     static mfxStatus Create(Usage usage, std::unique_ptr<MfxDev>* device);
++
++#ifdef ONEVPL_EXPERIMENTAL
++    bool isDedicated() { return dedicated; }
++    void setDedicated(bool dGPU) { dedicated = dGPU; }
++private:
++    bool dedicated = false;
++#endif
+ };
+diff --git a/c2_utils/include/mfx_va_allocator.h b/c2_utils/include/mfx_va_allocator.h
+index f0c722e..94a012c 100755
+--- a/c2_utils/include/mfx_va_allocator.h
++++ b/c2_utils/include/mfx_va_allocator.h
+@@ -46,6 +46,11 @@ public:
+     MfxVaFrameAllocator(VADisplay dpy);
+     virtual ~MfxVaFrameAllocator();
+ 
++#ifdef ONEVPL_EXPERIMENTAL
++    bool isDedicated() { return dedicated; }
++    void setDedicated(bool dGPU) { dedicated = dGPU; }
++#endif
++
+ private: // MfxFrameAllocator
+     virtual mfxStatus AllocFrames(mfxFrameAllocRequest *request, mfxFrameAllocResponse *response) override;
+     virtual mfxStatus FreeFrames(mfxFrameAllocResponse *response) override;
+@@ -85,6 +90,10 @@ private:
+ 
+     std::mutex m_mutex;
+ 
++#ifdef ONEVPL_EXPERIMENTAL
++    bool dedicated = false;
++#endif
++
+     std::map<uint64_t, std::unique_ptr<VaMemIdAllocated, VaMemIdDeleter>>
+         m_mappedVaSurfaces;
+ 
+diff --git a/c2_utils/src/mfx_dev_va.cpp b/c2_utils/src/mfx_dev_va.cpp
+index 2d52fca..c321ee5 100755
+--- a/c2_utils/src/mfx_dev_va.cpp
++++ b/c2_utils/src/mfx_dev_va.cpp
+@@ -200,12 +200,16 @@ mfxStatus MfxDevVa::InitMfxSession(MFXVideoSession* session)
+ std::shared_ptr<MfxFrameAllocator> MfxDevVa::GetFrameAllocator()
+ {
+     MFX_DEBUG_TRACE_FUNC;
++    if (m_usage == Usage::Encoder && isDedicated())
++        m_vaAllocator->setDedicated(isDedicated());
+     return m_usage == Usage::Decoder ? m_vaPoolAllocator : m_vaAllocator;
+ }
+ 
+ std::shared_ptr<MfxFrameConverter> MfxDevVa::GetFrameConverter()
+ {
+     MFX_DEBUG_TRACE_FUNC;
++    if (m_usage == Usage::Encoder && isDedicated())
++        m_vaAllocator->setDedicated(isDedicated());
+     return m_usage == Usage::Decoder ? m_vaPoolAllocator : m_vaAllocator;
+ }
+ 
+diff --git a/c2_utils/src/mfx_va_allocator.cpp b/c2_utils/src/mfx_va_allocator.cpp
+index 7468970..1c8cd79 100755
+--- a/c2_utils/src/mfx_va_allocator.cpp
++++ b/c2_utils/src/mfx_va_allocator.cpp
+@@ -606,10 +606,12 @@ mfxStatus MfxVaFrameAllocator::CreateSurfaceFromGralloc(const IMfxGrallocModule:
+     desc.objects[0].fd = info.prime;
+     desc.objects[0].size = decode_target ? info.pitches[0] * ((height + 31) & ~31) * 1.5 : info.pitches[0] * ((height + 15) & ~15) * 1.5;
+     if (HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL == info.format || HAL_PIXEL_FORMAT_P010_INTEL == info.format)
+-        desc.objects[0].drm_format_modifier = I915_FORMAT_MOD_Y_TILED;
++	if (isDedicated())
++            desc.objects[0].drm_format_modifier = I915_FORMAT_MOD_4_TILED;
++        else
++            desc.objects[0].drm_format_modifier = I915_FORMAT_MOD_Y_TILED;
+     else
+         desc.objects[0].drm_format_modifier = DRM_FORMAT_MOD_LINEAR;
+-    //desc.objects[0].drm_format_modifier = I915_FORMAT_MOD_4_TILED;
+     desc.num_layers = 1;
+     desc.layers[0].drm_format = ConvertVAFourccToDrmFormat(va_fourcc);
+     desc.layers[0].num_planes = info.planes_count;
+-- 
+2.29.2
+
