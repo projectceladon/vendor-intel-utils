@@ -146,9 +146,24 @@ EvsEnumerator::EvsEnumerator(const std::shared_ptr<ICarDisplayProxy>& proxyServi
         sDisplayProxy = proxyService;
     }
 
+    MediaControl* mc = MediaControl::getInstance();
+    if (mc) {
+        mc->initEntities();
+        mc->resetAllRoutes();
+        mc->createLink();
+    }
+
     // Enumerate existing devices
     enumerateCameras();
     mInternalDisplayId = enumerateDisplays();
+}
+
+EvsEnumerator::~EvsEnumerator() {
+    MediaControl* mc = MediaControl::getInstance();
+    if (mc) {
+        mc->clearEntities();
+        MediaControl::releaseInstance();
+    }
 }
 
 bool EvsEnumerator::checkPermission() {
@@ -613,14 +628,15 @@ bool EvsEnumerator::qualifyCaptureDevice(const char* deviceName) {
     if (result < 0) {
         return false;
     }
-    if (((caps.capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0) ||
+    if (((caps.capabilities & (V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_CAPTURE_MPLANE)) == 0) ||
         ((caps.capabilities & V4L2_CAP_STREAMING) == 0)) {
         return false;
     }
 
     // Enumerate the available capture formats (if any)
     v4l2_fmtdesc formatDescription;
-    formatDescription.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    formatDescription.type = (caps.capabilities & V4L2_CAP_VIDEO_CAPTURE) ? V4L2_BUF_TYPE_VIDEO_CAPTURE : V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+
     bool found = false;
     for (int i = 0; !found; ++i) {
         formatDescription.index = i;
@@ -631,6 +647,7 @@ bool EvsEnumerator::qualifyCaptureDevice(const char* deviceName) {
                        << formatDescription.flags;
             switch (formatDescription.pixelformat) {
                 case V4L2_PIX_FMT_YUYV:
+                case V4L2_PIX_FMT_UYVY:
                     found = true;
                     break;
                 case V4L2_PIX_FMT_NV21:

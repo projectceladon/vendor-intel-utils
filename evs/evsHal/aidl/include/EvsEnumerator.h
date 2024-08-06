@@ -20,6 +20,7 @@
 #include "ConfigManager.h"
 #include "EvsGlDisplay.h"
 #include "EvsV4lCamera.h"
+#include "MediaControl.h"
 
 #include <aidl/android/frameworks/automotive/display/ICarDisplayProxy.h>
 #include <aidl/android/hardware/automotive/evs/BnEvsEnumerator.h>
@@ -74,6 +75,7 @@ public:
     EvsEnumerator(const std::shared_ptr<
                   ::aidl::android::frameworks::automotive::display::ICarDisplayProxy>&
                           proxyService);
+    virtual ~EvsEnumerator();
 
     void notifyDeviceStatusChange(const std::string_view& deviceName,
                                   aidlevs::DeviceStatusType type);

@@ -25,6 +25,11 @@
 
 typedef v4l2_buffer imageBuffer;
 
+#define VIDEO_PLANES 1
+#define BUFFER_COUNT 6
+#define WIDTH 1920
+#define HEIGHT 1080
+
 class VideoCapture final {
 public:
     bool open(const char* deviceName, const int32_t width = 0, const int32_t height = 0);
@@ -65,8 +70,11 @@ private:
     bool returnFrame(int id);
 
     int mDeviceFd = -1;
+    uint32_t mBufferType = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 
     int mNumBuffers = 0;
+    uint32_t mBufferSize;
+
     std::unique_ptr<v4l2_buffer[]> mBufferInfos = nullptr;
     std::unique_ptr<void*[]> mPixelBuffers = nullptr;
 

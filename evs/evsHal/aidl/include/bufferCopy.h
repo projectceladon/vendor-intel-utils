@@ -31,6 +31,9 @@ void fillNV21FromYUYV(const ::aidl::android::hardware::automotive::evs::BufferDe
 void fillRGBAFromYUYV(const ::aidl::android::hardware::automotive::evs::BufferDesc& tgtBuff,
                       uint8_t* tgt, void* imgData, unsigned imgStride);
 
+void fillRGBAFromUYVY(const BufferDesc& tgtBuff, uint8_t* tgt,
+                      void* imgData, unsigned imgStride);
+
 void fillYUYVFromYUYV(const ::aidl::android::hardware::automotive::evs::BufferDesc& tgtBuff,
                       uint8_t* tgt, void* imgData, unsigned imgStride);
 

@@ -39,7 +39,7 @@ using ::android::base::Result;
 using ::ndk::ScopedAStatus;
 
 // Default camera output image resolution
-constexpr std::array<int32_t, 2> kDefaultResolution = {640, 480};
+const std::array<int32_t, 2> kDefaultResolution = {WIDTH, HEIGHT};
 
 // Arbitrary limit on number of graphics buffers allowed to be allocated
 // Safeguards against unreasonable resource consumption and provides a testable limit
@@ -184,6 +184,9 @@ ScopedAStatus EvsV4lCamera::startVideoStream(const std::shared_ptr<IEvsCameraStr
             switch (videoSrcFormat) {
                 case V4L2_PIX_FMT_YUYV:
                     mFillBufferFromVideo = fillRGBAFromYUYV;
+                    break;
+                case V4L2_PIX_FMT_UYVY:
+                    mFillBufferFromVideo = fillRGBAFromUYVY;
                     break;
                 default:
                     LOG(ERROR) << "Unhandled camera source format " << (char*)&videoSrcFormat;
