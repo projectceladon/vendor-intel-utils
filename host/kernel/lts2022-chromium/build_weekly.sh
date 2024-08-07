@@ -23,12 +23,11 @@ cd host_kernel
 
 git clone https://github.com/projectceladon/vendor-intel-utils.git
 cd vendor-intel-utils
-git checkout b29ac676304fe6d9df26e45ac7a6f197ae8f68e2
 cd ../
 
 git clone https://github.com/projectceladon/linux-intel-lts2022-chromium.git
 cd linux-intel-lts2022-chromium
-git checkout 3ac5aa048639a40e29d2c773c5451afdc661c47f
+git checkout 2fe084abc93d0fe7dff4fc7680d6b89ec613c8be
 
 cp ../vendor-intel-utils/host/kernel/lts2022-chromium/x86_64_defconfig .config
 patch_list=`find ../vendor-intel-utils/host/kernel/lts2022-chromium -iname "*.patch" | sort -u`
