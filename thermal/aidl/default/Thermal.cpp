@@ -81,8 +81,8 @@ struct temp_info {
     uint32_t temp;
 };
 
-Temperature kDummyTemp, kTemp_1_0,kTemp_2_0,kTemp_2_0_1;
-TemperatureThreshold kTempThreshold ,kDummyTempThreshold, kTempThreshold_1;
+Temperature kTemp_1_0,kTemp_2_0;
+TemperatureThreshold kTempThreshold;
 
 
 static void parse_temp_info(struct temp_info *t)
@@ -91,9 +91,6 @@ static void parse_temp_info(struct temp_info *t)
     switch(t->type) {
         case 0:
             kTemp_2_0.value = t->temp / TEMP_UNIT;
-            break;
-        case 2:
-            kTemp_2_0_1.value = t->temp / TEMP_UNIT;
             break;
         default:
             break;
@@ -109,9 +106,6 @@ static void parse_zone_info(struct zone_info *zone)
                     kTempThreshold.hotThrottlingThresholds[5] = zone->trip_0 / TEMP_UNIT;
                     kTempThreshold.hotThrottlingThresholds[6] = zone->trip_1 / TEMP_UNIT;
                     kTemp_2_0.value = zone->temperature / TEMP_UNIT;;
-                    break;
-              case 2:
-                    kTemp_2_0_1.value = zone->temperature / TEMP_UNIT;
                     break;
               default:
                     break;
@@ -231,7 +225,6 @@ void Thermal::CheckThermalServerity() {
     int res = -1;
     int vsock_fd;
     kTempThreshold.hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 99, 108}};
-    kTempThreshold_1.hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 65, 68}};
     ALOGI("Start check temp thread.\n");
 
     if (!connect_vsock(&vsock_fd))
@@ -266,19 +259,6 @@ void Thermal::CheckThermalServerity() {
                             else {
                                 ALOGE("Thermal callback SUCCESS");
                             }
-                        }
-                    }
-                }
-            }
-            for (size_t i = kTempThreshold_1.hotThrottlingThresholds.size() - 1; i > 0; i--) {
-                if (kTemp_2_0_1.value >= kTempThreshold_1.hotThrottlingThresholds[i]) {
-                    ALOGI("CheckThermalServerity: hit ThrottlingSeverity1 %s, temperature is %f",
-                          THROTTLING_SEVERITY_LABEL[i], kTemp_2_0_1.value);
-                    kTemp_2_0_1.throttlingStatus = (ThrottlingSeverity)i;
-                    {
-                       std::lock_guard<std::mutex> _lock(thermal_callback_mutex_);
-                        for (auto& cb : callbacks_) {
-                            cb.callback->notifyThrottling(kTemp_2_0_1);
                         }
                     }
                 }
@@ -329,20 +309,6 @@ ScopedAStatus  Thermal::fillTemperatures(std::vector<Temperature>*  out_temperat
     kTemp_2_0.name = "TCPU";
     ret.emplace_back(std::move(kTemp_2_0));
 
-    // Dummy GPU temperature
-    kDummyTemp.type = TemperatureType::GPU;
-    kDummyTemp.name = "test sensor";
-    kDummyTemp.value = 25;
-    kDummyTemp.throttlingStatus = ThrottlingSeverity::NONE;
-    ret.emplace_back(std::move(kDummyTemp));
-
-    //Battery Temperature
-    kTemp_2_0_1.type = TemperatureType::BATTERY;
-    kTemp_2_0_1.name = "TBATTERY";
-    kTemp_2_0_1.value = 25;
-    kTemp_2_0_1.throttlingStatus = ThrottlingSeverity::NONE;
-    ret.emplace_back(std::move(kTemp_2_0_1));
-
     *out_temperatures = ret;
     return ScopedAStatus::ok();
 }
@@ -366,18 +332,6 @@ ScopedAStatus Thermal::getTemperatureThresholds(
     kTempThreshold.hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 99, 108}};
     kTempThreshold.coldThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}};
     ret.emplace_back(std::move(kTempThreshold));
-
-    kDummyTempThreshold.type = TemperatureType::GPU;
-    kDummyTempThreshold.name = "test sensor";
-    kDummyTempThreshold.hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 90, 100}};
-    kDummyTempThreshold.coldThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}};
-    ret.emplace_back(std::move(kDummyTempThreshold));
-
-    kTempThreshold_1.type = TemperatureType::BATTERY,
-    kTempThreshold_1.name = "TBATTERY",
-    kTempThreshold_1.hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 65, 68}},
-    kTempThreshold_1.coldThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}},
-    ret.emplace_back(std::move(kTempThreshold_1));
 
     *out_temperatureThresholds = ret;
     return ScopedAStatus::ok();
