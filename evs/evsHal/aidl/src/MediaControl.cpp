@@ -730,6 +730,14 @@ int MediaControl::enumLinks(int fd) {
                 ALOGE("WARNING entity %u link %u src %u/%u to %u/%u is invalid!", entity.info.id, i,
                       link->source.entity, link->source.index, link->sink.entity, link->sink.index);
                 ret = -EINVAL;
+            } else if (link->source.index < 0 || link->source.index >= source->info.pads) {
+                ALOGE("WARNING entity %u link %u src %u/%u index out of range!", entity.info.id, i,
+                      link->source.entity, link->source.index);
+                ret = -EINVAL;
+            } else if (link->sink.index < 0 || link->sink.index >= sink->info.pads) {
+                ALOGE("WARNING entity %u link %u to %u/%u index out of range!", entity.info.id, i,
+                      link->sink.entity, link->sink.index);
+                ret = -EINVAL;
             } else {
                 fwdlink = entityAddLink(source);
                 if (fwdlink) {

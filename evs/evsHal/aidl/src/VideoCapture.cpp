@@ -38,6 +38,8 @@
 //        the file descriptor.  This must be fixed before using this code for anything but
 //        experimentation.
 bool VideoCapture::open(const char* deviceName, const int32_t width, const int32_t height) {
+    LOG(INFO) <<"App requested resolution "<<width <<" "<<height;
+
     // If we want a polling interface for getting frames, we would use O_NONBLOCK
     mDeviceFd = ::open(deviceName, O_RDWR| O_NONBLOCK, 0);
     if (mDeviceFd < 0) {
@@ -62,8 +64,8 @@ bool VideoCapture::open(const char* deviceName, const int32_t width, const int32
         return false;
     }
 
-    uint32_t requestWidth = 0;
-    uint32_t requestHeight = 0;
+    uint32_t requestWidth = 1280;
+    uint32_t requestHeight = 720;
     mBufferType = (caps.capabilities & V4L2_CAP_VIDEO_CAPTURE) ? V4L2_BUF_TYPE_VIDEO_CAPTURE :
                                                                  V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 
@@ -103,8 +105,12 @@ bool VideoCapture::open(const char* deviceName, const int32_t width, const int32
                              29.0) &&
                             (requestWidth * requestHeight) <
                                 frmsize.discrete.width * frmsize.discrete.height) {
-                            requestWidth = frmsize.discrete.width;
-                            requestHeight = frmsize.discrete.height;
+                            if(frmsize.discrete.width == (uint32_t)width && frmsize.discrete.height == (uint32_t)height) {
+                                LOG(INFO) <<"Driver support this resolution ";
+                                requestWidth = frmsize.discrete.width;
+                                requestHeight = frmsize.discrete.height;
+                                break;
+                            }
                         }
                         frmival.index++;
                     }
@@ -136,7 +142,7 @@ bool VideoCapture::open(const char* deviceName, const int32_t width, const int32
         format.fmt.pix_mp.plane_fmt[0].bytesperline = width * 2;
         format.fmt.pix_mp.plane_fmt[0].sizeimage = width * height * 2;
     } else if (strcmp((char*)caps.driver, "virtio-camera") == 0) {
-            LOG(INFO) << "Virtio-camera";
++            LOG(INFO) << "Virtio-camera "<<requestWidth <<" "<<requestHeight;
             format.type = V4L2_CAP_VIDEO_CAPTURE;
             format.fmt.pix.pixelformat = V4L2_PIX_FMT_UYVY;
             format.fmt.pix.width = requestWidth > 0 ? requestWidth : 1280;
@@ -240,7 +246,7 @@ bool VideoCapture::startStream(std::function<void(VideoCapture*, imageBuffer*, v
                                  mBufferInfos[i].m.planes[0].m.mem_offset :
                                  mBufferInfos[i].m.offset;
         LOG(DEBUG) << "Buffer description:";
-        LOG(INFO) << "  offset: " << mBufferInfos[i].m.planes[0].m.mem_offset;
+        LOG(INFO) << "  offset: " << memOffset;
         LOG(DEBUG) << "  length: " << mBufferInfos[i].length;
         LOG(DEBUG) << "  flags : " << std::hex << mBufferInfos[i].flags;
         if (mBufferInfos[i].type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
