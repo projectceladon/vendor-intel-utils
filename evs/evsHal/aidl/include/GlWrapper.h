@@ -70,6 +70,8 @@ private:
     // Opaque handle for a native hardware buffer defined in
     // frameworks/native/opengl/include/EGL/eglplatform.h
     ANativeWindow* mWindow;
+
+    bool mFirstFrameIsDisplayed = false;
 };
 
 }  // namespace aidl::android::hardware::automotive::evs::implementation

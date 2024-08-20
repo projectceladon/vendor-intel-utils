@@ -438,6 +438,11 @@ void GlWrapper::renderImageToScreen() {
 
     if (eglSwapBuffers(mDisplay, mSurface) == EGL_FALSE) {
         LOG(WARNING) << "Failed to swap EGL buffers, " << getEGLError();
+    } else {
+        if (!mFirstFrameIsDisplayed) {
+            LOG(INFO) << "The first EVS frame is displayed";
+            mFirstFrameIsDisplayed = true;
+        }
     }
 }
 
