@@ -278,12 +278,6 @@ ScopedAStatus Thermal::getCoolingDevices(std::vector<CoolingDevice>* out_devices
 ScopedAStatus  Thermal::fillCoolingDevices(std::vector<CoolingDevice>*  out_devices) {
     std::vector<CoolingDevice> ret;
 
-    CoolingDevice devicevalue;
-    devicevalue.type = CoolingType::FAN;
-    devicevalue.name = "test cooling device";
-    devicevalue.value = 100;
-    ret.emplace_back(std::move(devicevalue));
-
     *out_devices = ret;
     return ScopedAStatus::ok();
 }
