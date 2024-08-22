@@ -307,11 +307,19 @@ ScopedAStatus  Thermal::fillTemperatures(std::vector<Temperature>*  out_temperat
     return ScopedAStatus::ok();
 }
 
-
-
 ScopedAStatus Thermal::getTemperaturesWithType(TemperatureType in_type,
-                                               std::vector<Temperature>* /* out_temperatures */) {
+                                               std::vector<Temperature>* out_temperatures) {
     LOG(VERBOSE) << __func__ << " TemperatureType: " << static_cast<int32_t>(in_type);
+
+    *out_temperatures={};
+
+    if (in_type == TemperatureType::CPU) {
+        kTemp_2_0.type = TemperatureType::CPU;
+        kTemp_2_0.name = "TCPU";
+
+        out_temperatures->emplace_back(std::move(kTemp_2_0));
+    }
+
     return ScopedAStatus::ok();
 }
 
@@ -333,8 +341,19 @@ ScopedAStatus Thermal::getTemperatureThresholds(
 
 ScopedAStatus Thermal::getTemperatureThresholdsWithType(
         TemperatureType in_type,
-        std::vector<TemperatureThreshold>* /* out_temperatureThresholds */) {
+        std::vector<TemperatureThreshold>* out_temperatureThresholds) {
     LOG(VERBOSE) << __func__ << " TemperatureType: " << static_cast<int32_t>(in_type);
+
+    *out_temperatureThresholds = {};
+
+    if (in_type == TemperatureType::CPU) {
+        kTempThreshold.type = TemperatureType::CPU;
+        kTempThreshold.name = "TCPU";
+        kTempThreshold.hotThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, 99, 108}};
+        kTempThreshold.coldThrottlingThresholds = {{NAN, NAN, NAN, NAN, NAN, NAN, NAN}};
+        out_temperatureThresholds->emplace_back(std::move(kTempThreshold));
+    }
+
     return ScopedAStatus::ok();
 }
 
