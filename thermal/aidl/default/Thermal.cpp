@@ -241,7 +241,7 @@ void Thermal::CheckThermalServerity() {
         if (res) {
             ALOGE("Can not get temperature of type %d", kTemp_1_0.type);
         } else {
-           ALOGE("Size of kTempThreshold.hotThrottlingThresholds=%f, kTemp_2_0.value=%f",kTempThreshold.hotThrottlingThresholds[5], kTemp_2_0.value);
+           ALOGI("Size of kTempThreshold.hotThrottlingThresholds=%f, kTemp_2_0.value=%f",kTempThreshold.hotThrottlingThresholds[5], kTemp_2_0.value);
             for (size_t i = kTempThreshold.hotThrottlingThresholds.size() - 1; i > 0; i--) {
                 if (kTemp_2_0.value >= kTempThreshold.hotThrottlingThresholds[i]) {
                     kTemp_2_0.type = TemperatureType::CPU;
