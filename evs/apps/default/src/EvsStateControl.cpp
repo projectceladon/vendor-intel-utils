@@ -283,12 +283,13 @@ bool EvsStateControl::selectStateForCurrentConditions() {
     }
     // Choose our desired EVS state based on the current car state
     State desiredState = OFF;
-    if (mGearValue.value.int32Values[0] == int32_t(VehicleGear::GEAR_REVERSE)) {
-        desiredState = REVERSE;
-    } else if (mTurnSignalValue.value.int32Values[0] == int32_t(VehicleTurnSignal::RIGHT)) {
+    if (mTurnSignalValue.value.int32Values[0] == int32_t(VehicleTurnSignal::RIGHT)) {
         desiredState = RIGHT;
     } else if (mTurnSignalValue.value.int32Values[0] == int32_t(VehicleTurnSignal::LEFT)) {
         desiredState = LEFT;
+    }
+    if (mGearValue.value.int32Values[0] == int32_t(VehicleGear::GEAR_REVERSE)) {
+        desiredState = REVERSE;
     } else if (mGearValue.value.int32Values[0] == int32_t(VehicleGear::GEAR_PARK)) {
         desiredState = PARKING;
     }
