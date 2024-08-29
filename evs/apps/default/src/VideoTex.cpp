@@ -75,7 +75,8 @@ bool VideoTex::refresh() {
     }
 
     // If we already have an image backing us, then it's time to return it
-    if (getNativeHandle(mImageBuffer) != nullptr) {
+    auto h = getNativeHandle(mImageBuffer);
+    if(h != nullptr) {
         // Drop our device texture image
         if (mKHRimage != EGL_NO_IMAGE_KHR) {
             eglDestroyImageKHR(mDisplay, mKHRimage);
@@ -84,6 +85,7 @@ bool VideoTex::refresh() {
 
         // Return it since we're done with it
         mStreamHandler->doneWithFrame(mImageBuffer);
+        free(h);
     }
 
     // Get the new image we want to use as our contents
