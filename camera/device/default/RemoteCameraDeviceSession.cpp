@@ -134,7 +134,7 @@ void *RemoteDataRecvThreadFun(void *argv)
     ALOGI(LOG_TAG " %s: Thread is running", __FUNCTION__);
     struct pollfd fd;
     int event;
-    uint8_t *fBuffer = nullptr;    
+    uint8_t *fBuffer = nullptr;
     RemoteCameraDeviceSession *parentHandle = (RemoteCameraDeviceSession*)argv;
     fd.fd = parentHandle->mFd;
     fd.events = POLLIN | POLLHUP;
@@ -163,10 +163,15 @@ void *RemoteDataRecvThreadFun(void *argv)
             size_header = recv(parentHandle->mFd, (char *)&buffer_header, sizeof(camera_header_t), 0);
             if(buffer_header.type == CAMERA_DATA){
                 size_pending = (size_t)buffer_header.size;
+                if(fBuffer != nullptr) {
+                    free(fBuffer);
+                }
                 fBuffer = (uint8_t *)malloc(size_pending);
                 if (fBuffer == NULL) {
                     ALOGE(LOG_TAG "%s: buffer allocation failed: %d ", __FUNCTION__, __LINE__);
+                    continue;
                 }
+
                 while(true) {
                     if(mEnqList.size() == 0) {
                         if (parentHandle->mStopRequest == true) {
@@ -216,7 +221,6 @@ void *RemoteDataRecvThreadFun(void *argv)
                             ALOGE("updated fail to convert MJPG to I420 ret %d", res);
                         }
                         mDeqList.push_back(frame);
-                        free(fBuffer);
                         break;
                     }
                 }
@@ -228,7 +232,10 @@ void *RemoteDataRecvThreadFun(void *argv)
             }
         } 
     }
-
+    if (fBuffer != nullptr) {
+        free(fBuffer);
+        fBuffer = nullptr;
+    }
     return argv;
 }
 RemoteCameraDeviceSession::RemoteCameraDeviceSession(
@@ -851,6 +858,7 @@ Status RemoteCameraDeviceSession::switchToOffline(
                     native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
                     handle->data[0] = buffer.acquireFence;
                     outputBuffer.releaseFence = android::makeToAidl(handle);
+                    native_handle_delete(handle);
                 }
             } else {
                 offlineBuffers.push_back(buffer);
@@ -1683,6 +1691,7 @@ Status RemoteCameraDeviceSession::processCaptureRequestError(
             native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
             handle->data[0] = req->buffers[i].acquireFence;
             result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+            native_handle_delete(handle);
         }
     }
 
@@ -1728,6 +1737,7 @@ Status RemoteCameraDeviceSession::processCaptureResult(std::shared_ptr<HalReques
                 native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
                 handle->data[0] = req->buffers[i].acquireFence;
                 result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+                native_handle_delete(handle);
             }
             notifyError(req->frameNumber, req->buffers[i].streamId, ErrorCode::ERROR_BUFFER);
         } else {
@@ -1737,6 +1747,7 @@ Status RemoteCameraDeviceSession::processCaptureResult(std::shared_ptr<HalReques
                 native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
                 handle->data[0] = req->buffers[i].acquireFence;
                 result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+                native_handle_delete(handle);
             }
         }
     }

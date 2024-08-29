@@ -798,6 +798,7 @@ Status ExternalCameraDeviceSession::switchToOffline(
                     native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
                     handle->data[0] = buffer.acquireFence;
                     outputBuffer.releaseFence = android::makeToAidl(handle);
+                    native_handle_delete(handle);
                 }
             } else {
                 offlineBuffers.push_back(buffer);
@@ -1781,6 +1782,7 @@ Status ExternalCameraDeviceSession::processCaptureRequestError(
             native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
             handle->data[0] = req->buffers[i].acquireFence;
             result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+            native_handle_delete(handle);
         }
     }
 
@@ -1827,6 +1829,7 @@ Status ExternalCameraDeviceSession::processCaptureResult(std::shared_ptr<HalRequ
                 native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
                 handle->data[0] = req->buffers[i].acquireFence;
                 result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+                native_handle_delete(handle);
             }
             notifyError(req->frameNumber, req->buffers[i].streamId, ErrorCode::ERROR_BUFFER);
         } else {
@@ -1836,6 +1839,7 @@ Status ExternalCameraDeviceSession::processCaptureResult(std::shared_ptr<HalRequ
                 native_handle_t* handle = native_handle_create(/*numFds*/ 1, /*numInts*/ 0);
                 handle->data[0] = req->buffers[i].acquireFence;
                 result.outputBuffers[i].releaseFence = ::android::makeToAidl(handle);
+                native_handle_delete(handle);
             }
         }
     }

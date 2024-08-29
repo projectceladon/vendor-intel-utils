@@ -139,7 +139,7 @@ bool ExternalCameraProvider::configureCapabilities() {
               strerror(errno));
         goto out;
     }
-
+    free(cap_packet);
     cap_packet = (camera_packet_t *)malloc(cap_packet_size);
     if (cap_packet == NULL) {
         ALOGE(LOG_TAG "%s: cap camera_packet_t allocation failed: %d ", __FUNCTION__, __LINE__);
@@ -351,21 +351,23 @@ void *RemoteThreadFun(void *argv)
         ALOGI("Waiting for connection ");
         int mSocketServerFd = ::socket(AF_VSOCK, SOCK_STREAM, 0);
         if (mSocketServerFd < 0) {
-        ALOGV(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
-        __FUNCTION__, __LINE__, strerror(errno));
-        return NULL;
+            ALOGV(LOG_TAG " %s:Line:[%d] Fail to construct camera socket with error: [%s]",
+            __FUNCTION__, __LINE__, strerror(errno));
+            return NULL;
         }
         ret = ::bind(mSocketServerFd, (struct sockaddr *)&addr_vm,
             sizeof(struct sockaddr_vm));
         if (ret < 0) {
             ALOGV(LOG_TAG " %s Failed to bind port(%d). ret: %d, %s", __func__, addr_vm.svm_port, ret,
             strerror(errno));
-            return NULL;
+            close(mSocketServerFd);
+	    return NULL;
         }
         ret = listen(mSocketServerFd, 32);
         if (ret < 0) {
-        ALOGV("%s Failed to listen on ", __FUNCTION__);
-        return NULL;
+            ALOGV("%s Failed to listen on ", __FUNCTION__);
+            close(mSocketServerFd);
+	    return NULL;
         }
 
         socklen_t alen = sizeof(struct sockaddr_un);
@@ -377,7 +379,9 @@ void *RemoteThreadFun(void *argv)
                 ALOGE("Fail to configure ");
             }
         }
+        close(mSocketServerFd);
     }
+
     pthread_join(thread_id, NULL);
     return argv;
 }
