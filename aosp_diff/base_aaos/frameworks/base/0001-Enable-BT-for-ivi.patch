@@ -1,0 +1,160 @@
+From 5ac39430d557f370282e71022f9bdc1fadb58b92 Mon Sep 17 00:00:00 2001
+From: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+Date: Tue, 6 Aug 2024 06:39:38 +0000
+Subject: [PATCH] Enable BT for ivi
+
+The BT chip is loaded as USB interface as hci0, the UsbHostManager
+is taking control of hci0 interface and doing initialization.
+Because of which Bluetooth-HAL is not able to send HCI cmds via
+hci0 interface, causing the hci_timeout_abort() crash.
+So BT is not enabled.
+
+Add BT chip vendor id and product id in config deny list, so that
+UsbHostManager skips the USB interface intialization for hci0.
+Added support for AX201, AX210, AX211 cards.
+
+Tests:
+1. Bluetooth on/off success
+2. Bluetooth scan success
+
+Tracked-On: OAM-121975
+Signed-off-by: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+Signed-off-by: Bharat B Panda <bharat.b.panda@intel.com>
+---
+ core/res/res/values/config.xml                |  3 +
+ .../android/server/usb/UsbHostManager.java    | 61 +++++++++++++++----
+ 2 files changed, 53 insertions(+), 11 deletions(-)
+
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index 4e133de7c483..955cea896e3e 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -1332,6 +1332,9 @@
+          to this list.  If this is empty, no parts of the host USB bus will be excluded.
+     -->
+     <string-array name="config_usbHostDenylist" translatable="false">
++        <item>"8087:0032"</item>
++        <item>"8087:0033"</item>
++        <item>"8087:0026"</item>
+     </string-array>
+ 
+     <!-- List of paths to serial ports that are available to the serial manager.
+diff --git a/services/usb/java/com/android/server/usb/UsbHostManager.java b/services/usb/java/com/android/server/usb/UsbHostManager.java
+index 36adeec74e36..340674f151c9 100644
+--- a/services/usb/java/com/android/server/usb/UsbHostManager.java
++++ b/services/usb/java/com/android/server/usb/UsbHostManager.java
+@@ -238,6 +238,16 @@ public class UsbHostManager {
+         }
+     }
+ 
++    private static class VendorIdProductId {
++        public int vendorId;
++        public int productId;
++
++        public VendorIdProductId(int vendorId, int productId) {
++            vendorId = vendorId;
++            productId = productId;
++        }
++    }
++
+     /*
+      * UsbHostManager
+      */
+@@ -293,13 +303,25 @@ public class UsbHostManager {
+     }
+ 
+     /* returns true if the USB device should not be accessible by applications */
+-    private boolean isDenyListed(int clazz, int subClass) {
++    private boolean isDenyListed(int clazz, int subClass, int vendorID, int productID) {
++
+         // deny hubs
+         if (clazz == UsbConstants.USB_CLASS_HUB) return true;
+ 
+         // deny HID boot devices (mouse and keyboard)
+-        return clazz == UsbConstants.USB_CLASS_HID
+-                && subClass == UsbConstants.USB_INTERFACE_SUBCLASS_BOOT;
++        if (clazz == UsbConstants.USB_CLASS_HID
++                && subClass == UsbConstants.USB_INTERFACE_SUBCLASS_BOOT) {
++            return true;
++        }
++
++        int count = mHostDenyList.length;
++        String vid_pid = String.format("%04x:%04x", vendorID, productID);
++        for (int i = 0; i < count; i++) {
++            if (vid_pid.equals(mHostDenyList[i])) {
++                return true;
++            }
++        }
++        return false;
+ 
+     }
+ 
+@@ -362,6 +384,9 @@ public class UsbHostManager {
+     @SuppressWarnings("unused")
+     private boolean usbDeviceAdded(String deviceAddress, int deviceClass, int deviceSubclass,
+             byte[] descriptors) {
++        int vendorId = 0;
++        int productId = 0;
++
+         if (DEBUG) {
+             Slog.d(TAG, "usbDeviceAdded(" + deviceAddress + ") - start");
+         }
+@@ -373,13 +398,6 @@ public class UsbHostManager {
+             return false;
+         }
+ 
+-        if (isDenyListed(deviceClass, deviceSubclass)) {
+-            if (DEBUG) {
+-                Slog.d(TAG, "device class is deny listed");
+-            }
+-            return false;
+-        }
+-
+         if (descriptors == null) {
+             Slog.e(TAG, "Failed to add device as the descriptor is null");
+             return false;
+@@ -391,6 +409,18 @@ public class UsbHostManager {
+             return false;
+         }
+ 
++        UsbDeviceDescriptor deviceDescriptor = parser.getDeviceDescriptor();
++        if (deviceDescriptor != null) {
++            vendorId  = deviceDescriptor.getVendorID();
++            productId = deviceDescriptor.getProductID();
++        }
++
++        if (isDenyListed(deviceClass, deviceSubclass, vendorId, productId)) {
++            if (DEBUG) {
++                Slog.d(TAG, "device class is black listed");
++            }
++            return false;
++        }
+         // Potentially can block as it may read data from the USB device.
+         logUsbDevice(parser);
+ 
+@@ -629,12 +659,21 @@ public class UsbHostManager {
+         // Device class needs to be obtained through the device interface.  Ignore device only
+         // if ALL interfaces are deny-listed.
+         boolean shouldIgnoreDevice = false;
++        int vendorId = 0;
++        int productId = 0;
++
+         for (UsbDescriptor descriptor: parser.getDescriptors()) {
+             if (!(descriptor instanceof UsbInterfaceDescriptor)) {
+                 continue;
+             }
++            UsbDeviceDescriptor deviceDescriptor = parser.getDeviceDescriptor();
++            if (deviceDescriptor != null) {
++                vendorId  = deviceDescriptor.getVendorID();
++                productId = deviceDescriptor.getProductID();
++            }
++
+             UsbInterfaceDescriptor iface = (UsbInterfaceDescriptor) descriptor;
+-            shouldIgnoreDevice = isDenyListed(iface.getUsbClass(), iface.getUsbSubclass());
++            shouldIgnoreDevice = isDenyListed(iface.getUsbClass(), iface.getUsbSubclass(), vendorId, productId);
+             if (!shouldIgnoreDevice) {
+                 break;
+             }
+-- 
+2.34.1
+

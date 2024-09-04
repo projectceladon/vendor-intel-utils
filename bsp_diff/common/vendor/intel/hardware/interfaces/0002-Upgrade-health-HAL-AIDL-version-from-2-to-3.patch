@@ -1,0 +1,411 @@
+From 36516ee1ea507bc74484636b0eb1be46c3c44c98 Mon Sep 17 00:00:00 2001
+From: RajaniRanjan <rajani.ranjan@intel.com>
+Date: Mon, 29 Jul 2024 10:14:02 +0530
+Subject: [PATCH] Upgrade health HAL AIDL version from 2 to 3
+
+Upgrade health HAL to comply with A15 requirements.
+
+Removed support for android.hardware.health AIDL IHealth (@2) as it
+is no longer compatible with the requirements for A15.
+
+Upgraded to android.hardware.health AIDL IHealth (@3) to ensure
+compliance with A15 specifications.
+
+Tracked-On: OAM-122198
+Signed-off-by: RajaniRanjan <rajani.ranjan@intel.com>
+---
+ health/aidl/Health.cpp                        | 139 +++++++++++++-----
+ health/aidl/LinkedCallback.cpp                |  28 ++--
+ health/aidl/LinkedCallback.h                  |  20 +--
+ ...ndroid.hardware.health-service.example.xml |   2 +-
+ .../android.hardware.health-service.intel.xml |   2 +-
+ health/aidl/include/health-impl/Health.h      |   5 +-
+ 6 files changed, 122 insertions(+), 74 deletions(-)
+
+diff --git a/health/aidl/Health.cpp b/health/aidl/Health.cpp
+index e0242ed..ce90ee1 100644
+--- a/health/aidl/Health.cpp
++++ b/health/aidl/Health.cpp
+@@ -48,6 +48,11 @@ void OnCallbackDiedWrapped(void* cookie) {
+     LinkedCallback* linked = reinterpret_cast<LinkedCallback*>(cookie);
+     linked->OnCallbackDied();
+ }
++// Delete the owned cookie.
++void onCallbackUnlinked(void* cookie) {
++    LinkedCallback* linked = reinterpret_cast<LinkedCallback*>(cookie);
++    delete linked;
++}
+ }  // namespace
+ 
+ /*
+@@ -69,11 +74,24 @@ Health::Health(std::string_view instance_name, std::unique_ptr<struct healthd_co
+     : instance_name_(instance_name),
+       healthd_config_(std::move(config)),
+       death_recipient_(AIBinder_DeathRecipient_new(&OnCallbackDiedWrapped)) {
++    AIBinder_DeathRecipient_setOnUnlinked(death_recipient_.get(), onCallbackUnlinked);
+     battery_monitor_.init(healthd_config_.get());
+ }
+ 
+ Health::~Health() {}
+ 
++static inline ndk::ScopedAStatus TranslateStatus(::android::status_t err) {
++    switch (err) {
++        case ::android::OK:
++            return ndk::ScopedAStatus::ok();
++        case ::android::NAME_NOT_FOUND:
++            return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++        default:
++            return ndk::ScopedAStatus::fromServiceSpecificErrorWithMessage(
++                    IHealth::STATUS_UNKNOWN, ::android::statusToString(err).c_str());
++    }
++}
++
+ //
+ // Getters.
+ //
+@@ -90,16 +108,7 @@ static ndk::ScopedAStatus GetProperty(::android::BatteryMonitor* monitor, int id
+         LOG(DEBUG) << "getProperty(" << id << ")"
+                    << " fails: (" << err << ") " << ::android::statusToString(err);
+     }
+-
+-    switch (err) {
+-        case ::android::OK:
+-            return ndk::ScopedAStatus::ok();
+-        case ::android::NAME_NOT_FOUND:
+-            return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+-        default:
+-            return ndk::ScopedAStatus::fromServiceSpecificErrorWithMessage(
+-                    IHealth::STATUS_UNKNOWN, ::android::statusToString(err).c_str());
+-    }
++    return TranslateStatus(err);
+ }
+ 
+ ndk::ScopedAStatus Health::getChargeCounterUah(int32_t* out) {
+@@ -127,16 +136,60 @@ ndk::ScopedAStatus Health::getChargeStatus(BatteryStatus* out) {
+                        BatteryStatus::UNKNOWN, out);
+ }
+ 
+-ndk::ScopedAStatus Health::setChargingPolicy(BatteryChargingPolicy out) {
+-    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++ndk::ScopedAStatus Health::setChargingPolicy(BatteryChargingPolicy in_value) {
++   ::android::status_t err = battery_monitor_.setChargingPolicy(static_cast<int>(in_value));
++
++    switch (err) {
++        case ::android::OK:
++            return ndk::ScopedAStatus::ok();
++        case ::android::NAME_NOT_FOUND:
++            return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++        case ::android::BAD_VALUE:
++            return ndk::ScopedAStatus::fromStatus(::android::INVALID_OPERATION);
++        default:
++            return ndk::ScopedAStatus::fromServiceSpecificErrorWithMessage(
++                    IHealth::STATUS_UNKNOWN, ::android::statusToString(err).c_str());
++    }
+ }
+ 
+ ndk::ScopedAStatus Health::getChargingPolicy(BatteryChargingPolicy* out) {
+-    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    return GetProperty(&battery_monitor_, ::android::BATTERY_PROP_CHARGING_POLICY,
++                       BatteryChargingPolicy::DEFAULT, out);
+ }
+ 
+ ndk::ScopedAStatus Health::getBatteryHealthData(BatteryHealthData* out) {
+-    return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++    if (auto res =
++                GetProperty<int64_t>(&battery_monitor_, ::android::BATTERY_PROP_MANUFACTURING_DATE,
++                                     0, &out->batteryManufacturingDateSeconds);
++        !res.isOk()) {
++        LOG(WARNING) << "Cannot get Manufacturing_date: " << res.getDescription();
++    }
++    if (auto res = GetProperty<int64_t>(&battery_monitor_, ::android::BATTERY_PROP_FIRST_USAGE_DATE,
++                                        0, &out->batteryFirstUsageSeconds);
++        !res.isOk()) {
++        LOG(WARNING) << "Cannot get First_usage_date: " << res.getDescription();
++    }
++    if (auto res = GetProperty<int64_t>(&battery_monitor_, ::android::BATTERY_PROP_STATE_OF_HEALTH,
++                                        0, &out->batteryStateOfHealth);
++        !res.isOk()) {
++        LOG(WARNING) << "Cannot get Battery_state_of_health: " << res.getDescription();
++    }
++    if (auto res = battery_monitor_.getSerialNumber(&out->batterySerialNumber);
++        res != ::android::OK) {
++        LOG(WARNING) << "Cannot get Battery_serial_number: "
++                     << TranslateStatus(res).getDescription();
++    }
++
++    int64_t part_status = static_cast<int64_t>(BatteryPartStatus::UNSUPPORTED);
++    if (auto res = GetProperty<int64_t>(&battery_monitor_, ::android::BATTERY_PROP_PART_STATUS,
++                                        static_cast<int64_t>(BatteryPartStatus::UNSUPPORTED),
++                                        &part_status);
++        !res.isOk()) {
++        LOG(WARNING) << "Cannot get Battery_part_status: " << res.getDescription();
++    }
++    out->batteryPartStatus = static_cast<BatteryPartStatus>(part_status);
++
++    return ndk::ScopedAStatus::ok();
+ }
+ 
+ ndk::ScopedAStatus Health::getDiskStats(std::vector<DiskStats>*) {
+@@ -195,6 +248,7 @@ binder_status_t Health::dump(int fd, const char**, uint32_t) {
+     } else {
+         ::android::base::WriteStringToFd(res.getDescription(), fd);
+     }
++    ::android::base::WriteStringToFd("\n", fd);
+ 
+     fsync(fd);
+     return STATUS_OK;
+@@ -215,15 +269,6 @@ std::optional<bool> Health::ShouldKeepScreenOn() {
+     return healthd_config_->screen_on(&props);
+ }
+ 
+-namespace {
+-bool IsDeadObjectLogged(const ndk::ScopedAStatus& ret) {
+-    if (ret.isOk()) return false;
+-    if (ret.getStatus() == ::STATUS_DEAD_OBJECT) return true;
+-    LOG(ERROR) << "Cannot call healthInfoChanged on callback: " << ret.getDescription();
+-    return false;
+-}
+-}  // namespace
+-
+ //
+ // Subclass helpers / overrides
+ //
+@@ -261,7 +306,11 @@ ndk::ScopedAStatus Health::registerCallback(const std::shared_ptr<IHealthInfoCal
+ 
+     {
+         std::lock_guard<decltype(callbacks_lock_)> lock(callbacks_lock_);
+-        callbacks_.emplace_back(LinkedCallback::Make(ref<Health>(), callback));
++        auto linked_callback_result = LinkedCallback::Make(ref<Health>(), callback);
++        if (!linked_callback_result.ok()) {
++            return ndk::ScopedAStatus::fromStatus(-linked_callback_result.error().code());
++        }
++        callbacks_[*linked_callback_result] = callback;
+         // unlock
+     }
+     HealthInfo health_info;
+@@ -271,8 +320,10 @@ ndk::ScopedAStatus Health::registerCallback(const std::shared_ptr<IHealthInfoCal
+         return ndk::ScopedAStatus::ok();
+     }
+ 
+-    if (auto res = callback->healthInfoChanged(health_info); IsDeadObjectLogged(res)) {
+-        (void)unregisterCallback(callback);
++    auto res = callback->healthInfoChanged(health_info);
++    if (!res.isOk()) {
++        LOG(DEBUG) << "Cannot call healthInfoChanged:" << res.getDescription()
++                   << ". Do nothing here if callback is dead as it will be cleaned up later.";
+     }
+     return ndk::ScopedAStatus::ok();
+ }
+@@ -286,12 +337,24 @@ ndk::ScopedAStatus Health::unregisterCallback(
+ 
+     std::lock_guard<decltype(callbacks_lock_)> lock(callbacks_lock_);
+ 
+-    auto matches = [callback](const auto& linked) {
+-        return linked->callback()->asBinder() == callback->asBinder();  // compares binder object
++    auto matches = [callback](const auto& cb) {
++        return cb->asBinder() == callback->asBinder();  // compares binder object
+     };
+-    auto it = std::remove_if(callbacks_.begin(), callbacks_.end(), matches);
+-    bool removed = (it != callbacks_.end());
+-    callbacks_.erase(it, callbacks_.end());  // calls unlinkToDeath on deleted callbacks.
++    bool removed = false;
++    for (auto it = callbacks_.begin(); it != callbacks_.end();) {
++        if (it->second->asBinder() == callback->asBinder()) {
++            auto status = AIBinder_unlinkToDeath(callback->asBinder().get(), death_recipient_.get(),
++                                                 reinterpret_cast<void*>(it->first));
++            if (status != STATUS_OK && status != STATUS_DEAD_OBJECT) {
++                LOG(WARNING) << __func__
++                             << "Cannot unlink to death: " << ::android::statusToString(status);
++            }
++            it = callbacks_.erase(it);
++            removed = true;
++        } else {
++            it++;
++        }
++    }
+     return removed ? ndk::ScopedAStatus::ok()
+                    : ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
+ }
+@@ -319,13 +382,13 @@ ndk::ScopedAStatus Health::update() {
+ void Health::OnHealthInfoChanged(const HealthInfo& health_info) {
+     // Notify all callbacks
+     std::unique_lock<decltype(callbacks_lock_)> lock(callbacks_lock_);
+-    // is_dead notifies a callback and return true if it is dead.
+-    auto is_dead = [&](const auto& linked) {
+-        auto res = linked->callback()->healthInfoChanged(health_info);
+-        return IsDeadObjectLogged(res);
+-    };
+-    auto it = std::remove_if(callbacks_.begin(), callbacks_.end(), is_dead);
+-    callbacks_.erase(it, callbacks_.end());  // calls unlinkToDeath on deleted callbacks.
++    for (const auto& [_, callback] : callbacks_) {
++        auto res = callback->healthInfoChanged(health_info);
++        if (!res.isOk()) {
++            LOG(DEBUG) << "Cannot call healthInfoChanged:" << res.getDescription()
++                       << ". Do nothing here if callback is dead as it will be cleaned up later.";
++        }
++    }
+     lock.unlock();
+ 
+     // Let HalHealthLoop::OnHealthInfoChanged() adjusts uevent / wakealarm periods
+diff --git a/health/aidl/LinkedCallback.cpp b/health/aidl/LinkedCallback.cpp
+index 2985ffe..df471a3 100644
+--- a/health/aidl/LinkedCallback.cpp
++++ b/health/aidl/LinkedCallback.cpp
+@@ -24,35 +24,24 @@
+ 
+ namespace aidl::android::hardware::health {
+ 
+-std::unique_ptr<LinkedCallback> LinkedCallback::Make(
++::android::base::Result<LinkedCallback*> LinkedCallback::Make(
+         std::shared_ptr<Health> service, std::shared_ptr<IHealthInfoCallback> callback) {
+-    std::unique_ptr<LinkedCallback> ret(new LinkedCallback());
++    LinkedCallback* ret(new LinkedCallback());
++    // pass ownership of this object to the death recipient
+     binder_status_t linkRet =
+             AIBinder_linkToDeath(callback->asBinder().get(), service->death_recipient_.get(),
+-                                 reinterpret_cast<void*>(ret.get()));
++                                 reinterpret_cast<void*>(ret));
+     if (linkRet != ::STATUS_OK) {
+         LOG(WARNING) << __func__ << "Cannot link to death: " << linkRet;
+-        return nullptr;
++        return ::android::base::Error(-linkRet);
+     }
+     ret->service_ = service;
+-    ret->callback_ = std::move(callback);
++    ret->callback_ = callback;
+     return ret;
+ }
+ 
+ LinkedCallback::LinkedCallback() = default;
+ 
+-LinkedCallback::~LinkedCallback() {
+-    if (callback_ == nullptr) {
+-        return;
+-    }
+-    auto status =
+-            AIBinder_unlinkToDeath(callback_->asBinder().get(), service()->death_recipient_.get(),
+-                                   reinterpret_cast<void*>(this));
+-    if (status != STATUS_OK && status != STATUS_DEAD_OBJECT) {
+-        LOG(WARNING) << __func__ << "Cannot unlink to death: " << ::android::statusToString(status);
+-    }
+-}
+-
+ std::shared_ptr<Health> LinkedCallback::service() {
+     auto service_sp = service_.lock();
+     CHECK_NE(nullptr, service_sp);
+@@ -60,7 +49,10 @@ std::shared_ptr<Health> LinkedCallback::service() {
+ }
+ 
+ void LinkedCallback::OnCallbackDied() {
+-    service()->unregisterCallback(callback_);
++    auto sCb = callback_.lock();
++    if (sCb) {
++        service()->unregisterCallback(sCb);
++    }
+ }
+ 
+ }  // namespace aidl::android::hardware::health
+diff --git a/health/aidl/LinkedCallback.h b/health/aidl/LinkedCallback.h
+index 82490a7..8c9c997 100644
+--- a/health/aidl/LinkedCallback.h
++++ b/health/aidl/LinkedCallback.h
+@@ -20,6 +20,7 @@
+ 
+ #include <aidl/android/hardware/health/IHealthInfoCallback.h>
+ #include <android-base/macros.h>
++#include <android-base/result.h>
+ #include <android/binder_auto_utils.h>
+ 
+ #include <health-impl/Health.h>
+@@ -31,19 +32,10 @@ namespace aidl::android::hardware::health {
+ class LinkedCallback {
+   public:
+     // Automatically linkToDeath upon construction with the returned object as the cookie.
+-    // service->death_reciepient() should be from CreateDeathRecipient().
+-    // Not using a strong reference to |service| to avoid circular reference. The lifetime
+-    // of |service| must be longer than this LinkedCallback object.
+-    static std::unique_ptr<LinkedCallback> Make(std::shared_ptr<Health> service,
+-                                                std::shared_ptr<IHealthInfoCallback> callback);
+-
+-    // Automatically unlinkToDeath upon destruction. So, it is always safe to reinterpret_cast
+-    // the cookie back to the LinkedCallback object.
+-    ~LinkedCallback();
+-
+-    // The wrapped IHealthInfoCallback object.
+-    const std::shared_ptr<IHealthInfoCallback>& callback() const { return callback_; }
+-
++    // The deathRecipient owns the LinkedCallback object and will delete it with
++    // cookie when it's unlinked.
++    static ::android::base::Result<LinkedCallback*> Make(
++            std::shared_ptr<Health> service, std::shared_ptr<IHealthInfoCallback> callback);
+     // On callback died, unreigster it from the service.
+     void OnCallbackDied();
+ 
+@@ -54,7 +46,7 @@ class LinkedCallback {
+     std::shared_ptr<Health> service();
+ 
+     std::weak_ptr<Health> service_;
+-    std::shared_ptr<IHealthInfoCallback> callback_;
++    std::weak_ptr<IHealthInfoCallback> callback_;
+ };
+ 
+ }  // namespace aidl::android::hardware::health
+diff --git a/health/aidl/android.hardware.health-service.example.xml b/health/aidl/android.hardware.health-service.example.xml
+index 98026cb..2acaaba 100644
+--- a/health/aidl/android.hardware.health-service.example.xml
++++ b/health/aidl/android.hardware.health-service.example.xml
+@@ -1,7 +1,7 @@
+ <manifest version="1.0" type="device">
+     <hal format="aidl">
+         <name>android.hardware.health</name>
+-        <version>1</version>
++        <version>3</version>
+         <fqname>IHealth/default</fqname>
+     </hal>
+ </manifest>
+diff --git a/health/aidl/android.hardware.health-service.intel.xml b/health/aidl/android.hardware.health-service.intel.xml
+index 1fe9b8d..2acaaba 100644
+--- a/health/aidl/android.hardware.health-service.intel.xml
++++ b/health/aidl/android.hardware.health-service.intel.xml
+@@ -1,7 +1,7 @@
+ <manifest version="1.0" type="device">
+     <hal format="aidl">
+         <name>android.hardware.health</name>
+-        <version>2</version>
++        <version>3</version>
+         <fqname>IHealth/default</fqname>
+     </hal>
+ </manifest>
+diff --git a/health/aidl/include/health-impl/Health.h b/health/aidl/include/health-impl/Health.h
+index e3770e9..7afafbd 100644
+--- a/health/aidl/include/health-impl/Health.h
++++ b/health/aidl/include/health-impl/Health.h
+@@ -16,6 +16,7 @@
+ 
+ #pragma once
+ 
++#include <map>
+ #include <memory>
+ #include <optional>
+ 
+@@ -61,7 +62,7 @@ class Health : public BnHealth, public HalHealthLoopCallback {
+     ndk::ScopedAStatus getCurrentAverageMicroamps(int32_t* out) override;
+     ndk::ScopedAStatus getCapacity(int32_t* out) override;
+     ndk::ScopedAStatus getChargeStatus(BatteryStatus* out) override;
+-    ndk::ScopedAStatus setChargingPolicy(BatteryChargingPolicy out) override;
++    ndk::ScopedAStatus setChargingPolicy(BatteryChargingPolicy in_value) override;
+     ndk::ScopedAStatus getChargingPolicy(BatteryChargingPolicy* out) override;
+     ndk::ScopedAStatus getBatteryHealthData(BatteryHealthData* out) override;
+ 
+@@ -111,7 +112,7 @@ class Health : public BnHealth, public HalHealthLoopCallback {
+     ndk::ScopedAIBinder_DeathRecipient death_recipient_;
+     int binder_fd_ = -1;
+     std::mutex callbacks_lock_;
+-    std::vector<std::unique_ptr<LinkedCallback>> callbacks_;
++    std::map<LinkedCallback*, std::shared_ptr<IHealthInfoCallback>> callbacks_;
+ };
+ 
+ }  // namespace aidl::android::hardware::health
+-- 
+2.43.2
+

@@ -1,0 +1,582 @@
+From 6a0ac7ee444e9d21c77c5514fb82262d845b30aa Mon Sep 17 00:00:00 2001
+From: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+Date: Tue, 13 Aug 2024 18:09:34 +0530
+Subject: [PATCH] Add support for mapper5
+
+As IMapper4 is deprecated from Android15, changes done to use
+IMapper5 stable-c mapper.
+
+Tests done:
+- Android boot in GVT-d and BM config
+- H/W accelerated video playback
+- adb reboot
+
+Tracked-On: OAM-123348
+Signed-off-by: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+---
+ c2_components/Android.bp                |  15 +-
+ c2_utils/Android.bp                     |  10 +-
+ c2_utils/include/mfx_defs.h             |  11 +-
+ c2_utils/include/mfx_gralloc_instance.h |   1 +
+ c2_utils/include/mfx_mapper5.h          |  36 +++
+ c2_utils/src/mfx_gralloc_instance.cpp   |   8 +-
+ c2_utils/src/mfx_mapper5.cpp            | 371 ++++++++++++++++++++++++
+ 7 files changed, 443 insertions(+), 9 deletions(-)
+ create mode 100644 c2_utils/include/mfx_mapper5.h
+ create mode 100644 c2_utils/src/mfx_mapper5.cpp
+
+diff --git a/c2_components/Android.bp b/c2_components/Android.bp
+index 1e560bd..f3867eb 100644
+--- a/c2_components/Android.bp
++++ b/c2_components/Android.bp
+@@ -31,7 +31,10 @@ cc_library_headers {
+ cc_library_shared {
+     name: "libmfx_c2_components_hw",
+ 
+-    defaults: ["mfx_c2_defaults"],
++    defaults: [
++        "mfx_c2_defaults",
++        "android.hardware.graphics.allocator-ndk_shared",
++    ],
+ 
+     static_libs: [
+         "libmfx_c2_buffers",
+@@ -57,6 +60,8 @@ cc_library_shared {
+         "android.hardware.graphics.bufferqueue@2.0",
+         "android.hardware.graphics.common@1.2",
+         "android.hardware.graphics.mapper@4.0",
++        "libbinder_ndk",
++        "libvndksupport",
+     ],
+ 
+     local_include_dirs: [
+@@ -79,5 +84,11 @@ cc_library_shared {
+         
+     ],
+ 
++    header_libs: [
++        "libui_headers",
++        "libimapper_stablec",
++        "libimapper_providerutils",
++    ],
++
+     vendor: true,
+-}
+\ No newline at end of file
++}
+diff --git a/c2_utils/Android.bp b/c2_utils/Android.bp
+index 2082e9a..a88f952 100644
+--- a/c2_utils/Android.bp
++++ b/c2_utils/Android.bp
+@@ -34,9 +34,14 @@ cc_library_static {
+         "android.hardware.graphics.bufferqueue@2.0",
+         "android.hardware.graphics.common@1.2",
+         "android.hardware.graphics.mapper@4.0",
++        "libbinder_ndk",
++        "libvndksupport",
+     ],
+ 
+-    defaults: ["mfx_c2_defaults"],
++    defaults: [
++        "mfx_c2_defaults",
++        "android.hardware.graphics.allocator-ndk_shared",
++    ],
+ 
+     srcs: [
+         "src/*.cpp",
+@@ -69,6 +74,9 @@ cc_library_static {
+         "libva_headers",
+         "libcodec2_vndk_headers",
+         "libcodec2_headers",
++        "libui_headers",
++        "libimapper_stablec",
++        "libimapper_providerutils",
+     ],
+ 
+     vendor: true,
+diff --git a/c2_utils/include/mfx_defs.h b/c2_utils/include/mfx_defs.h
+index 0a6fc26..86e4b58 100755
+--- a/c2_utils/include/mfx_defs.h
++++ b/c2_utils/include/mfx_defs.h
+@@ -34,18 +34,19 @@
+ 
+ // includes below are to get Intel color formats
+ 
+-#define HAVE_GRALLOC4 // We use gralloc4 but keep supporting gralloc1
+-
+-#ifdef HAVE_GRALLOC4
++#if PLATFORM_SDK_VERSION >= 35
++    #define USE_MAPPER5
++#elif PLATFORM_SDK_VERSION >= 34
+     #define USE_GRALLOC4
+-#else // HAVE_GRALLOC4
++#else
+ #ifdef MFX_C2_USE_PRIME
+     // USE_GRALLOC1 required for using PRIME buffer descriptor -
+     // opens definition GRALLOC1_PFN_GET_PRIME in
+     // i915_private_android_types.h
+     #define USE_GRALLOC1
+ #endif // MFX_C2_USE_PRIME
+-#endif // HAVE_GRALLOC4
++#endif
++
+ #define DRV_I915
+ #include <i915_private_android_types.h>
+ 
+diff --git a/c2_utils/include/mfx_gralloc_instance.h b/c2_utils/include/mfx_gralloc_instance.h
+index 6eb064a..ea41b99 100644
+--- a/c2_utils/include/mfx_gralloc_instance.h
++++ b/c2_utils/include/mfx_gralloc_instance.h
+@@ -23,6 +23,7 @@
+ #include "mfx_gralloc_interface.h"
+ #include "mfx_gralloc1.h"
+ #include "mfx_gralloc4.h"
++#include "mfx_mapper5.h"
+ 
+ class MfxGrallocInstance
+ {
+diff --git a/c2_utils/include/mfx_mapper5.h b/c2_utils/include/mfx_mapper5.h
+new file mode 100644
+index 0000000..2b3a533
+--- /dev/null
++++ b/c2_utils/include/mfx_mapper5.h
+@@ -0,0 +1,36 @@
++// Copyright (c) 2024 Intel Corporation
++// SPDX-License-Identifier: Apache-2.0
++
++#pragma once
++
++#include <android/hardware/graphics/mapper/IMapper.h>
++#include <mfx_defs.h>
++#include <utils/Errors.h>
++#include <hidl/HidlSupport.h>
++#include "mfx_gralloc_interface.h"
++
++#ifdef USE_MAPPER5
++using namespace android;
++using hardware::hidl_vec;
++using hardware::hidl_handle;
++
++class MfxMapper5Module : public IMfxGrallocModule
++{
++public:
++    virtual c2_status_t Init() override;
++
++    virtual ~MfxMapper5Module();
++
++    virtual c2_status_t GetBufferDetails(const buffer_handle_t handle,
++                                         BufferDetails* details) override;
++    virtual c2_status_t GetBackingStore(const buffer_handle_t rawHandle, uint64_t *id) override;
++    virtual buffer_handle_t ImportBuffer(const buffer_handle_t rawHandle) override;
++    virtual c2_status_t FreeBuffer(const buffer_handle_t rawHandle);
++    virtual c2_status_t LockFrame(buffer_handle_t handle, uint8_t** data, C2PlanarLayout *layout);
++    virtual c2_status_t UnlockFrame(buffer_handle_t handle);
++
++private:
++    AIMapper *m_mapper;
++};
++
++#endif
+diff --git a/c2_utils/src/mfx_gralloc_instance.cpp b/c2_utils/src/mfx_gralloc_instance.cpp
+index 614da9a..fd1cc15 100644
+--- a/c2_utils/src/mfx_gralloc_instance.cpp
++++ b/c2_utils/src/mfx_gralloc_instance.cpp
+@@ -38,11 +38,17 @@ std::shared_ptr<IMfxGrallocModule> MfxGrallocInstance::getInstance()
+         std::lock_guard<std::mutex> lock(m_mutex);
+         if (nullptr == m_instance)
+         {
+-#ifdef USE_GRALLOC4
++#ifdef USE_MAPPER5
++            MFX_DEBUG_TRACE_MSG("using mapper5");
++            ALOGI("using mapper5");
++            m_instance = std::make_shared<MfxMapper5Module>();
++#elif USE_GRALLOC4
+             MFX_DEBUG_TRACE_MSG("using gralloc4");
++            ALOGI("using gralloc4");
+             m_instance = std::make_shared<MfxGralloc4Module>();
+ #else
+             MFX_DEBUG_TRACE_MSG("using gralloc1");
++            ALOGI("using gralloc1");
+             m_instance = std::make_shared<MfxGralloc1Module>();
+ #endif
+             if(C2_OK != m_instance->Init())
+diff --git a/c2_utils/src/mfx_mapper5.cpp b/c2_utils/src/mfx_mapper5.cpp
+new file mode 100644
+index 0000000..12a4822
+--- /dev/null
++++ b/c2_utils/src/mfx_mapper5.cpp
+@@ -0,0 +1,371 @@
++// Copyright (c) 2024 Intel Corporation
++// SPDX-License-Identifier: Apache-2.0
++
++#include <aidl/android/hardware/graphics/allocator/IAllocator.h>
++#include <aidl/android/hardware/graphics/common/BufferUsage.h>
++#include <aidl/android/hardware/graphics/common/ChromaSiting.h>
++#include <aidl/android/hardware/graphics/common/Dataspace.h>
++#include <aidl/android/hardware/graphics/common/ExtendableType.h>
++#include <aidl/android/hardware/graphics/common/PixelFormat.h>
++#include <aidl/android/hardware/graphics/common/PlaneLayoutComponent.h>
++#include <aidl/android/hardware/graphics/common/PlaneLayoutComponentType.h>
++#include <aidl/android/hardware/graphics/common/StandardMetadataType.h>
++#include <android/hardware/graphics/mapper/utils/IMapperMetadataTypes.h>
++#include <android/binder_manager.h>
++#include <dlfcn.h> // dlopen
++#include <gralloctypes/Gralloc4.h>
++#include <system/window.h>
++#include <ui/FatVector.h>
++#include <vndksupport/linker.h>
++
++#include "mfx_mapper5.h"
++#include "cros_gralloc/cros_gralloc_helpers.h"
++#include "mfx_c2_utils.h"
++#include "mfx_debug.h"
++#include "mfx_c2_debug.h"
++
++using namespace aidl::android::hardware::graphics::allocator;
++using aidl::android::hardware::graphics::common::BufferUsage;
++using aidl::android::hardware::graphics::common::ChromaSiting;
++using aidl::android::hardware::graphics::common::Dataspace;
++using aidl::android::hardware::graphics::common::ExtendableType;
++using aidl::android::hardware::graphics::common::PlaneLayout;
++using aidl::android::hardware::graphics::common::PlaneLayoutComponent;
++using aidl::android::hardware::graphics::common::PlaneLayoutComponentType;
++using aidl::android::hardware::graphics::common::PlaneLayout;
++using aidl::android::hardware::graphics::common::StandardMetadataType;
++using android::hardware::graphics::common::V1_2::PixelFormat;
++using android::hardware::graphics::mapper::StandardMetadata;
++using android::hardware::hidl_handle;
++
++using ADataspace = aidl::android::hardware::graphics::common::Dataspace;
++using APixelFormat = aidl::android::hardware::graphics::common::PixelFormat;
++
++#ifdef USE_MAPPER5
++
++static const auto kIAllocatorServiceName = IAllocator::descriptor + std::string("/default");
++static const auto kIAllocatorMinimumVersion = 2;
++
++#undef MFX_DEBUG_MODULE_NAME
++#define MFX_DEBUG_MODULE_NAME "mfx_mapper5"
++
++
++typedef AIMapper_Error (*AIMapper_loadIMapperFn)(AIMapper *_Nullable *_Nonnull outImplementation);
++
++static std::shared_ptr<IAllocator> waitForAllocator() {
++    if (__builtin_available(android 31, *)) {
++        if (!AServiceManager_isDeclared(kIAllocatorServiceName.c_str())) {
++            return nullptr;
++        }
++        auto allocator = IAllocator::fromBinder(
++                ndk::SpAIBinder(AServiceManager_waitForService(kIAllocatorServiceName.c_str())));
++        if (!allocator) {
++            ALOGE("AIDL IAllocator declared but failed to get service");
++            return nullptr;
++        }
++
++        int32_t version = 0;
++        if (!allocator->getInterfaceVersion(&version).isOk()) {
++            ALOGE("Failed to query interface version");
++            return nullptr;
++        }
++        if (version < kIAllocatorMinimumVersion) {
++            return nullptr;
++        }
++        return allocator;
++    } else {
++        return nullptr;
++    }
++}
++
++static void *loadIMapperLibrary() {
++    static void *imapperLibrary = []() -> void * {
++        auto allocator = waitForAllocator();
++        std::string mapperSuffix;
++        auto status = allocator->getIMapperLibrarySuffix(&mapperSuffix);
++        if (!status.isOk()) {
++            ALOGE("Failed to get IMapper library suffix");
++            return nullptr;
++        }
++        std::string lib_name = "mapper." + mapperSuffix + ".so";
++        void *so = android_load_sphal_library(lib_name.c_str(), RTLD_LOCAL | RTLD_NOW);
++        if (!so) {
++            ALOGE("Failed to load mapper.minigbm.so");
++        }
++        return so;
++    }();
++    return imapperLibrary;
++}
++
++template <StandardMetadataType T>
++static auto getStandardMetadata(AIMapper *mapper, buffer_handle_t bufferHandle)
++        -> decltype(StandardMetadata<T>::value::decode(NULL, 0)) {
++    using Value = typename StandardMetadata<T>::value;
++    // TODO: Tune for common-case better
++    android::FatVector<uint8_t, 128> buffer;
++    int32_t sizeRequired = mapper->v5.getStandardMetadata(bufferHandle,
++                                                          static_cast<int64_t>(T),
++                                                          buffer.data(), buffer.size());
++    if (sizeRequired < 0) {
++        ALOGW_IF(-AIMAPPER_ERROR_UNSUPPORTED != sizeRequired,
++                 "Unexpected error %d from valid getStandardMetadata call", -sizeRequired);
++        return std::nullopt;
++    }
++    if ((size_t)sizeRequired > buffer.size()) {
++        buffer.resize(sizeRequired);
++        sizeRequired = mapper->v5.getStandardMetadata(bufferHandle, static_cast<int64_t>(T),
++                                                      buffer.data(), buffer.size());
++    }
++    if (sizeRequired < 0 || (size_t)sizeRequired > buffer.size()) {
++        ALOGW("getStandardMetadata failed, received %d with buffer size %zd", sizeRequired,
++              buffer.size());
++        // Generate a fail type
++        return std::nullopt;
++    }
++    return Value::decode(buffer.data(), sizeRequired);
++}
++
++c2_status_t MfxMapper5Module::Init()
++{
++    MFX_DEBUG_TRACE_FUNC;
++
++    void *so = loadIMapperLibrary();
++    if (!so) {
++        ALOGE("loadIMapperLibrary failed");
++        return C2_CORRUPTED;
++    }
++    auto loadIMapper = (AIMapper_loadIMapperFn)dlsym(so, "AIMapper_loadIMapper");
++    AIMapper *mapper = nullptr;
++    AIMapper_Error error = loadIMapper(&mapper);
++    if (error != AIMAPPER_ERROR_NONE) {
++        ALOGE("AIMapper_loadIMapper failed %d", error);
++        return C2_CORRUPTED;
++    }
++
++    m_mapper = mapper;
++
++    return C2_OK;
++}
++
++MfxMapper5Module::~MfxMapper5Module()
++{
++}
++
++c2_status_t MfxMapper5Module::GetBufferDetails(const buffer_handle_t handle, BufferDetails *details)
++{
++    MFX_DEBUG_TRACE_FUNC;
++    c2_status_t res = C2_OK;
++
++    if (nullptr == m_mapper) {
++        ALOGE("mapper is null");
++        return C2_NO_INIT;
++    }
++
++    auto importedHandle = ImportBuffer(handle);
++    if (nullptr == importedHandle) {
++        ALOGE("ImportBuffer failed");
++        return C2_CORRUPTED;
++    }
++
++    do
++    {
++        details->handle = handle;
++
++        details->prime = handle->data[0];
++        MFX_DEBUG_TRACE_I32(details->prime);
++
++        auto width =
++            getStandardMetadata<StandardMetadataType::WIDTH>(m_mapper, importedHandle);
++        if (!width.has_value()) {
++            ALOGE("WIDTH get failed");
++            res = C2_CORRUPTED;
++            break;
++        }
++
++        details->width = details->allocWidth = *width;
++        MFX_DEBUG_TRACE_I32(details->width);
++
++        auto height =
++            getStandardMetadata<StandardMetadataType::HEIGHT>(m_mapper, importedHandle);
++        if (!height.has_value()) {
++            ALOGE("HEIGHT get failed");
++            res = C2_CORRUPTED;
++            break;
++        }
++        details->height = details->allocHeight = *height;
++        MFX_DEBUG_TRACE_I32(details->height);
++
++        auto pixelFormat =
++            getStandardMetadata<StandardMetadataType::PIXEL_FORMAT_REQUESTED>(m_mapper,
++                                                                              importedHandle);
++        if (!pixelFormat.has_value()) {
++            ALOGE("PIXEL_FORMAT_REQUESTED get failed");
++            res = C2_CORRUPTED;
++            break;
++        }
++
++        details->format = static_cast<std::underlying_type_t<PixelFormat>>(*pixelFormat);
++        MFX_DEBUG_TRACE_I32(details->format);
++
++        auto layouts_opt = getStandardMetadata<StandardMetadataType::PLANE_LAYOUTS>(m_mapper,
++                                                                                    importedHandle);
++        if (!(layouts_opt.has_value())) {
++            ALOGE("PLANE_LAYOUTS get failed");
++            res = C2_CORRUPTED;
++            break;
++        }
++
++        std::vector<PlaneLayout> &layouts = *layouts_opt;
++        details->planes_count = layouts.size();
++        MFX_DEBUG_TRACE_I32(details->planes_count);
++
++        for(int i = 0; i < layouts.size(); i++)
++        {
++            details->pitches[i] = layouts[i].strideInBytes;
++            MFX_DEBUG_TRACE_STREAM("details->pitches[" << i << "] = " << details->pitches[i]);
++        }
++    } while (false);
++
++    (void)FreeBuffer(importedHandle);
++    MFX_DEBUG_TRACE__android_c2_status_t(res);
++    return res;
++}
++
++c2_status_t MfxMapper5Module::GetBackingStore(const buffer_handle_t handle, uint64_t *id)
++{
++    MFX_DEBUG_TRACE_FUNC;
++    c2_status_t res = C2_OK;
++
++    auto importedHandle = ImportBuffer(handle);
++    if (nullptr == importedHandle) {
++        ALOGE("ImportBuffer failed");
++        return C2_CORRUPTED;
++    }
++
++    auto bufferId =
++        getStandardMetadata<StandardMetadataType::BUFFER_ID>(m_mapper, importedHandle);
++    if (!bufferId.has_value()) {
++        ALOGE("BufferId get failed");
++        res = C2_CORRUPTED;
++    } else {
++        *id = *bufferId;
++    }
++
++    (void)FreeBuffer(importedHandle);
++    MFX_DEBUG_TRACE__android_c2_status_t(res);
++    return res;
++}
++
++buffer_handle_t MfxMapper5Module::ImportBuffer(const buffer_handle_t rawHandle)
++{
++    MFX_DEBUG_TRACE_FUNC;
++    c2_status_t res = C2_OK;
++    buffer_handle_t outBuffer = nullptr;
++
++    if (nullptr == m_mapper) {
++        ALOGE("mapper is null");
++        res = C2_NO_INIT;
++    }
++
++    if (C2_OK == res)
++    {
++        AIMapper_Error error = m_mapper->v5.importBuffer(hardware::hidl_handle(rawHandle),
++                                                         &outBuffer);
++        if (error != AIMAPPER_ERROR_NONE) {
++            ALOGE("importBuffer failed");
++            res = C2_CORRUPTED;
++        }
++    }
++
++    MFX_DEBUG_TRACE__android_c2_status_t(res);
++    return outBuffer;
++}
++
++c2_status_t MfxMapper5Module::FreeBuffer(const buffer_handle_t handle)
++{
++    MFX_DEBUG_TRACE_FUNC;
++    c2_status_t res = C2_OK;
++
++    if (nullptr == m_mapper) {
++        ALOGE("mapper is null");
++        res = C2_NO_INIT;
++    }
++
++    if (C2_OK == res)
++    {
++        AIMapper_Error error = m_mapper->v5.freeBuffer(handle);
++        if (error != AIMAPPER_ERROR_NONE) {
++            ALOGE("freeBuffer failed");
++            res = C2_CORRUPTED;
++        }
++    }
++
++    MFX_DEBUG_TRACE__android_c2_status_t(res);
++    return res;
++}
++
++c2_status_t MfxMapper5Module::LockFrame(buffer_handle_t handle, uint8_t** data,
++                                        C2PlanarLayout *layout)
++{
++    MFX_DEBUG_TRACE_FUNC;
++    c2_status_t res = C2_OK;
++
++    if (!layout) {
++        ALOGE("layout is invalid");
++        return C2_BAD_VALUE;
++    }
++
++    if (nullptr == m_mapper) {
++        ALOGE("mapper is null");
++        return C2_NO_INIT;
++    }
++
++    BufferDetails details;
++
++    if (C2_OK != GetBufferDetails(handle, &details)) {
++        ALOGE("GetBufferDetails failed");
++        return C2_BAD_VALUE;
++    }
++
++    const ARect region{0, 0, details.width, details.height};
++    uint8_t *img = nullptr;
++    AIMapper_Error error = m_mapper->v5.lock(handle,
++                    AHardwareBuffer_UsageFlags::AHARDWAREBUFFER_USAGE_CPU_READ_MASK |
++                    AHardwareBuffer_UsageFlags::AHARDWAREBUFFER_USAGE_CPU_WRITE_MASK,
++                    region, -1, (void**)&img);
++    if (error != AIMAPPER_ERROR_NONE) {
++        ALOGE("lock failed");
++        res = C2_CORRUPTED;
++    }
++
++    if (C2_OK == res) {
++        InitNV12PlaneLayout(details.pitches, layout);
++        InitNV12PlaneData(details.pitches[C2PlanarLayout::PLANE_Y],
++                          details.allocHeight, (uint8_t*)img, data);
++    }
++
++    return res;
++}
++
++c2_status_t MfxMapper5Module::UnlockFrame(buffer_handle_t handle)
++{
++    MFX_DEBUG_TRACE_FUNC;
++    c2_status_t res = C2_OK;
++
++    if (nullptr == m_mapper) {
++        ALOGE("mapper is null");
++        return C2_NO_INIT;
++    }
++
++    int releaseFence = -1;
++    AIMapper_Error error = m_mapper->v5.unlock(handle, &releaseFence);
++    if (error != AIMAPPER_ERROR_NONE) {
++        ALOGE("unlock failed");
++        res = C2_CORRUPTED;
++    }
++
++    MFX_DEBUG_TRACE__android_c2_status_t(res);
++    return res;
++}
++
++#endif
+-- 
+2.45.2
+
