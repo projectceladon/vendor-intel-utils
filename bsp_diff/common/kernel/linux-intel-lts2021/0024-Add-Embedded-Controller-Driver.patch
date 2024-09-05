@@ -1,0 +1,465 @@
+From 94b19952c164ce85b404f640bca6edbf92e861af Mon Sep 17 00:00:00 2001
+From: jizhenlo <zhenlong.z.ji@intel.com>
+Date: Sat, 16 Sep 2023 16:34:47 +0800
+Subject: [PATCH] Add Embedded Controller Driver
+
+Signed-off-by: jizhenlo <zhenlong.z.ji@intel.com>
+---
+ drivers/misc/Kconfig       |   1 +
+ drivers/misc/Makefile      |   1 +
+ drivers/misc/ec/Kconfig    |  11 ++
+ drivers/misc/ec/Makefile   |   4 +
+ drivers/misc/ec/intel_ec.c | 393 +++++++++++++++++++++++++++++++++++++
+ 5 files changed, 410 insertions(+)
+ create mode 100644 drivers/misc/ec/Kconfig
+ create mode 100644 drivers/misc/ec/Makefile
+ create mode 100644 drivers/misc/ec/intel_ec.c
+
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index d65f2e9fb54c..802734f6a468 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -517,4 +517,5 @@ source "drivers/misc/pvpanic/Kconfig"
+ source "drivers/misc/vpumgr/Kconfig"
+ source "drivers/misc/Gpio-asm28xx/Kconfig"
+ source "drivers/misc/gna/Kconfig"
++source "drivers/misc/ec/Kconfig"
+ endmenu
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index db18e63b3634..9024c1e8ad1a 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -64,3 +64,4 @@ obj-$(CONFIG_HOST_KMB_TJ)       += Gpio-asm28xx/
+ obj-$(CONFIG_INTEL_GNA)		+= gna/
+ obj-$(CONFIG_UID_SYS_STATS)	+= uid_sys_stats.o
+ obj-$(CONFIG_OPEN_DICE)		+= open-dice.o
++obj-$(CONFIG_INTEL_EC)		+= ec/
+diff --git a/drivers/misc/ec/Kconfig b/drivers/misc/ec/Kconfig
+new file mode 100644
+index 000000000000..f04e0172f77e
+--- /dev/null
++++ b/drivers/misc/ec/Kconfig
+@@ -0,0 +1,11 @@
++#
++# Intel EC device
++#
++
++config INTEL_EC
++        tristate "Intel Embedded Controller"
++        help
++	  This adds an option to enable the Intel Embedded Controller driver. The embedded
++	  controller is an essential component in modern mobile, ultra-mobile and embedded
++	  computer systems. An efficient EC sub-system enables energy-conscious designs to
++	  obtain dramatic power savings.
+diff --git a/drivers/misc/ec/Makefile b/drivers/misc/ec/Makefile
+new file mode 100644
+index 000000000000..fc6d1383b8a9
+--- /dev/null
++++ b/drivers/misc/ec/Makefile
+@@ -0,0 +1,4 @@
++# SPDX-License-Identifier: GPL-2.0
++
++obj-y := intel_ec.o
++
+diff --git a/drivers/misc/ec/intel_ec.c b/drivers/misc/ec/intel_ec.c
+new file mode 100644
+index 000000000000..0930f173d8a1
+--- /dev/null
++++ b/drivers/misc/ec/intel_ec.c
+@@ -0,0 +1,393 @@
++#include <linux/module.h>
++#include <linux/fs.h>
++#include <linux/miscdevice.h>
++#include <linux/uaccess.h>
++#include <linux/delay.h>
++#include <linux/slab.h>
++#include <asm/io.h>
++
++#define DEVICE_NAME "intel_ec"
++
++#define EC_IOCTL_MAGIC 'E'
++#define EC_ERASE _IOW(EC_IOCTL_MAGIC, 1, char *)
++#define EC_VERIFY_ERASE_STATUS _IOR(EC_IOCTL_MAGIC, 2, char *)
++
++#define CFG_PORT1            0x2E
++#define CFG_PORT2            0x4E
++
++#define EC_STATUS            0x66
++#define EC_CMD               0x66
++#define EC_DATA              0x62
++
++#define CMD_WRSR             0x01
++#define CMD_PAGE_PROG        0x02
++#define CMD_READ             0x03
++#define CMD_WRDI             0x04
++#define CMD_RDSR             0x05
++#define CMD_WREN             0x06
++#define CMD_FAST_READ        0x0B
++#define CMD_CHIP_ERASE       0xC7
++#define CMD_JEDEC_ID         0x9F
++#define CMD_EWSR             0x50
++#define CMD_DEV_ID1          0xAB
++#define CMD_DEV_ID2          0x90
++#define CMD_1K_SEC_ERASE     0xD7
++#define CMD_AAI_BYTE_PRO     0xAF
++#define CMD_AAI_WORD_PRO     0xAD
++#define CMD_PAGE_PROGRAM     0x02
++
++#define EC_OBF               0x01
++#define EC_IBF               0x02
++#define ENTER_FOLLOW_MODE    0x01
++#define EXIT_FOLLOW_MODE     0x05
++#define ENTER_FLASH_MODE     0xDC
++#define EXIT_FLASH_MODE      0xFC
++#define SEND_CMD             0x02
++#define SEND_BYTE            0x03
++#define READ_BYTE            0x04
++
++#define MAX_DATA_SIZE        4096
++#define FLASH_SIZE           0x20000
++#define HALF_FLASH_SIZE      0x10000
++#define HALF_FLASH_BLOCKS    256
++#define BLOCK_SIZE           256
++
++static unsigned char flash_id[5];
++static int total_read = 0;
++static int total_write = 0;
++static char *g_buffer = NULL;
++static int circles = 0;
++
++static void wait_ec_obf(void) {
++    unsigned char status = inb(EC_STATUS);
++    while(!(status & EC_OBF)) {
++        status = inb(EC_STATUS);
++    }
++}
++
++static void wait_ec_ibe(void) {
++    unsigned char status = inb(EC_STATUS);
++    while(status & EC_IBF) {
++        status = inb(EC_STATUS);
++    }
++}
++
++static void send_cmd_to_pm(unsigned char cmd) {
++    wait_ec_ibe();
++    outb(cmd, EC_CMD);
++    wait_ec_ibe();
++}
++
++static unsigned char read_data_from_pm(void) {
++    unsigned char data = 0;
++    wait_ec_obf();
++    data = inb(EC_DATA);
++    return data;
++}
++
++static void follow_mode(unsigned char mode) {
++    send_cmd_to_pm(mode);
++}
++
++static void send_cmd_to_ec(unsigned char cmd) {
++    send_cmd_to_pm(SEND_CMD);
++    send_cmd_to_pm(cmd);
++}
++
++static void send_byte_to_ec(unsigned char data) {
++    send_cmd_to_pm(SEND_BYTE);
++    send_cmd_to_pm(data);
++}
++
++static unsigned char read_byte_from_ec(void) {
++    send_cmd_to_pm(READ_BYTE);
++    return read_data_from_pm();
++}
++
++static void wait_for_ec_free(void) {
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_RDSR);
++    while(0x00 != (read_byte_from_ec() & 0x01));
++    follow_mode(EXIT_FOLLOW_MODE);
++}
++
++static void enable_flash_write(void) {
++    wait_for_ec_free();
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_WRSR);
++    send_byte_to_ec(0x00);
++
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_WREN);
++
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_RDSR);
++    while(0x00 == (read_byte_from_ec() & 0x02));
++    follow_mode(EXIT_FOLLOW_MODE);
++}
++
++static void disable_flash_write(void) {
++    wait_for_ec_free();
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_WRDI);
++
++    wait_for_ec_free();
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_RDSR);
++
++    while(0x00 != (read_byte_from_ec() & 0x02));
++    follow_mode(EXIT_FOLLOW_MODE);
++}
++
++static void read_flash_jedec_id(void) {
++    int index = 0;
++    wait_for_ec_free();
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_JEDEC_ID);
++    for (; index < 3; index++) {
++        flash_id[index]=read_byte_from_ec();
++    }
++
++    follow_mode(EXIT_FOLLOW_MODE);
++}
++
++static void enable_ec_status_reg_write(void) {
++    wait_for_ec_free();
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_WREN);
++
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_EWSR);
++}
++
++static void block_1k_erase(unsigned char addr2, unsigned char addr1, unsigned char addr0) {
++    enable_ec_status_reg_write();
++    enable_flash_write();
++    wait_for_ec_free();
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_1K_SEC_ERASE);
++    send_byte_to_ec(addr2);
++    send_byte_to_ec(addr1);
++    send_byte_to_ec(addr0);
++    wait_for_ec_free();
++}
++
++static void ec_erase(void) {
++    unsigned char i, j;
++    for (i = 0; i < 0x02; i++) {
++        for (j = 0; j < 0x100; j +=0x04) {
++            block_1k_erase(i, j, 0x00);
++        }
++    }
++}
++
++static int ec_erase_verify(void) {
++    unsigned int counter, data, i;
++    disable_flash_write();
++    wait_for_ec_free();
++    follow_mode(ENTER_FOLLOW_MODE);
++    send_cmd_to_ec(CMD_FAST_READ);
++    send_byte_to_ec(0x00);
++    send_byte_to_ec(0x00);
++    send_byte_to_ec(0x00);
++    send_byte_to_ec(0x00);
++
++    for(i = 0; i < 0x04; i++) {
++        for(counter = 0; counter < 0x8000; counter++) {
++            data = read_byte_from_ec();
++            if (data != 0xFF) {
++                wait_for_ec_free();
++                return -1;
++            }
++        }
++    }
++    wait_for_ec_free();
++    return 0;
++}
++
++static int intel_ec_open(struct inode *inode, struct file *file) {
++    int mode = file->f_mode & (FMODE_READ | FMODE_WRITE);
++
++    if (mode != FMODE_READ && mode != FMODE_WRITE) {
++        pr_err("Invalid access mode\n");
++        return -EINVAL;
++    }
++
++    g_buffer = (unsigned char *)kmalloc(MAX_DATA_SIZE, GFP_KERNEL);
++    if (!g_buffer) {
++        pr_info("EC: buffer allocation failed\n");
++        return -ENOMEM;
++    }
++
++    send_cmd_to_pm(ENTER_FLASH_MODE);
++    while(0x33 != read_data_from_pm());
++
++    if (mode == FMODE_READ) {
++        pr_info("Device opened with read-only access\n");
++        wait_for_ec_free();
++        follow_mode(ENTER_FOLLOW_MODE);
++        send_cmd_to_ec(CMD_FAST_READ);
++        send_byte_to_ec(0x00);
++        send_byte_to_ec(0x00);
++        send_byte_to_ec(0x00);
++        send_byte_to_ec(0x00);
++    } else if (mode == FMODE_WRITE) {
++        pr_info("Device opened with write-only access\n");
++    }
++
++    return 0;
++}
++
++
++static int intel_ec_close(struct inode *inode, struct file *file) {
++    pr_info("intel_ec_close\n");
++    int mode = file->f_mode & (FMODE_READ | FMODE_WRITE);
++    follow_mode(EXIT_FOLLOW_MODE);
++    if (mode == FMODE_WRITE) {
++        msleep(5000);
++    }
++    send_cmd_to_pm(EXIT_FLASH_MODE);
++    kfree(g_buffer);
++    g_buffer = NULL;
++    total_read = 0;
++    total_write = 0;
++    return 0;
++}
++
++static ssize_t intel_ec_read(struct file *filp, char __user *buf,
++			      size_t count, loff_t *ppos) {
++    ssize_t bytes_read = 0;
++    int index, read_count;
++
++    if (*ppos >= FLASH_SIZE)
++        return 0;
++
++    read_count = min(count, MAX_DATA_SIZE);
++    bytes_read = min(FLASH_SIZE - total_read, read_count);
++    if (bytes_read == 0) {
++        pr_info("EC: finished the read\n");
++        return 0;
++    }
++
++    for (index = 0; index < bytes_read; index++) {
++        g_buffer[index] = read_byte_from_ec();
++    }
++
++    if (copy_to_user(buf, g_buffer, bytes_read) != 0) {
++        pr_info("EC: copy_to_user failed\n");
++        return -EFAULT;
++    }
++
++    *ppos += bytes_read;
++    total_read += bytes_read;
++
++    return bytes_read;
++}
++
++static ssize_t intel_ec_write(struct file *filp, const char __user *buf,
++			       size_t count, loff_t *ppos) {
++    ssize_t bytes_write = 0;
++    int write_count, i;
++    int block, cur_pos;
++    int temp1, temp2;
++    if (*ppos >= FLASH_SIZE)
++        return -EINVAL;
++
++    write_count = min(count, MAX_DATA_SIZE);
++    bytes_write = min(FLASH_SIZE - total_write, write_count);
++    if (bytes_write == 0) {
++        pr_info("EC: bytes write is zero\n");
++        return 0;
++    }
++
++    if (bytes_write % BLOCK_SIZE != 0) {
++        pr_info("EC: bytes count should be an integer multiple of block size(256)\n");
++        return -EINVAL;
++    }
++
++    if (copy_from_user(g_buffer, buf, bytes_write)) {
++        return -EFAULT;
++    }
++
++    for (block = 0; block < (bytes_write / BLOCK_SIZE); block++) {
++        cur_pos = block * BLOCK_SIZE;
++        enable_flash_write();
++        wait_for_ec_free();
++        follow_mode(ENTER_FOLLOW_MODE);
++        send_cmd_to_ec(CMD_PAGE_PROGRAM);
++        send_byte_to_ec((total_write < HALF_FLASH_SIZE) ? 0 : 1);
++        send_byte_to_ec((total_write / BLOCK_SIZE) % HALF_FLASH_BLOCKS);
++        send_byte_to_ec(0x00);
++        for (i = 0; i < BLOCK_SIZE; i++) {
++            send_byte_to_ec(g_buffer[cur_pos + i]);
++        }
++        total_write += BLOCK_SIZE;
++        *ppos += BLOCK_SIZE;
++        wait_for_ec_free();
++    }
++
++    return bytes_write;
++}
++
++static long ec_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
++    int ret = 0, status = 0;
++
++    switch (cmd) {
++        case EC_ERASE:
++            ec_erase();
++            break;
++
++        case EC_VERIFY_ERASE_STATUS:
++            status = ec_erase_verify();
++            if (copy_to_user((char *)arg, &status, sizeof(status))) {
++                return -EFAULT;
++            }
++            break;
++
++        default:
++            return -EINVAL;
++    }
++
++    return ret;
++}
++
++static const struct file_operations intel_ec_fops = {
++    .owner = THIS_MODULE,
++    .open = intel_ec_open,
++    .release = intel_ec_close,
++    .read = intel_ec_read,
++    .write = intel_ec_write,
++    .unlocked_ioctl = ec_ioctl,
++};
++
++static struct miscdevice intel_ec_device = {
++    .minor = MISC_DYNAMIC_MINOR,
++    .name = DEVICE_NAME,
++    .fops = &intel_ec_fops,
++};
++
++static int __init intel_ec_init(void) {
++    int ret;
++
++    ret = misc_register(&intel_ec_device);
++    if (ret) {
++        pr_err("Failed to register misc device\n");
++        return ret;
++    }
++
++    pr_info("Misc device registered: %s\n", DEVICE_NAME);
++    return 0;
++}
++
++static void __exit intel_ec_exit(void) {
++    misc_deregister(&intel_ec_device);
++    pr_info("Misc device unregistered: %s\n", DEVICE_NAME);
++}
++
++module_init(intel_ec_init);
++module_exit(intel_ec_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Zhenlong Ji");
++MODULE_DESCRIPTION("Driver for Embedded Controller");
++
+-- 
+2.25.1
+
