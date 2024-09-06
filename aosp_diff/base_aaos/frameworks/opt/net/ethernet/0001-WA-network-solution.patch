@@ -1,0 +1,320 @@
+From 0dfcbda9afdf32182238b7f167193c07dd48b56f Mon Sep 17 00:00:00 2001
+From: Austin Sun <austin.sun@intel.com>
+Date: Sat, 14 Oct 2023 01:20:51 +0000
+Subject: [PATCH] WA: network solution
+
+- never release network
+- enable eth0 to eth1 nat and forward
+- make score eth1 higher than eth0 identify if in VM3
+
+Tracked-On: OAM-113193
+Signed-off-by: Austin Sun <austin.sun@intel.com>
+---
+ .../ethernet/EthernetNetworkFactory.java      |  26 ++-
+ .../server/ethernet/EthernetTracker.java      | 168 +++++++++++++++++-
+ 2 files changed, 186 insertions(+), 8 deletions(-)
+
+diff --git a/java/com/android/server/ethernet/EthernetNetworkFactory.java b/java/com/android/server/ethernet/EthernetNetworkFactory.java
+index a6a2c2f..9e50290 100644
+--- a/java/com/android/server/ethernet/EthernetNetworkFactory.java
++++ b/java/com/android/server/ethernet/EthernetNetworkFactory.java
+@@ -40,6 +40,7 @@ import android.net.shared.ProvisioningConfiguration;
+ import android.net.util.InterfaceParams;
+ import android.os.ConditionVariable;
+ import android.os.Handler;
++import android.os.SystemProperties;
+ import android.os.RemoteException;
+ import android.text.TextUtils;
+ import android.util.AndroidRuntimeException;
+@@ -115,10 +116,15 @@ public class EthernetNetworkFactory extends NetworkFactory {
+             Log.e(TAG, "releaseNetworkFor, failed to get a network for " + networkRequest);
+             return;
+         }
+-
+-        if (--network.refCount == 0) {
+-            network.stop();
+-        }
++        // Not release network as two ethernet co-existing
++        if ("3".equals(SystemProperties.get("vendor.modules.eth.vm"))) {
++            Log.w(TAG, "in VM3 never release Network" + network.name);
++            return;
++		} else {
++            if (--network.refCount == 0) {
++                network.stop();
++            }
++		}
+     }
+ 
+     /**
+@@ -427,7 +433,7 @@ public class EthernetNetworkFactory extends NetworkFactory {
+             if (!mLinkUp) {
+                 return 0;
+             }
+-
++            Log.d(TAG, "getNetworkScore");
+             int[] transportTypes = mCapabilities.getTransportTypes();
+             if (transportTypes.length < 1) {
+                 Log.w(TAG, "Network interface '" + mLinkProperties.getInterfaceName() + "' has no "
+@@ -436,7 +442,15 @@ public class EthernetNetworkFactory extends NetworkFactory {
+             }
+             TransportInfo transportInfo = sTransports.get(transportTypes[0], /* if dne */ null);
+             if (transportInfo != null) {
+-                return transportInfo.mScore;
++                if(mLinkProperties != null && mLinkProperties.getInterfaceName() != null) {
++                    if(mLinkProperties.getInterfaceName().equals("eth0")) {
++                        Log.d(TAG, "getNetworkScore eth0: " + transportInfo.mScore);
++                        return transportInfo.mScore;
++                     }else if(mLinkProperties.getInterfaceName().equals("eth1")) {
++                        Log.d(TAG, "getNetworkScore eth1: " + transportInfo.mScore+5);
++                        return transportInfo.mScore + 5;
++				    }
++				}
+             }
+             return 0;
+         }
+diff --git a/java/com/android/server/ethernet/EthernetTracker.java b/java/com/android/server/ethernet/EthernetTracker.java
+index b2b60fc..0cc9e73 100644
+--- a/java/com/android/server/ethernet/EthernetTracker.java
++++ b/java/com/android/server/ethernet/EthernetTracker.java
+@@ -27,6 +27,8 @@ import android.net.InterfaceConfiguration;
+ import android.net.IpConfiguration;
+ import android.net.IpConfiguration.IpAssignment;
+ import android.net.IpConfiguration.ProxySettings;
++import android.net.IpPrefix;
++import android.net.RouteInfo;
+ import android.net.LinkAddress;
+ import android.net.NetworkCapabilities;
+ import android.net.NetworkStack;
+@@ -37,6 +39,7 @@ import android.os.INetworkManagementService;
+ import android.os.RemoteCallbackList;
+ import android.os.RemoteException;
+ import android.os.ServiceManager;
++import android.os.SystemProperties;
+ import android.text.TextUtils;
+ import android.util.ArrayMap;
+ import android.util.Log;
+@@ -49,7 +52,10 @@ import com.android.server.net.BaseNetworkObserver;
+ 
+ import java.io.FileDescriptor;
+ import java.net.InetAddress;
++import java.util.Arrays;
+ import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
+ import java.util.Objects;
+ import java.util.concurrent.ConcurrentHashMap;
+ 
+@@ -113,9 +119,8 @@ final class EthernetTracker {
+         @Override
+         public void onCallbackDied(ITetheredInterfaceCallback cb, Object cookie) {
+             mHandler.post(EthernetTracker.this::maybeUntetherDefaultInterface);
+-        }
++      }
+     }
+-
+     EthernetTracker(Context context, Handler handler) {
+         mContext = context;
+         mHandler = handler;
+@@ -285,6 +290,8 @@ final class EthernetTracker {
+ 
+     private void addInterface(String iface) {
+         InterfaceConfiguration config = null;
++
++        Log.d(TAG, "adding Ethernet interface " + iface );
+         // Bring up the interface so we get link status indications.
+         try {
+             NetworkStack.checkNetworkStackPermission(mContext);
+@@ -333,7 +340,136 @@ final class EthernetTracker {
+             updateInterfaceState(iface, true);
+         }
+     }
++    //add eth0 to LocalNetwork
++    private void addInterfaceToLocalNetwork(String iface) {
++        try {
++                Log.d(TAG, "Get "+ iface + "config");
++                List<RouteInfo> routes = new ArrayList<>();
++                LinkAddress dest = mNMService.getInterfaceConfig(iface).getLinkAddress();;
++                RouteInfo route = new RouteInfo(
++                new IpPrefix(dest.getAddress(), dest.getPrefixLength()),
++                null, null, RouteInfo.RTN_UNICAST);
++                Log.d(TAG, "Interface" + iface + "route is " + route);
++                routes.add(route);
++                mNMService.addInterfaceToLocalNetwork(iface, routes);
++            } catch (RemoteException | IllegalStateException e) {
++                Log.e(TAG, "Error add " + iface + " to Local Network", e);
++            }
++    }
++     private void removeInterfaceFromLocalNetwork(String iface) {
+ 
++        Log.d(TAG, "removeInterfaceFromLocalNetwork: "+ iface);
++        try {
++                mNMService.removeInterfaceFromLocalNetwork(iface);
++            } catch (RemoteException | IllegalStateException e) {
++                Log.e(TAG, "Error remove" + iface + " From Local Network", e);
++            }
++    }
++
++    // enable eth1 ipfwd
++    private void enableEth1Ipfwd(String iface, boolean up) {
++        // let's enable forward and nat
++        if(iface.equals("eth1")) {
++            Log.d(TAG, "Tracking interface " + iface + "forward and nat");
++            InterfaceConfiguration wificonfig = null;
++            try {
++                Log.d(TAG, "Get wlan0 config");
++                wificonfig = mNMService.getInterfaceConfig("wlan0");
++            } catch (RemoteException | IllegalStateException e) {
++                Log.e(TAG, "Error get wlan0 config", e);
++            }
++            if(up) {
++                if(!wificonfig.isActive()) {
++                    try {
++                         Log.d(TAG, iface + " is up");
++                         Log.d(TAG, "disable nat and fwd eth0 to " + iface );
++                         mNMService.stopInterfaceForwarding("eth0", iface);
++                         mNMService.stopInterfaceForwarding(iface, "eth0");
++                         mNMService.disableNat("eth0", iface);
++                    } catch (RemoteException | IllegalStateException e) {
++                         Log.e(TAG, "Error disable forward and nat " + iface, e);
++                    }
++                    try {
++                         Log.d(TAG, iface + " is up");
++                         Log.d(TAG, "enable nat and fwd eth0 to " + iface );
++                         mNMService.startInterfaceForwarding(iface, "eth0");
++                         mNMService.startInterfaceForwarding("eth0", iface);
++                         mNMService.enableNat("eth0", iface);
++                    } catch (RemoteException | IllegalStateException e) {
++                         Log.e(TAG, "Error enable forward and nat" + iface, e);
++                    }
++
++                 }else {
++                       Log.d(TAG, "wlan0 is Active, not fwd eth0 to eth1");
++                 }
++               }else { // eth1 is down
++                    try {
++                         Log.d(TAG, iface + "is down");
++                         Log.d(TAG, "disable nat and fwd eth0 to " + iface );
++                         mNMService.stopInterfaceForwarding("eth0", iface);
++                         mNMService.stopInterfaceForwarding(iface, "eth0");
++                         mNMService.disableNat("eth0", iface);
++                    } catch (RemoteException | IllegalStateException e) {
++                        Log.e(TAG, "Error disable forward and nat" + iface, e);
++                    }
++
++               }
++        }else if(iface.equals("eth0")){
++            Log.d(TAG, "Tracking interface " + iface + "forward and nat");
++            InterfaceConfiguration wificonfig = null;
++            InterfaceConfiguration eth1config= null;
++            try {
++                Log.d(TAG, "Get wlan0 config");
++                wificonfig = mNMService.getInterfaceConfig("wlan0");
++            } catch (RemoteException | IllegalStateException e) {
++                Log.e(TAG, "Error get wlan0 config", e);
++            }
++            try {
++                Log.d(TAG, "Get eth1 config");
++                eth1config = mNMService.getInterfaceConfig("eth1");
++            } catch (RemoteException | IllegalStateException e) {
++                Log.e(TAG, "Error get eth1 config", e);
++            }
++            if(up) {
++                Log.d(TAG, "eth0 is up, wifi active is " + wificonfig.isActive()
++                + " eth1 is "+ eth1config.isActive());
++                if(!wificonfig.isActive() && eth1config.isActive()) {
++
++                    Log.d(TAG, "wifi is not active and eth1 is active");
++                    try {
++                         Log.d(TAG, "disable nat and fwd eth0 to eth1");
++                         mNMService.stopInterfaceForwarding("eth0", "eth1");
++                         mNMService.stopInterfaceForwarding("eth1", "eth0");
++                         mNMService.disableNat("eth0", "eth1");
++                    } catch (RemoteException | IllegalStateException e) {
++                        Log.e(TAG, "Error disable forward and nat " + "eth1", e);
++                    }
++                    try {
++                         Log.d(TAG, "enable nat and fwd eth0 to eth1");
++                         mNMService.startInterfaceForwarding("eth1", "eth0");
++                         mNMService.startInterfaceForwarding("eth0", "eth1");
++                         mNMService.enableNat("eth0", "eth1");
++                    } catch (RemoteException | IllegalStateException e) {
++                        Log.e(TAG, "Error enable forward and nat eth1" , e);
++                    }
++                 }else {
++                       Log.d(TAG, "wlan0 is Active, not fwd eth0 to eth1");
++                 }
++               }else { // eth0 is down
++                    try {
++                         Log.d(TAG, iface + "is down");
++                         Log.d(TAG, "disable nat and fwd eth0 to eth1" );
++                         mNMService.stopInterfaceForwarding("eth0", "eth1");
++                         mNMService.stopInterfaceForwarding("eth1", "eth0");
++                         mNMService.disableNat("eth0", "eth1");
++                    } catch (RemoteException | IllegalStateException e) {
++                        Log.e(TAG, "Error disable forward and nat eth1", e);
++                    }
++               }
++        }else{
++              Log.d(TAG, "Link " + iface +" is not eth0 or eth1");
++        }
++    }
+     private void updateInterfaceState(String iface, boolean up) {
+         final int mode = getInterfaceMode(iface);
+         final boolean factoryLinkStateUpdated = (mode == INTERFACE_MODE_CLIENT)
+@@ -393,6 +529,7 @@ final class EthernetTracker {
+ 
+         // TODO: avoid making an interface default if it has configured NetworkCapabilities.
+         if (mDefaultInterface == null) {
++            Log.d(TAG, "set as default Interface " + iface);
+             mDefaultInterface = iface;
+         }
+ 
+@@ -407,6 +544,16 @@ final class EthernetTracker {
+     private void trackAvailableInterfaces() {
+         try {
+             final String[] ifaces = mNMService.listInterfaces();
++            if ("3".equals(SystemProperties.get("vendor.modules.eth.vm"))) {
++                if (DBG) {
++                    Log.i(TAG, "trackAvailableInterfaces: " +Arrays.toString(ifaces) + "before sort");
++                }
++                //make sure eth1 is first show up then eth0
++                Arrays.sort(ifaces , Collections.reverseOrder());
++                if (DBG) {
++                    Log.i(TAG, "trackAvailableInterfaces: " +Arrays.toString(ifaces) + "after sort");
++                }
++            }
+             for (String iface : ifaces) {
+                 maybeTrackInterface(iface);
+             }
+@@ -423,11 +570,28 @@ final class EthernetTracker {
+             if (DBG) {
+                 Log.i(TAG, "interfaceLinkStateChanged, iface: " + iface + ", up: " + up);
+             }
++            /*if(iface.equals("eth1")) {
++                if(up) {
++                    Log.i(TAG, "addInterfaceToLocalNetwork, iface: " + iface + ", up: " + up);
++                    addInterfaceToLocalNetwork("eth0");
++                } else {
++                    Log.i(TAG, "removeInterfaceFromLocalNetwork, iface: " + iface + ", up: " + up);
++                    removeInterfaceFromLocalNetwork("eth0");
++                }
++            }*/
++            if ("3".equals(SystemProperties.get("vendor.modules.eth.vm"))) {
++                Log.d(TAG, "in VM3, try to enable Eth1 fwd");
++                enableEth1Ipfwd(iface,up);
++            }
+             mHandler.post(() -> updateInterfaceState(iface, up));
+         }
+ 
+         @Override
+         public void interfaceAdded(String iface) {
++             if (DBG) {
++                Log.i(TAG, "interfaceAdded: " + iface);
++            }
++
+             mHandler.post(() -> maybeTrackInterface(iface));
+         }
+ 
+-- 
+2.17.1
+
