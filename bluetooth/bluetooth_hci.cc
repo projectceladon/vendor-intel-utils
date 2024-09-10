@@ -33,7 +33,7 @@ static const uint8_t HCI_DATA_TYPE_SCO = 3;
 
 class BluetoothDeathRecipient : public hidl_death_recipient {
  public:
-  BluetoothDeathRecipient(const sp<IBluetoothHci> hci) : mHci(hci) {}
+  BluetoothDeathRecipient(const sp<IBluetoothHci> hci) : mHci(hci), has_died_(false) {}
 
   virtual void serviceDied(
       uint64_t /*cookie*/,
