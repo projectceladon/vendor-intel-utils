@@ -11,7 +11,6 @@ tmp_lunch=`mktemp`
 sed '/ lunch()/,/^}/!d'  build/envsetup.sh | sed 's/function lunch/function aosp_lunch/' > ${tmp_lunch}
 source ${tmp_lunch}
 rm -f ${tmp_lunch}
-
 # Override lunch function to filter lunch targets
 function lunch
 {
@@ -20,8 +19,30 @@ function lunch
         echo "[lunch] Couldn't locate the top of the tree.  Try setting TOP." >&2
         return
     fi
+    local answer=' '
+    # Set the TARGET_RELEASE variable to the release_config for
+    # which we want to build CELADON. It should be one among
+    # $(TOP)/build/release/release_configs/*
+    # When updating TARGET_RELEASE value here please change in 
+    # "function _get_build_var_cached" below too.
+    TARGET_RELEASE=ap3a
+    if [ "$1" ]; then
+        local valid_targets=`mixinup -t`
+        local count=`echo "$1" | grep -o "-" | wc -l`
+        if [ "${count}" -eq 1 ]; then
+            local array=(${1/-/ })
+            local target=${array[0]}
+            if [[ "${valid_targets}" =~ "${target}" ]]; then
+                answer=${target}-$TARGET_RELEASE-${array[1]}
+            else
+                answer=$1
+            fi
+        else
+            answer=$1
+        fi
+    fi
 
-    aosp_lunch $*
+    aosp_lunch $answer
 
     rm -rf vendor/intel/utils/Android.mk vendor/intel/utils_priv/Android.mk
     vendor/intel/utils/autopatch.sh
