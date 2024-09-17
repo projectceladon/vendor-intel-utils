@@ -35,8 +35,12 @@ function lunch
 }
 
 # Get the exact value of a build variable.
-function get_build_var()
+function _get_build_var_cached()
 {
+    # Set the TARGET_RELEASE variable to the release_config for
+    # which we want to build CELADON. It should be one among
+    # $(TOP)/build/release/release_configs/*
+    TARGET_RELEASE=ap3a
     if [ "$1" = "COMMON_LUNCH_CHOICES" ]
     then
         valid_targets=`mixinup -t`
@@ -46,7 +50,8 @@ function get_build_var()
             array=(${t/-/ })
             target=${array[0]}
             if [[ "${valid_targets}" =~ "$target" ]]; then
-                   LUNCH_MENU_CHOICES+=($t)
+                   tgt=$target-$TARGET_RELEASE-${array[1]}
+                   LUNCH_MENU_CHOICES+=($tgt)
             fi
         done
         echo ${LUNCH_MENU_CHOICES[@]}
