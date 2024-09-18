@@ -1,0 +1,170 @@
+From 257a37fdcccdd48f2d09d5898a8b5424b8c6e324 Mon Sep 17 00:00:00 2001
+From: Ashley Holton <ashleyholton@google.com>
+Date: Wed, 18 Sep 2024 12:17:29 +0800
+Subject: [PATCH] Post power state listener broadcast calls to handler
+
+Handle power state listener broadcasts on a separate thread to prevent
+more than one broadcast being active at one time.
+
+Bug: 323603048
+Bug: 323603043
+Test: atest CarPowerManagementServiceUnitTest
+
+Tracked-On: OAM-124540
+Signed-off-by: Xu Bing <bing.xu@intel.com>
+---
+ .../car/power/CarPowerManagementService.java  | 92 ++++++++++++-------
+ 1 file changed, 57 insertions(+), 35 deletions(-)
+
+diff --git a/service/src/com/android/car/power/CarPowerManagementService.java b/service/src/com/android/car/power/CarPowerManagementService.java
+index cdfed3813d..2fdec450bb 100644
+--- a/service/src/com/android/car/power/CarPowerManagementService.java
++++ b/service/src/com/android/car/power/CarPowerManagementService.java
+@@ -111,6 +111,7 @@ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.LinkedList;
+ import java.util.Objects;
++import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.Semaphore;
+@@ -181,6 +182,9 @@ public class CarPowerManagementService extends ICarPower.Stub implements
+     private final Context mContext;
+     private final PowerHalService mHal;
+     private final SystemInterface mSystemInterface;
++    private final HandlerThread mBroadcastHandlerThread = CarServiceUtils.getHandlerThread(
++            getClass().getSimpleName() + " broadcasts");
++    private final Handler mBroadcastHandler = new Handler(mBroadcastHandlerThread.getLooper());
+     // The listeners that complete simply by returning from onStateChanged()
+     private final PowerManagerCallbackList<ICarPowerStateListener> mPowerManagerListeners =
+             new PowerManagerCallbackList<>(
+@@ -1228,7 +1232,7 @@ public class CarPowerManagementService extends ICarPower.Stub implements
+         // Broadcasts to the listeners that do not signal completion.
+         notifyListeners(mPowerManagerListeners, newState, INVALID_TIMEOUT);
+ 
+-        boolean allowCompletion = false;
++        boolean allowCompletion;
+         boolean isShutdownPrepare = newState == CarPowerManager.STATE_SHUTDOWN_PREPARE;
+         long internalListenerExpirationTimeMs = INVALID_TIMEOUT;
+         long binderListenerExpirationTimeMs = INVALID_TIMEOUT;
+@@ -1254,6 +1258,7 @@ public class CarPowerManagementService extends ICarPower.Stub implements
+                 binderListenerExpirationTimeMs =
+                         isShutdownPrepare ? INVALID_TIMEOUT : internalListenerExpirationTimeMs;
+             } else {
++                allowCompletion = false;
+                 mStateForCompletion = CarPowerManager.STATE_INVALID;
+             }
+ 
+@@ -1265,17 +1270,21 @@ public class CarPowerManagementService extends ICarPower.Stub implements
+                     mListenersWeAreWaitingFor.add(listener.asBinder());
+                 }
+             }
+-            int idx = mPowerManagerListenersWithCompletion.beginBroadcast();
+-            while (idx-- > 0) {
+-                ICarPowerStateListener listener =
+-                        mPowerManagerListenersWithCompletion.getBroadcastItem(idx);
+-                completingBinderListeners.register(listener);
+-                // For binder listeners, listener completion is not allowed for SHUTDOWN_PREPARE.
+-                if (allowCompletion && !isShutdownPrepare) {
+-                    mListenersWeAreWaitingFor.add(listener.asBinder());
++            mBroadcastHandler.post(() -> {
++                int idx = mPowerManagerListenersWithCompletion.beginBroadcast();
++                while (idx-- > 0) {
++                    ICarPowerStateListener listener =
++                            mPowerManagerListenersWithCompletion.getBroadcastItem(idx);
++                    completingBinderListeners.register(listener);
++                    // For binder listeners, listener completion is not allowed for SHUTDOWN_PREPARE
++                    if (allowCompletion && !isShutdownPrepare) {
++                        synchronized (mLock) {
++                            mListenersWeAreWaitingFor.add(listener.asBinder());
++                        }
++                    }
+                 }
+-            }
+-            mPowerManagerListenersWithCompletion.finishBroadcast();
++                mPowerManagerListenersWithCompletion.finishBroadcast();
++            });
+         }
+         // Resets the semaphore's available permits to 0.
+         mListenerCompletionSem.drainPermits();
+@@ -1290,17 +1299,27 @@ public class CarPowerManagementService extends ICarPower.Stub implements
+ 
+     private void notifyListeners(PowerManagerCallbackList<ICarPowerStateListener> listenerList,
+             @CarPowerManager.CarPowerState int newState, long expirationTimeMs) {
+-        int idx = listenerList.beginBroadcast();
+-        while (idx-- > 0) {
+-            ICarPowerStateListener listener = listenerList.getBroadcastItem(idx);
+-            try {
+-                listener.onStateChanged(newState, expirationTimeMs);
+-            } catch (RemoteException e) {
+-                // It's likely the connection snapped. Let binder death handle the situation.
+-                Slogf.e(TAG, e, "onStateChanged() call failed");
++        CountDownLatch listenerLatch = new CountDownLatch(1);
++        mBroadcastHandler.post(() -> {
++            int idx = listenerList.beginBroadcast();
++            while (idx-- > 0) {
++                ICarPowerStateListener listener = listenerList.getBroadcastItem(idx);
++                try {
++                    listener.onStateChanged(newState, expirationTimeMs);
++                } catch (RemoteException e) {
++                    // It's likely the connection snapped. Let binder death handle the situation.
++                    Slogf.e(TAG, e, "onStateChanged() call failed");
++                }
+             }
++            listenerList.finishBroadcast();
++            listenerLatch.countDown();
++        });
++        try {
++            listenerLatch.await(DEFAULT_COMPLETION_WAIT_TIMEOUT, TimeUnit.MILLISECONDS);
++        } catch (InterruptedException e) {
++            Slogf.w(TAG, e, "Wait for power state listener completion interrupted");
++            Thread.currentThread().interrupt();
+         }
+-        listenerList.finishBroadcast();
+     }
+ 
+     private void doHandleSuspend(boolean simulatedMode) {
+@@ -1928,22 +1947,25 @@ public class CarPowerManagementService extends ICarPower.Stub implements
+         if (appliedPolicy == null) {
+             Slogf.wtf(TAG, "The new power policy(%s) should exist", policyId);
+         }
+-        int idx = mPowerPolicyListeners.beginBroadcast();
+-        while (idx-- > 0) {
+-            ICarPowerPolicyListener listener = mPowerPolicyListeners.getBroadcastItem(idx);
+-            CarPowerPolicyFilter filter =
+-                    (CarPowerPolicyFilter) mPowerPolicyListeners.getBroadcastCookie(idx);
+-            if (!mPowerComponentHandler.isComponentChanged(filter)) {
+-                continue;
+-            }
+-            try {
+-                listener.onPolicyChanged(appliedPolicy, accumulatedPolicy);
+-            } catch (RemoteException e) {
+-                // It's likely the connection snapped. Let binder death handle the situation.
+-                Slogf.e(TAG, e, "onPolicyChanged() call failed: policyId = %s", policyId);
++        mBroadcastHandler.post(() -> {
++            int idx = mPowerPolicyListeners.beginBroadcast();
++
++            while (idx-- > 0) {
++                ICarPowerPolicyListener listener = mPowerPolicyListeners.getBroadcastItem(idx);
++                CarPowerPolicyFilter filter =
++                        (CarPowerPolicyFilter) mPowerPolicyListeners.getBroadcastCookie(idx);
++                if (!mPowerComponentHandler.isComponentChanged(filter)) {
++                    continue;
++                }
++                try {
++                    listener.onPolicyChanged(appliedPolicy, accumulatedPolicy);
++                } catch (RemoteException e) {
++                    // It's likely the connection snapped. Let binder death handle the situation.
++                    Slogf.e(TAG, e, "onPolicyChanged() call failed: policyId = %s", policyId);
++                }
+             }
+-        }
+-        mPowerPolicyListeners.finishBroadcast();
++            mPowerPolicyListeners.finishBroadcast();
++        });
+     }
+ 
+     private void makeSureNoUserInteraction() {
+-- 
+2.34.1
+
