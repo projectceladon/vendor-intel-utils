@@ -1,0 +1,107 @@
+From 558fa8214dfcc3f16be4b910cdc3c5f0da02ab3b Mon Sep 17 00:00:00 2001
+From: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+Date: Thu, 26 Sep 2024 01:17:18 +0530
+Subject: [PATCH] Trigger RNR during reconnect and BT power cycle
+
+Changes made to the remote reference device (Pixel) Bluetooth name
+do not update in DUT's BT settings. Remote Name Request(RNR) is
+not issued during reference device reconnect or BT on/off. So the
+updated name is not fetched from reference device.
+
+Issue RNR from bt-stack during device reconnection and BT power
+cycle. And handle the RNR response, update the latest name in NVRAM
+and notify the same to JNI.
+
+Tests done:
+1. Boot Android
+2. Pair reference device (Pixel) with DUT
+3. Modify reference device name (Pixel 123)
+4. Observe the latest name reflected on DUT (Pixel 123)
+5. Modify reference device name (Pixel 123456)
+6. Observe the latest name reflected on DUT (Pixel 123456)
+
+Tracked-On: OAM-123706
+Signed-off-by: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+---
+ system/stack/btm/btm_sec.cc | 40 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/system/stack/btm/btm_sec.cc b/system/stack/btm/btm_sec.cc
+index 9a363568f9..c14df04323 100644
+--- a/system/stack/btm/btm_sec.cc
++++ b/system/stack/btm/btm_sec.cc
+@@ -33,6 +33,7 @@
+ #include <string.h>
+ 
+ #include "btif/include/btif_storage.h"
++#include "btif/include/stack_manager.h"
+ #include "common/metrics.h"
+ #include "common/time_util.h"
+ #include "device/include/controller.h"
+@@ -2320,17 +2321,45 @@ void btm_sec_rmt_name_request_complete(const RawAddress* p_bd_addr,
+   if (p_dev_rec != nullptr) {
+     old_sec_state = p_dev_rec->sec_state;
+     if (status == HCI_SUCCESS) {
++      BD_NAME bd_name;
++      bool is_rmt_name_changed = false;
+       LOG_DEBUG(
+           "Remote read request complete for known device pairing_state:%s "
+           "name:%s sec_state:%s",
+           btm_pair_state_descr(btm_cb.pairing_state), p_bd_name,
+           security_state_text(p_dev_rec->sec_state).c_str());
+ 
++      if (BTM_GetRemoteDeviceName(p_dev_rec->bd_addr, bd_name) &&
++              (strcmp((char*)p_bd_name, (char*)bd_name) != 0)) {
++          is_rmt_name_changed = true;
++      }
+       strlcpy((char*)p_dev_rec->sec_bd_name, (const char*)p_bd_name,
+               BTM_MAX_REM_BD_NAME_LEN + 1);
+       p_dev_rec->sec_flags |= BTM_SEC_NAME_KNOWN;
+       BTM_TRACE_EVENT("setting BTM_SEC_NAME_KNOWN sec_flags:0x%x",
+                       p_dev_rec->sec_flags);
++
++      /* Update NVRAM and notify JNI only during reconnection and
++       * BT power cycle. */
++      if (btm_cb.pairing_state == BTM_PAIR_STATE_IDLE &&
++                                      is_rmt_name_changed) {
++        bt_property_t properties[3];
++        bt_status_t status;
++
++        properties[0].type = BT_PROPERTY_BDNAME;
++        properties[0].val = p_dev_rec->sec_bd_name;
++        properties[0].len = strlen((char*)p_dev_rec->sec_bd_name);
++        RawAddress& bdaddr = p_dev_rec->bd_addr;
++
++        status =
++            btif_storage_set_remote_device_property(&bdaddr, &properties[0]);
++        if (status == BT_STATUS_SUCCESS) {
++          GetInterfaceToProfiles()->events->invoke_remote_device_properties_cb(
++              status, bdaddr, 1, properties);
++          BTM_TRACE_DEBUG("Updated remote name %s to NVRAM and "
++                          "notified to upper layer", p_dev_rec->sec_bd_name);
++        }
++      }
+     } else {
+       LOG_WARN(
+           "Remote read request failed for known device pairing_state:%s "
+@@ -3637,6 +3666,17 @@ void btm_sec_connected(const RawAddress& bda, uint16_t handle,
+       /* always clear the pending flag */
+       p_dev_rec->sm4 &= ~BTM_SM4_CONN_PEND;
+     }
++    /* Trigger RNR only during remote device reconnect. Ignore duplicate RNR
++     * in all other cases. */
++    if (btm_cb.pairing_state == BTM_PAIR_STATE_IDLE &&
++              p_dev_rec->sec_state != BTM_SEC_STATE_GETTING_NAME &&
++              strlen((const char*)p_dev_rec->sec_bd_name)) {
++      BTM_TRACE_DEBUG("%s BTM_ReadRemoteDeviceName during reconnect", __func__);
++      if (BTM_ReadRemoteDeviceName(p_dev_rec->bd_addr, NULL,
++                      BT_TRANSPORT_BR_EDR) != BTM_CMD_STARTED) {
++        BTM_TRACE_ERROR("%s BTM_ReadRemoteDeviceName failed", __func__);
++      }
++    }
+   }
+ 
+   p_dev_rec->device_type |= BT_DEVICE_TYPE_BREDR;
+-- 
+2.17.1
+
