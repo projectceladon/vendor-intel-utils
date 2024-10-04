@@ -1,0 +1,147 @@
+From 24989666ff595a9bf4168f3bdb45f27ec154b4ce Mon Sep 17 00:00:00 2001
+From: Manvi Bajaj <manvi.bajaj@intel.com>
+Date: Thu, 12 Sep 2024 14:09:04 +0530
+Subject: [PATCH] Fix static analysis issues for thermal daemon for IVI
+
+Below issues will be solved with this change.
+
++-------------------------------+
+|Unchecked return value from library |
+|Argument cannot be negative |
+|Waiting while holding a lock |
+|Resource leak |
+|Uninitialized scalar variable |
++-------------------------------+
+
+Signed-off-by: Manvi Bajaj <manvi.bajaj@intel.com>
+---
+ src/android_main.cpp   | 28 +++++++++++++++++++++++++---
+ src/thd_engine.cpp     | 19 +++++++++++++------
+ src/thd_trip_point.cpp |  3 ++-
+ 3 files changed, 40 insertions(+), 10 deletions(-)
+
+diff --git a/src/android_main.cpp b/src/android_main.cpp
+index 1832a52..26c7273 100644
+--- a/src/android_main.cpp
++++ b/src/android_main.cpp
+@@ -125,8 +125,21 @@ static void daemonize(char *rundir, char *pidfile) {
+ 	}
+ 
+ 	i = open("/dev/null", O_RDWR);
+-	dup(i);
+-	dup(i);
++	if (i == -1)
++	{
++		thd_log_info("Could not open /dev/null\n");
++		exit(EXIT_FAILURE);
++	}
++	int ret = dup(i);
++	if (ret == -1) {
++		close(i);
++		exit(EXIT_FAILURE);
++	}
++	int ret1 = dup(i);
++	if (ret1 == -1) {
++		close(i);
++		exit(EXIT_FAILURE);
++	}
+ 	chdir(rundir);
+ 
+ 	pid_file_handle = open(pidfile, O_RDWR | O_CREAT, 0600);
+@@ -148,6 +161,9 @@ static void daemonize(char *rundir, char *pidfile) {
+ 	thd_log_info("Thermal PID %d\n", getpid());
+ 	snprintf(str, sizeof(str), "%d\n", getpid());
+ 	write(pid_file_handle, str, strlen(str));
++	close(ret);
++	close(ret1);
++	close(i);
+ }
+ 
+ static void print_usage(FILE* stream, int exit_code) {
+@@ -239,7 +255,13 @@ int main(int argc, char *argv[]) {
+ 			exit(EXIT_FAILURE);
+ 		}
+ 	}
+-	mkdir(TDCONFDIR, 0755); // Don't care return value as directory
++	if (mkdir(TDCONFDIR, 0755) !=0) {
++		if (errno != EEXIST) {
++			fprintf(stderr, "Cannot create '%s': %s\n", TDCONFDIR,
++					strerror(errno));
++			exit(EXIT_FAILURE);
++		}
++	}
+ 	if (!no_daemon) {
+ 		daemonize((char *) "/data/vendor/thermal-daemon",
+ 				(char *) "/data/vendor/thermal-daemon/thermald.pid");
+diff --git a/src/thd_engine.cpp b/src/thd_engine.cpp
+index 828f6af..5f90c9f 100644
+--- a/src/thd_engine.cpp
++++ b/src/thd_engine.cpp
+@@ -110,13 +110,15 @@ void cthd_engine::thd_engine_thread() {
+ 				thd_log_warn("Thermal Daemon is disabled \n");
+ 				continue;
+ 			}
++			std::vector<cthd_zone *> zones_copy;
+ 			pthread_mutex_lock(&thd_engine_mutex);
++			zones_copy = zones;
++			pthread_mutex_unlock(&thd_engine_mutex);
+ 			// Polling mode enabled. Trigger a temp change message
+-			for (i = 0; i < zones.size(); ++i) {
+-				cthd_zone *zone = zones[i];
++			for (i = 0; i < zones_copy.size(); ++i) {
++				cthd_zone *zone = zones_copy[i];
+ 				zone->zone_temperature_notification(0, 0);
+ 			}
+-			pthread_mutex_unlock(&thd_engine_mutex);
+ 			thz_last_temp_ind_time = tm;
+ 		}
+ 		if (uevent_fd >= 0 && poll_fds[uevent_fd].revents & POLLIN) {
+@@ -128,12 +130,14 @@ void cthd_engine::thd_engine_thread() {
+ 				thd_log_debug("kobj uevent for thermal\n");
+ 				if ((tm - thz_last_uevent_time)
+ 						>= thz_notify_debounce_interval) {
++					std::vector<cthd_zone *> zones_copy;
+ 					pthread_mutex_lock(&thd_engine_mutex);
+-					for (i = 0; i < zones.size(); ++i) {
+-						cthd_zone *zone = zones[i];
++					zones_copy = zones;
++					pthread_mutex_unlock(&thd_engine_mutex);
++					for (i = 0; i < zones_copy.size(); ++i) {
++						cthd_zone *zone = zones_copy[i];
+ 						zone->zone_temperature_notification(0, 0);
+ 					}
+-					pthread_mutex_unlock(&thd_engine_mutex);
+ 				} else {
+ 					thd_log_debug("IGNORE THZ kevent\n");
+ 				}
+@@ -1068,6 +1072,9 @@ int cthd_engine::user_add_zone(std::string zone_name, unsigned int trip_temp,
+ 		pthread_mutex_unlock(&thd_engine_mutex);
+ 		zone->set_zone_active();
+ 		++current_zone_index;
++	} else {
++		delete zone;
++		return THD_ERROR;
+ 	}
+ 
+ 	for (unsigned int i = 0; i < zones.size(); ++i) {
+diff --git a/src/thd_trip_point.cpp b/src/thd_trip_point.cpp
+index 50c9112..582eb55 100644
+--- a/src/thd_trip_point.cpp
++++ b/src/thd_trip_point.cpp
+@@ -345,11 +345,12 @@ void cthd_trip_point::thd_trip_point_add_cdev(cthd_cdev &cdev, int influence,
+ int cthd_trip_point::thd_trip_point_add_cdev_index(int _index, int influence) {
+ 	cthd_cdev *cdev = thd_engine->thd_get_cdev_at_index(_index);
+ 	if (cdev) {
+-		trip_pt_cdev_t thd_cdev;
++		trip_pt_cdev_t thd_cdev = {};
+ 		thd_cdev.cdev = cdev;
+ 		thd_cdev.influence = influence;
+ 		thd_cdev.sampling_priod = 0;
+ 		thd_cdev.last_op_time = 0;
++		thd_cdev.target_state_valid = 0;
+ 		trip_cdev_add(thd_cdev);
+ 		return THD_SUCCESS;
+ 	} else {
+-- 
+2.34.1
+
