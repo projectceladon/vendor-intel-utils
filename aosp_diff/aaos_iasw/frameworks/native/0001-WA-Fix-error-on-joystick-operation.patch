@@ -1,0 +1,134 @@
+From 92001c1d5eefd1859420dc12f3617751daa378c5 Mon Sep 17 00:00:00 2001
+From: Xu Bing <bing.xu@intel.com>
+Date: Wed, 9 Oct 2024 13:59:39 +0800
+Subject: [PATCH] [WA]Fix error on joystick operation
+
+The event of joystick will be actived on the foucus window, it is
+only related with display ID, but is not related with user, so force
+to enable it on main display.
+
+Tracked-On: OAM-125665
+Signed-off-by: Xu Bing <bing.xu@intel.com>
+---
+ .../dispatcher/InputDispatcher.cpp            | 32 +++++++++++++++----
+ .../reader/mapper/JoystickInputMapper.cpp     |  2 ++
+ 2 files changed, 27 insertions(+), 7 deletions(-)
+
+diff --git a/services/inputflinger/dispatcher/InputDispatcher.cpp b/services/inputflinger/dispatcher/InputDispatcher.cpp
+index c906c3e0ce..e9ca1040ff 100644
+--- a/services/inputflinger/dispatcher/InputDispatcher.cpp
++++ b/services/inputflinger/dispatcher/InputDispatcher.cpp
+@@ -19,6 +19,10 @@
+ 
+ #define LOG_NDEBUG 1
+ 
++// Input Source JOYSTICK & BUTTON Value
++#define SOURCE_CLASS_JOYSTICK 0x00000010
++#define SOURCE_CLASS_BUTTON 0x00000001
++
+ #include <android-base/chrono_utils.h>
+ #include <android-base/logging.h>
+ #include <android-base/properties.h>
+@@ -4265,6 +4269,13 @@ void InputDispatcher::notifyKey(const NotifyKeyArgs& args) {
+         return;
+     }
+ 
++    int32_t display_id = args.displayId;
++
++    // Send all Key Input Source Events to Default Display.
++    if (display_id == ADISPLAY_ID_NONE && ((args.source & SOURCE_CLASS_BUTTON) == SOURCE_CLASS_BUTTON)) {
++        display_id = ADISPLAY_ID_DEFAULT;
++    }
++
+     uint32_t policyFlags = args.policyFlags;
+     int32_t flags = args.flags;
+     int32_t metaState = args.metaState;
+@@ -4285,7 +4296,7 @@ void InputDispatcher::notifyKey(const NotifyKeyArgs& args) {
+     accelerateMetaShortcuts(args.deviceId, args.action, keyCode, metaState);
+ 
+     KeyEvent event;
+-    event.initialize(args.id, args.deviceId, args.source, args.displayId, INVALID_HMAC, args.action,
++    event.initialize(args.id, args.deviceId, args.source, display_id, INVALID_HMAC, args.action,
+                      flags, keyCode, args.scanCode, metaState, repeatCount, args.downTime,
+                      args.eventTime);
+ 
+@@ -4313,7 +4324,7 @@ void InputDispatcher::notifyKey(const NotifyKeyArgs& args) {
+ 
+         std::unique_ptr<KeyEntry> newEntry =
+                 std::make_unique<KeyEntry>(args.id, args.eventTime, args.deviceId, args.source,
+-                                           args.displayId, policyFlags, args.action, flags, keyCode,
++                                           display_id, policyFlags, args.action, flags, keyCode,
+                                            args.scanCode, metaState, repeatCount, args.downTime);
+ 
+         needWake = enqueueInboundEventLocked(std::move(newEntry));
+@@ -4379,11 +4390,18 @@ void InputDispatcher::notifyMotion(const NotifyMotionArgs& args) {
+         }
+     }
+ 
++    int32_t display_id = args.displayId;
++
++    // Send all Joy Stick Input Source Events to Default Display.
++    if ((args.source & SOURCE_CLASS_JOYSTICK) == SOURCE_CLASS_JOYSTICK) {
++        display_id = ADISPLAY_ID_DEFAULT;
++    }
++
+     uint32_t policyFlags = args.policyFlags;
+     policyFlags |= POLICY_FLAG_TRUSTED;
+ 
+     android::base::Timer t;
+-    mPolicy.interceptMotionBeforeQueueing(args.displayId, args.eventTime, policyFlags);
++    mPolicy.interceptMotionBeforeQueueing(display_id, args.eventTime, policyFlags);
+     if (t.duration() > SLOW_INTERCEPTION_THRESHOLD) {
+         ALOGW("Excessive delay in interceptMotionBeforeQueueing; took %s ms",
+               std::to_string(t.duration().count()).c_str());
+@@ -4395,7 +4413,7 @@ void InputDispatcher::notifyMotion(const NotifyMotionArgs& args) {
+         if (!(policyFlags & POLICY_FLAG_PASS_TO_USER)) {
+             // Set the flag anyway if we already have an ongoing gesture. That would allow us to
+             // complete the processing of the current stroke.
+-            const auto touchStateIt = mTouchStatesByDisplay.find(args.displayId);
++            const auto touchStateIt = mTouchStatesByDisplay.find(display_id);
+             if (touchStateIt != mTouchStatesByDisplay.end()) {
+                 const TouchState& touchState = touchStateIt->second;
+                 if (touchState.hasTouchingPointers(args.deviceId)) {
+@@ -4406,14 +4424,14 @@ void InputDispatcher::notifyMotion(const NotifyMotionArgs& args) {
+ 
+         if (shouldSendMotionToInputFilterLocked(args)) {
+             ui::Transform displayTransform;
+-            if (const auto it = mDisplayInfos.find(args.displayId); it != mDisplayInfos.end()) {
++            if (const auto it = mDisplayInfos.find(display_id); it != mDisplayInfos.end()) {
+                 displayTransform = it->second.transform;
+             }
+ 
+             mLock.unlock();
+ 
+             MotionEvent event;
+-            event.initialize(args.id, args.deviceId, args.source, args.displayId, INVALID_HMAC,
++            event.initialize(args.id, args.deviceId, args.source, display_id, INVALID_HMAC,
+                              args.action, args.actionButton, args.flags, args.edgeFlags,
+                              args.metaState, args.buttonState, args.classification,
+                              displayTransform, args.xPrecision, args.yPrecision,
+@@ -4431,7 +4449,7 @@ void InputDispatcher::notifyMotion(const NotifyMotionArgs& args) {
+ 
+         // Just enqueue a new motion event.
+         std::unique_ptr<MotionEntry> newEntry =
+-                std::make_unique<MotionEntry>(args.id, args.eventTime, args.deviceId, args.source,
++                std::make_unique<MotionEntry>(args.id, args.eventTime, display_id, args.source,
+                                               args.displayId, policyFlags, args.action,
+                                               args.actionButton, args.flags, args.metaState,
+                                               args.buttonState, args.classification, args.edgeFlags,
+diff --git a/services/inputflinger/reader/mapper/JoystickInputMapper.cpp b/services/inputflinger/reader/mapper/JoystickInputMapper.cpp
+index 099a95541e..5ecd9f4294 100644
+--- a/services/inputflinger/reader/mapper/JoystickInputMapper.cpp
++++ b/services/inputflinger/reader/mapper/JoystickInputMapper.cpp
+@@ -344,6 +344,8 @@ std::list<NotifyArgs> JoystickInputMapper::sync(nsecs_t when, nsecs_t readTime,
+     int32_t displayId = ADISPLAY_ID_NONE;
+     if (getDeviceContext().getAssociatedViewport()) {
+         displayId = getDeviceContext().getAssociatedViewport()->displayId;
++    } else {
++        displayId = ADISPLAY_ID_DEFAULT;
+     }
+ 
+     out.push_back(NotifyMotionArgs(getContext()->getNextId(), when, readTime, getDeviceId(),
+-- 
+2.34.1
+
