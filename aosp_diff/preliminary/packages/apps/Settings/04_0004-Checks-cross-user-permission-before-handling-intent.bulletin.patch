@@ -1,0 +1,239 @@
+From 34b9bd3233b0b90ba460cf62ad425b414141fd98 Mon Sep 17 00:00:00 2001
+From: Fan Wu <cechkahn@google.com>
+Date: Mon, 22 Jul 2024 16:12:46 +0800
+Subject: [PATCH] Checks cross user permission before handling intent
+
+Bug: 326057017
+
+Test: atest
+
+Flag: EXEMPT bug fix
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:d3b3edd45167515579ab156533754e56ac813f35)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:d5a0692bd13eb18bd18cb012f20c9a2dceb17241)
+Merged-In: I3444e55b22b7487f96b0e3e9deb3f844c4c4723a
+Change-Id: I3444e55b22b7487f96b0e3e9deb3f844c4c4723a
+---
+ .../settings/applications/AppInfoBase.java    | 33 +++++++++++++++-
+ .../applications/AppInfoWithHeaderTest.java   | 38 +++++++++++++++++++
+ .../appcompat/UserAspectRatioDetailsTest.java | 31 ++++++++++-----
+ 3 files changed, 91 insertions(+), 11 deletions(-)
+
+diff --git a/src/com/android/settings/applications/AppInfoBase.java b/src/com/android/settings/applications/AppInfoBase.java
+index 2c41be4ad4..f55aee23f9 100644
+--- a/src/com/android/settings/applications/AppInfoBase.java
++++ b/src/com/android/settings/applications/AppInfoBase.java
+@@ -18,6 +18,7 @@ package com.android.settings.applications;
+ 
+ import static com.android.settingslib.RestrictedLockUtils.EnforcedAdmin;
+ 
++import android.Manifest;
+ import android.app.Activity;
+ import android.app.Dialog;
+ import android.app.admin.DevicePolicyManager;
+@@ -39,6 +40,7 @@ import android.os.UserManager;
+ import android.text.TextUtils;
+ import android.util.Log;
+ 
++import androidx.annotation.VisibleForTesting;
+ import androidx.appcompat.app.AlertDialog;
+ import androidx.fragment.app.DialogFragment;
+ import androidx.fragment.app.Fragment;
+@@ -135,8 +137,13 @@ public abstract class AppInfoBase extends SettingsPreferenceFragment
+             }
+         }
+         if (intent != null && intent.hasExtra(Intent.EXTRA_USER_HANDLE)) {
+-            mUserId = ((UserHandle) intent.getParcelableExtra(
+-                    Intent.EXTRA_USER_HANDLE)).getIdentifier();
++            mUserId = ((UserHandle) intent.getParcelableExtra(Intent.EXTRA_USER_HANDLE))
++                    .getIdentifier();
++            if (mUserId != UserHandle.myUserId() && !hasInteractAcrossUsersPermission()) {
++                Log.w(TAG, "Intent not valid.");
++                finish();
++                return "";
++            }
+         } else {
+             mUserId = UserHandle.myUserId();
+         }
+@@ -163,6 +170,28 @@ public abstract class AppInfoBase extends SettingsPreferenceFragment
+         return mPackageName;
+     }
+ 
++    @VisibleForTesting
++    protected boolean hasInteractAcrossUsersPermission() {
++        Activity activity = getActivity();
++        if (!(activity instanceof SettingsActivity)) {
++            return false;
++        }
++        final String callingPackageName =
++                ((SettingsActivity) activity).getInitialCallingPackage();
++
++        if (TextUtils.isEmpty(callingPackageName)) {
++            Log.w(TAG, "Not able to get calling package name for permission check");
++            return false;
++        }
++        if (mPm.checkPermission(Manifest.permission.INTERACT_ACROSS_USERS_FULL, callingPackageName)
++                != PackageManager.PERMISSION_GRANTED) {
++            Log.w(TAG, "Package " + callingPackageName + " does not have required permission "
++                    + Manifest.permission.INTERACT_ACROSS_USERS_FULL);
++            return false;
++        }
++        return true;
++    }
++
+     protected void setIntentAndFinish(boolean appChanged) {
+         Log.i(TAG, "appChanged=" + appChanged);
+         Intent intent = new Intent();
+diff --git a/tests/robotests/src/com/android/settings/applications/AppInfoWithHeaderTest.java b/tests/robotests/src/com/android/settings/applications/AppInfoWithHeaderTest.java
+index 562212e356..cb121ea3c0 100644
+--- a/tests/robotests/src/com/android/settings/applications/AppInfoWithHeaderTest.java
++++ b/tests/robotests/src/com/android/settings/applications/AppInfoWithHeaderTest.java
+@@ -171,6 +171,32 @@ public class AppInfoWithHeaderTest {
+         assertThat(mAppInfoWithHeader.mAppEntry).isNotNull();
+     }
+ 
++    @Test
++    public void noCrossUserPermission_retrieveAppEntry_fail()
++            throws PackageManager.NameNotFoundException {
++        TestFragmentWithoutPermission testFragmentWithoutPermission =
++                new TestFragmentWithoutPermission();
++        final int userId = 1002;
++        final String packageName = "com.android.settings";
++
++        testFragmentWithoutPermission.mIntent.putExtra(Intent.EXTRA_USER_HANDLE,
++                new UserHandle(userId));
++        testFragmentWithoutPermission.mIntent.setData(Uri.fromParts("package",
++                packageName, null));
++        final ApplicationsState.AppEntry entry = mock(ApplicationsState.AppEntry.class);
++        entry.info = new ApplicationInfo();
++        entry.info.packageName = packageName;
++
++        when(testFragmentWithoutPermission.mState.getEntry(packageName, userId)).thenReturn(entry);
++        when(testFragmentWithoutPermission.mPm.getPackageInfoAsUser(eq(entry.info.packageName),
++                any(), eq(userId))).thenReturn(
++                testFragmentWithoutPermission.mPackageInfo);
++
++        testFragmentWithoutPermission.retrieveAppEntry();
++
++        assertThat(testFragmentWithoutPermission.mAppEntry).isNull();
++    }
++
+     public static class TestFragment extends AppInfoWithHeader {
+ 
+         PreferenceManager mManager;
+@@ -223,6 +249,11 @@ public class AppInfoWithHeaderTest {
+             return mShadowContext;
+         }
+ 
++        @Override
++        protected boolean hasInteractAcrossUsersPermission() {
++            return true;
++        }
++
+         @Override
+         protected void onPackageRemoved() {
+             mPackageRemovedCalled = true;
+@@ -233,4 +264,11 @@ public class AppInfoWithHeaderTest {
+             return mIntent;
+         }
+     }
++
++    private static final class TestFragmentWithoutPermission extends TestFragment {
++        @Override
++        protected boolean hasInteractAcrossUsersPermission() {
++            return false;
++        }
++    }
+ }
+diff --git a/tests/robotests/src/com/android/settings/applications/appcompat/UserAspectRatioDetailsTest.java b/tests/robotests/src/com/android/settings/applications/appcompat/UserAspectRatioDetailsTest.java
+index ce03a6def3..d597b7ea04 100644
+--- a/tests/robotests/src/com/android/settings/applications/appcompat/UserAspectRatioDetailsTest.java
++++ b/tests/robotests/src/com/android/settings/applications/appcompat/UserAspectRatioDetailsTest.java
+@@ -39,23 +39,26 @@ import static org.mockito.Mockito.spy;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
++import android.Manifest;
++import android.app.Application;
+ import android.app.IActivityManager;
+ import android.app.settings.SettingsEnums;
+ import android.content.Context;
++import android.content.Intent;
++import android.content.pm.PackageManager;
+ import android.os.Bundle;
+ import android.os.RemoteException;
++import android.os.UserHandle;
+ 
+-import androidx.fragment.app.testing.EmptyFragmentActivity;
+ import androidx.test.core.app.ApplicationProvider;
+-import androidx.test.ext.junit.rules.ActivityScenarioRule;
+ 
++import com.android.settings.SettingsActivity;
+ import com.android.settings.testutils.FakeFeatureFactory;
+ import com.android.settings.testutils.shadow.ShadowActivityManager;
+ import com.android.settings.testutils.shadow.ShadowFragment;
+ import com.android.settingslib.core.instrumentation.MetricsFeatureProvider;
+ 
+ import org.junit.Before;
+-import org.junit.Rule;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.mockito.InOrder;
+@@ -71,14 +74,14 @@ import org.robolectric.annotation.Config;
+ @Config(shadows = {ShadowActivityManager.class, ShadowFragment.class})
+ public class UserAspectRatioDetailsTest {
+ 
+-    @Rule
+-    public ActivityScenarioRule<EmptyFragmentActivity> rule =
+-            new ActivityScenarioRule<>(EmptyFragmentActivity.class);
+-
+     @Mock
+     private UserAspectRatioManager mUserAspectRatioManager;
+     @Mock
+     private IActivityManager mAm;
++    @Mock
++    private PackageManager mPackageManager;
++    @Mock
++    private SettingsActivity mSettingsActivity;
+ 
+     private RadioWithImagePreference mRadioButtonPref;
+     private Context mContext;
+@@ -93,6 +96,12 @@ public class UserAspectRatioDetailsTest {
+         mFragment = spy(new UserAspectRatioDetails());
+         when(mFragment.getContext()).thenReturn(mContext);
+         when(mFragment.getAspectRatioManager()).thenReturn(mUserAspectRatioManager);
++        when(mFragment.getActivity()).thenReturn(mSettingsActivity);
++        when(mSettingsActivity.getApplication()).thenReturn((Application) mContext);
++        when(mSettingsActivity.getInitialCallingPackage()).thenReturn("test.package");
++        when(mSettingsActivity.getPackageManager()).thenReturn(mPackageManager);
++        when(mPackageManager.checkPermission(eq(Manifest.permission.INTERACT_ACROSS_USERS_FULL),
++                any())).thenReturn(PackageManager.PERMISSION_GRANTED);
+         when(mUserAspectRatioManager.isOverrideToFullscreenEnabled(anyString(), anyInt()))
+                 .thenReturn(false);
+         ShadowActivityManager.setService(mAm);
+@@ -111,8 +120,10 @@ public class UserAspectRatioDetailsTest {
+                 .getUserMinAspectRatioOrder(USER_MIN_ASPECT_RATIO_FULLSCREEN);
+         doReturn(2).when(mUserAspectRatioManager)
+                 .getUserMinAspectRatioOrder(USER_MIN_ASPECT_RATIO_UNSET);
+-        rule.getScenario().onActivity(a -> doReturn(a).when(mFragment).getActivity());
+         final Bundle args = new Bundle();
++        Intent intent = new Intent();
++        intent.putExtra(Intent.EXTRA_USER_HANDLE, new UserHandle(0));
++        args.putParcelable("intent", intent);
+         args.putString(ARG_PACKAGE_NAME, anyString());
+         mFragment.setArguments(args);
+         mFragment.onCreate(Bundle.EMPTY);
+@@ -196,8 +207,10 @@ public class UserAspectRatioDetailsTest {
+         doReturn(true).when(mUserAspectRatioManager)
+                 .hasAspectRatioOption(anyInt(), anyString());
+ 
+-        rule.getScenario().onActivity(a -> doReturn(a).when(mFragment).getActivity());
+         final Bundle args = new Bundle();
++        Intent intent = new Intent();
++        intent.putExtra(Intent.EXTRA_USER_HANDLE, new UserHandle(0));
++        args.putParcelable("intent", intent);
+         args.putString(ARG_PACKAGE_NAME, anyString());
+         mFragment.setArguments(args);
+         mFragment.onCreate(Bundle.EMPTY);
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
