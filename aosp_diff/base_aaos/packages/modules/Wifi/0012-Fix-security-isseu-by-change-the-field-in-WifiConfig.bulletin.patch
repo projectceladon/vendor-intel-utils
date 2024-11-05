@@ -1,0 +1,284 @@
+From 5124c5c31a32405cd7f939d2cdbe368137409c24 Mon Sep 17 00:00:00 2001
+From: Nate Jiang <qiangjiang@google.com>
+Date: Thu, 8 Aug 2024 18:13:39 +0000
+Subject: [PATCH] Fix security isseu by change the field in WifiConfig
+
+Flag: EXEMPT bugfix
+Bug: 347912017
+Bug: 348352288
+Bug: 346289032
+Test: atest com.android.server.wifi
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:eca3f190d2a5b6b634224863f5ee5f584babd0dc)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:945a365e2dd63e921f0a459b25afbb8c0ceeee8b)
+Merged-In: I8998340ae557660036895dd906808d682b83c6f0
+Change-Id: I8998340ae557660036895dd906808d682b83c6f0
+---
+ .../server/wifi/WifiConfigurationUtil.java    | 105 +++++++++++++++++-
+ .../wifi/WifiConfigurationUtilTest.java       |  69 ++++++++++++
+ 2 files changed, 170 insertions(+), 4 deletions(-)
+
+diff --git a/service/java/com/android/server/wifi/WifiConfigurationUtil.java b/service/java/com/android/server/wifi/WifiConfigurationUtil.java
+index 3ab3ca3d08..379661ad0b 100644
+--- a/service/java/com/android/server/wifi/WifiConfigurationUtil.java
++++ b/service/java/com/android/server/wifi/WifiConfigurationUtil.java
+@@ -19,7 +19,10 @@ package com.android.server.wifi;
+ import static android.net.wifi.WifiConfiguration.INVALID_NETWORK_ID;
+ import static android.net.wifi.WifiConfiguration.SECURITY_TYPE_EAP;
+ import static android.net.wifi.WifiConfiguration.SECURITY_TYPE_EAP_WPA3_ENTERPRISE;
++import static android.net.wifi.WifiConfiguration.SECURITY_TYPE_NUM;
+ import static android.net.wifi.WifiManager.ALL_ZEROS_MAC_ADDRESS;
++import static android.net.wifi.hotspot2.PasspointConfiguration.MAX_NUMBER_OF_OI;
++import static android.net.wifi.hotspot2.PasspointConfiguration.MAX_OI_VALUE;
+ 
+ import static com.android.server.wifi.util.NativeUtil.addEnclosingQuotes;
+ 
+@@ -34,6 +37,8 @@ import android.net.wifi.WifiInfo;
+ import android.net.wifi.WifiManager;
+ import android.net.wifi.WifiNetworkSpecifier;
+ import android.net.wifi.WifiScanner;
++import android.net.wifi.WifiSsid;
++import android.net.wifi.hotspot2.PasspointConfiguration;
+ import android.os.PatternMatcher;
+ import android.text.TextUtils;
+ import android.util.Log;
+@@ -49,8 +54,10 @@ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.BitSet;
+ import java.util.Comparator;
++import java.util.HashSet;
+ import java.util.List;
+ import java.util.Objects;
++import java.util.Set;
+ 
+ /**
+  * WifiConfiguration utility for any {@link android.net.wifi.WifiConfiguration} related operations.
+@@ -75,6 +82,7 @@ public class WifiConfigurationUtil {
+     private static final int PSK_SAE_HEX_LEN = 64;
+     private static final int WEP104_KEY_BYTES_LEN = 13;
+     private static final int WEP40_KEY_BYTES_LEN = 5;
++    private static final int MAX_STRING_LENGTH = 512;
+ 
+     @VisibleForTesting
+     public static final String PASSWORD_MASK = "*";
+@@ -681,7 +689,8 @@ public class WifiConfigurationUtil {
+         if (!validateSsid(config.SSID, isAdd)) {
+             return false;
+         }
+-        if (!validateBssid(config.BSSID)) {
++        if (!validateBssid(config.BSSID) || !validateBssid(config.dhcpServer)
++                || !validateBssid(config.defaultGwMacAddress)) {
+             return false;
+         }
+         if (!validateBitSets(config)) {
+@@ -690,9 +699,22 @@ public class WifiConfigurationUtil {
+         if (!validateKeyMgmt(config.allowedKeyManagement)) {
+             return false;
+         }
+-        if (config.isSecurityType(WifiConfiguration.SECURITY_TYPE_WEP)
+-                && config.wepKeys != null
+-                && !validateWepKeys(config.wepKeys, config.wepTxKeyIndex, isAdd)) {
++        if (!validateSecurityParameters(config.getSecurityParamsList())) {
++            return false;
++        }
++        if (!validatePasspoint(config)) {
++            return false;
++        }
++        if (!validateNetworkSelectionStatus(config.getNetworkSelectionStatus())) {
++            return false;
++        }
++
++        if (config.isSecurityType(WifiConfiguration.SECURITY_TYPE_WEP)) {
++            if (config.wepKeys != null
++                    && !validateWepKeys(config.wepKeys, config.wepTxKeyIndex, isAdd)) {
++                return false;
++            }
++        } else if (!validateWepKeys(config.wepKeys, config.wepTxKeyIndex, false)) {
+             return false;
+         }
+         if (config.isSecurityType(WifiConfiguration.SECURITY_TYPE_PSK)
+@@ -723,6 +745,81 @@ public class WifiConfigurationUtil {
+         return true;
+     }
+ 
++    private static boolean validateStringField(String field, int maxLength) {
++        return field == null || field.length() <= maxLength;
++    }
++
++    private static boolean validatePasspoint(WifiConfiguration config) {
++        if (!validateStringField(config.FQDN, PasspointConfiguration.MAX_STRING_LENGTH)) {
++            return false;
++        }
++        if (!validateStringField(config.providerFriendlyName,
++                PasspointConfiguration.MAX_STRING_LENGTH)) {
++            return false;
++        }
++        if (!validateRoamingConsortiumIds(config.roamingConsortiumIds)) {
++            return false;
++        }
++        if (!validateUpdateIdentifier(config.updateIdentifier)) {
++            return false;
++        }
++        return true;
++    }
++
++    private static boolean validateUpdateIdentifier(String updateIdentifier) {
++        if (TextUtils.isEmpty(updateIdentifier)) {
++            return true;
++        }
++        try {
++            Integer.valueOf(updateIdentifier);
++        } catch (NumberFormatException e) {
++            return false;
++        }
++        return true;
++    }
++
++    private static boolean validateNetworkSelectionStatus(
++            WifiConfiguration.NetworkSelectionStatus status) {
++        if (status == null) {
++            return false;
++        }
++        return validateStringField(status.getConnectChoice(), MAX_STRING_LENGTH)
++                    && validateBssid(status.getNetworkSelectionBSSID());
++    }
++
++    private static boolean validateRoamingConsortiumIds(long[] roamingConsortiumIds) {
++        if (roamingConsortiumIds != null) {
++            if (roamingConsortiumIds.length > MAX_NUMBER_OF_OI) {
++                Log.d(TAG, "too many Roaming Consortium Organization Identifiers in the "
++                        + "profile");
++                return false;
++            }
++            for (long oi : roamingConsortiumIds) {
++                if (oi < 0 || oi > MAX_OI_VALUE) {
++                    Log.d(TAG, "Organization Identifiers is out of range");
++                    return false;
++                }
++            }
++        }
++        return true;
++    }
++
++    private static boolean validateSecurityParameters(List<SecurityParams> paramsList) {
++        Set<Integer> uniqueSecurityTypes = new HashSet<>(SECURITY_TYPE_NUM + 1);
++        for (SecurityParams params : paramsList) {
++            int securityType = params.getSecurityType();
++            if (securityType < 0 || securityType > SECURITY_TYPE_NUM) {
++                return false;
++            }
++            if (uniqueSecurityTypes.contains(securityType)) {
++                return false;
++            }
++            uniqueSecurityTypes.add(securityType);
++        }
++        return true;
++
++    }
++
+     private static boolean validateBssidPattern(
+             Pair<MacAddress, MacAddress> bssidPatternMatcher) {
+         if (bssidPatternMatcher == null) return true;
+diff --git a/service/tests/wifitests/src/com/android/server/wifi/WifiConfigurationUtilTest.java b/service/tests/wifitests/src/com/android/server/wifi/WifiConfigurationUtilTest.java
+index af9b08bd84..01934d92ea 100644
+--- a/service/tests/wifitests/src/com/android/server/wifi/WifiConfigurationUtilTest.java
++++ b/service/tests/wifitests/src/com/android/server/wifi/WifiConfigurationUtilTest.java
+@@ -19,6 +19,7 @@ package com.android.server.wifi;
+ import static android.net.wifi.WifiConfiguration.INVALID_NETWORK_ID;
+ import static android.net.wifi.WifiEnterpriseConfig.OCSP_NONE;
+ import static android.net.wifi.WifiEnterpriseConfig.OCSP_REQUIRE_CERT_STATUS;
++import static android.net.wifi.hotspot2.PasspointConfiguration.MAX_URL_BYTES;
+ 
+ import static com.android.server.wifi.WifiConfigurationUtil.addSecurityTypeToNetworkId;
+ import static com.android.server.wifi.WifiConfigurationUtil.convertWifiInfoSecurityTypeToWifiConfiguration;
+@@ -45,8 +46,11 @@ import androidx.test.filters.SmallTest;
+ 
+ import com.android.modules.utils.build.SdkLevel;
+ 
++import com.google.common.base.Strings;
++
+ import org.junit.Test;
+ 
++import java.nio.charset.StandardCharsets;
+ import java.security.cert.X509Certificate;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -70,6 +74,8 @@ public class WifiConfigurationUtilTest extends WifiBaseTest {
+     static final List<UserInfo> PROFILES = Arrays.asList(
+             new UserInfo(CURRENT_USER_ID, "owner", 0),
+             new UserInfo(CURRENT_USER_MANAGED_PROFILE_USER_ID, "managed profile", 0));
++    private static final long SUPPORTED_FEATURES_ALL = Long.MAX_VALUE;
++    private final String mGeneratedString256 = Strings.repeat("a", 256);
+ 
+     /**
+      * Verify that new WifiEnterpriseConfig is detected.
+@@ -1398,4 +1404,67 @@ public class WifiConfigurationUtilTest extends WifiBaseTest {
+             }
+         }
+     }
++
++    @Test
++    public void testWepKeyOnNonWepConfig() {
++        WifiConfiguration pskConfig = WifiConfigurationTestUtil.createPskNetwork();
++        pskConfig.wepKeys = new String[4];
++        pskConfig.wepKeys[0] = mGeneratedString256;
++        assertFalse(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++    }
++
++    @Test
++    public void testInvalidFqdnAndFriendlyName() {
++        WifiConfiguration pskConfig = WifiConfigurationTestUtil.createPskNetwork();
++
++        pskConfig.FQDN = mGeneratedString256;
++        assertFalse(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++
++        pskConfig.FQDN = null;
++        pskConfig.providerFriendlyName = mGeneratedString256;
++        assertFalse(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++    }
++
++    @Test
++    public void testInvalidDhcpAndGtw() {
++        WifiConfiguration pskConfig = WifiConfigurationTestUtil.createPskNetwork();
++        pskConfig.dhcpServer = TEST_BSSID;
++        pskConfig.defaultGwMacAddress = TEST_BSSID;
++        assertTrue(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++        pskConfig.dhcpServer = mGeneratedString256;
++        assertFalse(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++        pskConfig.dhcpServer = TEST_BSSID;
++        pskConfig.defaultGwMacAddress = mGeneratedString256;
++        assertFalse(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++    }
++
++    @Test
++    public void testInvalidSecurityParameter() {
++        WifiConfiguration pskConfig = WifiConfigurationTestUtil.createPskNetwork();
++        List<SecurityParams> securityParamsList = new ArrayList<>();
++        securityParamsList.add(SecurityParams.createSecurityParamsBySecurityType(
++                WifiConfiguration.SECURITY_TYPE_PSK));
++        securityParamsList.add(SecurityParams.createSecurityParamsBySecurityType(
++                WifiConfiguration.SECURITY_TYPE_PSK));
++
++        pskConfig.setSecurityParams(securityParamsList);
++        assertFalse(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++    }
++
++    @Test
++    public void testInvalidUserConnectChoice() {
++        WifiConfiguration pskConfig = WifiConfigurationTestUtil.createPskNetwork();
++        String generatedString513 = Strings.repeat("a", 513);
++        pskConfig.getNetworkSelectionStatus().setConnectChoice(generatedString513);
++
++        assertFalse(WifiConfigurationUtil.validate(pskConfig,
++                WifiConfigurationUtil.VALIDATE_FOR_ADD));
++    }
+ }
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
