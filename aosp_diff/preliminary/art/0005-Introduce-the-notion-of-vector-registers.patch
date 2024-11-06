@@ -1,0 +1,1024 @@
+From 066363860fc04baad3715cb5d9b6bfc6936f3628 Mon Sep 17 00:00:00 2001
+From: Vinay Prasad Kompella <vinay.kompella@intel.com>
+Date: Wed, 30 Oct 2024 20:16:45 +0530
+Subject: [PATCH 5/6] Introduce the notion of vector registers
+
+For arm, x86 vector registers are extensions of FP registers.
+Risc-v has exclusive set of vector registers. This patch focuses
+mainly on overlapping FP/vector registers.
+
+For arm, x86 FP/vector registers are one and the same.
+They cannot be used simultaneously without clobbering the other.
+We model vector registers as FP registers with a vector length > 0
+
+Vector codegen need not request for vector registers via LocationsBuilder,
+the use of vector registers will be driven by vector length from loop vectorization.
+The vector length is saved on the locations during register allocation.
+Implicitly the allocated FP registers contain this info, making them vector registers.
+
+Test: art/test.py -b --host
+      Run the above test with and without "avx,avx2" features
+
+Tracked-On: OAM-126116
+Change-Id: I9bea8fb13ffb3cb77a13753aae2356c49fba5837
+Signed-off-by: Vinay Prasad Kompella <vinay.kompella@intel.com>
+---
+ compiler/optimizing/code_generator.cc         |  14 +-
+ compiler/optimizing/code_generator.h          |  14 ++
+ .../code_generator_vector_x86_64.cc           |  32 +++-
+ compiler/optimizing/code_generator_x86_64.cc  | 109 ++++++++---
+ compiler/optimizing/code_generator_x86_64.h   |   7 +-
+ compiler/optimizing/locations.h               | 180 ++++++++++++++++--
+ compiler/optimizing/optimizing_unit_test.h    |   3 +-
+ .../register_allocation_resolver.cc           |   3 +-
+ .../register_allocator_linear_scan.cc         |  19 +-
+ .../optimizing/register_allocator_test.cc     |   9 +-
+ compiler/optimizing/ssa_liveness_analysis.cc  |  19 +-
+ compiler/optimizing/ssa_liveness_analysis.h   |  69 +++++--
+ 12 files changed, 398 insertions(+), 80 deletions(-)
+
+diff --git a/compiler/optimizing/code_generator.cc b/compiler/optimizing/code_generator.cc
+index 88bd818b0c..9cb6a9fe0e 100644
+--- a/compiler/optimizing/code_generator.cc
++++ b/compiler/optimizing/code_generator.cc
+@@ -1741,7 +1741,12 @@ void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* lo
+     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
+     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+     saved_fpu_stack_offsets_[i] = stack_offset;
+-    stack_offset += codegen->SaveFloatingPointRegister(stack_offset, i);
++    if (codegen->HasOverlappingFPVecRegisters() && locations->GetNumLiveVectorRegisters() > 0) {
++      stack_offset +=
++          codegen->SaveVectorRegister(stack_offset, locations->LiveFPVecRegAsLocation(i));
++    } else {
++      stack_offset += codegen->SaveFloatingPointRegister(stack_offset, i);
++    }
+   }
+ }
+ 
+@@ -1759,7 +1764,12 @@ void SlowPathCode::RestoreLiveRegisters(CodeGenerator* codegen, LocationSummary*
+   for (uint32_t i : LowToHighBits(fp_spills)) {
+     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
+     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
+-    stack_offset += codegen->RestoreFloatingPointRegister(stack_offset, i);
++    if (codegen->HasOverlappingFPVecRegisters() && locations->GetNumLiveVectorRegisters() > 0) {
++      stack_offset +=
++          codegen->RestoreVectorRegister(stack_offset, locations->LiveFPVecRegAsLocation(i));
++    } else {
++      stack_offset += codegen->RestoreFloatingPointRegister(stack_offset, i);
++    }
+   }
+ }
+ 
+diff --git a/compiler/optimizing/code_generator.h b/compiler/optimizing/code_generator.h
+index aec7b45a1a..b132d8c8a1 100644
+--- a/compiler/optimizing/code_generator.h
++++ b/compiler/optimizing/code_generator.h
+@@ -241,6 +241,8 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
+ 
+   // Get the size of the target SIMD register in bytes.
+   virtual size_t GetSIMDRegisterWidth() const = 0;
++  virtual bool HasOverlappingFPVecRegisters() const { return false; }
++
+   virtual uintptr_t GetAddressOf(HBasicBlock* block) = 0;
+   void InitializeCodeGeneration(size_t number_of_spill_slots,
+                                 size_t maximum_safepoint_spill_size,
+@@ -280,6 +282,18 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
+   virtual size_t SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) = 0;
+   virtual size_t RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) = 0;
+ 
++  virtual size_t SaveVectorRegister([[maybe_unused]] size_t stack_index,
++                                    [[maybe_unused]] Location loc) {
++    LOG(FATAL) << "Unexpected or Unimplemented";
++    return 0;
++  }
++
++  virtual size_t RestoreVectorRegister([[maybe_unused]] size_t stack_index,
++                                       [[maybe_unused]] Location loc) {
++    LOG(FATAL) << "Unexpected or Unimplemented";
++    return 0;
++  }
++
+   virtual bool NeedsTwoRegisters(DataType::Type type) const = 0;
+   // Returns whether we should split long moves in parallel moves.
+   virtual bool ShouldSplitLongMoves() const { return false; }
+diff --git a/compiler/optimizing/code_generator_vector_x86_64.cc b/compiler/optimizing/code_generator_vector_x86_64.cc
+index 47afa3b4a1..31626f9e44 100644
+--- a/compiler/optimizing/code_generator_vector_x86_64.cc
++++ b/compiler/optimizing/code_generator_vector_x86_64.cc
+@@ -45,8 +45,12 @@ void LocationsBuilderX86_64::VisitVecReplicateScalar(HVecReplicateScalar* instru
+     case DataType::Type::kFloat64:
+       locations->SetInAt(0, is_zero ? Location::ConstantLocation(input)
+                                     : Location::RequiresFpuRegister());
+-      locations->SetOut(is_zero ? Location::RequiresFpuRegister()
+-                                : Location::SameAsFirstInput());
++      // This is a special instruction with scalar-in and vector-out
++      // If we use same register for In and Out, we would wrongly consider it as vector-in
++      //   during register allocation.
++      // Any parallel moves generated, would have trouble as we wrongly marked
++      // the in-reg as vector. Use a different register for in and out to avoid this.
++      locations->SetOut(Location::RequiresFpuRegister());
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -94,12 +98,18 @@ void InstructionCodeGeneratorX86_64::VisitVecReplicateScalar(HVecReplicateScalar
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      DCHECK(locations->InAt(0).Equals(locations->Out()));
++      {
++        XmmRegister src = locations->InAt(0).AsFpuRegister<XmmRegister>();
++        __ movups(dst, src);
++      }
+       __ shufps(dst, dst, Immediate(0));
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      DCHECK(locations->InAt(0).Equals(locations->Out()));
++      {
++        XmmRegister src = locations->InAt(0).AsFpuRegister<XmmRegister>();
++        __ movups(dst, src);
++      }
+       __ shufpd(dst, dst, Immediate(0));
+       break;
+     default:
+@@ -124,7 +134,13 @@ void LocationsBuilderX86_64::VisitVecExtractScalar(HVecExtractScalar* instructio
+     case DataType::Type::kFloat32:
+     case DataType::Type::kFloat64:
+       locations->SetInAt(0, Location::RequiresFpuRegister());
+-      locations->SetOut(Location::SameAsFirstInput());
++      // This is a special instruction with scalar-out and vector-in
++      // If we use same register for In and Out, we would consider it as vector-out
++      //   during register allocation.
++      // Eventually any users will see it as a vector register.
++      // Using a different register for out, ensures its not marked as vector
++      locations->SetOut(Location::RequiresFpuRegister());
++
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -155,7 +171,11 @@ void InstructionCodeGeneratorX86_64::VisitVecExtractScalar(HVecExtractScalar* in
+     case DataType::Type::kFloat64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 4u);
+-      DCHECK(locations->InAt(0).Equals(locations->Out()));  // no code required
++      {
++        XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++        __ movups(dst, src);
++      }
++
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+diff --git a/compiler/optimizing/code_generator_x86_64.cc b/compiler/optimizing/code_generator_x86_64.cc
+index e2b4344be9..893a485616 100644
+--- a/compiler/optimizing/code_generator_x86_64.cc
++++ b/compiler/optimizing/code_generator_x86_64.cc
+@@ -1543,6 +1543,32 @@ size_t CodeGeneratorX86_64::RestoreFloatingPointRegister(size_t stack_index, uin
+   return GetSlowPathFPWidth();
+ }
+ 
++size_t CodeGeneratorX86_64::SaveVectorRegister(size_t stack_index, Location loc) {
++  DCHECK(loc.IsFpuRegister());
++  size_t slowpath_fp_width = GetSlowPathFPWidth();
++  DCHECK(GetGraph()->HasSIMD());
++  // Although we have fully qualified location with vector length, we choose not to use it.
++  // If there is atleast 1 live 256-bit register, we must emit AVX2 for all registers,
++  // to avoid performance issues
++  XmmRegister vReg(loc.reg(), GetSIMDRegisterWidth());
++  DCHECK_EQ(vReg.GetVecLen(), slowpath_fp_width);
++  __ movups(Address(CpuRegister(RSP), stack_index), vReg);
++  return slowpath_fp_width;
++}
++
++size_t CodeGeneratorX86_64::RestoreVectorRegister(size_t stack_index, Location loc) {
++  DCHECK(loc.IsFpuRegister());
++  size_t slowpath_fp_width = GetSlowPathFPWidth();
++  DCHECK(GetGraph()->HasSIMD());
++  // Although we have fully qualified location with vector length, we choose not to use it.
++  // If there is atleast 1 live 256-bit register, we must emit AVX2 for all registers,
++  // to avoid performance issues
++  XmmRegister vReg(loc.reg(), GetSIMDRegisterWidth());
++  DCHECK_EQ(vReg.GetVecLen(), slowpath_fp_width);
++  __ movups(vReg, Address(CpuRegister(RSP), stack_index));
++  return slowpath_fp_width;
++}
++
+ void CodeGeneratorX86_64::InvokeRuntime(QuickEntrypointEnum entrypoint,
+                                         HInstruction* instruction,
+                                         uint32_t dex_pc,
+@@ -1980,11 +2006,13 @@ void CodeGeneratorX86_64::Move(Location destination, Location source) {
+       __ movq(dest, Address(CpuRegister(RSP), source.GetStackIndex()));
+     }
+   } else if (destination.IsFpuRegister()) {
+-    XmmRegister dest = destination.AsFpuRegister<XmmRegister>();
++    XmmRegister dest = destination.AsFPVectorRegister<XmmRegister>();
+     if (source.IsRegister()) {
+       __ movd(dest, source.AsRegister<CpuRegister>());
+     } else if (source.IsFpuRegister()) {
+-      __ movaps(dest, source.AsFpuRegister<XmmRegister>());
++      XmmRegister src = source.AsFPVectorRegister<XmmRegister>();
++      DCHECK_EQ(dest.GetVecLen(), src.GetVecLen());
++      __ movaps(dest, src);
+     } else if (source.IsConstant()) {
+       HConstant* constant = source.GetConstant();
+       int64_t value = CodeGenerator::GetInt64ValueOf(constant);
+@@ -6363,6 +6391,9 @@ void ParallelMoveResolverX86_64::EmitMove(size_t index) {
+   Location source = move->GetSource();
+   Location destination = move->GetDestination();
+ 
++  // Parallel moves may involve vector registers.
++  // Hence the special handling to always retrieve
++  // FpuRegister locations as VectorRegister
+   if (source.IsRegister()) {
+     if (destination.IsRegister()) {
+       __ movq(destination.AsRegister<CpuRegister>(), source.AsRegister<CpuRegister>());
+@@ -6379,8 +6410,9 @@ void ParallelMoveResolverX86_64::EmitMove(size_t index) {
+       __ movl(destination.AsRegister<CpuRegister>(),
+               Address(CpuRegister(RSP), source.GetStackIndex()));
+     } else if (destination.IsFpuRegister()) {
+-      __ movss(destination.AsFpuRegister<XmmRegister>(),
+-              Address(CpuRegister(RSP), source.GetStackIndex()));
++      DCHECK_EQ(destination.GetVecLen(), 0u);
++      __ movss(destination.AsFPVectorRegister<XmmRegister>(),
++               Address(CpuRegister(RSP), source.GetStackIndex()));
+     } else {
+       DCHECK(destination.IsStackSlot());
+       __ movl(CpuRegister(TMP), Address(CpuRegister(RSP), source.GetStackIndex()));
+@@ -6391,7 +6423,8 @@ void ParallelMoveResolverX86_64::EmitMove(size_t index) {
+       __ movq(destination.AsRegister<CpuRegister>(),
+               Address(CpuRegister(RSP), source.GetStackIndex()));
+     } else if (destination.IsFpuRegister()) {
+-      __ movsd(destination.AsFpuRegister<XmmRegister>(),
++      DCHECK_EQ(destination.GetVecLen(), 0u);
++      __ movsd(destination.AsFPVectorRegister<XmmRegister>(),
+                Address(CpuRegister(RSP), source.GetStackIndex()));
+     } else {
+       DCHECK(destination.IsDoubleStackSlot()) << destination;
+@@ -6400,7 +6433,8 @@ void ParallelMoveResolverX86_64::EmitMove(size_t index) {
+     }
+   } else if (source.IsSIMDStackSlot()) {
+     if (destination.IsFpuRegister()) {
+-      __ movups(destination.AsFpuRegister<XmmRegister>(),
++      DCHECK_EQ(source.GetVecLen(), destination.GetVecLen());
++      __ movups(destination.AsFPVectorRegister<XmmRegister>(),
+                 Address(CpuRegister(RSP), source.GetStackIndex()));
+     } else {
+       DCHECK(destination.IsSIMDStackSlot());
+@@ -6456,17 +6490,22 @@ void ParallelMoveResolverX86_64::EmitMove(size_t index) {
+     }
+   } else if (source.IsFpuRegister()) {
+     if (destination.IsFpuRegister()) {
+-      __ movaps(destination.AsFpuRegister<XmmRegister>(), source.AsFpuRegister<XmmRegister>());
++      DCHECK_EQ(source.GetVecLen(), destination.GetVecLen());
++      __ movaps(destination.AsFPVectorRegister<XmmRegister>(),
++                source.AsFPVectorRegister<XmmRegister>());
+     } else if (destination.IsStackSlot()) {
++      DCHECK_EQ(source.GetVecLen(), 0u);
+       __ movss(Address(CpuRegister(RSP), destination.GetStackIndex()),
+-               source.AsFpuRegister<XmmRegister>());
++               source.AsFPVectorRegister<XmmRegister>());
+     } else if (destination.IsDoubleStackSlot()) {
++      DCHECK_EQ(source.GetVecLen(), 0u);
+       __ movsd(Address(CpuRegister(RSP), destination.GetStackIndex()),
+-               source.AsFpuRegister<XmmRegister>());
++               source.AsFPVectorRegister<XmmRegister>());
+     } else {
+        DCHECK(destination.IsSIMDStackSlot());
+-      __ movups(Address(CpuRegister(RSP), destination.GetStackIndex()),
+-                source.AsFpuRegister<XmmRegister>());
++       DCHECK_EQ(source.GetVecLen(), destination.GetVecLen());
++       __ movups(Address(CpuRegister(RSP), destination.GetStackIndex()),
++                 source.AsFPVectorRegister<XmmRegister>());
+     }
+   }
+ }
+@@ -6501,15 +6540,24 @@ void ParallelMoveResolverX86_64::Exchange64(XmmRegister reg, int mem) {
+   __ movd(reg, CpuRegister(TMP));
+ }
+ 
+-void ParallelMoveResolverX86_64::Exchange128(XmmRegister reg, int mem) {
+-  size_t extra_slot = 2 * kX86_64WordSize;
++void ParallelMoveResolverX86_64::ExchangeSIMD(XmmRegister reg, int mem) {
++  // We are operating on Vector register for sure
++  size_t extra_slot = reg.GetVecLen();
+   __ subq(CpuRegister(RSP), Immediate(extra_slot));
+-  __ movups(Address(CpuRegister(RSP), 0), XmmRegister(reg));
+-  ExchangeMemory64(0, mem + extra_slot, 2);
+-  __ movups(XmmRegister(reg), Address(CpuRegister(RSP), 0));
++  __ movups(Address(CpuRegister(RSP), 0), reg);
++  ExchangeMemory64(0, mem + extra_slot, extra_slot >> 3);
++  __ movups(reg, Address(CpuRegister(RSP), 0));
+   __ addq(CpuRegister(RSP), Immediate(extra_slot));
+ }
+ 
++void ParallelMoveResolverX86_64::ExchangeFPReg(XmmRegister reg1, XmmRegister reg2) {
++  // We may be either operating on plain FP registers or Vector registers
++  DCHECK_EQ(reg1.GetVecLen(), reg2.GetVecLen());
++  __ pxor(reg1, reg2);
++  __ pxor(reg2, reg1);
++  __ pxor(reg1, reg2);
++}
++
+ void ParallelMoveResolverX86_64::ExchangeMemory32(int mem1, int mem2) {
+   ScratchRegisterScope ensure_scratch(
+       this, TMP, RAX, codegen_->GetNumberOfCoreRegisters());
+@@ -6548,6 +6596,9 @@ void ParallelMoveResolverX86_64::EmitSwap(size_t index) {
+   Location source = move->GetSource();
+   Location destination = move->GetDestination();
+ 
++  // Parallel moves may involve vector registers.
++  // Hence the special handling to always retrieve
++  // FpuRegister locations as VectorRegister
+   if (source.IsRegister() && destination.IsRegister()) {
+     Exchange64(source.AsRegister<CpuRegister>(), destination.AsRegister<CpuRegister>());
+   } else if (source.IsRegister() && destination.IsStackSlot()) {
+@@ -6563,23 +6614,29 @@ void ParallelMoveResolverX86_64::EmitSwap(size_t index) {
+   } else if (source.IsDoubleStackSlot() && destination.IsDoubleStackSlot()) {
+     ExchangeMemory64(destination.GetStackIndex(), source.GetStackIndex(), 1);
+   } else if (source.IsFpuRegister() && destination.IsFpuRegister()) {
+-    __ movd(CpuRegister(TMP), source.AsFpuRegister<XmmRegister>());
+-    __ movaps(source.AsFpuRegister<XmmRegister>(), destination.AsFpuRegister<XmmRegister>());
+-    __ movd(destination.AsFpuRegister<XmmRegister>(), CpuRegister(TMP));
++    ExchangeFPReg(source.AsFPVectorRegister<XmmRegister>(),
++                  destination.AsFPVectorRegister<XmmRegister>());
+   } else if (source.IsFpuRegister() && destination.IsStackSlot()) {
+-    Exchange32(source.AsFpuRegister<XmmRegister>(), destination.GetStackIndex());
++    DCHECK_EQ(source.GetVecLen(), 0u);
++    Exchange32(source.AsFPVectorRegister<XmmRegister>(), destination.GetStackIndex());
+   } else if (source.IsStackSlot() && destination.IsFpuRegister()) {
+-    Exchange32(destination.AsFpuRegister<XmmRegister>(), source.GetStackIndex());
++    DCHECK_EQ(destination.GetVecLen(), 0u);
++    Exchange32(destination.AsFPVectorRegister<XmmRegister>(), source.GetStackIndex());
+   } else if (source.IsFpuRegister() && destination.IsDoubleStackSlot()) {
+-    Exchange64(source.AsFpuRegister<XmmRegister>(), destination.GetStackIndex());
++    DCHECK_EQ(source.GetVecLen(), 0u);
++    Exchange64(source.AsFPVectorRegister<XmmRegister>(), destination.GetStackIndex());
+   } else if (source.IsDoubleStackSlot() && destination.IsFpuRegister()) {
+-    Exchange64(destination.AsFpuRegister<XmmRegister>(), source.GetStackIndex());
++    DCHECK_EQ(destination.GetVecLen(), 0u);
++    Exchange64(destination.AsFPVectorRegister<XmmRegister>(), source.GetStackIndex());
+   } else if (source.IsSIMDStackSlot() && destination.IsSIMDStackSlot()) {
+-    ExchangeMemory64(destination.GetStackIndex(), source.GetStackIndex(), 2);
++    DCHECK_EQ(source.GetVecLen(), destination.GetVecLen());
++    ExchangeMemory64(destination.GetStackIndex(), source.GetStackIndex(), source.GetVecLen() >> 3);
+   } else if (source.IsFpuRegister() && destination.IsSIMDStackSlot()) {
+-    Exchange128(source.AsFpuRegister<XmmRegister>(), destination.GetStackIndex());
++    DCHECK_EQ(source.GetVecLen(), destination.GetVecLen());
++    ExchangeSIMD(source.AsFPVectorRegister<XmmRegister>(), destination.GetStackIndex());
+   } else if (destination.IsFpuRegister() && source.IsSIMDStackSlot()) {
+-    Exchange128(destination.AsFpuRegister<XmmRegister>(), source.GetStackIndex());
++    DCHECK_EQ(source.GetVecLen(), destination.GetVecLen());
++    ExchangeSIMD(destination.AsFPVectorRegister<XmmRegister>(), source.GetStackIndex());
+   } else {
+     LOG(FATAL) << "Unimplemented swap between " << source << " and " << destination;
+   }
+diff --git a/compiler/optimizing/code_generator_x86_64.h b/compiler/optimizing/code_generator_x86_64.h
+index 81c8ead32e..3f366d01ad 100644
+--- a/compiler/optimizing/code_generator_x86_64.h
++++ b/compiler/optimizing/code_generator_x86_64.h
+@@ -206,7 +206,8 @@ class ParallelMoveResolverX86_64 : public ParallelMoveResolverWithSwap {
+   void Exchange64(CpuRegister reg1, CpuRegister reg2);
+   void Exchange64(CpuRegister reg, int mem);
+   void Exchange64(XmmRegister reg, int mem);
+-  void Exchange128(XmmRegister reg, int mem);
++  void ExchangeSIMD(XmmRegister reg, int mem);
++  void ExchangeFPReg(XmmRegister reg1, XmmRegister reg2);
+   void ExchangeMemory32(int mem1, int mem2);
+   void ExchangeMemory64(int mem1, int mem2, int num_of_qwords);
+ 
+@@ -401,6 +402,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
+   size_t RestoreCoreRegister(size_t stack_index, uint32_t reg_id) override;
+   size_t SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) override;
+   size_t RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) override;
++  size_t SaveVectorRegister(size_t stack_index, Location loc) override;
++  size_t RestoreVectorRegister(size_t stack_index, Location loc) override;
+ 
+   // Generate code to invoke a runtime entry point.
+   void InvokeRuntime(QuickEntrypointEnum entrypoint,
+@@ -434,6 +437,8 @@ class CodeGeneratorX86_64 : public CodeGenerator {
+     return 2 * kX86_64WordSize;
+   }
+ 
++  bool HasOverlappingFPVecRegisters() const override { return true; }
++
+   HGraphVisitor* GetLocationBuilder() override {
+     return &location_builder_;
+   }
+diff --git a/compiler/optimizing/locations.h b/compiler/optimizing/locations.h
+index 2209f05c0b..2791a9352f 100644
+--- a/compiler/optimizing/locations.h
++++ b/compiler/optimizing/locations.h
+@@ -22,8 +22,10 @@
+ #include "base/bit_field.h"
+ #include "base/bit_utils.h"
+ #include "base/bit_vector.h"
++#include "base/logging.h"
+ #include "base/macros.h"
+ #include "base/value_object.h"
++#include "runtime_globals.h"
+ 
+ namespace art HIDDEN {
+ 
+@@ -53,7 +55,7 @@ class Location : public ValueObject {
+   enum Kind {
+     kInvalid = 0,
+     kConstant = 1,
+-    kStackSlot = 2,  // 32bit stack slot.
++    kStackSlot = 2,        // 32bit stack slot.
+     kDoubleStackSlot = 3,  // 64bit stack slot.
+ 
+     kRegister = 4,  // Core register.
+@@ -70,13 +72,15 @@ class Location : public ValueObject {
+     // We do not use the value 9 because it conflicts with kLocationConstantMask.
+     kDoNotUse9 = 9,
+ 
+-    kSIMDStackSlot = 10,  // 128bit stack slot. TODO: generalize with encoded #bytes?
++    kVecRegister = 10,  // Vector register.
++
++    kSIMDStackSlot = 11,  // 128bit stack slot. TODO: generalize with encoded #bytes?
+ 
+     // Unallocated location represents a location that is not fixed and can be
+     // allocated by a register allocator.  Each unallocated location has
+     // a policy that specifies what kind of location is suitable. Payload
+     // contains register allocation policy.
+-    kUnallocated = 11,
++    kUnallocated = 12,
+   };
+ 
+   constexpr Location() : ValueObject(), value_(kInvalid) {
+@@ -91,6 +95,7 @@ class Location : public ValueObject {
+     static_assert((kRegisterPair & kLocationConstantMask) != kConstant, "TagError");
+     static_assert((kFpuRegisterPair & kLocationConstantMask) != kConstant, "TagError");
+     static_assert((kConstant & kLocationConstantMask) == kConstant, "TagError");
++    static_assert((kVecRegister & kLocationConstantMask) != kConstant, "TagError");
+ 
+     DCHECK(!IsValid());
+   }
+@@ -139,6 +144,15 @@ class Location : public ValueObject {
+     return Location(kFpuRegister, reg);
+   }
+ 
++  static Location FpuRegisterLocation(int reg, int vecLen) {
++    return Location(kFpuRegister, reg, vecLen);
++  }
++
++  // TODO: Implement this when we enable to architecures with exclusive Vec register
++  static Location VecRegisterLocation([[maybe_unused]] int reg, [[maybe_unused]] int vecLen) {
++    UNREACHABLE();
++  }
++
+   static constexpr Location RegisterPairLocation(int low, int high) {
+     return Location(kRegisterPair, low << 16 | high);
+   }
+@@ -155,6 +169,10 @@ class Location : public ValueObject {
+     return GetKind() == kFpuRegister;
+   }
+ 
++  bool IsVecRegister() const {
++    return (GetKind() == kVecRegister) || (IsFpuRegister() && GetVecLen() > 0);
++  }
++
+   bool IsRegisterPair() const {
+     return GetKind() == kRegisterPair;
+   }
+@@ -194,6 +212,23 @@ class Location : public ValueObject {
+     return static_cast<T>(reg());
+   }
+ 
++  template <typename T, bool kHasOverlappingFPVecRegisters = false>
++  T AsVectorRegister() const {
++    if (kHasOverlappingFPVecRegisters) {
++      DCHECK(IsFpuRegister());
++      return T(reg(), GetVecLen());
++    } else {
++      DCHECK(!IsFpuRegister());
++      DCHECK(IsVecRegister());
++      return static_cast<T>(reg());
++    }
++  }
++
++  template <typename T>
++  T AsFPVectorRegister() const {
++    return AsVectorRegister<T, true>();
++  }
++
+   template <typename T>
+   T AsRegisterPairLow() const {
+     DCHECK(IsRegisterPair());
+@@ -274,9 +309,9 @@ class Location : public ValueObject {
+     return GetKind() == kDoubleStackSlot;
+   }
+ 
+-  static Location SIMDStackSlot(intptr_t stack_index) {
++  static Location SIMDStackSlot(intptr_t stack_index, size_t num_of_slots = 0) {
+     uintptr_t payload = EncodeStackIndex(stack_index);
+-    Location loc(kSIMDStackSlot, payload);
++    Location loc(kSIMDStackSlot, payload, num_of_slots * kVRegSize);
+     // Ensure that sign is preserved.
+     DCHECK_EQ(loc.GetStackIndex(), stack_index);
+     return loc;
+@@ -295,7 +330,7 @@ class Location : public ValueObject {
+         return Location::DoubleStackSlot(spill_slot);
+       default:
+         // Assume all other stack slot sizes correspond to SIMD slot size.
+-        return Location::SIMDStackSlot(spill_slot);
++        return Location::SIMDStackSlot(spill_slot, num_of_slots);
+     }
+   }
+ 
+@@ -316,7 +351,12 @@ class Location : public ValueObject {
+   }
+ 
+   bool Equals(Location other) const {
+-    return value_ == other.value_;
++    // Handle the case of overlapping FP vector registers
++    if (IsFpuRegister() && other.IsFpuRegister()) {
++      return reg() == other.reg();
++    } else {
++      return value_ == other.value_;
++    }
+   }
+ 
+   bool Contains(Location other) const {
+@@ -354,6 +394,8 @@ class Location : public ValueObject {
+       case kFpuRegister: return "F";
+       case kRegisterPair: return "RP";
+       case kFpuRegisterPair: return "FP";
++      case kVecRegister:
++        return "V";
+       case kDoNotUse5:  // fall-through
+       case kDoNotUse9:
+         LOG(FATAL) << "Should not use this location kind";
+@@ -415,16 +457,35 @@ class Location : public ValueObject {
+     return GetPayload();
+   }
+ 
++  size_t GetVecLen() const {
++    uint8_t decodedVecLen = GetVecLenAsPowerOf2();
++    return (decodedVecLen > 0) ? (1 << decodedVecLen) : 0;
++  }
++
++  uint8_t GetVecLenAsPowerOf2() const {
++    DCHECK(IsFpuRegister() || IsVecRegister() || IsSIMDStackSlot());
++    return VecLenField::Decode(value_);
++  }
++
+  private:
+   // Number of bits required to encode Kind value.
+   static constexpr uint32_t kBitsForKind = 4;
+-  static constexpr uint32_t kBitsForPayload = kBitsPerIntPtrT - kBitsForKind;
++  static constexpr uint32_t kBitsForVecLen = 4;
++  static constexpr uint32_t kBitsForPayload = kBitsPerIntPtrT - (kBitsForKind + kBitsForVecLen);
+   static constexpr uintptr_t kLocationConstantMask = 0x3;
+ 
+   explicit Location(uintptr_t value) : value_(value) {}
+ 
+-  constexpr Location(Kind kind, uintptr_t payload)
+-      : value_(KindField::Encode(kind) | PayloadField::Encode(payload)) {}
++  constexpr Location(Kind kind, uintptr_t payload, size_t vecLen = 0)
++      : value_(KindField::Encode(kind) | VecLenField::Encode(0) | PayloadField::Encode(payload)) {
++    if (vecLen > 0 && (kind == kFpuRegister || kind == kVecRegister || kind == kSIMDStackSlot)) {
++      size_t vecLenAsPowOf2 = CTZ(vecLen);
++      DCHECK_LE(vecLenAsPowOf2, 15U) << "Insufficient bits to represent vector length";
++      value_ |= VecLenField::Encode(vecLenAsPowOf2);
++    } else {
++      DCHECK_EQ(vecLen, 0U) << "Invalid vecLen on Location of kind - " << DebugString();
++    }
++  }
+ 
+   uintptr_t GetPayload() const {
+     return PayloadField::Decode(value_);
+@@ -433,7 +494,8 @@ class Location : public ValueObject {
+   static void DCheckInstructionIsConstant(HInstruction* instruction);
+ 
+   using KindField = BitField<Kind, 0, kBitsForKind>;
+-  using PayloadField = BitField<uintptr_t, kBitsForKind, kBitsForPayload>;
++  using VecLenField = BitField<size_t, kBitsForKind, kBitsForVecLen>;
++  using PayloadField = BitField<uintptr_t, kBitsForKind + kBitsForVecLen, kBitsForPayload>;
+ 
+   // Layout for kUnallocated locations payload.
+   using PolicyField = BitField<Policy, 0, 3>;
+@@ -458,18 +520,41 @@ class RegisterSet : public ValueObject {
+   void Add(Location loc) {
+     if (loc.IsRegister()) {
+       core_registers_ |= (1 << loc.reg());
+-    } else {
+-      DCHECK(loc.IsFpuRegister());
++    } else if (loc.IsFpuRegister()) {
+       floating_point_registers_ |= (1 << loc.reg());
++      DCHECK_IMPLIES(!has_overlapping_fp_vec_registers_, vector_registers_ == 0U)
++          << "All FP Vec registers must either be overlapping/non-overlapping";
++      if (loc.IsVecRegister()) {
++        vector_registers_ |= (1 << loc.reg());
++        DCHECK(vector_length_as_pow_of_2_ == 0 ||
++               vector_length_as_pow_of_2_ == loc.GetVecLenAsPowerOf2())
++            << "Unexpected vector length " << (1 << loc.GetVecLenAsPowerOf2());
++        vector_length_as_pow_of_2_ = loc.GetVecLenAsPowerOf2();
++        has_overlapping_fp_vec_registers_ = true;
++      }
++    } else {
++      DCHECK(loc.IsVecRegister());
++      DCHECK(!has_overlapping_fp_vec_registers_);
++      DCHECK(vector_length_as_pow_of_2_ == 0 ||
++               vector_length_as_pow_of_2_ == loc.GetVecLenAsPowerOf2())
++            << "Unexpected vector length " << (1 << loc.GetVecLenAsPowerOf2());
++      vector_length_as_pow_of_2_ = loc.GetVecLenAsPowerOf2();
++      vector_registers_ |= (1 << loc.reg());
+     }
+   }
+ 
+   void Remove(Location loc) {
+     if (loc.IsRegister()) {
+       core_registers_ &= ~(1 << loc.reg());
+-    } else {
+-      DCHECK(loc.IsFpuRegister()) << loc;
++    } else if (loc.IsFpuRegister()) {
+       floating_point_registers_ &= ~(1 << loc.reg());
++      if (has_overlapping_fp_vec_registers_) {
++        vector_registers_ &= ~(1 << loc.reg());
++      }
++    } else {
++      DCHECK(loc.IsVecRegister()) << loc;
++      DCHECK(!has_overlapping_fp_vec_registers_);
++      vector_registers_ &= ~(1 << loc.reg());
+     }
+   }
+ 
+@@ -481,6 +566,8 @@ class RegisterSet : public ValueObject {
+     return Contains(floating_point_registers_, id);
+   }
+ 
++  bool ContainsVectorRegister(uint32_t id) const { return Contains(vector_registers_, id); }
++
+   static bool Contains(uint32_t register_set, uint32_t reg) {
+     return (register_set & (1 << reg)) != 0;
+   }
+@@ -503,9 +590,12 @@ class RegisterSet : public ValueObject {
+   }
+ 
+   size_t GetNumberOfRegisters() const {
+-    return POPCOUNT(core_registers_) + POPCOUNT(floating_point_registers_);
++    size_t total = POPCOUNT(core_registers_) + POPCOUNT(floating_point_registers_);
++    return has_overlapping_fp_vec_registers_ ? total : (total + GetNumberOfVectorRegisters());
+   }
+ 
++  size_t GetNumberOfVectorRegisters() const { return POPCOUNT(vector_registers_); }
++
+   uint32_t GetCoreRegisters() const {
+     return core_registers_;
+   }
+@@ -514,12 +604,50 @@ class RegisterSet : public ValueObject {
+     return floating_point_registers_;
+   }
+ 
++  uint32_t GetVectorRegisters() const { return vector_registers_; }
++
++  Location VecRegAsLocation(uint32_t reg_id) const {
++    if (ContainsVectorRegister(reg_id)) {
++      size_t vecLen =
++          (vector_length_as_pow_of_2_ > 0) ? (1 << vector_length_as_pow_of_2_) : 0;
++      return (has_overlapping_fp_vec_registers_) ? Location::FpuRegisterLocation(reg_id, vecLen) :
++                                                   Location::VecRegisterLocation(reg_id, vecLen);
++    }
++    return Location::NoLocation();
++  }
++
+  private:
+-  RegisterSet() : core_registers_(0), floating_point_registers_(0) {}
+-  RegisterSet(uint32_t core, uint32_t fp) : core_registers_(core), floating_point_registers_(fp) {}
++  RegisterSet()
++      : core_registers_(0),
++        floating_point_registers_(0),
++        vector_registers_(0),
++        vector_length_as_pow_of_2_(0),
++        has_overlapping_fp_vec_registers_(false) {}
++  RegisterSet(uint32_t core, uint32_t fp)
++      : core_registers_(core),
++        floating_point_registers_(fp),
++        vector_registers_(0),
++        vector_length_as_pow_of_2_(0),
++        has_overlapping_fp_vec_registers_(false) {}
++  RegisterSet(uint32_t core,
++              uint32_t fp,
++              uint32_t vecreg,
++              uint8_t vec_length_as_pow_of_2,
++              bool FPVecRegOverlap)
++      : core_registers_(core),
++        floating_point_registers_(fp),
++        vector_registers_(vecreg),
++        vector_length_as_pow_of_2_(vec_length_as_pow_of_2),
++        has_overlapping_fp_vec_registers_(FPVecRegOverlap) {}
+ 
+   uint32_t core_registers_;
+   uint32_t floating_point_registers_;
++  // TODO: Vector registers require vector length info as well, although not for all archs
++  //  Storing vector length needs atleast 4 bits/reg => 16 bytes per RegisterSet/location summary
++  //  For now we simplify by just assuming vector length to be fixed
++  uint32_t vector_registers_;
++  uint8_t  vector_length_as_pow_of_2_;
++  bool has_overlapping_fp_vec_registers_;
+ };
+ 
+ static constexpr bool kIntrinsified = true;
+@@ -684,6 +812,8 @@ class LocationSummary : public ArenaObject<kArenaAllocLocationSummary> {
+     return live_registers_.GetNumberOfRegisters();
+   }
+ 
++  size_t GetNumLiveVectorRegisters() const { return live_registers_.GetNumberOfVectorRegisters(); }
++
+   bool OutputUsesSameAs(uint32_t input_index) const {
+     return (input_index == 0)
+         && output_.IsUnallocated()
+@@ -707,6 +837,20 @@ class LocationSummary : public ArenaObject<kArenaAllocLocationSummary> {
+     return intrinsified_;
+   }
+ 
++  Location LiveFPVecRegAsLocation(int reg_id) const {
++    if (live_registers_.ContainsVectorRegister(reg_id)) {
++      return LiveVecRegAsLocation(reg_id);
++    } else if (live_registers_.ContainsFloatingPointRegister(reg_id)) {
++      return Location::FpuRegisterLocation(reg_id);
++    } else {
++      return Location::NoLocation();
++    }
++  }
++
++  Location LiveVecRegAsLocation(int reg_id) const {
++    return live_registers_.VecRegAsLocation(reg_id);
++  }
++
+  private:
+   LocationSummary(HInstruction* instruction,
+                   CallKind call_kind,
+diff --git a/compiler/optimizing/optimizing_unit_test.h b/compiler/optimizing/optimizing_unit_test.h
+index e1d8969b2b..f6817b6754 100644
+--- a/compiler/optimizing/optimizing_unit_test.h
++++ b/compiler/optimizing/optimizing_unit_test.h
+@@ -96,7 +96,8 @@ inline LiveInterval* BuildInterval(const size_t ranges[][2],
+                                    int reg = -1,
+                                    HInstruction* defined_by = nullptr) {
+   LiveInterval* interval =
+-      LiveInterval::MakeInterval(allocator, DataType::Type::kInt32, defined_by);
++      LiveInterval::MakeInterval(allocator, DataType::Type::kInt32, defined_by,
++                                  /*has_overlapping_fp_vec_regs*/false);
+   if (defined_by != nullptr) {
+     defined_by->SetLiveInterval(interval);
+   }
+diff --git a/compiler/optimizing/register_allocation_resolver.cc b/compiler/optimizing/register_allocation_resolver.cc
+index a4b1698b8d..c690783687 100644
+--- a/compiler/optimizing/register_allocation_resolver.cc
++++ b/compiler/optimizing/register_allocation_resolver.cc
+@@ -218,7 +218,8 @@ void RegisterAllocationResolver::Resolve(ArrayRef<HInstruction* const> safepoint
+               temp->GetRegister(), temp->GetHighInterval()->GetRegister());
+           locations->SetTempAt(temp_index, location);
+         } else {
+-          locations->SetTempAt(temp_index, Location::FpuRegisterLocation(temp->GetRegister()));
++          DCHECK(temp->HasRegister());
++          locations->SetTempAt(temp_index, temp->ToLocation());
+         }
+         break;
+ 
+diff --git a/compiler/optimizing/register_allocator_linear_scan.cc b/compiler/optimizing/register_allocator_linear_scan.cc
+index 458d1a740e..85bb748fbc 100644
+--- a/compiler/optimizing/register_allocator_linear_scan.cc
++++ b/compiler/optimizing/register_allocator_linear_scan.cc
+@@ -54,9 +54,11 @@ RegisterAllocatorLinearScan::RegisterAllocatorLinearScan(ScopedArenaAllocator* a
+         physical_core_register_intervals_(allocator->Adapter(kArenaAllocRegisterAllocator)),
+         physical_fp_register_intervals_(allocator->Adapter(kArenaAllocRegisterAllocator)),
+         block_registers_for_call_interval_(
+-            LiveInterval::MakeFixedInterval(allocator, kNoRegister, DataType::Type::kVoid)),
++            LiveInterval::MakeFixedInterval(allocator, kNoRegister, DataType::Type::kVoid,
++                                            codegen->HasOverlappingFPVecRegisters())),
+         block_registers_special_interval_(
+-            LiveInterval::MakeFixedInterval(allocator, kNoRegister, DataType::Type::kVoid)),
++            LiveInterval::MakeFixedInterval(allocator, kNoRegister, DataType::Type::kVoid,
++                                            codegen->HasOverlappingFPVecRegisters())),
+         temp_intervals_(allocator->Adapter(kArenaAllocRegisterAllocator)),
+         int_spill_slots_(allocator->Adapter(kArenaAllocRegisterAllocator)),
+         long_spill_slots_(allocator->Adapter(kArenaAllocRegisterAllocator)),
+@@ -147,7 +149,8 @@ void RegisterAllocatorLinearScan::BlockRegister(Location location,
+       ? DataType::Type::kInt32
+       : DataType::Type::kFloat32;
+   if (interval == nullptr) {
+-    interval = LiveInterval::MakeFixedInterval(allocator_, reg, type);
++    interval = LiveInterval::MakeFixedInterval(
++        allocator_, reg, type, codegen_->HasOverlappingFPVecRegisters());
+     if (location.IsRegister()) {
+       physical_core_register_intervals_[reg] = interval;
+     } else {
+@@ -331,7 +334,10 @@ void RegisterAllocatorLinearScan::CheckForTempLiveIntervals(HInstruction* instru
+       switch (temp.GetPolicy()) {
+         case Location::kRequiresRegister: {
+           LiveInterval* interval =
+-              LiveInterval::MakeTempInterval(allocator_, DataType::Type::kInt32);
++              LiveInterval::MakeTempInterval(allocator_,
++                                             DataType::Type::kInt32,
++                                             instruction,
++                                             codegen_->HasOverlappingFPVecRegisters());
+           temp_intervals_.push_back(interval);
+           interval->AddTempUse(instruction, i);
+           unhandled_core_intervals_.push_back(interval);
+@@ -340,7 +346,10 @@ void RegisterAllocatorLinearScan::CheckForTempLiveIntervals(HInstruction* instru
+ 
+         case Location::kRequiresFpuRegister: {
+           LiveInterval* interval =
+-              LiveInterval::MakeTempInterval(allocator_, DataType::Type::kFloat64);
++              LiveInterval::MakeTempInterval(allocator_,
++                                             DataType::Type::kFloat64,
++                                             instruction,
++                                             codegen_->HasOverlappingFPVecRegisters());
+           temp_intervals_.push_back(interval);
+           interval->AddTempUse(instruction, i);
+           if (codegen_->NeedsTwoRegisters(DataType::Type::kFloat64)) {
+diff --git a/compiler/optimizing/register_allocator_test.cc b/compiler/optimizing/register_allocator_test.cc
+index 8f1e724569..4d95d61434 100644
+--- a/compiler/optimizing/register_allocator_test.cc
++++ b/compiler/optimizing/register_allocator_test.cc
+@@ -428,15 +428,18 @@ TEST_F(RegisterAllocatorTest, FreeUntil) {
+   // Put the one that should be picked in the middle of the inactive list to ensure
+   // we do not depend on an order.
+   LiveInterval* interval =
+-      LiveInterval::MakeFixedInterval(GetScopedAllocator(), 0, DataType::Type::kInt32);
++      LiveInterval::MakeFixedInterval(GetScopedAllocator(), 0, DataType::Type::kInt32,
++                                      codegen.HasOverlappingFPVecRegisters());
+   interval->AddRange(40, 50);
+   register_allocator.inactive_.push_back(interval);
+ 
+-  interval = LiveInterval::MakeFixedInterval(GetScopedAllocator(), 0, DataType::Type::kInt32);
++  interval = LiveInterval::MakeFixedInterval(GetScopedAllocator(), 0, DataType::Type::kInt32,
++                                              codegen.HasOverlappingFPVecRegisters());
+   interval->AddRange(20, 30);
+   register_allocator.inactive_.push_back(interval);
+ 
+-  interval = LiveInterval::MakeFixedInterval(GetScopedAllocator(), 0, DataType::Type::kInt32);
++  interval = LiveInterval::MakeFixedInterval(GetScopedAllocator(), 0, DataType::Type::kInt32,
++                                              codegen.HasOverlappingFPVecRegisters());
+   interval->AddRange(60, 70);
+   register_allocator.inactive_.push_back(interval);
+ 
+diff --git a/compiler/optimizing/ssa_liveness_analysis.cc b/compiler/optimizing/ssa_liveness_analysis.cc
+index 317e0999d7..bce7937acb 100644
+--- a/compiler/optimizing/ssa_liveness_analysis.cc
++++ b/compiler/optimizing/ssa_liveness_analysis.cc
+@@ -55,8 +55,8 @@ void SsaLivenessAnalysis::NumberInstructions() {
+       if (locations != nullptr && locations->Out().IsValid()) {
+         instructions_from_ssa_index_.push_back(current);
+         current->SetSsaIndex(ssa_index++);
+-        current->SetLiveInterval(
+-            LiveInterval::MakeInterval(allocator_, current->GetType(), current));
++        current->SetLiveInterval(LiveInterval::MakeInterval(
++            allocator_, current->GetType(), current, codegen_->HasOverlappingFPVecRegisters()));
+       }
+       current->SetLifetimePosition(lifetime_position);
+     }
+@@ -73,8 +73,8 @@ void SsaLivenessAnalysis::NumberInstructions() {
+       if (locations != nullptr && locations->Out().IsValid()) {
+         instructions_from_ssa_index_.push_back(current);
+         current->SetSsaIndex(ssa_index++);
+-        current->SetLiveInterval(
+-            LiveInterval::MakeInterval(allocator_, current->GetType(), current));
++        current->SetLiveInterval(LiveInterval::MakeInterval(
++            allocator_, current->GetType(), current, codegen_->HasOverlappingFPVecRegisters()));
+       }
+       instructions_from_lifetime_position_.push_back(current);
+       current->SetLifetimePosition(lifetime_position);
+@@ -509,6 +509,17 @@ Location LiveInterval::ToLocation() const {
+       if (HasHighInterval()) {
+         return Location::FpuRegisterPairLocation(GetRegister(), GetHighInterval()->GetRegister());
+       } else {
++        if (has_overlapping_fp_vec_registers_) {
++          HInstruction* definition = GetParent()->GetDefinedBy();
++          // For vector operation we want to embedd the vector length in the Location info
++          DCHECK(definition != nullptr);
++          // Determine if location is a vector by getting needed spill slots
++          size_t needed_spill_slots = NumberOfSpillSlotsNeeded();
++          needed_spill_slots = (needed_spill_slots > 2) ? needed_spill_slots : 0;
++          DCHECK_IMPLIES(needed_spill_slots > 0, definition->IsVecOperation() ||
++                          (definition->IsPhi() && definition->InputAt(1)->IsVecOperation()));
++          return Location::FpuRegisterLocation(GetRegister(), needed_spill_slots * kVRegSize);
++        }
+         return Location::FpuRegisterLocation(GetRegister());
+       }
+     } else {
+diff --git a/compiler/optimizing/ssa_liveness_analysis.h b/compiler/optimizing/ssa_liveness_analysis.h
+index e9422edb15..b9d55a37b6 100644
+--- a/compiler/optimizing/ssa_liveness_analysis.h
++++ b/compiler/optimizing/ssa_liveness_analysis.h
+@@ -276,18 +276,44 @@ class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
+  public:
+   static LiveInterval* MakeInterval(ScopedArenaAllocator* allocator,
+                                     DataType::Type type,
+-                                    HInstruction* instruction = nullptr) {
+-    return new (allocator) LiveInterval(allocator, type, instruction);
++                                    HInstruction* instruction,
++                                    bool has_overlapping_fp_vec_regs) {
++    return new (allocator) LiveInterval(allocator,
++                                        type,
++                                        instruction,
++                                        /*is_fixed*/ false,
++                                        /*reg*/ kNoRegister,
++                                        /*is_temp*/ false,
++                                        /*is_high_interval*/ false,
++                                        has_overlapping_fp_vec_regs);
+   }
+ 
+   static LiveInterval* MakeFixedInterval(ScopedArenaAllocator* allocator,
+                                          int reg,
+-                                         DataType::Type type) {
+-    return new (allocator) LiveInterval(allocator, type, nullptr, true, reg, false);
+-  }
+-
+-  static LiveInterval* MakeTempInterval(ScopedArenaAllocator* allocator, DataType::Type type) {
+-    return new (allocator) LiveInterval(allocator, type, nullptr, false, kNoRegister, true);
++                                         DataType::Type type,
++                                         bool has_overlapping_fp_vec_regs) {
++    return new (allocator) LiveInterval(allocator,
++                                        type,
++                                        nullptr,
++                                        true,
++                                        reg,
++                                        /*is_temp*/ false,
++                                        /*is_high_interval*/ false,
++                                        has_overlapping_fp_vec_regs);
++  }
++
++  static LiveInterval* MakeTempInterval(ScopedArenaAllocator* allocator,
++                                        DataType::Type type,
++                                        HInstruction* instruction,
++                                        bool has_overlapping_fp_vec_regs) {
++    return new (allocator) LiveInterval(allocator,
++                                        type,
++                                        instruction,
++                                        false,
++                                        kNoRegister,
++                                        true,
++                                        /*is_high_interval*/ false,
++                                        has_overlapping_fp_vec_regs);
+   }
+ 
+   bool IsFixed() const { return is_fixed_; }
+@@ -658,8 +684,14 @@ class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
+       // This range dies before `position`, no need to split.
+       return nullptr;
+     }
+-
+-    LiveInterval* new_interval = new (allocator_) LiveInterval(allocator_, type_);
++    LiveInterval* new_interval = new (allocator_) LiveInterval(allocator_,
++                                                               type_,
++                                                               defined_by_,
++                                                               /*is_fixed*/ false,
++                                                               /*reg*/ kNoRegister,
++                                                               /*is_temp*/ false,
++                                                               /*is_high_interval*/ false,
++                                                               has_overlapping_fp_vec_registers_);
+     SafepointPosition* new_last_safepoint = FindSafepointJustBefore(position);
+     if (new_last_safepoint == nullptr) {
+       new_interval->first_safepoint_ = first_safepoint_;
+@@ -849,8 +881,14 @@ class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
+     DCHECK(IsParent());
+     DCHECK(!HasHighInterval());
+     DCHECK(!HasLowInterval());
+-    high_or_low_interval_ = new (allocator_) LiveInterval(
+-        allocator_, type_, defined_by_, false, kNoRegister, is_temp, true);
++    high_or_low_interval_ = new (allocator_) LiveInterval(allocator_,
++                                                          type_,
++                                                          defined_by_,
++                                                          false,
++                                                          kNoRegister,
++                                                          is_temp,
++                                                          true,
++                                                          has_overlapping_fp_vec_registers_);
+     high_or_low_interval_->high_or_low_interval_ = this;
+     if (first_range_ != nullptr) {
+       high_or_low_interval_->first_range_ = first_range_->Dup(allocator_);
+@@ -983,7 +1021,8 @@ class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
+                bool is_fixed = false,
+                int reg = kNoRegister,
+                bool is_temp = false,
+-               bool is_high_interval = false)
++               bool is_high_interval = false,
++               bool has_overlapping_fp_vec_regs = false)
+       : allocator_(allocator),
+         first_range_(nullptr),
+         last_range_(nullptr),
+@@ -1000,6 +1039,7 @@ class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
+         is_fixed_(is_fixed),
+         is_temp_(is_temp),
+         is_high_interval_(is_high_interval),
++        has_overlapping_fp_vec_registers_(has_overlapping_fp_vec_regs),
+         high_or_low_interval_(nullptr),
+         defined_by_(defined_by) {}
+ 
+@@ -1133,6 +1173,9 @@ class LiveInterval : public ArenaObject<kArenaAllocSsaLiveness> {
+   // Whether this interval is a synthesized interval for register pair.
+   const bool is_high_interval_;
+ 
++  // Whether vector registers overlap with fp registers.
++  const bool has_overlapping_fp_vec_registers_;
++
+   // If this interval needs a register pair, the high or low equivalent.
+   // `is_high_interval_` tells whether this holds the low or the high.
+   LiveInterval* high_or_low_interval_;
+-- 
+2.25.1
+
