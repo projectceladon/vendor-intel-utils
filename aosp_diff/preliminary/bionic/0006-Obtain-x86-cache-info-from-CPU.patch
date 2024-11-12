@@ -1,0 +1,594 @@
+From e4ddc78e40f68994a1822c2e126e517c8f4060c5 Mon Sep 17 00:00:00 2001
+From: Elliott Hughes <enh@google.com>
+Date: Fri, 19 Jul 2024 12:00:17 +0000
+Subject: [PATCH] Obtain x86 cache info from CPU
+
+The cache info today is hardcoded in cache.h
+May not be optimal across various uarchs/SKUs
+Leverage bionic sysconf to get the underlying cache.
+
+Improvements seen on RPL, for various sizes
+memmove_non_overlapping
+1.25M - 31%
+1.5M - 30%
+1.75M - 28%
+
+memcpy
+1.25M - 31%
+1.5M - 31%
+1.75M - 30%
+
+The bionic benchmarks (which only go up to 128KiB) show no change, as
+you'd expect.
+
+Test: bionic/tests/run-on-host.sh 64 && bionic/tests/run-on-host.sh 32
+Bug: 202102347
+Change-Id: I4bbad51794758873744149d0f58b86bb92ee307f
+Signed-off-by: Vinay Prasad Kompella <vinay.kompella@intel.com>
+Signed-off-by: Soni, Ravi Kumar <ravi.kumar.soni@intel.com>
+---
+ libc/arch-x86/string/cache.h                  | 41 -------------------
+ libc/arch-x86/string/sse2-memmove-slm.S       | 19 +++++++--
+ libc/arch-x86/string/sse2-memset-atom.S       | 13 ++++--
+ libc/arch-x86/string/sse2-memset-slm.S        | 11 +++--
+ libc/arch-x86/string/ssse3-memcpy-atom.S      |  1 -
+ .../kabylake/string/avx2-memmove-kbl.S        | 26 +++++++++---
+ .../kabylake/string/avx2-memset-kbl.S         |  8 +---
+ libc/arch-x86_64/kabylake/string/cache.h      | 36 ----------------
+ libc/arch-x86_64/silvermont/string/cache.h    | 36 ----------------
+ .../silvermont/string/sse2-memmove-slm.S      | 26 +++++++++---
+ .../silvermont/string/sse2-memset-slm.S       |  8 +---
+ .../silvermont/string/sse4-memcmp-slm.S       | 13 +-----
+ libc/bionic/libc_init_common.cpp              | 26 ++++++++++++
+ 13 files changed, 108 insertions(+), 156 deletions(-)
+ delete mode 100644 libc/arch-x86/string/cache.h
+ delete mode 100644 libc/arch-x86_64/kabylake/string/cache.h
+ delete mode 100644 libc/arch-x86_64/silvermont/string/cache.h
+
+diff --git a/libc/arch-x86/string/cache.h b/libc/arch-x86/string/cache.h
+deleted file mode 100644
+index 33719a0cb..000000000
+--- a/libc/arch-x86/string/cache.h
++++ /dev/null
+@@ -1,41 +0,0 @@
+-/*
+-Copyright (c) 2010, Intel Corporation
+-All rights reserved.
+-
+-Redistribution and use in source and binary forms, with or without
+-modification, are permitted provided that the following conditions are met:
+-
+-    * Redistributions of source code must retain the above copyright notice,
+-    * this list of conditions and the following disclaimer.
+-
+-    * Redistributions in binary form must reproduce the above copyright notice,
+-    * this list of conditions and the following disclaimer in the documentation
+-    * and/or other materials provided with the distribution.
+-
+-    * Neither the name of Intel Corporation nor the names of its contributors
+-    * may be used to endorse or promote products derived from this software
+-    * without specific prior written permission.
+-
+-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-*/
+-
+-#ifdef FOR_ATOM
+-#define SHARED_CACHE_SIZE (512 * 1024) /* Atom L2 Cache */
+-#endif
+-#ifdef FOR_SILVERMONT
+-#define SHARED_CACHE_SIZE (1024 * 1024) /* Silvermont L2 Cache */
+-#endif
+-
+-#define DATA_CACHE_SIZE (24 * 1024) /* Atom and Silvermont L1 Data Cache */
+-
+-#define SHARED_CACHE_SIZE_HALF (SHARED_CACHE_SIZE / 2)
+-#define DATA_CACHE_SIZE_HALF (DATA_CACHE_SIZE / 2)
+diff --git a/libc/arch-x86/string/sse2-memmove-slm.S b/libc/arch-x86/string/sse2-memmove-slm.S
+index 79b5d1b7e..7f4237486 100644
+--- a/libc/arch-x86/string/sse2-memmove-slm.S
++++ b/libc/arch-x86/string/sse2-memmove-slm.S
+@@ -29,7 +29,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+ #define FOR_SILVERMONT
+-#include "cache.h"
+ 
+ #ifndef MEMMOVE
+ # define MEMMOVE	memmove_generic
+@@ -94,6 +93,8 @@ name:		\
+ #define RETURN_END	POP (%ebx); ret
+ #define RETURN		RETURN_END; CFI_PUSH (%ebx)
+ 
++#define SETUP_PIC_REG(x)	call	__x86.get_pc_thunk.x
++
+ 	.section .text.sse2,"ax",@progbits
+ ENTRY (MEMMOVE)
+ 	ENTRANCE
+@@ -193,7 +194,13 @@ L(mm_len_128_or_more_forward):
+ 	cmp	%edi, %ebx
+ 	jbe	L(mm_copy_remaining_forward)
+ 
+-	cmp	$SHARED_CACHE_SIZE_HALF, %ecx
++	PUSH(%ebx)
++	SETUP_PIC_REG(bx)
++	add	$_GLOBAL_OFFSET_TABLE_, %ebx
++	cmp	__x86_shared_cache_size_half@GOTOFF(%ebx), %ecx
++	/* Restore ebx. We can place a pop before jump as it doesn't affect any flags. */
++	POP(%ebx)
++
+ 	jae	L(mm_large_page_loop_forward)
+ 
+ 	.p2align 4
+@@ -424,7 +431,13 @@ L(mm_len_128_or_more_backward):
+ 	cmp	%edi, %ebx
+ 	jae	L(mm_main_loop_backward_end)
+ 
+-	cmp	$SHARED_CACHE_SIZE_HALF, %ecx
++	PUSH(%ebx)
++	SETUP_PIC_REG(bx)
++	add	$_GLOBAL_OFFSET_TABLE_, %ebx
++	cmp	__x86_shared_cache_size_half@GOTOFF(%ebx), %ecx
++	/* Restore ebx. We can place a pop before jump as it doesn't affect any flags. */
++	POP(%ebx)
++
+ 	jae	L(mm_large_page_loop_backward)
+ 
+ 	.p2align 4
+diff --git a/libc/arch-x86/string/sse2-memset-atom.S b/libc/arch-x86/string/sse2-memset-atom.S
+index 320afec11..e43ead0d1 100644
+--- a/libc/arch-x86/string/sse2-memset-atom.S
++++ b/libc/arch-x86/string/sse2-memset-atom.S
+@@ -31,7 +31,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <private/bionic_asm.h>
+ 
+ #define FOR_ATOM
+-#include "cache.h"
+ 
+ #ifndef L
+ # define L(label)	.L##label
+@@ -64,6 +63,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #define RETURN		RETURN_END; CFI_PUSH(%ebx)
+ #define JMPTBL(I, B)	I - B
+ 
++#define SETUP_PIC_REG(x)	call	__x86.get_pc_thunk.x
++
+ /* Load an entry in a jump table into EBX and branch to it.  TABLE is a
+    jump table with relative offsets.   */
+ # define BRANCH_TO_JMPTBL_ENTRY(TABLE)				\
+@@ -256,14 +257,20 @@ L(aligned_16_less128bytes):
+ 	ALIGN(4)
+ L(128bytesormore):
+ 	PUSH(%ebx)
+-	mov	$SHARED_CACHE_SIZE, %ebx
++	SETUP_PIC_REG(bx)
++	add	$_GLOBAL_OFFSET_TABLE_, %ebx
++	mov	__x86_shared_cache_size@GOTOFF(%ebx), %ebx
+ 	cmp	%ebx, %ecx
+ 	jae	L(128bytesormore_nt_start)
+ 
+ 
+ 	POP(%ebx)
+ # define RESTORE_EBX_STATE CFI_PUSH(%ebx)
+-	cmp	$DATA_CACHE_SIZE, %ecx
++	PUSH(%ebx)
++	SETUP_PIC_REG(bx)
++	add	$_GLOBAL_OFFSET_TABLE_, %ebx
++	cmp	__x86_data_cache_size@GOTOFF(%ebx), %ecx
++	POP(%ebx)
+ 
+ 	jae	L(128bytes_L2_normal)
+ 	subl	$128, %ecx
+diff --git a/libc/arch-x86/string/sse2-memset-slm.S b/libc/arch-x86/string/sse2-memset-slm.S
+index 5cff141ad..e4c8fa108 100644
+--- a/libc/arch-x86/string/sse2-memset-slm.S
++++ b/libc/arch-x86/string/sse2-memset-slm.S
+@@ -31,7 +31,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <private/bionic_asm.h>
+ 
+ #define FOR_SILVERMONT
+-#include "cache.h"
+ 
+ #ifndef L
+ # define L(label)	.L##label
+@@ -64,6 +63,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ # define RETURN		RETURN_END; CFI_PUSH(%ebx)
+ # define JMPTBL(I, B)	I - B
+ 
++#define SETUP_PIC_REG(x)	call	__x86.get_pc_thunk.x
++
+ /* Load an entry in a jump table into EBX and branch to it.  TABLE is a
+    jump table with relative offsets.   */
+ # define BRANCH_TO_JMPTBL_ENTRY(TABLE)				\
+@@ -177,14 +178,18 @@ L(aligned_16_less128bytes):
+ 	ALIGN(4)
+ L(128bytesormore):
+ 	PUSH(%ebx)
+-	mov	$SHARED_CACHE_SIZE, %ebx
++	SETUP_PIC_REG(bx)
++	add	$_GLOBAL_OFFSET_TABLE_, %ebx
++	mov	__x86_shared_cache_size@GOTOFF(%ebx), %ebx
+ 	cmp	%ebx, %ecx
+ 	jae	L(128bytesormore_nt_start)
+ 
+ 	POP(%ebx)
+ 
+ 	PUSH(%ebx)
+-	mov	$DATA_CACHE_SIZE, %ebx
++	SETUP_PIC_REG(bx)
++	add	$_GLOBAL_OFFSET_TABLE_, %ebx
++	mov	__x86_data_cache_size@GOTOFF(%ebx), %ebx
+ 
+ 	cmp	%ebx, %ecx
+ 	jae	L(128bytes_L2_normal)
+diff --git a/libc/arch-x86/string/ssse3-memcpy-atom.S b/libc/arch-x86/string/ssse3-memcpy-atom.S
+index fe3082ee7..83e198504 100644
+--- a/libc/arch-x86/string/ssse3-memcpy-atom.S
++++ b/libc/arch-x86/string/ssse3-memcpy-atom.S
+@@ -29,7 +29,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+ #define FOR_ATOM
+-#include "cache.h"
+ 
+ #ifndef MEMCPY
+ # define MEMCPY	memcpy_atom
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
+index 02e9ec1d2..77d628eb0 100644
+--- a/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
++++ b/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
+@@ -28,7 +28,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+-#include "cache.h"
++
+ 
+ #ifndef MEMMOVE
+ # define MEMMOVE		memmove_avx2
+@@ -228,8 +228,9 @@ L(mm_len_256_or_more_forward):
+         cmp     %r8, %rbx
+         jbe     L(mm_copy_remaining_forward)
+ 
+-        cmp     $SHARED_CACHE_SIZE_HALF, %rdx
+-        jae     L(mm_large_page_loop_forward)
++           cmp     __x86_shared_cache_size_half(%rip), %rdx
++
++           ja      L(mm_overlapping_check_forward)
+ 
+         .p2align 4
+ L(mm_main_loop_forward):
+@@ -497,8 +498,10 @@ L(mm_len_256_or_more_backward):
+ 	cmp	%r9, %rbx
+ 	jae	L(mm_recalc_len)
+ 
+-	cmp	$SHARED_CACHE_SIZE_HALF, %rdx
+-	jae	L(mm_large_page_loop_backward)
++	cmp     __x86_shared_cache_size_half(%rip), %rdx
++
++       ja      L(mm_overlapping_check_backward)
++
+ 
+ 	.p2align 4
+ L(mm_main_loop_backward):
+@@ -560,6 +563,12 @@ L(mm_return):
+ /* Big length copy forward part.  */
+ 
+ 	.p2align 4
++L(mm_overlapping_check_forward):
++       mov     %rsi, %r9
++       add     %rdx, %r9
++       cmp     __x86_shared_cache_size(%rip), %r9
++       jbe     L(mm_main_loop_forward)
++
+ L(mm_large_page_loop_forward):
+ 	vmovdqu	  (%r8, %rsi), %ymm0
+ 	vmovdqu	  32(%r8, %rsi), %ymm1
+@@ -577,6 +586,13 @@ L(mm_large_page_loop_forward):
+ 
+ /* Big length copy backward part.  */
+ 	.p2align 4
++L(mm_overlapping_check_backward):
++       mov     %rdi, %r11
++       sub     %rsi, %r11 /* r11 = dst - src, diff */
++       add     %rdx, %r11
++       cmp     __x86_shared_cache_size(%rip), %r11
++       jbe     L(mm_main_loop_backward)
++
+ L(mm_large_page_loop_backward):
+ 	vmovdqu	  -64(%r9, %r8), %ymm0
+ 	vmovdqu	  -32(%r9, %r8), %ymm1
+diff --git a/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+index ca62a9f8c..35d682a5d 100644
+--- a/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
++++ b/libc/arch-x86_64/kabylake/string/avx2-memset-kbl.S
+@@ -30,7 +30,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #include <private/bionic_asm.h>
+ 
+-#include "cache.h"
+ 
+ #ifndef L
+ # define L(label)	.L##label
+@@ -117,11 +116,8 @@ L(16bytesormore):
+ 	cmpq	%rcx, %rdx
+ 	je	L(done)
+ 
+-#ifdef SHARED_CACHE_SIZE
+-	cmp	$SHARED_CACHE_SIZE, %r8
+-#else
+-	cmp	__x86_64_shared_cache_size(%rip), %r8
+-#endif
++	cmp	__x86_shared_cache_size(%rip), %r8
++
+ 	ja	L(non_temporal_loop)
+ 
+ 	ALIGN (4)
+diff --git a/libc/arch-x86_64/kabylake/string/cache.h b/libc/arch-x86_64/kabylake/string/cache.h
+deleted file mode 100644
+index 4131509fb..000000000
+--- a/libc/arch-x86_64/kabylake/string/cache.h
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+-Copyright (c) 2014, Intel Corporation
+-All rights reserved.
+-
+-Redistribution and use in source and binary forms, with or without
+-modification, are permitted provided that the following conditions are met:
+-
+-    * Redistributions of source code must retain the above copyright notice,
+-    * this list of conditions and the following disclaimer.
+-
+-    * Redistributions in binary form must reproduce the above copyright notice,
+-    * this list of conditions and the following disclaimer in the documentation
+-    * and/or other materials provided with the distribution.
+-
+-    * Neither the name of Intel Corporation nor the names of its contributors
+-    * may be used to endorse or promote products derived from this software
+-    * without specific prior written permission.
+-
+-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-*/
+-
+-/* Values are optimized for Core Architecture */
+-#define SHARED_CACHE_SIZE (4096*1024)  /* Core Architecture L2 Cache */
+-#define DATA_CACHE_SIZE   (24*1024)    /* Core Architecture L1 Data Cache */
+-
+-#define SHARED_CACHE_SIZE_HALF (SHARED_CACHE_SIZE / 2)
+-#define DATA_CACHE_SIZE_HALF   (DATA_CACHE_SIZE / 2)
+diff --git a/libc/arch-x86_64/silvermont/string/cache.h b/libc/arch-x86_64/silvermont/string/cache.h
+deleted file mode 100644
+index 3606d2a1a..000000000
+--- a/libc/arch-x86_64/silvermont/string/cache.h
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+-Copyright (c) 2014, Intel Corporation
+-All rights reserved.
+-
+-Redistribution and use in source and binary forms, with or without
+-modification, are permitted provided that the following conditions are met:
+-
+-    * Redistributions of source code must retain the above copyright notice,
+-    * this list of conditions and the following disclaimer.
+-
+-    * Redistributions in binary form must reproduce the above copyright notice,
+-    * this list of conditions and the following disclaimer in the documentation
+-    * and/or other materials provided with the distribution.
+-
+-    * Neither the name of Intel Corporation nor the names of its contributors
+-    * may be used to endorse or promote products derived from this software
+-    * without specific prior written permission.
+-
+-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-*/
+-
+-/* Values are optimized for Silvermont */
+-#define SHARED_CACHE_SIZE (1024*1024)  /* Silvermont L2 Cache */
+-#define DATA_CACHE_SIZE   (24*1024)    /* Silvermont L1 Data Cache */
+-
+-#define SHARED_CACHE_SIZE_HALF (SHARED_CACHE_SIZE / 2)
+-#define DATA_CACHE_SIZE_HALF   (DATA_CACHE_SIZE / 2)
+diff --git a/libc/arch-x86_64/silvermont/string/sse2-memmove-slm.S b/libc/arch-x86_64/silvermont/string/sse2-memmove-slm.S
+index 7024f4950..0530a6f59 100644
+--- a/libc/arch-x86_64/silvermont/string/sse2-memmove-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse2-memmove-slm.S
+@@ -28,7 +28,6 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+-#include "cache.h"
+ 
+ #ifndef MEMMOVE
+ # define MEMMOVE		memmove_generic
+@@ -189,8 +188,9 @@ L(mm_len_128_or_more_forward):
+ 	cmp	%r8, %rbx
+ 	jbe	L(mm_copy_remaining_forward)
+ 
+-	cmp	$SHARED_CACHE_SIZE_HALF, %rdx
+-	jae	L(mm_large_page_loop_forward)
++	cmp	__x86_shared_cache_size_half(%rip), %rdx
++
++	ja      L(mm_overlapping_check_forward)
+ 
+ 	.p2align 4
+ L(mm_main_loop_forward):
+@@ -414,8 +414,9 @@ L(mm_len_128_or_more_backward):
+ 	cmp	%r9, %rbx
+ 	jae	L(mm_recalc_len)
+ 
+-	cmp	$SHARED_CACHE_SIZE_HALF, %rdx
+-	jae	L(mm_large_page_loop_backward)
++	cmp	__x86_shared_cache_size_half(%rip), %rdx
++
++	ja	L(mm_overlapping_check_backward)
+ 
+ 	.p2align 4
+ L(mm_main_loop_backward):
+@@ -481,6 +482,13 @@ L(mm_return):
+ /* Big length copy forward part.  */
+ 
+ 	.p2align 4
++
++L(mm_overlapping_check_forward):
++	mov	%rsi, %r9
++	add	%rdx, %r9
++	cmp	__x86_shared_cache_size(%rip), %r9
++	jbe	L(mm_main_loop_forward)
++
+ L(mm_large_page_loop_forward):
+ 	movdqu	(%r8, %rsi), %xmm0
+ 	movdqu	16(%r8, %rsi), %xmm1
+@@ -498,6 +506,14 @@ L(mm_large_page_loop_forward):
+ 
+ /* Big length copy backward part.  */
+ 	.p2align 4
++
++L(mm_overlapping_check_backward):
++	mov	%rdi, %r11
++	sub	%rsi, %r11 /* r11 = dst - src, diff */
++	add	%rdx, %r11
++	cmp	__x86_shared_cache_size(%rip), %r11
++	jbe	L(mm_main_loop_backward)
++
+ L(mm_large_page_loop_backward):
+ 	movdqu	-64(%r9, %r8), %xmm0
+ 	movdqu	-48(%r9, %r8), %xmm1
+diff --git a/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+index cceadd297..84ab327c9 100644
+--- a/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse2-memset-slm.S
+@@ -30,7 +30,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #include <private/bionic_asm.h>
+ 
+-#include "cache.h"
+ 
+ #ifndef L
+ # define L(label)	.L##label
+@@ -116,11 +115,8 @@ L(128bytesmore):
+ 	cmpq	%rcx, %rdx
+ 	je	L(return)
+ 
+-#ifdef SHARED_CACHE_SIZE
+-	cmp	$SHARED_CACHE_SIZE, %r8
+-#else
+-	cmp	__x86_64_shared_cache_size(%rip), %r8
+-#endif
++	cmp	__x86_shared_cache_size(%rip), %r8
++
+ 	ja	L(128bytesmore_nt)
+ 
+ 	ALIGN (4)
+diff --git a/libc/arch-x86_64/silvermont/string/sse4-memcmp-slm.S b/libc/arch-x86_64/silvermont/string/sse4-memcmp-slm.S
+index 6cfcd767f..c5980d431 100644
+--- a/libc/arch-x86_64/silvermont/string/sse4-memcmp-slm.S
++++ b/libc/arch-x86_64/silvermont/string/sse4-memcmp-slm.S
+@@ -28,7 +28,6 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+ 
+-#include "cache.h"
+ 
+ #ifndef MEMCMP
+ # define MEMCMP		memcmp_generic
+@@ -353,11 +352,7 @@ L(less32bytesin256):
+ 
+ 	ALIGN (4)
+ L(512bytesormore):
+-#ifdef DATA_CACHE_SIZE_HALF
+-	mov	$DATA_CACHE_SIZE_HALF, %r8
+-#else
+-	mov	__x86_64_data_cache_size_half(%rip), %r8
+-#endif
++	mov	__x86_data_cache_size_half(%rip), %r8
+ 	mov	%r8, %r9
+ 	shr	$1, %r8
+ 	add	%r9, %r8
+@@ -669,11 +664,7 @@ L(less32bytesin256in2alinged):
+ 
+ 	ALIGN (4)
+ L(512bytesormorein2aligned):
+-#ifdef DATA_CACHE_SIZE_HALF
+-	mov	$DATA_CACHE_SIZE_HALF, %r8
+-#else
+-	mov	__x86_64_data_cache_size_half(%rip), %r8
+-#endif
++	mov	__x86_data_cache_size_half(%rip), %r8
+ 	mov	%r8, %r9
+ 	shr	$1, %r8
+ 	add	%r9, %r8
+diff --git a/libc/bionic/libc_init_common.cpp b/libc/bionic/libc_init_common.cpp
+index c82c52e9d..6e4213a90 100644
+--- a/libc/bionic/libc_init_common.cpp
++++ b/libc/bionic/libc_init_common.cpp
+@@ -63,6 +63,28 @@ __LIBC_HIDDEN__ constinit _Atomic(bool) __libc_memtag_stack;
+ __BIONIC_WEAK_VARIABLE_FOR_NATIVE_BRIDGE
+ const char* __progname;
+ 
++#if defined(__i386__) || defined(__x86_64__)
++// Default sizes based on the old hard-coded values for Atom/Silvermont (x86) and Core 2 (x86-64)...
++size_t __x86_data_cache_size = 24 * 1024;
++size_t __x86_data_cache_size_half = __x86_data_cache_size / 2;
++size_t __x86_shared_cache_size = sizeof(long) == 8 ? 4096 * 1024 : 1024 * 1024;
++size_t __x86_shared_cache_size_half = __x86_shared_cache_size / 2;
++// ...overwritten at runtime based on the cpu's reported cache sizes.
++static void __libc_init_x86_cache_info() {
++  // Handle the case where during early boot /sys fs may not yet be ready,
++  // resulting in sysconf() returning 0, leading to crashes.
++  // In that case (basically just init), we keep the defaults.
++  if (sysconf(_SC_LEVEL1_DCACHE_SIZE) != 0) {
++    __x86_data_cache_size = sysconf(_SC_LEVEL1_DCACHE_SIZE);
++    __x86_data_cache_size_half = __x86_data_cache_size / 2;
++  }
++  if (sysconf(_SC_LEVEL2_CACHE_SIZE) != 0) {
++    __x86_shared_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
++    __x86_shared_cache_size_half = __x86_shared_cache_size / 2;
++  }
++}
++#endif
++
+ void __libc_init_globals() {
+   // Initialize libc globals that are needed in both the linker and in libc.
+   // In dynamic binaries, this is run at least twice for different copies of the
+@@ -172,6 +194,10 @@ void __libc_init_common() {
+   __system_properties_init(); // Requires 'environ'.
+   __libc_init_fdsan(); // Requires system properties (for debug.fdsan).
+   __libc_init_fdtrack();
++
++#if defined(__i386__) || defined(__x86_64__)
++  __libc_init_x86_cache_info();
++#endif
+ }
+ 
+ void __libc_init_fork_handler() {
+-- 
+2.34.1
+
