@@ -1,0 +1,130 @@
+From 70eb75df7d342429c3ee225feb7c011df727442f Mon Sep 17 00:00:00 2001
+From: Miranda Kephart <mkephart@google.com>
+Date: Fri, 16 Feb 2024 10:14:15 -0500
+Subject: [PATCH] Block clipboard UI when device is locked
+
+In some situations (see bug for details) it's possible to enter the
+clipboard even while the device is locked, and from there access the
+provided intents. Users should not be able to access intents from this
+state; this change adds an additional check before showing the interactive UI.
+
+The behavior is identical to what we do when user setup is not complete
+(b/251778420): we show a toast to note that content has been copied, but no interactive UI.
+
+Interactive UI is only blocked when device is locked (i.e. requiring pin
+entry/password/biometric/etc), not if the keyguard is up but trivially
+dismissable.
+
+Bug: 317048495
+Test: atest ClipboardListenerTest; verification using steps in linked
+bug as well as forcing text content to appear client-side, to verify
+that even if text content is received in the ClipboardListener, no
+interactive UI appears.
+
+(cherry picked from commit 2976ca86d5c5be558191a1fe706d4cd0d7ccdecb)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:c9adc41c71a604da29fe01be79f4172473dfe1c6)
+Merged-In: I1a48cbe64852dce3fba69915ca11dad8878f66eb
+Change-Id: I1a48cbe64852dce3fba69915ca11dad8878f66eb
+---
+ .../clipboardoverlay/ClipboardListener.java    |  8 +++++++-
+ .../ClipboardListenerTest.java                 | 18 +++++++++++++++++-
+ 2 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java
+index 63b4288ce055..f0a980e0a30c 100644
+--- a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java
++++ b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java
+@@ -24,6 +24,7 @@ import static com.android.systemui.clipboardoverlay.ClipboardOverlayEvent.CLIPBO
+ 
+ import static com.google.android.setupcompat.util.WizardManagerHelper.SETTINGS_SECURE_USER_SETUP_COMPLETE;
+ 
++import android.app.KeyguardManager;
+ import android.content.ClipData;
+ import android.content.ClipboardManager;
+ import android.content.Context;
+@@ -57,6 +58,7 @@ public class ClipboardListener implements
+     private final Provider<ClipboardOverlayController> mOverlayProvider;
+     private final ClipboardToast mClipboardToast;
+     private final ClipboardManager mClipboardManager;
++    private final KeyguardManager mKeyguardManager;
+     private final UiEventLogger mUiEventLogger;
+     private ClipboardOverlay mClipboardOverlay;
+ 
+@@ -65,11 +67,13 @@ public class ClipboardListener implements
+             Provider<ClipboardOverlayController> clipboardOverlayControllerProvider,
+             ClipboardToast clipboardToast,
+             ClipboardManager clipboardManager,
++            KeyguardManager keyguardManager,
+             UiEventLogger uiEventLogger) {
+         mContext = context;
+         mOverlayProvider = clipboardOverlayControllerProvider;
+         mClipboardToast = clipboardToast;
+         mClipboardManager = clipboardManager;
++        mKeyguardManager = keyguardManager;
+         mUiEventLogger = uiEventLogger;
+     }
+ 
+@@ -92,7 +96,9 @@ public class ClipboardListener implements
+             return;
+         }
+ 
+-        if (!isUserSetupComplete() // user should not access intents from this state
++        // user should not access intents before setup or while device is locked
++        if (mKeyguardManager.isDeviceLocked()
++                || !isUserSetupComplete()
+                 || clipData == null // shouldn't happen, but just in case
+                 || clipData.getItemCount() == 0) {
+             if (shouldShowToast(clipData)) {
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java b/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java
+index 18515825967f..9d02c86cfa7a 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java
+@@ -27,6 +27,7 @@ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.verifyZeroInteractions;
+ import static org.mockito.Mockito.when;
+ 
++import android.app.KeyguardManager;
+ import android.content.ClipData;
+ import android.content.ClipDescription;
+ import android.content.ClipboardManager;
+@@ -59,6 +60,8 @@ public class ClipboardListenerTest extends SysuiTestCase {
+     @Mock
+     private ClipboardManager mClipboardManager;
+     @Mock
++    private KeyguardManager mKeyguardManager;
++    @Mock
+     private ClipboardOverlayController mOverlayController;
+     @Mock
+     private ClipboardToast mClipboardToast;
+@@ -96,7 +99,7 @@ public class ClipboardListenerTest extends SysuiTestCase {
+         when(mClipboardManager.getPrimaryClipSource()).thenReturn(mSampleSource);
+ 
+         mClipboardListener = new ClipboardListener(getContext(), mOverlayControllerProvider,
+-                mClipboardToast, mClipboardManager, mUiEventLogger);
++                mClipboardToast, mClipboardManager, mKeyguardManager, mUiEventLogger);
+     }
+ 
+ 
+@@ -190,6 +193,19 @@ public class ClipboardListenerTest extends SysuiTestCase {
+         verifyZeroInteractions(mOverlayControllerProvider);
+     }
+ 
++    @Test
++    public void test_deviceLocked_showsToast() {
++        when(mKeyguardManager.isDeviceLocked()).thenReturn(true);
++
++        mClipboardListener.start();
++        mClipboardListener.onPrimaryClipChanged();
++
++        verify(mUiEventLogger, times(1)).log(
++                ClipboardOverlayEvent.CLIPBOARD_TOAST_SHOWN, 0, mSampleSource);
++        verify(mClipboardToast, times(1)).showCopiedToast();
++        verifyZeroInteractions(mOverlayControllerProvider);
++    }
++
+     @Test
+     public void test_nullClipData_showsNothing() {
+         when(mClipboardManager.getPrimaryClip()).thenReturn(null);
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
