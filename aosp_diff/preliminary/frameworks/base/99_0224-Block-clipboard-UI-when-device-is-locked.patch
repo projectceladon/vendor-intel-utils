@@ -1,0 +1,160 @@
+From f04947dde53d7b7c0022cfa69f10282ca5275ac1 Mon Sep 17 00:00:00 2001
+From: Miranda Kephart <mkephart@google.com>
+Date: Fri, 16 Feb 2024 10:14:15 -0500
+Subject: [PATCH] Block clipboard UI when device is locked
+
+In some situations (see bug for details) it's possible to enter the
+clipboard even while the device is locked, and from there access the
+provided intents. Users should not be able to access intents from this
+state; this change adds an additional check before showing the interactive UI.
+
+The behavior is identical to what we do when user setup is not complete
+(b/251778420): we show a toast to note that content has been copied, but no interactive UI.
+
+Interactive UI is only blocked when device is locked (i.e. requiring pin
+entry/password/biometric/etc), not if the keyguard is up but trivially
+dismissable.
+
+Bug: 317048495
+Test: atest ClipboardListenerTest; verification using steps in linked
+bug as well as forcing text content to appear client-side, to verify
+that even if text content is received in the ClipboardListener, no
+interactive UI appears.
+
+(cherry picked from commit 2976ca86d5c5be558191a1fe706d4cd0d7ccdecb)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:b9ffec803b31f1b57756105c9fbfd0cb672fcfde)
+Merged-In: I1a48cbe64852dce3fba69915ca11dad8878f66eb
+Change-Id: I1a48cbe64852dce3fba69915ca11dad8878f66eb
+---
+ .../clipboardoverlay/ClipboardListener.java   | 11 ++++-
+ .../ClipboardListenerTest.java                | 45 ++++++++++++++++++-
+ 2 files changed, 53 insertions(+), 3 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java
+index 805a20a6d965..0a6f9554e059 100644
+--- a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java
++++ b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ClipboardListener.java
+@@ -25,6 +25,7 @@ import static com.android.systemui.clipboardoverlay.ClipboardOverlayEvent.CLIPBO
+ 
+ import static com.google.android.setupcompat.util.WizardManagerHelper.SETTINGS_SECURE_USER_SETUP_COMPLETE;
+ 
++import android.app.KeyguardManager;
+ import android.content.ClipData;
+ import android.content.ClipboardManager;
+ import android.content.Context;
+@@ -64,6 +65,7 @@ public class ClipboardListener implements
+     private final ClipboardOverlayControllerLegacyFactory mOverlayFactory;
+     private final ClipboardToast mClipboardToast;
+     private final ClipboardManager mClipboardManager;
++    private final KeyguardManager mKeyguardManager;
+     private final UiEventLogger mUiEventLogger;
+     private final FeatureFlags mFeatureFlags;
+     private boolean mUsingNewOverlay;
+@@ -75,6 +77,7 @@ public class ClipboardListener implements
+             ClipboardOverlayControllerLegacyFactory overlayFactory,
+             ClipboardToast clipboardToast,
+             ClipboardManager clipboardManager,
++	    KeyguardManager keyguardManager,
+             UiEventLogger uiEventLogger,
+             FeatureFlags featureFlags) {
+         mContext = context;
+@@ -83,6 +86,7 @@ public class ClipboardListener implements
+         mOverlayFactory = overlayFactory;
+         mClipboardToast = clipboardToast;
+         mClipboardManager = clipboardManager;
++	mKeyguardManager = keyguardManager;
+         mUiEventLogger = uiEventLogger;
+         mFeatureFlags = featureFlags;
+ 
+@@ -111,8 +115,11 @@ public class ClipboardListener implements
+             return;
+         }
+ 
+-        if (!isUserSetupComplete()) {
+-            // just show a toast, user should not access intents from this state
++        // user should not access intents before setup or while device is locked
++        if (mKeyguardManager.isDeviceLocked()
++                || !isUserSetupComplete()
++                || clipData == null // shouldn't happen, but just in case
++                || clipData.getItemCount() == 0) {
+             if (shouldShowToast(clipData)) {
+                 mUiEventLogger.log(CLIPBOARD_TOAST_SHOWN, 0, clipSource);
+                 mClipboardToast.showCopiedToast();
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java b/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java
+index bdd496ec219b..7f625e66b57c 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/clipboardoverlay/ClipboardListenerTest.java
+@@ -29,6 +29,7 @@ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.verifyZeroInteractions;
+ import static org.mockito.Mockito.when;
+ 
++import android.app.KeyguardManager;
+ import android.content.ClipData;
+ import android.content.ClipDescription;
+ import android.content.ClipboardManager;
+@@ -67,6 +68,8 @@ public class ClipboardListenerTest extends SysuiTestCase {
+     @Mock
+     private ClipboardOverlayControllerLegacy mOverlayControllerLegacy;
+     @Mock
++    private KeyguardManager mKeyguardManager;
++    @Mock
+     private ClipboardOverlayController mOverlayController;
+     @Mock
+     private ClipboardToast mClipboardToast;
+@@ -112,7 +115,7 @@ public class ClipboardListenerTest extends SysuiTestCase {
+ 
+         mClipboardListener = new ClipboardListener(getContext(), mDeviceConfigProxy,
+                 mOverlayControllerProvider, mClipboardOverlayControllerLegacyFactory,
+-                mClipboardToast, mClipboardManager, mUiEventLogger, mFeatureFlags);
++                mClipboardToast, mClipboardManager, mKeyguardManager, mUiEventLogger, mFeatureFlags);
+     }
+ 
+     @Test
+@@ -273,4 +276,44 @@ public class ClipboardListenerTest extends SysuiTestCase {
+         verifyZeroInteractions(mOverlayControllerProvider);
+         verifyZeroInteractions(mClipboardOverlayControllerLegacyFactory);
+     }
++
++    @Test
++    public void test_deviceLocked_showsToast() {
++        when(mKeyguardManager.isDeviceLocked()).thenReturn(true);
++
++        mClipboardListener.start();
++        mClipboardListener.onPrimaryClipChanged();
++
++        verify(mUiEventLogger, times(1)).log(
++                ClipboardOverlayEvent.CLIPBOARD_TOAST_SHOWN, 0, mSampleSource);
++        verify(mClipboardToast, times(1)).showCopiedToast();
++        verifyZeroInteractions(mClipboardOverlayControllerFactory);
++    }
++
++    @Test
++    public void test_nullClipData_showsNothing() {
++        when(mClipboardManager.getPrimaryClip()).thenReturn(null);
++
++        mClipboardListener.start();
++        mClipboardListener.onPrimaryClipChanged();
++
++        verifyZeroInteractions(mUiEventLogger);
++        verifyZeroInteractions(mClipboardToast);
++        verifyZeroInteractions(mClipboardOverlayControllerFactory);
++    }
++
++    @Test
++    public void test_emptyClipData_showsToast() {
++        ClipDescription description = new ClipDescription("Test", new String[0]);
++        ClipData noItems = new ClipData(description, new ArrayList<>());
++        when(mClipboardManager.getPrimaryClip()).thenReturn(noItems);
++
++        mClipboardListener.start();
++        mClipboardListener.onPrimaryClipChanged();
++
++        verify(mUiEventLogger, times(1)).log(
++                ClipboardOverlayEvent.CLIPBOARD_TOAST_SHOWN, 0, mSampleSource);
++        verify(mClipboardToast, times(1)).showCopiedToast();
++        verifyZeroInteractions(mClipboardOverlayControllerFactory);
++    }
+ }
+-- 
+2.34.1
+
