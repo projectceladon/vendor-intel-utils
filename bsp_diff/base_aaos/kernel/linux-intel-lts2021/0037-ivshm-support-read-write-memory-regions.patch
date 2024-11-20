@@ -1,0 +1,169 @@
+From 6bcdb9fff8af5e997a8f88505dedeba28f458db8 Mon Sep 17 00:00:00 2001
+From: HeYue <yue.he@intel.com>
+Date: Mon, 25 Sep 2023 11:07:00 +0800
+Subject: [PATCH 03/14] ivshm: support read/write memory regions
+
+Signed-off-by: Junjie Mao <junjie.mao@intel.com>
+---
+ drivers/ivshm/ivshm.c | 89 +++++++++++++++++++++++++++++++++++++++++--
+ drivers/ivshm/ivshm.h |  1 +
+ 2 files changed, 87 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/ivshm/ivshm.c b/drivers/ivshm/ivshm.c
+index fd9ebf16976e..dea111151d73 100644
+--- a/drivers/ivshm/ivshm.c
++++ b/drivers/ivshm/ivshm.c
+@@ -8,6 +8,8 @@
+ #include <linux/kobject.h>
+ #include <linux/cdev.h>
+ #include <linux/fs.h>
++#include <linux/io.h>
++#include <linux/memremap.h>
+ 
+ #include "ivshm.h"
+ 
+@@ -150,6 +152,8 @@ static int ivshm_region_open(struct inode *inode, struct file *filep)
+ 	user->iregion = iregion;
+ 	filep->private_data = user;
+ 
++	i_size_write(inode, iregion->len);
++
+ 	return 0;
+ 
+ out_put_module:
+@@ -173,6 +177,54 @@ static int ivshm_region_release(struct inode *inode, struct file *filep)
+ 	return err;
+ }
+ 
++static ssize_t ivshm_region_read(struct file *filep, char __user *buf,
++				 size_t count, loff_t *ppos)
++{
++	struct ivshm_region_user *user = filep->private_data;
++	struct ivshm_region *iregion = user->iregion;
++	ssize_t ret = 0;
++
++	if (count == 0)
++		return 0;
++
++	if (*ppos > iregion->len || count > iregion->len)
++		return 0;
++
++	if ((*ppos + count) > iregion->len)
++		count = iregion->len - *ppos;
++
++	if (copy_to_user(buf, iregion->mem + *ppos, count))
++		return -EFAULT;
++
++	*ppos += count;
++
++	return ret;
++}
++
++static ssize_t ivshm_region_write(struct file *filep, const char __user *buf,
++				 size_t count, loff_t *ppos)
++{
++	struct ivshm_region_user *user = filep->private_data;
++	struct ivshm_region *iregion = user->iregion;
++	ssize_t ret = 0;
++
++	if (count == 0)
++		return 0;
++
++	if (*ppos > iregion->len || count > iregion->len)
++		return 0;
++
++	if ((*ppos + count) > iregion->len)
++		count = iregion->len - *ppos;
++
++	if (copy_from_user(iregion->mem + *ppos, buf, count))
++		return -EFAULT;
++
++	*ppos += count;
++
++	return ret;
++}
++
+ static const struct vm_operations_struct ivshm_region_vm_ops = {
+ #ifdef CONFIG_HAVE_IOREMAP_PROT
+ 	.access = generic_access_phys,
+@@ -198,13 +250,22 @@ static const struct file_operations ivshm_region_fops = {
+ 	.owner		= THIS_MODULE,
+ 	.open		= ivshm_region_open,
+ 	.release	= ivshm_region_release,
+-	.read		= NULL,
+-	.write		= NULL,
++	.read		= ivshm_region_read,
++	.write		= ivshm_region_write,
+ 	.mmap		= ivshm_region_mmap,
+ 	.poll		= NULL,
+ 	.unlocked_ioctl	= NULL,
+ 	.fasync		= NULL,
+-	.llseek		= noop_llseek,
++	.llseek		= default_llseek,
++};
++
++static void ivshm_region_page_free(struct page *page)
++{
++	/* No op here. Only to suppress the warning in free_zone_device_page(). */
++}
++
++static const struct dev_pagemap_ops ivshm_region_pgmap_ops = {
++	.page_free		= ivshm_region_page_free,
+ };
+ 
+ /**
+@@ -331,6 +392,7 @@ EXPORT_SYMBOL_GPL(ivshm_unregister_device);
+ int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_size_t base, resource_size_t len)
+ {
+ 	struct ivshm_region *iregion;
++	struct dev_pagemap *pgmap;
+ 	int ret;
+ 
+ 	iregion = kzalloc(sizeof(*iregion), GFP_KERNEL);
+@@ -372,10 +434,31 @@ int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_
+ 	iregion->base = base;
+ 	iregion->len = len;
+ 
++	pgmap = devm_kzalloc(&iregion->dev, sizeof(*pgmap), GFP_KERNEL);
++	if (!pgmap)
++		goto err_memremap;
++
++	pgmap->type = MEMORY_DEVICE_FS_DAX;
++
++	pgmap->range = (struct range) {
++		.start = (phys_addr_t) iregion->base,
++		.end = (phys_addr_t) iregion->base + iregion->len - 1,
++	};
++	pgmap->nr_range = 1;
++	pgmap->ops = &ivshm_region_pgmap_ops;
++
++	iregion->mem = devm_memremap_pages(&iregion->dev, pgmap);
++	if (IS_ERR(iregion->mem)) {
++		ret = PTR_ERR(iregion->mem);
++		goto err_memremap;
++	}
++
+ 	list_add(&iregion->list, &idev->regions);
+ 
+ 	return 0;
+ 
++err_memremap:
++	device_del(&iregion->dev);
+ err_device_create:
+ 	put_device(&iregion->dev);
+ 	kfree(iregion->listeners);
+diff --git a/drivers/ivshm/ivshm.h b/drivers/ivshm/ivshm.h
+index e166f732ca18..d7a29b1a3e9c 100644
+--- a/drivers/ivshm/ivshm.h
++++ b/drivers/ivshm/ivshm.h
+@@ -49,6 +49,7 @@ struct ivshm_region {
+ 
+ 	resource_size_t        base;
+ 	resource_size_t        len;
++	void                  *mem;
+ 	struct list_head      *listeners;
+ 
+ 	int                    minor;
+-- 
+2.17.1
+

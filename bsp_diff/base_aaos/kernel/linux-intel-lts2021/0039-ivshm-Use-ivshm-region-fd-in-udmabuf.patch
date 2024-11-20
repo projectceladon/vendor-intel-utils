@@ -1,0 +1,171 @@
+From 3ba3c0c0cdb5af2495787ecc9f1bda90a2e461f1 Mon Sep 17 00:00:00 2001
+From: HeYue <yue.he@intel.com>
+Date: Mon, 25 Sep 2023 11:09:43 +0800
+Subject: [PATCH 05/14] ivshm: Use ivshm region fd in udmabuf
+
+Signed-off-by: Junjie Mao <junjie.mao@intel.com>
+---
+ drivers/dma-buf/udmabuf.c | 27 +++++++++++++++++++--------
+ drivers/ivshm/ivshm.c     | 32 +++++++++++++++++++++++++++++---
+ include/linux/ivshm.h     | 26 ++++++++++++++++++++++++++
+ 3 files changed, 74 insertions(+), 11 deletions(-)
+ create mode 100644 include/linux/ivshm.h
+
+diff --git a/drivers/dma-buf/udmabuf.c b/drivers/dma-buf/udmabuf.c
+index bf11d32205f3..7c09b4563661 100644
+--- a/drivers/dma-buf/udmabuf.c
++++ b/drivers/dma-buf/udmabuf.c
+@@ -12,6 +12,7 @@
+ #include <linux/slab.h>
+ #include <linux/udmabuf.h>
+ #include <linux/hugetlb.h>
++#include <linux/ivshm.h>
+ 
+ static int list_limit = 1024;
+ module_param(list_limit, int, 0644);
+@@ -214,15 +215,19 @@ static long udmabuf_create(struct miscdevice *device,
+ 		if (!memfd)
+ 			goto err;
+ 		mapping = file_inode(memfd)->i_mapping;
+-		if (!shmem_mapping(mapping) && !is_file_hugepages(memfd))
+-			goto err;
+-		seals = memfd_fcntl(memfd, F_GET_SEALS, 0);
+-		if (seals == -EINVAL)
+-			goto err;
+-		ret = -EINVAL;
+-		if ((seals & SEALS_WANTED) != SEALS_WANTED ||
+-		    (seals & SEALS_DENIED) != 0)
++		if (shmem_mapping(mapping) || is_file_hugepages(memfd)) {
++			seals = memfd_fcntl(memfd, F_GET_SEALS, 0);
++			if (seals == -EINVAL)
++				goto err;
++			ret = -EINVAL;
++			if ((seals & SEALS_WANTED) != SEALS_WANTED ||
++			    (seals & SEALS_DENIED) != 0)
++				goto err;
++		} else if (is_ivshm_region(memfd)) {
++			/* no op */
++		} else {
+ 			goto err;
++		}
+ 		pgoff = list[i].offset >> PAGE_SHIFT;
+ 		pgcnt = list[i].size   >> PAGE_SHIFT;
+ 		if (is_file_hugepages(memfd)) {
+@@ -251,6 +256,12 @@ static long udmabuf_create(struct miscdevice *device,
+ 					subpgoff = 0;
+ 					pgoff++;
+ 				}
++			} else if (is_ivshm_region(memfd)) {
++				page = ivshm_region_offset_to_page(memfd, pgoff + pgidx);
++				if (IS_ERR(page)) {
++					ret = PTR_ERR(page);
++					goto err;
++				}
+ 			} else {
+ 				page = shmem_read_mapping_page(mapping,
+ 							       pgoff + pgidx);
+diff --git a/drivers/ivshm/ivshm.c b/drivers/ivshm/ivshm.c
+index 8d2cc813c4ce..7799d4f4cf25 100644
+--- a/drivers/ivshm/ivshm.c
++++ b/drivers/ivshm/ivshm.c
+@@ -26,7 +26,6 @@ static DEFINE_IDR(ivshm_region_idr);
+ static DEFINE_MUTEX(minor_lock);
+ 
+ static const struct file_operations ivshm_fops;
+-static const struct file_operations ivshm_region_fops;
+ 
+ /**
+  * Class declaration
+@@ -321,13 +320,21 @@ static int ivshm_region_mmap(struct file *filep, struct vm_area_struct *vma)
+ {
+ 	struct ivshm_region_user *user = filep->private_data;
+ 	struct ivshm_region *iregion = user->iregion;
++	unsigned long pfn;
+ 	int err = 0;
+ 
+ 	if (vma->vm_end < vma->vm_start)
+ 		return -EINVAL;
+ 
+ 	vma->vm_ops = &ivshm_vm_ops;
+-	err = vm_iomap_memory(vma, iregion->base, iregion->len);
++
++	pfn = PHYS_PFN(iregion->base);
++	if (pfn_valid(pfn)) {
++		err = remap_pfn_range(vma, vma->vm_start, pfn, vma->vm_end - vma->vm_start, vma->vm_page_prot);
++	} else {
++		WARN_ONCE(1, "Shared memory region at 0x%llx won't integrate with udmabuf.", iregion->base);
++		err = vm_iomap_memory(vma, iregion->base, iregion->len);
++	}
+ 
+ 	return err;
+ }
+@@ -387,7 +394,7 @@ static long ivshm_region_ioctl(struct file *filep, unsigned int cmd, unsigned lo
+ 	return err;
+ }
+ 
+-static const struct file_operations ivshm_region_fops = {
++const struct file_operations ivshm_region_fops = {
+ 	.owner		= THIS_MODULE,
+ 	.open		= ivshm_region_open,
+ 	.release	= ivshm_region_release,
+@@ -400,6 +407,25 @@ static const struct file_operations ivshm_region_fops = {
+ 	.llseek		= default_llseek,
+ };
+ 
++struct page *ivshm_region_offset_to_page(struct file *filep, pgoff_t pgoff)
++{
++	struct ivshm_region_user *user = filep->private_data;
++	struct ivshm_region *iregion = user->iregion;
++	unsigned long pfn;
++	int err;
++
++	pfn = PHYS_PFN(iregion->base) + pgoff;
++	if (!pfn_valid(pfn)) {
++		err = -EINVAL;
++		goto err;
++	}
++
++	return pfn_to_page(pfn);
++
++err:
++	return ERR_PTR(err);
++}
++
+ static void ivshm_region_page_free(struct page *page)
+ {
+ 	/* No op here. Only to suppress the warning in free_zone_device_page(). */
+diff --git a/include/linux/ivshm.h b/include/linux/ivshm.h
+new file mode 100644
+index 000000000000..9e7a74dae0c5
+--- /dev/null
++++ b/include/linux/ivshm.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _LINUX_IVSHM_H
++#define _LINUX_IVSHM_H
++
++#include <linux/types.h>
++#include <linux/mm.h>
++#include <linux/fs.h>
++
++#ifdef CONFIG_IVSHM
++
++extern const struct file_operations ivshm_region_fops;
++
++static inline bool is_ivshm_region(struct file *file)
++{
++	return (file->f_op == &ivshm_region_fops);
++}
++
++extern struct page *ivshm_region_offset_to_page(struct file *filep, pgoff_t pgoff);
++
++#else /* !CONFIG_IVSHM */
++
++#define is_ivshm_region(file)			false
++
++#endif /* !CONFIG_IVSHM */
++
++#endif /* _LINUX_IVSHM_H */
+-- 
+2.17.1
+
