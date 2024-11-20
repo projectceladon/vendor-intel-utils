@@ -1,0 +1,75 @@
+From dc9500a431cdca1cc773af203ce0dfa6a8c148a5 Mon Sep 17 00:00:00 2001
+From: feijiang1 <fei.jiang@intel.com>
+Date: Sun, 21 Mar 2021 01:22:27 +0800
+Subject: [PATCH] drm/i915: Reduce locking around
+ i915_active_acquire_preallocate_barrier()
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+As the conversion between idle-barrier and full i915_active_fence is
+already serialised by explicit memory barriers, we can reduce the
+spinlock in i915_active_acquire_preallocate_barrier() for finding an
+idle-barrier to reuse to an RCU read lock to ensure the fence remains
+valid, only taking the spinlock for the update of the rbtree itself.
+
+Signed-off-by: Chris Wilson <chris@chris-wilson.co.uk>
+peviewed-by: Thomas Hellström <thomas.hellstrom@intel.com>
+Link:
+https://patchwork.freedesktop.org/patch/msgid/20200731085015.32368-6-chris@chris-wilson.co.uk
+Signed-off-by: Rodrigo Vivi <rodrigo.vivi@intel.com>
+Signed-off-by: Joonas Lahtinen <joonas.lahtinen@linux.intel.com>
+---
+ drivers/gpu/drm/i915/i915_active.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_active.c b/drivers/gpu/drm/i915/i915_active.c
+index b0a499753526..5605f55bc2b7 100644
+--- a/drivers/gpu/drm/i915/i915_active.c
++++ b/drivers/gpu/drm/i915/i915_active.c
+@@ -525,7 +525,6 @@ static struct active_node *reuse_idle_barrier(struct i915_active *ref, u64 idx)
+ 	if (RB_EMPTY_ROOT(&ref->tree))
+ 		return NULL;
+ 
+-	spin_lock_irq(&ref->tree_lock);
+ 	GEM_BUG_ON(i915_active_is_idle(ref));
+ 
+ 	/*
+@@ -551,9 +550,9 @@ static struct active_node *reuse_idle_barrier(struct i915_active *ref, u64 idx)
+ 
+ 		prev = p;
+ 		if (node->timeline < idx)
+-			p = p->rb_right;
++			p = READ_ONCE(p->rb_right);
+ 		else
+-			p = p->rb_left;
++			p = READ_ONCE(p->rb_left);
+ 	}
+ 
+ 	/*
+@@ -590,11 +589,10 @@ static struct active_node *reuse_idle_barrier(struct i915_active *ref, u64 idx)
+ 			goto match;
+ 	}
+ 
+-	spin_unlock_irq(&ref->tree_lock);
+-
+ 	return NULL;
+ 
+ match:
++	spin_lock_irq(&ref->tree_lock);
+ 	rb_erase(p, &ref->tree); /* Hide from waits and sibling allocations */
+ 	if (p == &ref->cache->node)
+ 		ref->cache = NULL;
+@@ -628,7 +626,9 @@ int i915_active_acquire_preallocate_barrier(struct i915_active *ref,
+ 		struct llist_node *prev = first;
+ 		struct active_node *node;
+ 
++		rcu_read_lock();
+ 		node = reuse_idle_barrier(ref, idx);
++		rcu_read_unlock();
+ 		if (!node) {
+ 			node = kmem_cache_alloc(global.slab_cache, GFP_KERNEL);
+ 			if (!node) {
+-- 
+2.30.1
+
