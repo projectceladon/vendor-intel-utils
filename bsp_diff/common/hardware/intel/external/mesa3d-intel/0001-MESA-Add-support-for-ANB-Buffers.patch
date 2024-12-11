@@ -1,0 +1,280 @@
+From bb793d2fbd8da4d9cceb0b2b85e963663ed7b113 Mon Sep 17 00:00:00 2001
+From: Aakash Sarkar <aakash.deep.sarkar@intel.com>
+Date: Mon, 9 Dec 2024 17:07:12 +0530
+Subject: [PATCH] [MESA]: Add support for ANB Buffers
+
+This patch adds support for resolving ANB Buffers on Image bind.
+Just like AHB (GPU usable buffers), other types Android Native
+Buffers (used by video codecs etc) needs to be resolved when the
+application actually tries to write to that buffer.
+
+Therefore, we do a partial init during surface creation and set the
+layout later when the buffer is dequeued by the producer and we
+have the Gralloc Metadata available for the buffer.
+
+This patch is backported from the following upstream commit:
+https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/29850
+
+Tests done:
+
+- Android boot with angle and vulkan as backend
+- Video playback is working correctly
+- No artifacts are seen in the gallery app
+
+Tracked-On: OAM-126014
+Signed-off-by: Aakash Sarkar <Aakash.Deep.Sarkar@intel.com
+---
+ src/intel/vulkan/anv_android.c       | 53 +++++++++++++++++++-------
+ src/intel/vulkan/anv_android.h       |  7 ++++
+ src/intel/vulkan/anv_android_stubs.c |  8 ++++
+ src/intel/vulkan/anv_device.c        |  7 +++-
+ src/intel/vulkan/anv_image.c         | 56 ++++++++++++++++++++++++++--
+ 5 files changed, 113 insertions(+), 18 deletions(-)
+
+diff --git a/src/intel/vulkan/anv_android.c b/src/intel/vulkan/anv_android.c
+index b3405f6c96f..fc84cbdba4a 100644
+--- a/src/intel/vulkan/anv_android.c
++++ b/src/intel/vulkan/anv_android.c
+@@ -318,6 +318,30 @@ anv_import_ahw_memory(VkDevice device_h,
+ #endif
+ }
+ 
++VkResult
++anv_android_get_tiling(struct anv_device *device,
++                       struct u_gralloc_buffer_handle *gr_handle,
++                       enum isl_tiling *tiling_out)
++{
++   assert(device->u_gralloc);
++
++   struct u_gralloc_buffer_basic_info buf_info;
++   if (u_gralloc_get_buffer_basic_info(device->u_gralloc, gr_handle, &buf_info))
++      return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
++                       "failed to get tiling from gralloc buffer info");
++
++   const struct isl_drm_modifier_info *mod_info =
++      isl_drm_modifier_get_info(buf_info.modifier);
++   if (!mod_info) {
++      return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
++                       "invalid drm modifier from VkNativeBufferANDROID "
++                       "gralloc buffer info 0x%"PRIx64"", buf_info.modifier);
++   }
++
++   *tiling_out = mod_info->tiling;
++   return VK_SUCCESS;
++}
++
+ VkResult
+ anv_image_init_from_gralloc(struct anv_device *device,
+                             struct anv_image *image,
+@@ -360,21 +384,14 @@ anv_image_init_from_gralloc(struct anv_device *device,
+
+    enum isl_tiling tiling;
+    if (device->u_gralloc) {
+-      struct u_gralloc_buffer_basic_info buf_info;
+       struct u_gralloc_buffer_handle gr_handle = {
+          .handle = gralloc_info->handle,
+          .hal_format = gralloc_info->format,
+          .pixel_stride = gralloc_info->stride,
+       };
+-      u_gralloc_get_buffer_basic_info(device->u_gralloc, &gr_handle, &buf_info);
+-      const struct isl_drm_modifier_info *mod_info =
+-         isl_drm_modifier_get_info(buf_info.modifier);
+-      if (mod_info) {
+-         tiling = mod_info->tiling;
+-      } else {
+-         return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+-                          "unknown modifier of BO from VkNativeBufferANDROID");
+-      }
++      result = anv_android_get_tiling(device, &gr_handle, &tiling);
++      if (result != VK_SUCCESS)
++         return result;
+    } else {
+       /* Fallback to get_tiling API. */
+       result = anv_device_get_bo_tiling(device, bo, &tiling);
+@@ -461,12 +478,22 @@ anv_image_bind_from_gralloc(struct anv_device *device,
+                        "failed to import dma-buf from VkNativeBufferANDROID");
+    }
+
+-   uint64_t img_size = image->bindings[ANV_IMAGE_MEMORY_BINDING_MAIN].memory_range.size;
+-   if (img_size < bo->size) {
++   VkMemoryRequirements2 mem_reqs = {
++      .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
++   };
++
++   anv_image_get_memory_requirements(device, image, image->vk.aspects,
++                                     &mem_reqs);
++
++   VkDeviceSize aligned_image_size =
++      align64(mem_reqs.memoryRequirements.size,
++              mem_reqs.memoryRequirements.alignment);
++
++   if (bo->size < aligned_image_size) {
+       result = vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                          "dma-buf from VkNativeBufferANDROID is too small for "
+                          "VkImage: %"PRIu64"B < %"PRIu64"B",
+-                         bo->size, img_size);
++                         bo->size, aligned_image_size);
+       anv_device_release_bo(device, bo);
+       return result;
+    }
+diff --git a/src/intel/vulkan/anv_android.h b/src/intel/vulkan/anv_android.h
+index e1f099e1f4f..6eeff850723 100644
+--- a/src/intel/vulkan/anv_android.h
++++ b/src/intel/vulkan/anv_android.h
+@@ -34,6 +34,13 @@
+ struct anv_device_memory;
+ struct anv_device;
+ struct anv_image;
++struct u_gralloc_buffer_handle;
++enum isl_tiling;
++
++VkResult
++anv_android_get_tiling(struct anv_device *device,
++                       struct u_gralloc_buffer_handle *gr_handle,
++                       enum isl_tiling *tiling_out);
+
+ VkResult anv_image_init_from_gralloc(struct anv_device *device,
+                                      struct anv_image *image,
+diff --git a/src/intel/vulkan/anv_android_stubs.c b/src/intel/vulkan/anv_android_stubs.c
+index f1b2ef6b6f8..1c095e0aa82 100644
+--- a/src/intel/vulkan/anv_android_stubs.c
++++ b/src/intel/vulkan/anv_android_stubs.c
+@@ -23,6 +23,14 @@
+
+ #include "anv_android.h"
+
++VkResult
++anv_android_get_tiling(struct anv_device *device,
++                       struct u_gralloc_buffer_handle *gr_handle,
++                       enum isl_tiling *tiling_out)
++{
++   return VK_ERROR_EXTENSION_NOT_PRESENT;
++}
++
+ VkResult
+ anv_image_init_from_gralloc(struct anv_device *device,
+                             struct anv_image *image,
+diff --git a/src/intel/vulkan/anv_device.c b/src/intel/vulkan/anv_device.c
+index 13f534934f9..69e763aa36d 100644
+--- a/src/intel/vulkan/anv_device.c
++++ b/src/intel/vulkan/anv_device.c
+@@ -1968,8 +1968,11 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
+    int g_override = -1;
+    int c_override = -1;
+    int v_override = -1;
+-   char *env = getenv("ANV_QUEUE_OVERRIDE");
+
++#if DETECT_OS_ANDROID
++   gc_override = 2;
++#else
++   char *env = getenv("ANV_QUEUE_OVERRIDE");
+    if (env == NULL)
+       return;
+
+@@ -1991,6 +1994,8 @@ anv_override_engine_counts(int *gc_count, int *g_count, int *c_count, int *v_cou
+       next = strtok_r(NULL, ",", &save);
+    }
+    free(env);
++#endif
++
+    if (gc_override >= 0)
+       *gc_count = gc_override;
+    if (g_override >= 0)
+diff --git a/src/intel/vulkan/anv_image.c b/src/intel/vulkan/anv_image.c
+index 6ead10079b2..e8953fdcdcf 100644
+--- a/src/intel/vulkan/anv_image.c
++++ b/src/intel/vulkan/anv_image.c
+@@ -1638,6 +1638,15 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
+
+    image->n_planes = anv_get_format_planes(image->vk.format);
+
++#ifdef VK_USE_PLATFORM_ANDROID_KHR
++   /* In the case of gralloc-backed swap chain image, we don't know the
++    * layout yet.
++    */
++   if (vk_find_struct_const(pCreateInfo->pNext,
++                            IMAGE_SWAPCHAIN_CREATE_INFO_KHR) != NULL)
++      return VK_SUCCESS;
++#endif
++
+    image->from_wsi =
+       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA) != NULL;
+
+@@ -1863,9 +1872,9 @@ VkResult anv_CreateImage(
+               __LINE__, pCreateInfo->flags);
+
+ #ifndef VK_USE_PLATFORM_ANDROID_KHR
+-   /* Ignore swapchain creation info on Android. Since we don't have an
+-    * implementation in Mesa, we're guaranteed to access an Android object
+-    * incorrectly.
++   /* Skip the WSI common swapchain creation here on Android. Similar to ahw,
++    * this case is handled by a partial image init and then resolved when the
++    * image is bound and gralloc info is passed.
+     */
+    const VkImageSwapchainCreateInfoKHR *swapchain_info =
+       vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
+@@ -1928,7 +1937,14 @@ resolve_ahw_image(struct anv_device *device,
+
+    /* Check tiling. */
+    enum isl_tiling tiling;
+-   result = anv_device_get_bo_tiling(device, mem->bo, &tiling);
++   const native_handle_t *handle =
++      AHardwareBuffer_getNativeHandle(mem->vk.ahardware_buffer);
++   struct u_gralloc_buffer_handle gr_handle = {
++      .handle = handle,
++      .hal_format = desc.format,
++      .pixel_stride = desc.stride,
++   };
++   result = anv_android_get_tiling(device, &gr_handle, &tiling);
+    assert(result == VK_SUCCESS);
+    isl_tiling_flags_t isl_tiling_flags = (1u << tiling);
+
+@@ -1949,6 +1965,36 @@ resolve_ahw_image(struct anv_device *device,
+ #endif
+ }
+
++static void
++resolve_anb_image(struct anv_device *device,
++                  struct anv_image *image,
++                  const VkNativeBufferANDROID *gralloc_info)
++{
++#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 29
++   VkResult result;
++
++   /* Check tiling. */
++   enum isl_tiling tiling;
++   struct u_gralloc_buffer_handle gr_handle = {
++      .handle = gralloc_info->handle,
++      .hal_format = gralloc_info->format,
++      .pixel_stride = gralloc_info->stride,
++   };
++   result = anv_android_get_tiling(device, &gr_handle, &tiling);
++   assert(result == VK_SUCCESS);
++
++   isl_tiling_flags_t isl_tiling_flags = (1u << tiling);
++
++   /* Now we are able to fill anv_image fields properly and create
++    * isl_surface for it.
++    */
++   result = add_all_surfaces_implicit_layout(device, image, NULL, gralloc_info->stride,
++                                             isl_tiling_flags,
++                                             ISL_SURF_USAGE_DISABLE_AUX_BIT);
++   assert(result == VK_SUCCESS);
++#endif
++}
++
+ void
+ anv_image_get_memory_requirements(struct anv_device *device,
+                                   struct anv_image *image,
+@@ -2359,6 +2405,8 @@ anv_bind_image_memory(struct anv_device *device,
+                                                        gralloc_info);
+          if (result != VK_SUCCESS)
+             return result;
++
++         resolve_anb_image(device, image, gralloc_info);
+          did_bind = true;
+          break;
+       }
+-- 
+2.47.0
+
