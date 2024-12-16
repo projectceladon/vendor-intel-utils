@@ -1,0 +1,120 @@
+From ad57b42bc69aa2194fe4aa99b5d6b430f810c34f Mon Sep 17 00:00:00 2001
+From: Motomu Utsumi <motomuman@google.com>
+Date: Tue, 6 Aug 2024 19:00:22 +0900
+Subject: [PATCH] Skip adding ingress discard rule to OEM VPN
+
+OEM VPNs might need to receive packets to VPN address via
+non-VPN interface.
+
+Bug: 352424251
+Test: CsIngressDiscardRuleTest
+(cherry picked from https://android-review.googlesource.com/q/commit:c14288f7c77a2da7de0c7af107b9b505081f465d)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:f0fa3a4554393018b0fcab937ff0013a1829a69b)
+Merged-In: Ia9000bcbb5b3b9e1e0d396ba78946be36e2fc5ba
+Change-Id: Ia9000bcbb5b3b9e1e0d396ba78946be36e2fc5ba
+---
+ .../android/server/ConnectivityService.java   | 12 ++++---
+ .../CSIngressDiscardRuleTests.kt              | 31 +++++++++++++++----
+ 2 files changed, 32 insertions(+), 11 deletions(-)
+
+diff --git a/service/src/com/android/server/ConnectivityService.java b/service/src/com/android/server/ConnectivityService.java
+index 7027e835d5..492351c796 100755
+--- a/service/src/com/android/server/ConnectivityService.java
++++ b/service/src/com/android/server/ConnectivityService.java
+@@ -9343,10 +9343,10 @@ public class ConnectivityService extends IConnectivityManager.Stub
+      * interfaces.
+      * Ingress discard rule is added to the address iff
+      *   1. The address is not a link local address
+-     *   2. The address is used by a single non-Legacy VPN interface and not used by any other
+-     *      interfaces even non-VPN ones
+-     * Ingress discard rule is not be added to Legacy VPN since some Legacy VPNs need to receive
+-     * packet to VPN address via non-VPN interface.
++     *   2. The address is used by a single interface of VPN whose VPN type is not TYPE_VPN_LEGACY
++     *      or TYPE_VPN_OEM and the address is not used by any other interfaces even non-VPN ones
++     * Ingress discard rule is not be added to TYPE_VPN_LEGACY or TYPE_VPN_OEM VPN since these VPNs
++     * might need to receive packet to VPN address via non-VPN interface.
+      * This method can be called during network disconnects, when nai has already been removed from
+      * mNetworkAgentInfos.
+      *
+@@ -9381,8 +9381,10 @@ public class ConnectivityService extends IConnectivityManager.Stub
+         // for different network.
+         final Set<Pair<InetAddress, String>> ingressDiscardRules = new ArraySet<>();
+         for (final NetworkAgentInfo agent : nais) {
++            final int vpnType = getVpnType(agent);
+             if (!agent.isVPN() || agent.isDestroyed()
+-                    || getVpnType(agent) == VpnManager.TYPE_VPN_LEGACY) {
++                    || vpnType == VpnManager.TYPE_VPN_LEGACY
++                    || vpnType == VpnManager.TYPE_VPN_OEM) {
+                 continue;
+             }
+             final LinkProperties agentLp = (nai == agent) ? lp : agent.linkProperties;
+diff --git a/tests/unit/java/com/android/server/connectivityservice/CSIngressDiscardRuleTests.kt b/tests/unit/java/com/android/server/connectivityservice/CSIngressDiscardRuleTests.kt
+index 1ae77e581b..77b06b2239 100644
+--- a/tests/unit/java/com/android/server/connectivityservice/CSIngressDiscardRuleTests.kt
++++ b/tests/unit/java/com/android/server/connectivityservice/CSIngressDiscardRuleTests.kt
+@@ -26,6 +26,7 @@ import android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN
+ import android.net.NetworkCapabilities.TRANSPORT_VPN
+ import android.net.NetworkCapabilities.TRANSPORT_WIFI
+ import android.net.NetworkRequest
++import android.net.VpnManager.TYPE_VPN_OEM
+ import android.net.VpnManager.TYPE_VPN_SERVICE
+ import android.net.VpnManager.TYPE_VPN_LEGACY
+ import android.net.VpnTransportInfo
+@@ -50,11 +51,10 @@ private const val WIFI_IFNAME = "wlan0"
+ private const val TIMEOUT_MS = 1_000L
+ private const val LONG_TIMEOUT_MS = 5_000
+ 
+-private fun vpnNc(legacyVpn: Boolean = false) = NetworkCapabilities.Builder().apply {
++private fun vpnNc(vpnType: Int = TYPE_VPN_SERVICE) = NetworkCapabilities.Builder().apply {
+     addTransportType(TRANSPORT_VPN)
+     removeCapability(NET_CAPABILITY_NOT_VPN)
+     addCapability(NET_CAPABILITY_NOT_VCN_MANAGED)
+-    val vpnType = if (legacyVpn) { TYPE_VPN_LEGACY } else { TYPE_VPN_SERVICE }
+     setTransportInfo(
+             VpnTransportInfo(
+                     vpnType,
+@@ -313,18 +313,37 @@ class CSIngressDiscardRuleTests : CSTest() {
+         verify(bpfNetMaps, never()).setIngressDiscardRule(any(), any())
+     }
+ 
+-    @Test
+-    fun testVpnIngressDiscardRule_LegacyVpn() {
++    fun doTestVpnIngressDiscardRule_VpnType(vpnType: Int, expectAddRule: Boolean) {
+         val nr = nr(TRANSPORT_VPN)
+         val cb = TestableNetworkCallback()
+         cm.registerNetworkCallback(nr, cb)
+-        val nc = vpnNc(legacyVpn = true)
++        val nc = vpnNc(vpnType)
+         val lp = lp(VPN_IFNAME, IPV6_LINK_ADDRESS, LOCAL_IPV6_LINK_ADDRRESS)
+         val agent = Agent(nc = nc, lp = lp)
+         agent.connect()
+         cb.expectAvailableCallbacks(agent.network, validated = false)
+ 
++        if (expectAddRule) {
++            verify(bpfNetMaps).setIngressDiscardRule(IPV6_ADDRESS, VPN_IFNAME)
++        } else {
++            verify(bpfNetMaps, never()).setIngressDiscardRule(any(), any())
++        }
++    }
++
++    @Test
++    fun testVpnIngressDiscardRule_ServiceVpn() {
++        doTestVpnIngressDiscardRule_VpnType(TYPE_VPN_SERVICE, expectAddRule = true)
++    }
++
++    @Test
++    fun testVpnIngressDiscardRule_LegacyVpn() {
+         // IngressDiscardRule should not be added to Legacy VPN
+-        verify(bpfNetMaps, never()).setIngressDiscardRule(any(), any())
++        doTestVpnIngressDiscardRule_VpnType(TYPE_VPN_LEGACY, expectAddRule = false)
++    }
++
++    @Test
++    fun testVpnIngressDiscardRule_OemVpn() {
++        // IngressDiscardRule should not be added to OEM VPN
++        doTestVpnIngressDiscardRule_VpnType(TYPE_VPN_OEM, expectAddRule = false)
+     }
+ }
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
