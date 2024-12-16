@@ -123,7 +123,7 @@ if [[ $# -gt 1 || $# -lt 0 ]]; then
 	exit -1
 fi
 
-if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
+if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]] || [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
     echo -e "\nApply utils/aosp_diff/preliminary patches:"
     fpnat "$patch_dir_aosp/preliminary"
 fi
@@ -133,7 +133,7 @@ if [[ -e ${patch_dir_aosp}/${TARGET_PRODUCT} ]] && [[ -d ${patch_dir_aosp}/${TAR
         fpnat "${patch_dir_aosp}/${TARGET_PRODUCT}"
 fi
 
-if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
+if [[ -e ${patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]] || [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
     echo -e "\nApply utils/bsp_diff/common Patches:"
     fpnat "${patch_dir_bsp}/common"
 fi
@@ -164,7 +164,7 @@ if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
         echo "Embargoed Patches Found"
         echo "============================="
 
-    if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary ]];then
+    if [[ -e ${private_patch_dir_aosp}/${TARGET_PRODUCT}/include_preliminary_priv ]];then
         echo -e "\nApply utils_priv/aosp_diff/preliminary Patches:"
         fpnat "${private_patch_dir_aosp}/preliminary"
     fi
@@ -174,7 +174,7 @@ if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
         fpnat "${private_patch_dir_aosp}/${TARGET_PRODUCT}"
     fi
 
-    if [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT}/include_common ]];then
+    if [[ -e ${private_patch_dir_bsp}/${TARGET_PRODUCT}/include_common_priv ]];then
         echo -e "\nApply utils_priv/bsp_diff/common Patches:"
         fpnat "${private_patch_dir_bsp}/common"
     fi
@@ -199,6 +199,10 @@ if [[ -e ${private_utils_dir} ]] && [[ -d ${private_utils_dir} ]];then
       fi
     fi
 fi
+
+# NOTE: include_preliminary and inlcude_preliminary_priv feature if needed by
+# Vertical then will be implemented. As of now it is supported by utils and
+# utils_priv repos only.
 
 # Apply Vertical patches if exist
 if [[ -e ${vertical_utils_dir} ]] && [[ -d ${vertical_utils_dir} ]];then
