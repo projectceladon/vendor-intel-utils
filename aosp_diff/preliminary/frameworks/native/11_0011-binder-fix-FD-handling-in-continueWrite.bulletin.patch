@@ -1,0 +1,349 @@
+From 1d5f81bdd339e4468b2f476d609b7556a00ed9b3 Mon Sep 17 00:00:00 2001
+From: Frederick Mayle <fmayle@google.com>
+Date: Mon, 14 Oct 2024 17:12:30 -0700
+Subject: [PATCH] binder: fix FD handling in continueWrite
+
+Only close FDs within the truncated part of the parcel.
+
+This change also fixes a bug where a parcel truncated into the middle of
+an object would not properly free that object. That could have resulted
+in an OOB access in `Parcel::truncateRpcObjects`, so more bounds
+checking is added.
+
+The new tests show how to reproduce the bug by appending to or partially
+truncating Parcels owned by the kernel. Two cases are disabled because
+of a bug in the Parcel fdsan code (b/370824489).
+
+Cherry-pick notes: Add truncateFileDescriptors method instead of
+modifying closeFileDescriptors to avoid API change errors. Large diffs
+in this branch because it didn't have the disruptive RPC FD support,
+main diff is that the closeFileDescriptors call is move out of the
+mOwner implementation. Tweaked the test to support older C++ and
+android-base libs.
+
+Flag: EXEMPT bugfix
+Ignore-AOSP-First: security fix
+Bug: 239222407, 359179312
+Test: atest binderLibTest
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:0e06c131798a1e908a9875d3c7515bb8901d3ebe)
+Merged-In: Iadf7e2e98e3eb97c56ec2fed2b49d1e6492af9a3
+Change-Id: Iadf7e2e98e3eb97c56ec2fed2b49d1e6492af9a3
+---
+ libs/binder/IPCThreadState.cpp      |   3 +-
+ libs/binder/Parcel.cpp              |  20 +++-
+ libs/binder/include/binder/Parcel.h |   3 +
+ libs/binder/tests/binderLibTest.cpp | 162 ++++++++++++++++++++++++++++
+ 4 files changed, 184 insertions(+), 4 deletions(-)
+
+diff --git a/libs/binder/IPCThreadState.cpp b/libs/binder/IPCThreadState.cpp
+index 3c97dcab93..a62425e984 100644
+--- a/libs/binder/IPCThreadState.cpp
++++ b/libs/binder/IPCThreadState.cpp
+@@ -1443,7 +1443,7 @@ status_t IPCThreadState::freeze(pid_t pid, bool enable, uint32_t timeout_ms) {
+     return ret;
+ }
+ 
+-void IPCThreadState::freeBuffer(Parcel* parcel, const uint8_t* data,
++void IPCThreadState::freeBuffer(Parcel* /*parcel*/, const uint8_t* data,
+                                 size_t /*dataSize*/,
+                                 const binder_size_t* /*objects*/,
+                                 size_t /*objectsSize*/)
+@@ -1453,7 +1453,6 @@ void IPCThreadState::freeBuffer(Parcel* parcel, const uint8_t* data,
+         alog << "Writing BC_FREE_BUFFER for " << data << endl;
+     }
+     ALOG_ASSERT(data != NULL, "Called with NULL data");
+-    if (parcel != nullptr) parcel->closeFileDescriptors();
+     IPCThreadState* state = self();
+     state->mOut.writeInt32(BC_FREE_BUFFER);
+     state->mOut.writePointer((uintptr_t)data);
+diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
+index 58b0b35323..dd370caf1f 100644
+--- a/libs/binder/Parcel.cpp
++++ b/libs/binder/Parcel.cpp
+@@ -2193,11 +2193,15 @@ const flat_binder_object* Parcel::readObject(bool nullMetaData) const
+ 
+ void Parcel::closeFileDescriptors()
+ {
++    truncateFileDescriptors(0);
++}
++
++void Parcel::truncateFileDescriptors(size_t newObjectsSize) {
+     size_t i = mObjectsSize;
+     if (i > 0) {
+         //ALOGI("Closing file descriptors for %zu objects...", i);
+     }
+-    while (i > 0) {
++    while (i > newObjectsSize) {
+         i--;
+         const flat_binder_object* flat
+             = reinterpret_cast<flat_binder_object*>(mData+mObjects[i]);
+@@ -2345,6 +2349,7 @@ void Parcel::freeDataNoInit()
+     if (mOwner) {
+         LOG_ALLOC("Parcel %p: freeing other owner data", this);
+         //ALOGI("Freeing data ref of %p (pid=%d)", this, getpid());
++        closeFileDescriptors();
+         mOwner(this, mData, mDataSize, mObjects, mObjectsSize);
+     } else {
+         LOG_ALLOC("Parcel %p: freeing allocated data", this);
+@@ -2460,8 +2465,9 @@ status_t Parcel::continueWrite(size_t desired)
+         if (desired == 0) {
+             objectsSize = 0;
+         } else {
++            validateReadData(mDataSize); // hack to sort the objects
+             while (objectsSize > 0) {
+-                if (mObjects[objectsSize-1] < desired)
++                if (mObjects[objectsSize-1] + sizeof(flat_binder_object) <= desired)
+                     break;
+                 objectsSize--;
+             }
+@@ -2506,8 +2512,18 @@ status_t Parcel::continueWrite(size_t desired)
+         }
+         if (objects && mObjects) {
+             memcpy(objects, mObjects, objectsSize*sizeof(binder_size_t));
++            // All FDs are owned when `mOwner`, even when `cookie == 0`. When
++            // we switch to `!mOwner`, we need to explicitly mark the FDs as
++            // owned.
++            for (size_t i = 0; i < objectsSize; i++) {
++                flat_binder_object* flat = reinterpret_cast<flat_binder_object*>(data + objects[i]);
++                if (flat->hdr.type == BINDER_TYPE_FD) {
++                    flat->cookie = 1;
++                }
++            }
+         }
+         //ALOGI("Freeing data ref of %p (pid=%d)", this, getpid());
++        truncateFileDescriptors(objectsSize);
+         mOwner(this, mData, mDataSize, mObjects, mObjectsSize);
+         mOwner = nullptr;
+ 
+diff --git a/libs/binder/include/binder/Parcel.h b/libs/binder/include/binder/Parcel.h
+index e2b2c5128d..1b3b6f77d4 100644
+--- a/libs/binder/include/binder/Parcel.h
++++ b/libs/binder/include/binder/Parcel.h
+@@ -592,6 +592,9 @@ public:
+     void                print(TextOutput& to, uint32_t flags = 0) const;
+ 
+ private:
++    // Close all file descriptors in the parcel at object positions >= newObjectsSize.
++    __attribute__((__visibility__("hidden"))) void truncateFileDescriptors(size_t newObjectsSize);
++
+     typedef void        (*release_func)(Parcel* parcel,
+                                         const uint8_t* data, size_t dataSize,
+                                         const binder_size_t* objects, size_t objectsSize);
+diff --git a/libs/binder/tests/binderLibTest.cpp b/libs/binder/tests/binderLibTest.cpp
+index b1e17b7892..adb5d4f162 100644
+--- a/libs/binder/tests/binderLibTest.cpp
++++ b/libs/binder/tests/binderLibTest.cpp
+@@ -27,6 +27,7 @@
+ #include <gmock/gmock.h>
+ #include <gtest/gtest.h>
+ 
++#include <android-base/logging.h>
+ #include <android-base/properties.h>
+ #include <android-base/result-gmock.h>
+ #include <android-base/result.h>
+@@ -42,6 +43,7 @@
+ 
+ #include <linux/sched.h>
+ #include <sys/epoll.h>
++#include <sys/mman.h>
+ #include <sys/prctl.h>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+@@ -56,6 +58,7 @@ using namespace std::string_literals;
+ using namespace std::chrono_literals;
+ using android::base::testing::HasValue;
+ using android::base::testing::Ok;
++using android::base::unique_fd;
+ using testing::ExplainMatchResult;
+ using testing::Matcher;
+ using testing::Not;
+@@ -104,6 +107,8 @@ enum BinderLibTestTranscationCode {
+     BINDER_LIB_TEST_LINK_DEATH_TRANSACTION,
+     BINDER_LIB_TEST_WRITE_FILE_TRANSACTION,
+     BINDER_LIB_TEST_WRITE_PARCEL_FILE_DESCRIPTOR_TRANSACTION,
++    BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_OWNED_TRANSACTION,
++    BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_UNOWNED_TRANSACTION,
+     BINDER_LIB_TEST_EXIT_TRANSACTION,
+     BINDER_LIB_TEST_DELAYED_EXIT_TRANSACTION,
+     BINDER_LIB_TEST_GET_PTR_SIZE_TRANSACTION,
+@@ -437,6 +442,35 @@ class TestDeathRecipient : public IBinder::DeathRecipient, public BinderLibTestE
+         };
+ };
+ 
++ssize_t countFds() {
++    DIR* dir = opendir("/proc/self/fd/");
++    if (dir == nullptr) return -1;
++    ssize_t ret = 0;
++    dirent* ent;
++    while ((ent = readdir(dir)) != nullptr) ret++;
++    closedir(dir);
++    return ret;
++}
++
++struct FdLeakDetector {
++    int startCount;
++
++    FdLeakDetector() {
++        // This log statement is load bearing. We have to log something before
++        // counting FDs to make sure the logging system is initialized, otherwise
++        // the sockets it opens will look like a leak.
++        ALOGW("FdLeakDetector counting FDs.");
++        startCount = countFds();
++    }
++    ~FdLeakDetector() {
++        int endCount = countFds();
++        if (startCount != endCount) {
++            ADD_FAILURE() << "fd count changed (" << startCount << " -> " << endCount
++                          << ") fd leak?";
++        }
++    }
++};
++
+ TEST_F(BinderLibTest, CannotUseBinderAfterFork) {
+     // EXPECT_DEATH works by forking the process
+     EXPECT_DEATH({ ProcessState::self(); }, "libbinder ProcessState can not be used after fork");
+@@ -852,6 +886,100 @@ TEST_F(BinderLibTest, PassParcelFileDescriptor) {
+     EXPECT_EQ(0, read(read_end.get(), readbuf.data(), datasize));
+ }
+ 
++TEST_F(BinderLibTest, RecvOwnedFileDescriptors) {
++    FdLeakDetector fd_leak_detector;
++
++    Parcel data;
++    Parcel reply;
++    EXPECT_EQ(NO_ERROR,
++              m_server->transact(BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_OWNED_TRANSACTION, data,
++                                 &reply));
++    unique_fd a, b;
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&a));
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&b));
++}
++
++// Used to trigger fdsan error (b/239222407).
++TEST_F(BinderLibTest, RecvOwnedFileDescriptorsAndWriteInt) {
++    GTEST_SKIP() << "triggers fdsan false positive: b/370824489";
++
++    FdLeakDetector fd_leak_detector;
++
++    Parcel data;
++    Parcel reply;
++    EXPECT_EQ(NO_ERROR,
++              m_server->transact(BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_OWNED_TRANSACTION, data,
++                                 &reply));
++    reply.setDataPosition(reply.dataSize());
++    reply.writeInt32(0);
++    reply.setDataPosition(0);
++    unique_fd a, b;
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&a));
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&b));
++}
++
++// Used to trigger fdsan error (b/239222407).
++TEST_F(BinderLibTest, RecvOwnedFileDescriptorsAndTruncate) {
++    GTEST_SKIP() << "triggers fdsan false positive: b/370824489";
++
++    FdLeakDetector fd_leak_detector;
++
++    Parcel data;
++    Parcel reply;
++    EXPECT_EQ(NO_ERROR,
++              m_server->transact(BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_OWNED_TRANSACTION, data,
++                                 &reply));
++    reply.setDataSize(reply.dataSize() - sizeof(flat_binder_object));
++    unique_fd a, b;
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&a));
++    EXPECT_EQ(BAD_TYPE, reply.readUniqueFileDescriptor(&b));
++}
++
++TEST_F(BinderLibTest, RecvUnownedFileDescriptors) {
++    FdLeakDetector fd_leak_detector;
++
++    Parcel data;
++    Parcel reply;
++    EXPECT_EQ(NO_ERROR,
++              m_server->transact(BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_UNOWNED_TRANSACTION, data,
++                                 &reply));
++    unique_fd a, b;
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&a));
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&b));
++}
++
++// Used to trigger fdsan error (b/239222407).
++TEST_F(BinderLibTest, RecvUnownedFileDescriptorsAndWriteInt) {
++    FdLeakDetector fd_leak_detector;
++
++    Parcel data;
++    Parcel reply;
++    EXPECT_EQ(NO_ERROR,
++              m_server->transact(BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_UNOWNED_TRANSACTION, data,
++                                 &reply));
++    reply.setDataPosition(reply.dataSize());
++    reply.writeInt32(0);
++    reply.setDataPosition(0);
++    unique_fd a, b;
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&a));
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&b));
++}
++
++// Used to trigger fdsan error (b/239222407).
++TEST_F(BinderLibTest, RecvUnownedFileDescriptorsAndTruncate) {
++    FdLeakDetector fd_leak_detector;
++
++    Parcel data;
++    Parcel reply;
++    EXPECT_EQ(NO_ERROR,
++              m_server->transact(BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_UNOWNED_TRANSACTION, data,
++                                 &reply));
++    reply.setDataSize(reply.dataSize() - sizeof(flat_binder_object));
++    unique_fd a, b;
++    EXPECT_EQ(OK, reply.readUniqueFileDescriptor(&a));
++    EXPECT_EQ(BAD_TYPE, reply.readUniqueFileDescriptor(&b));
++}
++
+ TEST_F(BinderLibTest, PromoteLocal) {
+     sp<IBinder> strong = new BBinder();
+     wp<IBinder> weak = strong;
+@@ -1600,6 +1728,40 @@ public:
+                 if (ret != size) return UNKNOWN_ERROR;
+                 return NO_ERROR;
+             }
++            case BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_OWNED_TRANSACTION: {
++                unique_fd fd1(memfd_create("memfd1", MFD_CLOEXEC));
++                if (!fd1.ok()) {
++                    PLOG(ERROR) << "memfd_create failed";
++                    return UNKNOWN_ERROR;
++                }
++                unique_fd fd2(memfd_create("memfd2", MFD_CLOEXEC));
++                if (!fd2.ok()) {
++                    PLOG(ERROR) << "memfd_create failed";
++                    return UNKNOWN_ERROR;
++                }
++                status_t ret;
++                ret = reply->writeFileDescriptor(fd1.release(), true);
++                if (ret != NO_ERROR) {
++                    return ret;
++                }
++                ret = reply->writeFileDescriptor(fd2.release(), true);
++                if (ret != NO_ERROR) {
++                    return ret;
++                }
++                return NO_ERROR;
++            }
++            case BINDER_LIB_TEST_GET_FILE_DESCRIPTORS_UNOWNED_TRANSACTION: {
++                status_t ret;
++                ret = reply->writeFileDescriptor(STDOUT_FILENO, false);
++                if (ret != NO_ERROR) {
++                    return ret;
++                }
++                ret = reply->writeFileDescriptor(STDERR_FILENO, false);
++                if (ret != NO_ERROR) {
++                    return ret;
++                }
++                return NO_ERROR;
++            }
+             case BINDER_LIB_TEST_DELAYED_EXIT_TRANSACTION:
+                 alarm(10);
+                 return NO_ERROR;
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
