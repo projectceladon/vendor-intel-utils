@@ -1,0 +1,463 @@
+From 9529bb85c051596d8cc34ddac5fd5318e9b6d009 Mon Sep 17 00:00:00 2001
+From: Himanshu Rawat <rwt@google.com>
+Date: Fri, 5 Apr 2024 17:33:53 +0000
+Subject: [PATCH] RESTRICT AUTOMERGE Disallow unexpected incoming HID
+ connections
+
+HID profile accepted any new incoming HID connection. Even when the
+connection policy disabled HID connection, remote devices could initiate
+HID connection.
+This change ensures that incoming HID connection are accepted only if
+application was interested in that HID connection.
+This vulnerarbility no longer exists on the main because of feature
+request b/324093729.
+
+Test: mmm packages/modules/Bluetooth
+Test: Manual | Pair and connect a HID device, disable HID connection
+from Bluetooth device setting, attempt to connect from the HID device.
+Bug: 308429049
+Ignore-AOSP-First: security
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:bdd92020a9c14c3f541b39624c5b1e0af599acc5)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:358b66af175f423523c5d90bb8aea4b3eb084172)
+Merged-In: Iba2ac3502bf1e6e4ac1f60ed64b1b074facd880b
+Change-Id: Iba2ac3502bf1e6e4ac1f60ed64b1b074facd880b
+---
+ .../jni/com_android_bluetooth_hid_host.cpp    |  8 +-
+ .../android/bluetooth/hid/HidHostService.java | 11 +--
+ system/btif/include/btif_hh.h                 |  4 +-
+ system/btif/include/btif_storage.h            | 23 ++++++
+ system/btif/src/btif_hh.cc                    | 81 +++++++++++++++++--
+ system/btif/src/btif_profile_storage.cc       | 50 +++++++++++-
+ system/gd/rust/linux/stack/src/bluetooth.rs   |  4 +-
+ .../gd/rust/topshim/src/profiles/hid_host.rs  |  2 +-
+ system/include/hardware/bt_hh.h               |  2 +-
+ 9 files changed, 166 insertions(+), 19 deletions(-)
+
+diff --git a/android/app/jni/com_android_bluetooth_hid_host.cpp b/android/app/jni/com_android_bluetooth_hid_host.cpp
+index 7a164233bc..18ba315129 100644
+--- a/android/app/jni/com_android_bluetooth_hid_host.cpp
++++ b/android/app/jni/com_android_bluetooth_hid_host.cpp
+@@ -282,7 +282,8 @@ static jboolean connectHidNative(JNIEnv* env, jobject object,
+ }
+ 
+ static jboolean disconnectHidNative(JNIEnv* env, jobject object,
+-                                    jbyteArray address) {
++                                    jbyteArray address,
++                                    jboolean reconnect_allowed) {
+   jbyte* addr;
+   jboolean ret = JNI_TRUE;
+   if (!sBluetoothHidInterface) return JNI_FALSE;
+@@ -293,7 +294,8 @@ static jboolean disconnectHidNative(JNIEnv* env, jobject object,
+     return JNI_FALSE;
+   }
+ 
+-  bt_status_t status = sBluetoothHidInterface->disconnect((RawAddress*)addr);
++  bt_status_t status =
++      sBluetoothHidInterface->disconnect((RawAddress*)addr, reconnect_allowed);
+   if (status != BT_STATUS_SUCCESS) {
+     ALOGE("Failed disconnect hid channel, status: %d", status);
+     ret = JNI_FALSE;
+@@ -509,7 +511,7 @@ static JNINativeMethod sMethods[] = {
+     {"initializeNative", "()V", (void*)initializeNative},
+     {"cleanupNative", "()V", (void*)cleanupNative},
+     {"connectHidNative", "([B)Z", (void*)connectHidNative},
+-    {"disconnectHidNative", "([B)Z", (void*)disconnectHidNative},
++    {"disconnectHidNative", "([BZ)Z", (void*)disconnectHidNative},
+     {"getProtocolModeNative", "([B)Z", (void*)getProtocolModeNative},
+     {"virtualUnPlugNative", "([B)Z", (void*)virtualUnPlugNative},
+     {"setProtocolModeNative", "([BB)Z", (void*)setProtocolModeNative},
+diff --git a/android/app/src/com/android/bluetooth/hid/HidHostService.java b/android/app/src/com/android/bluetooth/hid/HidHostService.java
+index dfd7dd2002..eae47c1881 100644
+--- a/android/app/src/com/android/bluetooth/hid/HidHostService.java
++++ b/android/app/src/com/android/bluetooth/hid/HidHostService.java
+@@ -190,7 +190,10 @@ public class HidHostService extends ProfileService {
+                 break;
+                 case MESSAGE_DISCONNECT: {
+                     BluetoothDevice device = (BluetoothDevice) msg.obj;
+-                    if (!disconnectHidNative(getByteAddress(device))) {
++                    int connectionPolicy = getConnectionPolicy(device);
++                    boolean reconnectAllowed =
++                            connectionPolicy == BluetoothProfile.CONNECTION_POLICY_ALLOWED;
++                    if (!disconnectHidNative(getByteAddress(device), reconnectAllowed)) {
+                         broadcastConnectionState(device, BluetoothProfile.STATE_DISCONNECTING);
+                         broadcastConnectionState(device, BluetoothProfile.STATE_DISCONNECTED);
+                         break;
+@@ -326,9 +329,7 @@ public class HidHostService extends ProfileService {
+         }
+     };
+ 
+-    /**
+-     * Handlers for incoming service calls
+-     */
++    /** Handlers for incoming service calls */
+     @VisibleForTesting
+     static class BluetoothHidHostBinder extends IBluetoothHidHost.Stub
+             implements IProfileServiceBinder {
+@@ -1032,7 +1033,7 @@ public class HidHostService extends ProfileService {
+ 
+     private native boolean connectHidNative(byte[] btAddress);
+ 
+-    private native boolean disconnectHidNative(byte[] btAddress);
++    private native boolean disconnectHidNative(byte[] btAddress, boolean reconnect_allowed);
+ 
+     private native boolean getProtocolModeNative(byte[] btAddress);
+ 
+diff --git a/system/btif/include/btif_hh.h b/system/btif/include/btif_hh.h
+index d524687149..6ee8487712 100644
+--- a/system/btif/include/btif_hh.h
++++ b/system/btif/include/btif_hh.h
+@@ -111,6 +111,7 @@ typedef struct {
+   uint8_t dev_handle;
+   RawAddress bd_addr;
+   tBTA_HH_ATTR_MASK attr_mask;
++  bool reconnect_allowed;
+ } btif_hh_added_device_t;
+ 
+ /**
+@@ -134,7 +135,8 @@ extern btif_hh_cb_t btif_hh_cb;
+ 
+ btif_hh_device_t* btif_hh_find_connected_dev_by_handle(uint8_t handle);
+ void btif_hh_remove_device(RawAddress bd_addr);
+-bool btif_hh_add_added_dev(const RawAddress& bda, tBTA_HH_ATTR_MASK attr_mask);
++bool btif_hh_add_added_dev(const RawAddress& bda, tBTA_HH_ATTR_MASK attr_mask,
++                           bool reconnect_allowed);
+ bt_status_t btif_hh_virtual_unplug(const RawAddress* bd_addr);
+ void btif_hh_disconnect(RawAddress* bd_addr);
+ void btif_hh_setreport(btif_hh_device_t* p_dev, bthh_report_type_t r_type,
+diff --git a/system/btif/include/btif_storage.h b/system/btif/include/btif_storage.h
+index a8bf67eac1..392d99e4a3 100644
+--- a/system/btif/include/btif_storage.h
++++ b/system/btif/include/btif_storage.h
+@@ -216,6 +216,29 @@ void btif_storage_load_le_devices(void);
+  ******************************************************************************/
+ bt_status_t btif_storage_load_bonded_devices(void);
+ 
++/*******************************************************************************
++ *
++ * Function         btif_storage_set_hid_connection_policy
++ *
++ * Description      Stores connection policy info in nvram
++ *
++ * Returns          BT_STATUS_SUCCESS
++ *
++ ******************************************************************************/
++bt_status_t btif_storage_set_hid_connection_policy(const RawAddress& addr,
++                                                   bool reconnect_allowed);
++/*******************************************************************************
++ *
++ * Function         btif_storage_get_hid_connection_policy
++ *
++ * Description      get connection policy info from nvram
++ *
++ * Returns          BT_STATUS_SUCCESS
++ *
++ ******************************************************************************/
++bt_status_t btif_storage_get_hid_connection_policy(const RawAddress& addr,
++                                                   bool* reconnect_allowed);
++
+ /*******************************************************************************
+  *
+  * Function         btif_storage_add_hid_device_info
+diff --git a/system/btif/src/btif_hh.cc b/system/btif/src/btif_hh.cc
+index fea75ef0cb..e9d157b3ee 100644
+--- a/system/btif/src/btif_hh.cc
++++ b/system/btif/src/btif_hh.cc
+@@ -309,6 +309,24 @@ btif_hh_device_t* btif_hh_find_connected_dev_by_handle(uint8_t handle) {
+   return NULL;
+ }
+ 
++/*******************************************************************************
++ *
++ * Function         btif_hh_find_added_dev
++ *
++ * Description      Return the added device pointer of the specified address
++ *
++ * Returns          Added device entry
++ ******************************************************************************/
++btif_hh_added_device_t* btif_hh_find_added_dev(const RawAddress& addr) {
++  for (int i = 0; i < BTIF_HH_MAX_ADDED_DEV; i++) {
++    btif_hh_added_device_t* added_dev = &btif_hh_cb.added_devices[i];
++    if (added_dev->bd_addr == addr) {
++      return added_dev;
++    }
++  }
++  return nullptr;
++}
++
+ /*******************************************************************************
+  *
+  * Function         btif_hh_find_dev_by_bda
+@@ -398,9 +416,38 @@ static void hh_connect_complete(uint8_t handle, RawAddress& bda,
+   HAL_CBACK(bt_hh_callbacks, connection_state_cb, &bda, state);
+ }
+ 
++static bool hh_connection_allowed(const RawAddress& bda) {
++  /* Accept connection only if reconnection is allowed for the known device, or
++   * outgoing connection was requested */
++  btif_hh_added_device_t* added_dev = btif_hh_find_added_dev(bda);
++  if (added_dev != nullptr && added_dev->reconnect_allowed) {
++    LOG_VERBOSE("Connection allowed %s", ADDRESS_TO_LOGGABLE_CSTR(bda));
++    return true;
++  } else if (btif_hh_cb.pending_conn_address == bda) {
++    LOG_VERBOSE("Device connection was pending for: %s, status: %s",
++                ADDRESS_TO_LOGGABLE_CSTR(bda),
++                btif_hh_status_text(btif_hh_cb.status).c_str());
++    return true;
++  }
++
++  return false;
++}
++
+ static void hh_open_handler(tBTA_HH_CONN& conn) {
+   LOG_DEBUG("status = %d, handle = %d", conn.status, conn.handle);
+ 
++  if (!hh_connection_allowed(conn.bda)) {
++    LOG_WARN("Reject unexpected incoming HID Connection, device: %s",
++             ADDRESS_TO_LOGGABLE_CSTR(conn.bda));
++    btif_hh_device_t* p_dev = btif_hh_find_connected_dev_by_handle(conn.handle);
++    if (p_dev != nullptr) {
++      p_dev->dev_status = BTHH_CONN_STATE_DISCONNECTED;
++    }
++
++    hh_connect_complete(conn.handle, conn.bda, BTIF_HH_DEV_DISCONNECTED);
++    return;
++  }
++
+   HAL_CBACK(bt_hh_callbacks, connection_state_cb, (RawAddress*)&conn.bda,
+             BTHH_CONN_STATE_CONNECTING);
+   btif_hh_cb.pending_conn_address = RawAddress::kEmpty;
+@@ -454,7 +501,8 @@ static void hh_open_handler(tBTA_HH_CONN& conn) {
+  *
+  * Returns          true if add successfully, otherwise false.
+  ******************************************************************************/
+-bool btif_hh_add_added_dev(const RawAddress& bda, tBTA_HH_ATTR_MASK attr_mask) {
++bool btif_hh_add_added_dev(const RawAddress& bda, tBTA_HH_ATTR_MASK attr_mask,
++                           bool reconnect_allowed) {
+   int i;
+   for (i = 0; i < BTIF_HH_MAX_ADDED_DEV; i++) {
+     if (btif_hh_cb.added_devices[i].bd_addr == bda) {
+@@ -464,10 +512,12 @@ bool btif_hh_add_added_dev(const RawAddress& bda, tBTA_HH_ATTR_MASK attr_mask) {
+   }
+   for (i = 0; i < BTIF_HH_MAX_ADDED_DEV; i++) {
+     if (btif_hh_cb.added_devices[i].bd_addr.IsEmpty()) {
+-      LOG(WARNING) << " Added device " << ADDRESS_TO_LOGGABLE_STR(bda);
++      LOG(WARNING) << " Added device " << ADDRESS_TO_LOGGABLE_STR(bda)
++                   << " reconnection allowed: " << reconnect_allowed;
+       btif_hh_cb.added_devices[i].bd_addr = bda;
+       btif_hh_cb.added_devices[i].dev_handle = BTA_HH_INVALID_HANDLE;
+       btif_hh_cb.added_devices[i].attr_mask = attr_mask;
++      btif_hh_cb.added_devices[i].reconnect_allowed = reconnect_allowed;
+       return true;
+     }
+   }
+@@ -1025,7 +1075,7 @@ static void btif_hh_upstreams_evt(uint16_t event, char* p_param) {
+                                 p_data->dscp_info.version,
+                                 p_data->dscp_info.ctry_code, len,
+                                 p_data->dscp_info.descriptor.dsc_list);
+-        if (btif_hh_add_added_dev(p_dev->bd_addr, p_dev->attr_mask)) {
++        if (btif_hh_add_added_dev(p_dev->bd_addr, p_dev->attr_mask, true)) {
+           tBTA_HH_DEV_DSCP_INFO dscp_info;
+           bt_status_t ret;
+           btif_hh_copy_hid_info(&dscp_info, &p_data->dscp_info);
+@@ -1042,6 +1092,8 @@ static void btif_hh_upstreams_evt(uint16_t event, char* p_param) {
+               p_data->dscp_info.ssr_min_tout, len,
+               p_data->dscp_info.descriptor.dsc_list);
+ 
++          btif_storage_set_hid_connection_policy(p_dev->bd_addr, true);
++
+           ASSERTC(ret == BT_STATUS_SUCCESS, "storing hid info failed", ret);
+           BTIF_TRACE_WARNING("BTA_HH_GET_DSCP_EVT: Called add device");
+ 
+@@ -1341,12 +1393,20 @@ static bt_status_t connect(RawAddress* bd_addr) {
+     return BT_STATUS_NOT_READY;
+   }
+ 
++  /* If the device was already added, ensure that reconnections are allowed */
++  btif_hh_added_device_t* added_dev = btif_hh_find_added_dev(*bd_addr);
++  if (added_dev != nullptr && !added_dev->reconnect_allowed) {
++    added_dev->reconnect_allowed = true;
++    btif_storage_set_hid_connection_policy(*bd_addr, true);
++  }
++
+   p_dev = btif_hh_find_connected_dev_by_bda(*bd_addr);
+   if (p_dev) {
+     if (p_dev->dev_status == BTHH_CONN_STATE_CONNECTED ||
+         p_dev->dev_status == BTHH_CONN_STATE_CONNECTING) {
+       BTIF_TRACE_ERROR("%s: Error, device %s already connected.", __func__,
+                        ADDRESS_TO_LOGGABLE_CSTR(*bd_addr));
++
+       return BT_STATUS_DONE;
+     } else if (p_dev->dev_status == BTHH_CONN_STATE_DISCONNECTING) {
+       BTIF_TRACE_ERROR("%s: Error, device %s is busy with (dis)connecting.",
+@@ -1368,7 +1428,7 @@ static bt_status_t connect(RawAddress* bd_addr) {
+  * Returns         bt_status_t
+  *
+  ******************************************************************************/
+-static bt_status_t disconnect(RawAddress* bd_addr) {
++static bt_status_t disconnect(RawAddress* bd_addr, bool reconnect_allowed) {
+   CHECK_BTHH_INIT();
+   BTIF_TRACE_EVENT("BTHH: %s", __func__);
+   btif_hh_device_t* p_dev;
+@@ -1380,6 +1440,16 @@ static bt_status_t disconnect(RawAddress* bd_addr) {
+     return BT_STATUS_UNHANDLED;
+   }
+ 
++  if (!reconnect_allowed) {
++    LOG_INFO("Incoming reconnections disabled for device %s",
++             ADDRESS_TO_LOGGABLE_CSTR(*bd_addr));
++    btif_hh_added_device_t* added_dev = btif_hh_find_added_dev(*bd_addr);
++    if (added_dev != nullptr && added_dev->reconnect_allowed) {
++      added_dev->reconnect_allowed = false;
++      btif_storage_set_hid_connection_policy(added_dev->bd_addr, false);
++    }
++  }
++
+   p_dev = btif_hh_find_connected_dev_by_bda(*bd_addr);
+   if (!p_dev) {
+     BTIF_TRACE_ERROR("%s: Error, device %s not opened.", __func__,
+@@ -1524,9 +1594,10 @@ static bt_status_t set_info(RawAddress* bd_addr, bthh_hid_info_t hid_info) {
+       (uint8_t*)osi_malloc(dscp_info.descriptor.dl_len);
+   memcpy(dscp_info.descriptor.dsc_list, &(hid_info.dsc_list), hid_info.dl_len);
+ 
+-  if (btif_hh_add_added_dev(*bd_addr, hid_info.attr_mask)) {
++  if (btif_hh_add_added_dev(*bd_addr, hid_info.attr_mask, true)) {
+     BTA_HhAddDev(*bd_addr, hid_info.attr_mask, hid_info.sub_class,
+                  hid_info.app_id, dscp_info);
++    btif_storage_set_hid_connection_policy(*bd_addr, true);
+   }
+ 
+   osi_free_and_reset((void**)&dscp_info.descriptor.dsc_list);
+diff --git a/system/btif/src/btif_profile_storage.cc b/system/btif/src/btif_profile_storage.cc
+index eb423ba06d..92ad612c9f 100644
+--- a/system/btif/src/btif_profile_storage.cc
++++ b/system/btif/src/btif_profile_storage.cc
+@@ -80,6 +80,7 @@ using bluetooth::groups::DeviceGroups;
+ #define BTIF_STORAGE_LEAUDIO_SOURCE_SUPPORTED_CONTEXT_TYPE \
+   "SourceSupportedContextType"
+ #define BTIF_STORAGE_DEVICE_GROUP_BIN "DeviceGroupBin"
++#define BTIF_STORAGE_KEY_HID_RECONNECT_ALLOWED "HidReConnectAllowed"
+ 
+ #define STORAGE_HID_ATRR_MASK_SIZE (4)
+ #define STORAGE_HID_SUB_CLASS_SIZE (2)
+@@ -104,6 +105,49 @@ using bluetooth::groups::DeviceGroups;
+    STORAGE_HID_VERSION_SIZE + 1 + STORAGE_HID_CTRY_CODE_SIZE + 1 +    \
+    STORAGE_HID_DESC_LEN_SIZE + 1 + STORAGE_HID_DESC_MAX_SIZE + 1)
+ 
++/*******************************************************************************
++ *
++ * Function         btif_storage_set_hid_connection_policy
++ *
++ * Description      Stores connection policy info in nvram
++ *
++ * Returns          BT_STATUS_SUCCESS
++ *
++ ******************************************************************************/
++bt_status_t btif_storage_set_hid_connection_policy(const RawAddress& addr,
++                                                   bool reconnect_allowed) {
++  std::string bdstr = addr.ToString();
++
++  if (btif_config_set_int(bdstr, BTIF_STORAGE_KEY_HID_RECONNECT_ALLOWED,
++                          reconnect_allowed)) {
++    return BT_STATUS_SUCCESS;
++  } else {
++    return BT_STATUS_FAIL;
++  }
++}
++
++/*******************************************************************************
++ *
++ * Function         btif_storage_get_hid_connection_policy
++ *
++ * Description      get connection policy info from nvram
++ *
++ * Returns          BT_STATUS_SUCCESS
++ *
++ ******************************************************************************/
++bt_status_t btif_storage_get_hid_connection_policy(const RawAddress& addr,
++                                                   bool* reconnect_allowed) {
++  std::string bdstr = addr.ToString();
++
++  // For backward compatibility, assume that the reconnection is allowed in the
++  // absence of the key
++  int value = 1;
++  btif_config_get_int(bdstr, BTIF_STORAGE_KEY_HID_RECONNECT_ALLOWED, &value);
++  *reconnect_allowed = (value != 0);
++
++  return BT_STATUS_SUCCESS;
++}
++
+ /*******************************************************************************
+  *
+  * Function         btif_storage_add_hid_device_info
+@@ -198,8 +242,11 @@ bt_status_t btif_storage_load_bonded_hid_info(void) {
+                           (uint8_t*)dscp_info.descriptor.dsc_list, &len);
+     }
+ 
++    bool reconnect_allowed = false;
++    btif_storage_get_hid_connection_policy(bd_addr, &reconnect_allowed);
++
+     // add extracted information to BTA HH
+-    if (btif_hh_add_added_dev(bd_addr, attr_mask)) {
++    if (btif_hh_add_added_dev(bd_addr, attr_mask, reconnect_allowed)) {
+       BTA_HhAddDev(bd_addr, attr_mask, sub_class, app_id, dscp_info);
+     }
+   }
+@@ -231,6 +278,7 @@ bt_status_t btif_storage_remove_hid_info(const RawAddress& remote_bd_addr) {
+   btif_config_remove(bdstr, "HidSSRMaxLatency");
+   btif_config_remove(bdstr, "HidSSRMinTimeout");
+   btif_config_remove(bdstr, "HidDescriptor");
++  btif_config_remove(bdstr, BTIF_STORAGE_KEY_HID_RECONNECT_ALLOWED);
+   return BT_STATUS_SUCCESS;
+ }
+ 
+diff --git a/system/gd/rust/linux/stack/src/bluetooth.rs b/system/gd/rust/linux/stack/src/bluetooth.rs
+index 910d04af78..bec54c5f44 100644
+--- a/system/gd/rust/linux/stack/src/bluetooth.rs
++++ b/system/gd/rust/linux/stack/src/bluetooth.rs
+@@ -2446,7 +2446,7 @@ impl IBluetooth for Bluetooth {
+                     if UuidHelper::is_profile_supported(&p) {
+                         match p {
+                             Profile::Hid | Profile::Hogp => {
+-                                self.hh.as_ref().unwrap().disconnect(&mut addr.unwrap());
++                                self.hh.as_ref().unwrap().disconnect(&mut addr.unwrap(), true);
+                             }
+ 
+                             Profile::A2dpSink
+@@ -2574,7 +2574,7 @@ impl BtifHHCallbacks for Bluetooth {
+                 "[{}]: Rejecting a unbonded device's attempt to connect to HID/HOG profiles",
+                 DisplayAddress(&address)
+             );
+-            self.hh.as_ref().unwrap().disconnect(&mut address);
++            self.hh.as_ref().unwrap().disconnect(&mut address, true);
+         }
+     }
+ 
+diff --git a/system/gd/rust/topshim/src/profiles/hid_host.rs b/system/gd/rust/topshim/src/profiles/hid_host.rs
+index ce60d93354..76c5c685c4 100644
+--- a/system/gd/rust/topshim/src/profiles/hid_host.rs
++++ b/system/gd/rust/topshim/src/profiles/hid_host.rs
+@@ -238,7 +238,7 @@ impl HidHost {
+     #[profile_enabled_or(BtStatus::NotReady)]
+     pub fn disconnect(&self, addr: &mut RawAddress) -> BtStatus {
+         let addr_ptr = LTCheckedPtrMut::from_ref(addr);
+-        BtStatus::from(ccall!(self, disconnect, addr_ptr.into()))
++        BtStatus::from(ccall!(self, disconnect, addr_ptr.into(), true))
+     }
+ 
+     #[profile_enabled_or(BtStatus::NotReady)]
+diff --git a/system/include/hardware/bt_hh.h b/system/include/hardware/bt_hh.h
+index f6e6e83abd..0700ed4a20 100644
+--- a/system/include/hardware/bt_hh.h
++++ b/system/include/hardware/bt_hh.h
+@@ -179,7 +179,7 @@ typedef struct {
+   bt_status_t (*connect)(RawAddress* bd_addr);
+ 
+   /** dis-connect from hid device */
+-  bt_status_t (*disconnect)(RawAddress* bd_addr);
++  bt_status_t (*disconnect)(RawAddress* bd_addr, bool reconnect_allowed);
+ 
+   /** Virtual UnPlug (VUP) the specified HID device */
+   bt_status_t (*virtual_unplug)(RawAddress* bd_addr);
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
