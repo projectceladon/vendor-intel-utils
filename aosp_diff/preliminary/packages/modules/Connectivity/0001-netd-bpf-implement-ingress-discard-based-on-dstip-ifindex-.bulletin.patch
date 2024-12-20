@@ -1,0 +1,124 @@
+From 4e80ab9ca5b9e7db8185cdde240ab0f01a2c0611 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Maciej=20=C5=BBenczykowski?= <maze@google.com>
+Date: Tue, 29 Aug 2023 18:39:28 +0000
+Subject: [PATCH] netd bpf - implement ingress discard based on {dstip,ifindex}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Cherry-pick of aosp/2731354 to backport VPN security fix to non-mainline
+U devices.
+This CL removes bpf_existence_test.cpp change in aosp/2731354 since u
+branches use module prebuilt as default.
+
+Test: TreeHugger
+Bug: 193031925
+Signed-off-by: Maciej Żenczykowski <maze@google.com>
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:e1a82cc1cc04ed49f022825010316cde7758c2fb)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:807a915d2113781a9a42f47c6244729c91aa0d4b)
+Merged-In: If30536c444d9a661a162b935b1dd28df2d88f9b7
+Change-Id: If30536c444d9a661a162b935b1dd28df2d88f9b7
+---
+ bpf_progs/netd.c | 32 ++++++++++++++++++++++++++++++++
+ bpf_progs/netd.h | 14 ++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+diff --git a/bpf_progs/netd.c b/bpf_progs/netd.c
+index 39dff7f30b..da2046efb0 100644
+--- a/bpf_progs/netd.c
++++ b/bpf_progs/netd.c
+@@ -92,6 +92,8 @@ DEFINE_BPF_MAP_RO_NETD(stats_map_B, HASH, StatsKey, StatsValue, STATS_MAP_SIZE)
+ DEFINE_BPF_MAP_NO_NETD(iface_stats_map, HASH, uint32_t, StatsValue, IFACE_STATS_MAP_SIZE)
+ DEFINE_BPF_MAP_NO_NETD(uid_owner_map, HASH, uint32_t, UidOwnerValue, UID_OWNER_MAP_SIZE)
+ DEFINE_BPF_MAP_RW_NETD(uid_permission_map, HASH, uint32_t, uint8_t, UID_OWNER_MAP_SIZE)
++DEFINE_BPF_MAP_NO_NETD(ingress_discard_map, HASH, IngressDiscardKey, IngressDiscardValue,
++                       INGRESS_DISCARD_MAP_SIZE)
+ 
+ /* never actually used from ebpf */
+ DEFINE_BPF_MAP_NO_NETD(iface_index_name_map, HASH, uint32_t, IfaceValue, IFACE_INDEX_NAME_MAP_SIZE)
+@@ -343,6 +345,35 @@ static __always_inline inline BpfConfig getConfig(uint32_t configKey) {
+     return *config;
+ }
+ 
++static __always_inline inline bool ingress_should_discard(struct __sk_buff* skb,
++                                                          const unsigned kver) {
++    // Require 4.19, since earlier kernels don't have bpf_skb_load_bytes_relative() which
++    // provides relative to L3 header reads.  Without that we could fetch the wrong bytes.
++    // Additionally earlier bpf verifiers are much harder to please.
++    if (kver < KVER(4, 19, 0)) return false;
++
++    IngressDiscardKey k = {};
++    if (skb->protocol == htons(ETH_P_IP)) {
++        k.daddr.s6_addr32[2] = htonl(0xFFFF);
++        (void)bpf_skb_load_bytes_net(skb, IP4_OFFSET(daddr), &k.daddr.s6_addr32[3], 4, kver);
++    } else if (skb->protocol == htons(ETH_P_IPV6)) {
++        (void)bpf_skb_load_bytes_net(skb, IP6_OFFSET(daddr), &k.daddr, sizeof(k.daddr), kver);
++    } else {
++        return false; // non IPv4/IPv6, so no IP to match on
++    }
++
++    // we didn't check for load success, because destination bytes will be zeroed if
++    // bpf_skb_load_bytes_net() fails, instead we rely on daddr of '::' and '::ffff:0.0.0.0'
++    // never being present in the map itself
++
++    IngressDiscardValue* v = bpf_ingress_discard_map_lookup_elem(&k);
++    if (!v) return false;  // lookup failure -> no protection in place -> allow
++    // if (skb->ifindex == 1) return false;  // allow 'lo', but can't happen - see callsite
++    if (skb->ifindex == v->iif[0]) return false;  // allowed interface
++    if (skb->ifindex == v->iif[1]) return false;  // allowed interface
++    return true;  // disallowed interface
++}
++
+ // DROP_IF_SET is set of rules that DROP if rule is globally enabled, and per-uid bit is set
+ #define DROP_IF_SET (STANDBY_MATCH | OEM_DENY_1_MATCH | OEM_DENY_2_MATCH | OEM_DENY_3_MATCH)
+ // DROP_IF_UNSET is set of rules that should DROP if globally enabled, and per-uid bit is NOT set
+@@ -368,6 +399,7 @@ static __always_inline inline int bpf_owner_match(struct __sk_buff* skb, uint32_
+     if (enabledRules & (DROP_IF_SET | DROP_IF_UNSET) & (uidRules ^ DROP_IF_UNSET)) return DROP;
+ 
+     if (!egress && skb->ifindex != 1) {
++        if (ingress_should_discard(skb, kver)) return DROP;
+         if (uidRules & IIF_MATCH) {
+             if (allowed_iif && skb->ifindex != allowed_iif) {
+                 // Drops packets not coming from lo nor the allowed interface
+diff --git a/bpf_progs/netd.h b/bpf_progs/netd.h
+index be604f9a1a..c85e40e7e0 100644
+--- a/bpf_progs/netd.h
++++ b/bpf_progs/netd.h
+@@ -121,6 +121,7 @@ static const int IFACE_INDEX_NAME_MAP_SIZE = 1000;
+ static const int IFACE_STATS_MAP_SIZE = 1000;
+ static const int CONFIGURATION_MAP_SIZE = 2;
+ static const int UID_OWNER_MAP_SIZE = 4000;
++static const int INGRESS_DISCARD_MAP_SIZE = 100;
+ static const int PACKET_TRACE_BUF_SIZE = 32 * 1024;
+ 
+ #ifdef __cplusplus
+@@ -165,6 +166,7 @@ ASSERT_STRING_EQUAL(XT_BPF_DENYLIST_PROG_PATH,  BPF_NETD_PATH "prog_netd_skfilte
+ #define CONFIGURATION_MAP_PATH BPF_NETD_PATH "map_netd_configuration_map"
+ #define UID_OWNER_MAP_PATH BPF_NETD_PATH "map_netd_uid_owner_map"
+ #define UID_PERMISSION_MAP_PATH BPF_NETD_PATH "map_netd_uid_permission_map"
++#define INGRESS_DISCARD_MAP_PATH BPF_NETD_PATH "map_netd_ingress_discard_map"
+ #define PACKET_TRACE_RINGBUF_PATH BPF_NETD_PATH "map_netd_packet_trace_ringbuf"
+ #define PACKET_TRACE_ENABLED_MAP_PATH BPF_NETD_PATH "map_netd_packet_trace_enabled_map"
+ 
+@@ -213,6 +215,18 @@ typedef struct {
+ } UidOwnerValue;
+ STRUCT_SIZE(UidOwnerValue, 2 * 4);  // 8
+ 
++typedef struct {
++    // The destination ip of the incoming packet.  IPv4 uses IPv4-mapped IPv6 address format.
++    struct in6_addr daddr;
++} IngressDiscardKey;
++STRUCT_SIZE(IngressDiscardKey, 16);  // 16
++
++typedef struct {
++    // Allowed interface indexes.  Use same value multiple times if you just want to match 1 value.
++    uint32_t iif[2];
++} IngressDiscardValue;
++STRUCT_SIZE(IngressDiscardValue, 2 * 4);  // 8
++
+ // Entry in the configuration map that stores which UID rules are enabled.
+ #define UID_RULES_CONFIGURATION_KEY 0
+ // Entry in the configuration map that stores which stats map is currently in use.
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
