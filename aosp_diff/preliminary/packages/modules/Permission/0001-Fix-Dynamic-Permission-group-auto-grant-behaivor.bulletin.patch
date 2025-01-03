@@ -1,0 +1,897 @@
+From f677d33568d944dfe43a713dc148bd68a5472931 Mon Sep 17 00:00:00 2001
+From: Yi-an Chen <theianchen@google.com>
+Date: Wed, 17 Jul 2024 00:43:30 +0000
+Subject: [PATCH] Fix Dynamic Permission group auto grant behaivor
+
+Fix the Dynamic Permission group auto grant behaivor so that a
+permission group is only considered granted when (1) all permissions
+were auto-granted or (2) a platform permission in the same group is
+granted.
+
+Bug: 340480881
+Test: DynamicPermissionsTest
+(cherry picked from commit 46abb4e1fd365a88efdfe3f2b1f87da4d255b41b)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:111cac570a0f596cdca1b1d512dfbef17751e1a5)
+Merged-In: Ie7de1b9826df72c708df02a4b73707c8fcffac86
+Change-Id: Ie7de1b9826df72c708df02a4b73707c8fcffac86
+---
+ .../permission/data/LightPermInfoLiveData.kt  |  2 +-
+ .../permission/data/PermGroupLiveData.kt      | 45 ++++++++++---------
+ .../model/livedatatypes/LightAppPermGroup.kt  | 30 +++++++++----
+ .../model/livedatatypes/LightPackageInfo.kt   |  4 +-
+ .../model/livedatatypes/LightPermInfo.kt      | 10 +++--
+ .../model/livedatatypes/LightPermission.kt    | 19 +++++---
+ .../service/AutoRevokePermissions.kt          |  2 +-
+ .../RuntimePermissionsUpgradeController.kt    |  6 +--
+ .../handheld/ReviewPermissionsFragment.java   |  4 +-
+ .../ui/model/AppPermissionViewModel.kt        | 24 +++++-----
+ .../ui/model/GrantPermissionsViewModel.kt     | 28 +++++++-----
+ .../ui/model/ReviewPermissionsViewModel.kt    |  2 +-
+ .../BackgroundGrantBehavior.kt                |  9 ++--
+ .../model/grantPermissions/GrantBehavior.kt   |  2 +-
+ .../grantPermissions/HealthGrantBehavior.kt   |  2 +-
+ .../grantPermissions/LocationGrantBehavior.kt |  7 ++-
+ .../grantPermissions/StorageGrantBehavior.kt  | 10 ++---
+ .../permission/utils/KotlinUtils.kt           | 30 ++++++-------
+ .../permission/utils/SafetyNetLogger.java     |  2 +-
+ .../model/ReviewPermissionsViewModelTest.kt   |  2 +-
+ .../permission/utils/GrantRevokeTests.kt      |  6 ++-
+ 21 files changed, 138 insertions(+), 108 deletions(-)
+
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/data/LightPermInfoLiveData.kt b/PermissionController/src/com/android/permissioncontroller/permission/data/LightPermInfoLiveData.kt
+index 091c45b92..68aa55e14 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/data/LightPermInfoLiveData.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/data/LightPermInfoLiveData.kt
+@@ -67,7 +67,7 @@ private constructor(private val app: Application, private val permissionName: St
+ 
+         val newValue =
+             try {
+-                LightPermInfo(app.packageManager.getPermissionInfo(permissionName, 0))
++                LightPermInfo(app.packageManager.getPermissionInfo(permissionName, 0), null)
+             } catch (e: PackageManager.NameNotFoundException) {
+                 Log.w(LOG_TAG, "Permission \"$permissionName\" not found")
+                 invalidateSingle(permissionName)
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/data/PermGroupLiveData.kt b/PermissionController/src/com/android/permissioncontroller/permission/data/PermGroupLiveData.kt
+index d44fea233..e923746d7 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/data/PermGroupLiveData.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/data/PermGroupLiveData.kt
+@@ -17,6 +17,7 @@
+ package com.android.permissioncontroller.permission.data
+ 
+ import android.app.Application
++import android.content.pm.ApplicationInfo
+ import android.content.pm.PackageItemInfo
+ import android.content.pm.PackageManager
+ import android.content.pm.PermissionGroupInfo
+@@ -64,7 +65,6 @@ private constructor(private val app: Application, private val groupName: String)
+      */
+     override fun onUpdate() {
+         val permissionInfos = mutableMapOf<String, LightPermInfo>()
+-
+         groupInfo =
+             Utils.getGroupInfo(groupName, context)
+                 ?: run {
+@@ -73,28 +73,25 @@ private constructor(private val app: Application, private val groupName: String)
+                     value = null
+                     return
+                 }
+-
++        val permInfos = mutableListOf<PermissionInfo>()
+         when (groupInfo) {
+             is PermissionGroupInfo -> {
+-                val permInfos =
+-                    try {
++                try {
++                    permInfos.addAll(
+                         Utils.getInstalledRuntimePermissionInfosForGroup(
+                             context.packageManager,
+                             groupName
+                         )
+-                    } catch (e: PackageManager.NameNotFoundException) {
+-                        Log.e(LOG_TAG, "Invalid permission group $groupName")
+-                        invalidateSingle(groupName)
+-                        value = null
+-                        return
+-                    }
+-
+-                for (permInfo in permInfos) {
+-                    permissionInfos[permInfo.name] = LightPermInfo(permInfo)
++                    )
++                } catch (e: PackageManager.NameNotFoundException) {
++                    Log.e(LOG_TAG, "Invalid permission group $groupName")
++                    invalidateSingle(groupName)
++                    value = null
++                    return
+                 }
+             }
+             is PermissionInfo -> {
+-                permissionInfos[groupInfo.name] = LightPermInfo(groupInfo as PermissionInfo)
++                permInfos.add(groupInfo as PermissionInfo)
+             }
+             else -> {
+                 value = null
+@@ -102,19 +99,25 @@ private constructor(private val app: Application, private val groupName: String)
+             }
+         }
+ 
+-        val permGroup = PermGroup(LightPermGroupInfo(groupInfo), permissionInfos)
+-
+-        value = permGroup
+-
+-        val packageNames =
+-            permissionInfos.values.map { permInfo -> permInfo.packageName }.toMutableSet()
++        val packageNames = permInfos.map { permInfo -> permInfo.packageName }.toMutableSet()
+         packageNames.add(groupInfo.packageName)
+-
+         // TODO ntmyren: What if the package isn't installed for the system user?
+         val getLiveData = { packageName: String ->
+             LightPackageInfoLiveData[packageName, UserHandle.SYSTEM]
+         }
+         setSourcesToDifference(packageNames, packageLiveDatas, getLiveData)
++        if (!packageLiveDatas.all { it.value.isInitialized }) {
++            return
++        }
++        for (permInfo in permInfos) {
++            val lightPackageInfo = packageLiveDatas[permInfo.packageName]?.value
++            val isSystem =
++                lightPackageInfo?.let { it.appFlags and ApplicationInfo.FLAG_SYSTEM != 0 }
++            permissionInfos[permInfo.name] = LightPermInfo(permInfo, isSystem)
++        }
++
++        val permGroup = PermGroup(LightPermGroupInfo(groupInfo), permissionInfos)
++        value = permGroup
+     }
+ 
+     override fun onInactive() {
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightAppPermGroup.kt b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightAppPermGroup.kt
+index a5736ca83..61a604de8 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightAppPermGroup.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightAppPermGroup.kt
+@@ -20,6 +20,7 @@ import android.Manifest
+ import android.Manifest.permission.ACCESS_COARSE_LOCATION
+ import android.os.Build
+ import android.os.UserHandle
++import com.android.permissioncontroller.permission.utils.Utils
+ 
+ /**
+  * A lightweight version of the AppPermissionGroup data structure. Represents information about a
+@@ -75,10 +76,13 @@ data class LightAppPermGroup(
+         get() =
+             permissions.mapNotNull { (name, _) -> if (name !in backgroundPermNames) name else null }
+ 
++    val isPlatformPermissionGroup = permGroupInfo.packageName == Utils.OS_PKG
++
+     val foreground =
+         AppPermSubGroup(
+             permissions.filter { it.key in foregroundPermNames },
+             packageInfo,
++            isPlatformPermissionGroup,
+             specialLocationGrant
+         )
+ 
+@@ -86,6 +90,7 @@ data class LightAppPermGroup(
+         AppPermSubGroup(
+             permissions.filter { it.key in backgroundPermNames },
+             packageInfo,
++            isPlatformPermissionGroup,
+             specialLocationGrant
+         )
+ 
+@@ -123,7 +128,7 @@ data class LightAppPermGroup(
+     val isOneTime =
+         (permGroupName != Manifest.permission_group.LOCATION &&
+             permissions.any { it.value.isOneTime } &&
+-            permissions.none { !it.value.isOneTime && it.value.isGrantedIncludingAppOp }) ||
++            permissions.none { !it.value.isOneTime && it.value.isGranted }) ||
+             (permGroupName == Manifest.permission_group.LOCATION &&
+                 permissions[ACCESS_COARSE_LOCATION]?.isOneTime == true)
+ 
+@@ -160,16 +165,24 @@ data class LightAppPermGroup(
+      *
+      * @param permissions The permissions contained within this subgroup, a subset of those
+      *   contained in the full group
++     * @param isPlatformPermissionGroup Whether this is a platform permission group
+      * @param specialLocationGrant Whether this is a special location package
+      */
+     data class AppPermSubGroup
+     internal constructor(
+         private val permissions: Map<String, LightPermission>,
+         private val packageInfo: LightPackageInfo,
++        private val isPlatformPermissionGroup: Boolean,
+         private val specialLocationGrant: Boolean?
+     ) {
+         /** Whether any of this App Permission SubGroup's permissions are granted */
+-        val isGranted = specialLocationGrant ?: permissions.any { it.value.isGrantedIncludingAppOp }
++        val isGranted =
++            specialLocationGrant
++                ?: permissions.any {
++                    val mayGrantByPlatformOrSystem =
++                        !isPlatformPermissionGroup || it.value.isPlatformOrSystem
++                    it.value.isGranted && mayGrantByPlatformOrSystem
++                }
+ 
+         /**
+          * Whether this App Permission SubGroup should be treated as granted. This means either:
+@@ -178,14 +191,13 @@ data class LightAppPermGroup(
+          * 2) All permissions were auto-granted (all permissions are all granted and all
+          *    RevokeWhenRequested.)
+          */
+-        val isGrantedExcludingRWROrAllRWR =
++        val allowFullGroupGrant =
+             specialLocationGrant
+                 ?: (permissions.any {
+-                    it.value.isGrantedIncludingAppOp && !it.value.isRevokeWhenRequested
+-                } ||
+-                    permissions.all {
+-                        it.value.isGrantedIncludingAppOp && it.value.isRevokeWhenRequested
+-                    })
++                    val mayGrantByPlatformOrSystem =
++                        !isPlatformPermissionGroup || it.value.isPlatformOrSystem
++                    it.value.allowFullGroupGrant && mayGrantByPlatformOrSystem
++                } || permissions.all { it.value.isGranted && it.value.isRevokeWhenRequested })
+ 
+         /** Whether any of this App Permission SubGroup's permissions are granted by default */
+         val isGrantedByDefault = permissions.any { it.value.isGrantedByDefault }
+@@ -196,7 +208,7 @@ data class LightAppPermGroup(
+          */
+         val isOneTime =
+             permissions.any { it.value.isOneTime } &&
+-                permissions.none { it.value.isGrantedIncludingAppOp && !it.value.isOneTime }
++                permissions.none { it.value.isGranted && !it.value.isOneTime }
+ 
+         /**
+          * Whether any of this App Permission Subgroup's foreground permissions are fixed by policy
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPackageInfo.kt b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPackageInfo.kt
+index ab8afae08..32bc3c526 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPackageInfo.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPackageInfo.kt
+@@ -61,7 +61,9 @@ data class LightPackageInfo(
+         pI: PackageInfo
+     ) : this(
+         pI.packageName,
+-        pI.permissions?.map { perm -> LightPermInfo(perm) } ?: emptyList(),
++        pI.permissions?.map { perm ->
++            LightPermInfo(perm, pI.applicationInfo!!.flags and ApplicationInfo.FLAG_SYSTEM != 0)
++        } ?: emptyList(),
+         pI.requestedPermissions?.toList() ?: emptyList(),
+         pI.requestedPermissionsFlags?.toList() ?: emptyList(),
+         pI.applicationInfo!!.uid,
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermInfo.kt b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermInfo.kt
+index c1d271098..a25dcc24b 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermInfo.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermInfo.kt
+@@ -30,6 +30,7 @@ import android.content.pm.PermissionInfo
+  * @param protection The protection level of this permission
+  * @param protection Extra information about the protection of this permission
+  * @param flags The system flags of this permission
++ * @param isSystem Whether this permission is defined by a system app
+  */
+ data class LightPermInfo(
+     val name: String,
+@@ -38,10 +39,12 @@ data class LightPermInfo(
+     val backgroundPermission: String?,
+     val protection: Int,
+     val protectionFlags: Int,
+-    val flags: Int
++    val flags: Int,
++    val isSystem: Boolean?,
+ ) {
+     constructor(
+-        permInfo: PermissionInfo
++        permInfo: PermissionInfo,
++        isSystem: Boolean?
+     ) : this(
+         permInfo.name,
+         permInfo.packageName,
+@@ -49,7 +52,8 @@ data class LightPermInfo(
+         permInfo.backgroundPermission,
+         permInfo.protection,
+         permInfo.protectionFlags,
+-        permInfo.flags
++        permInfo.flags,
++        isSystem
+     )
+ 
+     /**
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermission.kt b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermission.kt
+index 7492ea6e0..66a076551 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermission.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/model/livedatatypes/LightPermission.kt
+@@ -28,8 +28,8 @@ import com.android.permissioncontroller.permission.utils.Utils
+  *
+  * @param pkgInfo The package requesting the permission
+  * @param permInfo The permissionInfo this represents
+- * @param isGrantedIncludingAppOp Whether or not this permission is functionally granted. A
+- *   non-granted app op but granted permission is counted as not granted
++ * @param isGranted Whether or not this permission is functionally granted. A non-granted app op but
++ *   granted permission is counted as not granted
+  * @param flags The PermissionController flags for this permission
+  * @param foregroundPerms The foreground permission names corresponding to this permission, if this
+  *   permission is a background permission
+@@ -37,7 +37,7 @@ import com.android.permissioncontroller.permission.utils.Utils
+ data class LightPermission(
+     val pkgInfo: LightPackageInfo,
+     val permInfo: LightPermInfo,
+-    val isGrantedIncludingAppOp: Boolean,
++    val isGranted: Boolean,
+     val flags: Int,
+     val foregroundPerms: List<String>?
+ ) {
+@@ -98,9 +98,9 @@ data class LightPermission(
+     /** Whether this permission is user sensitive in its current grant state */
+     val isUserSensitive =
+         !isRuntimePlatformPermission(permInfo.name) ||
+-            (isGrantedIncludingAppOp &&
++            (isGranted &&
+                 (flags and PackageManager.FLAG_PERMISSION_USER_SENSITIVE_WHEN_GRANTED) != 0) ||
+-            (!isGrantedIncludingAppOp &&
++            (!isGranted &&
+                 (flags and PackageManager.FLAG_PERMISSION_USER_SENSITIVE_WHEN_DENIED) != 0)
+     /** Whether the permission is restricted */
+     val isRestricted =
+@@ -122,10 +122,17 @@ data class LightPermission(
+      */
+     val isSelectedLocationAccuracy =
+         flags and PackageManager.FLAG_PERMISSION_SELECTED_LOCATION_ACCURACY != 0
++    /** Whether this permission is defined by platform or a system app */
++    val isPlatformOrSystem = permInfo.packageName == Utils.OS_PKG || permInfo.isSystem == true
++    /**
++     * Whether this permission is granted including app op and does not hold the
++     * PackageManager.FLAG_PERMISSION_REVOKE_WHEN_REQUESTED flag.
++     */
++    val allowFullGroupGrant = isGranted && !isRevokeWhenRequested
+ 
+     override fun toString() = buildString {
+         append(name)
+-        if (isGrantedIncludingAppOp) append(", Granted") else append(", NotGranted")
++        if (isGranted) append(", Granted") else append(", NotGranted")
+         if (isPolicyFixed) append(", PolicyFixed")
+         if (isSystemFixed) append(", SystemFixed")
+         if (isUserFixed) append(", UserFixed")
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/service/AutoRevokePermissions.kt b/PermissionController/src/com/android/permissioncontroller/permission/service/AutoRevokePermissions.kt
+index cfe753019..aae2aa212 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/service/AutoRevokePermissions.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/service/AutoRevokePermissions.kt
+@@ -132,7 +132,7 @@ suspend fun revokeAppPermissions(
+                 val fixed = group.isBackgroundFixed || group.isForegroundFixed
+                 val granted =
+                     group.permissions.any { (_, perm) ->
+-                        perm.isGrantedIncludingAppOp && perm.name !in AUTO_REVOKE_EXEMPT_PERMISSIONS
++                        perm.isGranted && perm.name !in AUTO_REVOKE_EXEMPT_PERMISSIONS
+                     }
+                 if (
+                     !fixed &&
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/service/RuntimePermissionsUpgradeController.kt b/PermissionController/src/com/android/permissioncontroller/permission/service/RuntimePermissionsUpgradeController.kt
+index af3b60702..2734116dd 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/service/RuntimePermissionsUpgradeController.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/service/RuntimePermissionsUpgradeController.kt
+@@ -492,7 +492,7 @@ object RuntimePermissionsUpgradeController {
+                     LightPermission(
+                         perm.pkgInfo,
+                         perm.permInfo,
+-                        perm.isGrantedIncludingAppOp,
++                        perm.isGranted,
+                         perm.flags or FLAG_PERMISSION_RESTRICTION_UPGRADE_EXEMPT,
+                         perm.foregroundPerms
+                     )
+@@ -569,7 +569,7 @@ object RuntimePermissionsUpgradeController {
+                         !perm.isUserSet &&
+                             !perm.isSystemFixed &&
+                             !perm.isPolicyFixed &&
+-                            !perm.isGrantedIncludingAppOp
++                            !perm.isGranted
+                     ) {
+                         grants.add(
+                             Grant(false, appPermGroup, listOf(permission.ACCESS_MEDIA_LOCATION))
+@@ -670,7 +670,7 @@ object RuntimePermissionsUpgradeController {
+                         LightPermission(
+                             perm.pkgInfo,
+                             perm.permInfo,
+-                            perm.isGrantedIncludingAppOp,
++                            perm.isGranted,
+                             perm.flags or FLAG_PERMISSION_RESTRICTION_UPGRADE_EXEMPT,
+                             perm.foregroundPerms
+                         )
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/handheld/ReviewPermissionsFragment.java b/PermissionController/src/com/android/permissioncontroller/permission/ui/handheld/ReviewPermissionsFragment.java
+index 5a7c3f2b5..14f349777 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/handheld/ReviewPermissionsFragment.java
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/handheld/ReviewPermissionsFragment.java
+@@ -267,11 +267,11 @@ public final class ReviewPermissionsFragment extends PreferenceFragmentCompat
+             PermissionControllerStatsLog.write(REVIEW_PERMISSIONS_FRAGMENT_RESULT_REPORTED,
+                     changeId, mViewModel.getPackageInfo().applicationInfo.uid,
+                     group.getPackageName(),
+-                    permission.getName(), permission.isGrantedIncludingAppOp());
++                    permission.getName(), permission.isGranted());
+             Log.i(LOG_TAG, "Permission grant via permission review changeId=" + changeId + " uid="
+                     + mViewModel.getPackageInfo().applicationInfo.uid + " packageName="
+                     + group.getPackageName() + " permission="
+-                    + permission.getName() + " granted=" + permission.isGrantedIncludingAppOp());
++                    + permission.getName() + " granted=" + permission.isGranted());
+         }
+     }
+ 
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/AppPermissionViewModel.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/AppPermissionViewModel.kt
+index 5b6d8b8db..1f0a41c59 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/AppPermissionViewModel.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/AppPermissionViewModel.kt
+@@ -325,6 +325,7 @@ class AppPermissionViewModel(
+ 
+         private val mainLocListener = { isEnabled: Boolean -> checkAndUpdateStatus(!isEnabled) }
+         private val locBypassListener = { _: Boolean -> checkAndUpdateStatus() }
++
+         override fun onUpdate() {
+             checkAndUpdateStatus()
+         }
+@@ -692,8 +693,7 @@ class AppPermissionViewModel(
+                 app,
+                 packageName,
+                 permGroupName
+-            )
+-                ?: return
++            ) ?: return
+         fragment.startActivity(restrictionIntent)
+     }
+ 
+@@ -726,10 +726,8 @@ class AppPermissionViewModel(
+             // 2. Else if FINE or COARSE have the isSelectedLocationAccuracy flag set, then return
+             //    true if FINE isSelectedLocationAccuracy is set.
+             // 3. Else, return default precision from device config.
+-            return if (
+-                fineLocation.isGrantedIncludingAppOp || coarseLocation.isGrantedIncludingAppOp
+-            ) {
+-                fineLocation.isGrantedIncludingAppOp
++            return if (fineLocation.isGranted || coarseLocation.isGranted) {
++                fineLocation.isGranted
+             } else if (
+                 fineLocation.isSelectedLocationAccuracy || coarseLocation.isSelectedLocationAccuracy
+             ) {
+@@ -1381,9 +1379,7 @@ class AppPermissionViewModel(
+     }
+ 
+     private fun getIndividualPermissionDetailResId(group: LightAppPermGroup): Pair<Int, Int> {
+-        return when (
+-            val numRevoked = group.permissions.filter { !it.value.isGrantedIncludingAppOp }.size
+-        ) {
++        return when (val numRevoked = group.permissions.filter { !it.value.isGranted }.size) {
+             0 -> R.string.permission_revoked_none to numRevoked
+             group.permissions.size -> R.string.permission_revoked_all to numRevoked
+             else -> R.string.permission_revoked_count to numRevoked
+@@ -1454,7 +1450,7 @@ class AppPermissionViewModel(
+             val newPermission = newGroup.permissions[permName] ?: continue
+ 
+             if (
+-                permission.isGrantedIncludingAppOp != newPermission.isGrantedIncludingAppOp ||
++                permission.isGranted != newPermission.isGranted ||
+                     permission.flags != newPermission.flags
+             ) {
+                 logAppPermissionFragmentActionReported(changeId, newPermission, buttonPressed)
+@@ -1462,7 +1458,7 @@ class AppPermissionViewModel(
+                     app.applicationContext,
+                     packageName,
+                     permGroupName,
+-                    newPermission.isGrantedIncludingAppOp
++                    newPermission.isGranted
+                 )
+                 PermissionChangeStorageImpl.recordPermissionChange(packageName)
+             }
+@@ -1492,7 +1488,7 @@ class AppPermissionViewModel(
+             uid,
+             packageName,
+             permission.permInfo.name,
+-            permission.isGrantedIncludingAppOp,
++            permission.isGranted,
+             permission.flags,
+             buttonPressed
+         )
+@@ -1502,7 +1498,7 @@ class AppPermissionViewModel(
+                 "$changeId uid=$uid packageName=$packageName permission=" +
+                 permission.permInfo.name +
+                 " isGranted=" +
+-                permission.isGrantedIncludingAppOp +
++                permission.isGranted +
+                 " permissionFlags=" +
+                 permission.flags +
+                 " buttonPressed=$buttonPressed"
+@@ -1544,7 +1540,7 @@ class AppPermissionViewModel(
+ 
+         return group.isGranted &&
+             group.permissions.values.all {
+-                it.name in partialPerms || (it.name !in partialPerms && !it.isGrantedIncludingAppOp)
++                it.name in partialPerms || (it.name !in partialPerms && !it.isGranted)
+             }
+     }
+ }
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/GrantPermissionsViewModel.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/GrantPermissionsViewModel.kt
+index b5df6f410..0a01929e6 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/GrantPermissionsViewModel.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/GrantPermissionsViewModel.kt
+@@ -338,7 +338,7 @@ class GrantPermissionsViewModel(
+                     if (state != null) {
+                         val allAffectedGranted =
+                             state.affectedPermissions.all { perm ->
+-                                appPermGroup.permissions[perm]?.isGrantedIncludingAppOp == true &&
++                                appPermGroup.permissions[perm]?.isGranted == true &&
+                                     appPermGroup.permissions[perm]?.isRevokeWhenRequested == false
+                             }
+                         if (allAffectedGranted) {
+@@ -592,7 +592,7 @@ class GrantPermissionsViewModel(
+ 
+         val behavior = getGrantBehavior(group)
+         return if (behavior.isGroupFullyGranted(group, groupRequestedPermissions)) {
+-            if (group.permissions[perm]?.isGrantedIncludingAppOp == false) {
++            if (group.permissions[perm]?.isGranted == false) {
+                 if (isBackground) {
+                     grantBackgroundRuntimePermissions(app, group, listOf(perm))
+                 } else {
+@@ -864,18 +864,15 @@ class GrantPermissionsViewModel(
+                 } else {
+                     PERMISSION_GRANT_REQUEST_RESULT_REPORTED__RESULT__USER_GRANTED
+                 }
++            var affectedPermissions: Collection<String> = groupState.affectedPermissions
+             if (shouldAffectBackgroundPermissions) {
+-                grantBackgroundRuntimePermissions(
+-                    app,
+-                    groupState.group,
+-                    groupState.affectedPermissions
+-                )
++                grantBackgroundRuntimePermissions(app, groupState.group, affectedPermissions)
+             } else if (shouldAffectForegroundPermssions) {
+                 if (affectedForegroundPermissions == null) {
+                     grantForegroundRuntimePermissions(
+                         app,
+                         groupState.group,
+-                        groupState.affectedPermissions,
++                        affectedPermissions,
+                         isOneTime
+                     )
+                     // This prevents weird flag state when app targetSDK switches from S+ to R-
+@@ -883,11 +880,12 @@ class GrantPermissionsViewModel(
+                         KotlinUtils.setFlagsWhenLocationAccuracyChanged(app, groupState.group, true)
+                     }
+                 } else {
++                    affectedPermissions = affectedForegroundPermissions
+                     val newGroup =
+                         grantForegroundRuntimePermissions(
+                             app,
+                             groupState.group,
+-                            affectedForegroundPermissions,
++                            affectedPermissions,
+                             isOneTime
+                         )
+                     if (!isOneTime || newGroup.isOneTime) {
+@@ -899,7 +897,17 @@ class GrantPermissionsViewModel(
+                     }
+                 }
+             }
+-            groupState.state = STATE_GRANTED
++            val shouldDenyFullGroupGrant =
++                groupState.group.isPlatformPermissionGroup &&
++                    affectedPermissions.none {
++                        groupState.group.permissions[it]?.isPlatformOrSystem == true
++                    }
++            groupState.state =
++                if (shouldDenyFullGroupGrant) {
++                    STATE_UNKNOWN
++                } else {
++                    STATE_GRANTED
++                }
+         } else {
+             if (shouldAffectBackgroundPermissions) {
+                 revokeBackgroundRuntimePermissions(
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/ReviewPermissionsViewModel.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/ReviewPermissionsViewModel.kt
+index 8613d1cae..ecb551ffc 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/ReviewPermissionsViewModel.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/ReviewPermissionsViewModel.kt
+@@ -133,7 +133,7 @@ class ReviewPermissionsViewModel(val app: Application, val packageInfo: PackageI
+         val lightPerms = permGroup.allPermissions.values.toList()
+         val permissionCount = lightPerms.size
+         for (i in 0 until permissionCount) {
+-            if (!lightPerms[i].isGrantedIncludingAppOp) {
++            if (!lightPerms[i].isGranted) {
+                 revokedCount++
+             }
+         }
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/BackgroundGrantBehavior.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/BackgroundGrantBehavior.kt
+index 6234b2755..7112d180f 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/BackgroundGrantBehavior.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/BackgroundGrantBehavior.kt
+@@ -57,7 +57,7 @@ object BackgroundGrantBehavior : GrantBehavior() {
+         val requestsBg = hasBgPerms(group, requestedPerms)
+         val requestsFg = requestedPerms.any { it !in group.backgroundPermNames }
+         val isOneTimeGroup = PermissionMapping.supportsOneTimeGrant(group.permGroupName)
+-        val isFgGranted = group.foreground.isGrantedExcludingRWROrAllRWR
++        val isFgGranted = group.foreground.allowFullGroupGrant
+         val isFgOneTime = group.foreground.isOneTime
+         val splitSdk = getSdkGroupWasSplitToBg(requestedPerms)
+         val isAppIsOlderThanSplitToBg = group.packageInfo.targetSdkVersion < splitSdk
+@@ -171,16 +171,15 @@ object BackgroundGrantBehavior : GrantBehavior() {
+         group: LightAppPermGroup,
+         requestedPerms: Set<String>
+     ): Boolean {
+-        return (!hasBgPerms(group, requestedPerms) ||
+-            group.background.isGrantedExcludingRWROrAllRWR) &&
+-            group.foreground.isGrantedExcludingRWROrAllRWR
++        return (!hasBgPerms(group, requestedPerms) || group.background.allowFullGroupGrant) &&
++            group.foreground.allowFullGroupGrant
+     }
+ 
+     override fun isForegroundFullyGranted(
+         group: LightAppPermGroup,
+         requestedPerms: Set<String>
+     ): Boolean {
+-        return group.foreground.isGrantedExcludingRWROrAllRWR
++        return group.foreground.allowFullGroupGrant
+     }
+ 
+     override fun isPermissionFixed(group: LightAppPermGroup, perm: String): Boolean {
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/GrantBehavior.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/GrantBehavior.kt
+index 3b3619084..54d6dc0f3 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/GrantBehavior.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/GrantBehavior.kt
+@@ -58,7 +58,7 @@ abstract class GrantBehavior {
+      * group not already granted will be granted.
+      */
+     open fun isGroupFullyGranted(group: LightAppPermGroup, requestedPerms: Set<String>): Boolean {
+-        return group.foreground.isGrantedExcludingRWROrAllRWR
++        return group.foreground.allowFullGroupGrant
+     }
+ 
+     /**
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/HealthGrantBehavior.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/HealthGrantBehavior.kt
+index 8e540701a..4f5def312 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/HealthGrantBehavior.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/HealthGrantBehavior.kt
+@@ -47,7 +47,7 @@ object HealthGrantBehavior : GrantBehavior() {
+         group: LightAppPermGroup,
+         requestedPerms: Set<String>
+     ): Boolean {
+-        return requestedPerms.all { group.permissions[it]?.isGrantedIncludingAppOp != false }
++        return requestedPerms.all { group.permissions[it]?.isGranted != false }
+     }
+ 
+     override fun isPermissionFixed(group: LightAppPermGroup, perm: String): Boolean {
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/LocationGrantBehavior.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/LocationGrantBehavior.kt
+index 2c5e2b732..31ac04cab 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/LocationGrantBehavior.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/LocationGrantBehavior.kt
+@@ -37,8 +37,7 @@ object LocationGrantBehavior : GrantBehavior() {
+     ): Prompt {
+         val backgroundPrompt = BackgroundGrantBehavior.getPrompt(group, requestedPerms)
+         val requestsBackground = requestedPerms.any { it in group.backgroundPermNames }
+-        val coarseGranted =
+-            group.permissions[ACCESS_COARSE_LOCATION]?.isGrantedIncludingAppOp == true
++        val coarseGranted = group.permissions[ACCESS_COARSE_LOCATION]?.isGranted == true
+         return if (!supportsLocationAccuracy(group) || requestsBackground) {
+             backgroundPrompt
+         } else if (requestedPerms.contains(ACCESS_FINE_LOCATION)) {
+@@ -84,10 +83,10 @@ object LocationGrantBehavior : GrantBehavior() {
+         }
+ 
+         if (requestedPerms.contains(ACCESS_FINE_LOCATION)) {
+-            return group.permissions[ACCESS_FINE_LOCATION]?.isGrantedIncludingAppOp == true
++            return group.permissions[ACCESS_FINE_LOCATION]?.isGranted == true
+         }
+ 
+-        return group.foreground.isGrantedExcludingRWROrAllRWR
++        return group.foreground.allowFullGroupGrant
+     }
+ 
+     override fun isPermissionFixed(group: LightAppPermGroup, perm: String): Boolean {
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/StorageGrantBehavior.kt b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/StorageGrantBehavior.kt
+index a690f5f59..9dd87674a 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/StorageGrantBehavior.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/model/grantPermissions/StorageGrantBehavior.kt
+@@ -66,11 +66,11 @@ object StorageGrantBehavior : GrantBehavior() {
+         }
+ 
+         val userSelectedPerm = group.permissions[READ_MEDIA_VISUAL_USER_SELECTED]
+-        if (userSelectedPerm?.isUserFixed == true && userSelectedPerm.isGrantedIncludingAppOp) {
++        if (userSelectedPerm?.isUserFixed == true && userSelectedPerm.isGranted) {
+             return Prompt.NO_UI_PHOTO_PICKER_REDIRECT
+         }
+ 
+-        if (userSelectedPerm?.isGrantedIncludingAppOp == true) {
++        if (userSelectedPerm?.isGranted == true) {
+             return Prompt.SELECT_MORE_PHOTOS
+         } else {
+             return Prompt.SELECT_PHOTOS
+@@ -97,16 +97,14 @@ object StorageGrantBehavior : GrantBehavior() {
+         }
+ 
+         return group.permissions.values.any {
+-            it.name !in getPartialGrantPermissions(group) && it.isGrantedIncludingAppOp
++            it.name !in getPartialGrantPermissions(group) && it.isGranted
+         }
+     }
+ 
+     override fun isPermissionFixed(group: LightAppPermGroup, perm: String): Boolean {
+         val userSelectedPerm = group.permissions[READ_MEDIA_VISUAL_USER_SELECTED]
+         if (
+-            userSelectedPerm != null &&
+-                userSelectedPerm.isGrantedIncludingAppOp &&
+-                userSelectedPerm.isUserFixed
++            userSelectedPerm != null && userSelectedPerm.isGranted && userSelectedPerm.isUserFixed
+         ) {
+             // If the user selected permission is fixed and granted, we immediately show the
+             // photo picker, rather than filtering
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt b/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt
+index b822aa541..93c30939d 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt
+@@ -771,7 +771,7 @@ object KotlinUtils {
+                 LightPermission(
+                     group.packageInfo,
+                     perm.permInfo,
+-                    perm.isGrantedIncludingAppOp,
++                    perm.isGranted,
+                     perm.flags or flagsToSet,
+                     perm.foregroundPerms
+                 )
+@@ -904,7 +904,7 @@ object KotlinUtils {
+                 group.specialLocationGrant
+             )
+         // If any permission in the group is one time granted, start one time permission session.
+-        if (newGroup.permissions.any { it.value.isOneTime && it.value.isGrantedIncludingAppOp }) {
++        if (newGroup.permissions.any { it.value.isOneTime && it.value.isGranted }) {
+             if (SdkLevel.isAtLeastT()) {
+                 context
+                     .getSystemService(PermissionManager::class.java)!!
+@@ -966,7 +966,7 @@ object KotlinUtils {
+ 
+         var newFlags = perm.flags
+         var oldFlags = perm.flags
+-        var isGranted = perm.isGrantedIncludingAppOp
++        var isGranted = perm.isGranted
+         var shouldKill = false
+ 
+         // Create a new context with the given deviceId so that permission updates will be bound
+@@ -974,7 +974,7 @@ object KotlinUtils {
+         val context = ContextCompat.createDeviceContext(app.applicationContext, deviceId)
+ 
+         // Grant the permission if needed.
+-        if (!perm.isGrantedIncludingAppOp) {
++        if (!perm.isGranted) {
+             val affectsAppOp = permissionToOp(perm.name) != null || perm.isBackgroundPermission
+ 
+             // TODO 195016052: investigate adding split permission handling
+@@ -1043,14 +1043,14 @@ object KotlinUtils {
+ 
+         // If we newly grant background access to the fine location, double-guess the user some
+         // time later if this was really the right choice.
+-        if (!perm.isGrantedIncludingAppOp && isGranted) {
++        if (!perm.isGranted && isGranted) {
+             var triggerLocationAccessCheck = false
+             if (perm.name == ACCESS_FINE_LOCATION) {
+                 val bgPerm = group.permissions[perm.backgroundPermission]
+-                triggerLocationAccessCheck = bgPerm?.isGrantedIncludingAppOp == true
++                triggerLocationAccessCheck = bgPerm?.isGranted == true
+             } else if (perm.name == ACCESS_BACKGROUND_LOCATION) {
+                 val fgPerm = group.permissions[ACCESS_FINE_LOCATION]
+-                triggerLocationAccessCheck = fgPerm?.isGrantedIncludingAppOp == true
++                triggerLocationAccessCheck = fgPerm?.isGranted == true
+             }
+             if (triggerLocationAccessCheck) {
+                 // trigger location access check
+@@ -1289,7 +1289,7 @@ object KotlinUtils {
+         val user = UserHandle.getUserHandleForUid(group.packageInfo.uid)
+         var newFlags = perm.flags
+         val deviceId = group.deviceId
+-        var isGranted = perm.isGrantedIncludingAppOp
++        var isGranted = perm.isGranted
+         val supportsRuntime = group.packageInfo.targetSdkVersion >= Build.VERSION_CODES.M
+         var shouldKill = false
+ 
+@@ -1299,7 +1299,7 @@ object KotlinUtils {
+         // to the device
+         val context = ContextCompat.createDeviceContext(app.applicationContext, deviceId)
+ 
+-        if (perm.isGrantedIncludingAppOp || (perm.isCompatRevoked && forceRemoveRevokedCompat)) {
++        if (perm.isGranted || (perm.isCompatRevoked && forceRemoveRevokedCompat)) {
+             if (
+                 supportsRuntime &&
+                     !isPermissionSplitFromNonRuntime(
+@@ -1363,14 +1363,14 @@ object KotlinUtils {
+ 
+         // If we revoke background access to the fine location, we trigger a check to remove
+         // notification warning about background location access
+-        if (perm.isGrantedIncludingAppOp && !isGranted) {
++        if (perm.isGranted && !isGranted) {
+             var cancelLocationAccessWarning = false
+             if (perm.name == ACCESS_FINE_LOCATION) {
+                 val bgPerm = group.permissions[perm.backgroundPermission]
+-                cancelLocationAccessWarning = bgPerm?.isGrantedIncludingAppOp == true
++                cancelLocationAccessWarning = bgPerm?.isGranted == true
+             } else if (perm.name == ACCESS_BACKGROUND_LOCATION) {
+                 val fgPerm = group.permissions[ACCESS_FINE_LOCATION]
+-                cancelLocationAccessWarning = fgPerm?.isGrantedIncludingAppOp == true
++                cancelLocationAccessWarning = fgPerm?.isGranted == true
+             }
+             if (cancelLocationAccessWarning) {
+                 // cancel location access warning notification
+@@ -1430,7 +1430,7 @@ object KotlinUtils {
+                 val fgPerm = group.permissions[foregroundPermName]
+                 val appOpName = permissionToOp(foregroundPermName) ?: continue
+ 
+-                if (fgPerm != null && fgPerm.isGrantedIncludingAppOp) {
++                if (fgPerm != null && fgPerm.isGranted) {
+                     wasChanged =
+                         setOpMode(appOpName, uid, packageName, MODE_ALLOWED, appOpsManager) ||
+                             wasChanged
+@@ -1443,7 +1443,7 @@ object KotlinUtils {
+                     if (group.permissions.containsKey(perm.backgroundPermission)) {
+                         val bgPerm = group.permissions[perm.backgroundPermission]
+                         val mode =
+-                            if (bgPerm != null && bgPerm.isGrantedIncludingAppOp) MODE_ALLOWED
++                            if (bgPerm != null && bgPerm.isGranted) MODE_ALLOWED
+                             else MODE_FOREGROUND
+ 
+                         setOpMode(appOpName, uid, packageName, mode, appOpsManager)
+@@ -1490,7 +1490,7 @@ object KotlinUtils {
+         if (perm.isBackgroundPermission && perm.foregroundPerms != null) {
+             for (foregroundPermName in perm.foregroundPerms) {
+                 val fgPerm = group.permissions[foregroundPermName]
+-                if (fgPerm != null && fgPerm.isGrantedIncludingAppOp) {
++                if (fgPerm != null && fgPerm.isGranted) {
+                     val appOpName = permissionToOp(foregroundPermName) ?: return false
+                     wasChanged =
+                         wasChanged ||
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/utils/SafetyNetLogger.java b/PermissionController/src/com/android/permissioncontroller/permission/utils/SafetyNetLogger.java
+index 828857cc6..c9b023c44 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/utils/SafetyNetLogger.java
++++ b/PermissionController/src/com/android/permissioncontroller/permission/utils/SafetyNetLogger.java
+@@ -95,7 +95,7 @@ public final class SafetyNetLogger {
+             }
+ 
+             builder.append(permission.getName()).append('|');
+-            builder.append(permission.isGrantedIncludingAppOp()).append('|');
++            builder.append(permission.isGranted()).append('|');
+             builder.append(permission.getFlags());
+         }
+     }
+diff --git a/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/ui/model/ReviewPermissionsViewModelTest.kt b/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/ui/model/ReviewPermissionsViewModelTest.kt
+index 899a026c4..0e8890df5 100644
+--- a/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/ui/model/ReviewPermissionsViewModelTest.kt
++++ b/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/ui/model/ReviewPermissionsViewModelTest.kt
+@@ -104,7 +104,7 @@ class ReviewPermissionsViewModelTest {
+         permissionsMap["mockedPermission1"] = permission2
+ 
+         whenever(permGroup.allPermissions).thenReturn(permissionsMap)
+-        whenever(permission1.isGrantedIncludingAppOp).thenReturn(true)
++        whenever(permission1.isGranted).thenReturn(true)
+ 
+         val summary = model.getSummaryForIndividuallyControlledPermGroup(permGroup)
+         assertEquals(
+diff --git a/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/utils/GrantRevokeTests.kt b/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/utils/GrantRevokeTests.kt
+index 8bd61ebe6..28f69b136 100644
+--- a/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/utils/GrantRevokeTests.kt
++++ b/PermissionController/tests/mocking/src/com/android/permissioncontroller/tests/mocking/permission/utils/GrantRevokeTests.kt
+@@ -25,6 +25,7 @@ import android.app.AppOpsManager.MODE_IGNORED
+ import android.app.AppOpsManager.permissionToOp
+ import android.app.Application
+ import android.content.Context
++import android.content.pm.ApplicationInfo
+ import android.content.pm.PackageManager
+ import android.content.pm.PackageManager.FLAG_PERMISSION_AUTO_REVOKED
+ import android.content.pm.PackageManager.FLAG_PERMISSION_ONE_TIME
+@@ -216,7 +217,8 @@ class GrantRevokeTests {
+                 backgroundPerm,
+                 PermissionInfo.PROTECTION_DANGEROUS,
+                 permInfoProtectionFlags,
+-                0
++                0,
++                pkgInfo.appFlags and ApplicationInfo.FLAG_SYSTEM != 0
+             )
+         return LightPermission(
+             pkgInfo,
+@@ -292,7 +294,7 @@ class GrantRevokeTests {
+             val flags = state.second
+ 
+             assertWithMessage("permission $permName grant state incorrect")
+-                .that(perms[permName]?.isGrantedIncludingAppOp)
++                .that(perms[permName]?.isGranted)
+                 .isEqualTo(granted)
+ 
+             val actualFlags = perms[permName]!!.flags
+-- 
+2.46.1.824.gd892dcdcdd-goog
+
