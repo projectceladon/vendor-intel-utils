@@ -1,26 +1,28 @@
-From 05ace70e6407263d0bef91800005942a079058d6 Mon Sep 17 00:00:00 2001
-From: "Reddy, Alavala Srinivasa" <alavala.srinivasa.reddy@intel.com>
-Date: Wed, 1 Nov 2023 18:43:18 +0530
-Subject: [PATCH 5/5] avx2 implementation for memmove api
+From 7e662fff3603bd6775a7a9a9d424e158fd58603f Mon Sep 17 00:00:00 2001
+From: "Soni, Ravi Kumar" <ravi.kumar.soni@intel.com>
+Date: Thu, 9 Jan 2025 08:20:16 +0000
+Subject: [PATCH 3/3] avx2 implementation for memmove api
 
 This patch includes handwritten avx2 assembly
 implementation for memmove 64-bit.
 
 Test done: Build and boot is fine, Run the benchmarks suite.
 
+Tracked-On: OAM-129137
 Signed-off-by: ahs <amrita.h.s@intel.com>
+Signed-off-by: Soni, Ravi Kumar <ravi.kumar.soni@intel.com>
 ---
  libc/Android.bp                               |   1 +
  .../arch-x86_64/dynamic_function_dispatch.cpp |   2 +
- .../kabylake/string/avx2-memmove-kbl.S        | 593 ++++++++++++++++++
- 3 files changed, 596 insertions(+)
+ .../kabylake/string/avx2-memmove-kbl.S        | 607 ++++++++++++++++++
+ 3 files changed, 610 insertions(+)
  create mode 100644 libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
 
 diff --git a/libc/Android.bp b/libc/Android.bp
-index 92483e833..5deb88b48 100644
+index 0a9df8991..8a50dcffb 100644
 --- a/libc/Android.bp
 +++ b/libc/Android.bp
-@@ -1235,6 +1235,7 @@ cc_library_static {
+@@ -1262,6 +1262,7 @@ cc_library_static {
                  "arch-x86_64/kabylake/string/avx2-memcmp-kbl.S",
                  "arch-x86_64/kabylake/string/avx2-memchr-kbl.S",
                  "arch-x86_64/kabylake/string/avx2-memrchr-kbl.S",
@@ -29,24 +31,24 @@ index 92483e833..5deb88b48 100644
                  "arch-x86_64/kabylake/string/avx2-strncmp-kbl.S",
                  "arch-x86_64/kabylake/string/avx2-strlen-kbl.S",
 diff --git a/libc/arch-x86_64/dynamic_function_dispatch.cpp b/libc/arch-x86_64/dynamic_function_dispatch.cpp
-index 182eb4200..5bcf63e4c 100644
+index 4640ecbf9..de28f6418 100644
 --- a/libc/arch-x86_64/dynamic_function_dispatch.cpp
 +++ b/libc/arch-x86_64/dynamic_function_dispatch.cpp
-@@ -55,6 +55,8 @@ DEFINE_IFUNC_FOR(memcmp) {
+@@ -54,6 +54,8 @@ DEFINE_IFUNC_FOR(memcmp) {
+ MEMCMP_SHIM()
  
- typedef void* memmove_func(void* __dst, const void* __src, size_t __n);
  DEFINE_IFUNC_FOR(memmove) {
 +    __builtin_cpu_init();
-+    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memmove_func, memmove_avx2);
-     RETURN_FUNC(memmove_func, memmove_generic);
++    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memmove_func_t, memmove_avx2);
+     RETURN_FUNC(memmove_func_t, memmove_generic);
  }
- 
+ MEMMOVE_SHIM()
 diff --git a/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S b/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
 new file mode 100644
-index 000000000..02e9ec1d2
+index 000000000..f27014001
 --- /dev/null
 +++ b/libc/arch-x86_64/kabylake/string/avx2-memmove-kbl.S
-@@ -0,0 +1,593 @@
+@@ -0,0 +1,607 @@
 +/*
 +Copyright (c) 2014, Intel Corporation
 +All rights reserved.
@@ -76,8 +78,6 @@ index 000000000..02e9ec1d2
 +(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 +SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 +*/
-+
-+#include "cache.h"
 +
 +#ifndef MEMMOVE
 +# define MEMMOVE		memmove_avx2
@@ -277,8 +277,8 @@ index 000000000..02e9ec1d2
 +        cmp     %r8, %rbx
 +        jbe     L(mm_copy_remaining_forward)
 +
-+        cmp     $SHARED_CACHE_SIZE_HALF, %rdx
-+        jae     L(mm_large_page_loop_forward)
++        cmp     __x86_shared_cache_size_half(%rip), %rdx
++        jae     L(mm_overlapping_check_forward)
 +
 +        .p2align 4
 +L(mm_main_loop_forward):
@@ -546,8 +546,8 @@ index 000000000..02e9ec1d2
 +	cmp	%r9, %rbx
 +	jae	L(mm_recalc_len)
 +
-+	cmp	$SHARED_CACHE_SIZE_HALF, %rdx
-+	jae	L(mm_large_page_loop_backward)
++	cmp	__x86_shared_cache_size_half(%rip), %rdx
++	jae	L(mm_overlapping_check_backward)
 +
 +	.p2align 4
 +L(mm_main_loop_backward):
@@ -609,6 +609,13 @@ index 000000000..02e9ec1d2
 +/* Big length copy forward part.  */
 +
 +	.p2align 4
++
++L(mm_overlapping_check_forward):
++	mov	%rsi, %r9
++	add	%rdx, %r9
++	cmp	__x86_shared_cache_size(%rip), %r9
++	jbe	L(mm_main_loop_forward)
++
 +L(mm_large_page_loop_forward):
 +	vmovdqu	  (%r8, %rsi), %ymm0
 +	vmovdqu	  32(%r8, %rsi), %ymm1
@@ -626,6 +633,15 @@ index 000000000..02e9ec1d2
 +
 +/* Big length copy backward part.  */
 +	.p2align 4
++
++L(mm_overlapping_check_backward):
++	mov	%rdi, %r11
++	sub	%rsi, %r11 /* r11 = dst - src, diff */
++	add	%rdx, %r11
++	cmp	__x86_shared_cache_size(%rip), %r11
++	jbe	L(mm_main_loop_backward)
++
++
 +L(mm_large_page_loop_backward):
 +	vmovdqu	  -64(%r9, %r8), %ymm0
 +	vmovdqu	  -32(%r9, %r8), %ymm1
@@ -641,5 +657,5 @@ index 000000000..02e9ec1d2
 +
 +//ALIAS_SYMBOL(memcpy, MEMMOVE)
 -- 
-2.25.1
+2.34.1
 
