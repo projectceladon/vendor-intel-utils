@@ -1,0 +1,89 @@
+From 370beea3852bf0d9672dbdb259c6fe224906b561 Mon Sep 17 00:00:00 2001
+From: David Anderson <dvander@google.com>
+Date: Tue, 1 Oct 2024 11:01:08 -0700
+Subject: [PATCH] libdm: Redact keys from dm-crypt targets when calling
+ GetTable.
+
+Ignore-AOSP-First: security fix
+Bug: 368069390
+Test: libdm_test
+(cherry picked from commit bc067ef9f0408f3b7c4f5dcae3b6aec51f386e4d)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:ee978d11115f9c0cce2b9a534a54171caef995e0)
+Merged-In: I40b9a0129e58b1a0f116ca29f0ee66f91a27a73d
+Change-Id: I40b9a0129e58b1a0f116ca29f0ee66f91a27a73d
+---
+ fs_mgr/libdm/dm.cpp      | 14 ++++++++++++++
+ fs_mgr/libdm/dm_test.cpp | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+)
+
+diff --git a/fs_mgr/libdm/dm.cpp b/fs_mgr/libdm/dm.cpp
+index 1e8c14fe2..c6f9192ae 100644
+--- a/fs_mgr/libdm/dm.cpp
++++ b/fs_mgr/libdm/dm.cpp
+@@ -540,6 +540,17 @@ bool DeviceMapper::GetTableInfo(const std::string& name, std::vector<TargetInfo>
+     return GetTable(name, DM_STATUS_TABLE_FLAG, table);
+ }
+ 
++void RedactTableInfo(const struct dm_target_spec& spec, std::string* data) {
++    if (DeviceMapper::GetTargetType(spec) == "crypt") {
++        auto parts = android::base::Split(*data, " ");
++        if (parts.size() < 2) {
++            return;
++        }
++        parts[1] = "redacted";
++        *data = android::base::Join(parts, " ");
++    }
++}
++
+ // private methods of DeviceMapper
+ bool DeviceMapper::GetTable(const std::string& name, uint32_t flags,
+                             std::vector<TargetInfo>* table) {
+@@ -578,6 +589,9 @@ bool DeviceMapper::GetTable(const std::string& name, uint32_t flags,
+             // Note: we use c_str() to eliminate any extra trailing 0s.
+             data = std::string(&buffer[data_offset], next_cursor - data_offset).c_str();
+         }
++        if (flags & DM_STATUS_TABLE_FLAG) {
++            RedactTableInfo(*spec, &data);
++        }
+         table->emplace_back(*spec, data);
+         cursor = next_cursor;
+     }
+diff --git a/fs_mgr/libdm/dm_test.cpp b/fs_mgr/libdm/dm_test.cpp
+index c522eafae..08edbe832 100644
+--- a/fs_mgr/libdm/dm_test.cpp
++++ b/fs_mgr/libdm/dm_test.cpp
+@@ -757,3 +757,31 @@ TEST_F(DmTest, GetNameAndUuid) {
+     ASSERT_EQ(name, test_name_);
+     ASSERT_FALSE(uuid.empty());
+ }
++
++TEST_F(DmTest, RedactDmCrypt) {
++    static constexpr uint64_t kImageSize = 65536;
++    unique_fd temp_file(CreateTempFile("file_1", kImageSize));
++    ASSERT_GE(temp_file, 0);
++
++    LoopDevice loop(temp_file, 10s);
++    ASSERT_TRUE(loop.valid());
++
++    static constexpr const char* kAlgorithm = "aes-cbc-essiv:sha256";
++    static constexpr const char* kKey = "0e64ef514e6a1315b1f6390cb57c9e6a";
++
++    auto target = std::make_unique<DmTargetCrypt>(0, kImageSize / 512, kAlgorithm, kKey, 0,
++                                                  loop.device(), 0);
++    target->AllowDiscards();
++
++    DmTable table;
++    table.AddTarget(std::move(target));
++
++    auto& dm = DeviceMapper::Instance();
++    std::string crypt_path;
++    ASSERT_TRUE(dm.CreateDevice(test_name_, table, &crypt_path, 10s));
++
++    std::vector<DeviceMapper::TargetInfo> targets;
++    ASSERT_TRUE(dm.GetTableInfo(test_name_, &targets));
++    ASSERT_EQ(targets.size(), 1);
++    EXPECT_EQ(targets[0].data.find(kKey), std::string::npos);
++}
+-- 
+2.47.1.613.gc27f4b7a9f-goog
+
