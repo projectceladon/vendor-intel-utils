@@ -1,0 +1,281 @@
+From 0cd72114e2d80b076fb65a76be02fb8dae1b88c6 Mon Sep 17 00:00:00 2001
+From: Chaohui Wang <chaohuiw@google.com>
+Date: Thu, 29 Aug 2024 13:17:36 +0800
+Subject: [PATCH] [Safer intents] App Time Spent Preference
+
+Set package com.android.internal.R.string.config_systemWellbeing to the
+intent.
+
+Fix: 356117796
+Flag: EXEMPT bug fix
+Test: manual - on App info
+Test: atest AppTimeSpentPreferenceTest
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:a9135aaddab390dec71126cd4898e612fce88987)
+Merged-In: I2af7b53a75fe5c6915dd9781406039822789c18c
+Change-Id: I2af7b53a75fe5c6915dd9781406039822789c18c
+---
+ .../spa/app/appinfo/AppTimeSpentPreference.kt | 67 ++++++++++++-------
+ .../app/appinfo/AppTimeSpentPreferenceTest.kt | 67 +++++++------------
+ 2 files changed, 66 insertions(+), 68 deletions(-)
+
+diff --git a/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreference.kt b/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreference.kt
+index 1ef893603c..1b605a8161 100644
+--- a/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreference.kt
++++ b/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreference.kt
+@@ -19,14 +19,16 @@ package com.android.settings.spa.app.appinfo
+ import android.content.Context
+ import android.content.Intent
+ import android.content.pm.ApplicationInfo
+-import android.content.pm.PackageManager.ResolveInfoFlags
++import android.content.pm.PackageManager
++import android.content.pm.ResolveInfo
+ import android.provider.Settings
+ import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.livedata.observeAsState
++import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.remember
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.res.stringResource
+-import androidx.lifecycle.liveData
++import androidx.lifecycle.compose.ExperimentalLifecycleComposeApi
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
+ import com.android.settings.R
+ import com.android.settings.overlay.FeatureFactory
+ import com.android.settingslib.spa.framework.compose.stateOf
+@@ -36,44 +38,61 @@ import com.android.settingslib.spaprivileged.model.app.hasFlag
+ import com.android.settingslib.spaprivileged.model.app.userHandle
+ import com.android.settingslib.spaprivileged.model.app.userId
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.flow
++import kotlinx.coroutines.flow.flowOn
+ 
++@OptIn(ExperimentalLifecycleComposeApi::class)
+ @Composable
+ fun AppTimeSpentPreference(app: ApplicationInfo) {
+     val context = LocalContext.current
+-    val presenter = remember { AppTimeSpentPresenter(context, app) }
+-    if (!presenter.isAvailable()) return
++    val presenter = remember(app) { AppTimeSpentPresenter(context, app) }
++    val isAvailable by presenter.isAvailableFlow.collectAsStateWithLifecycle(initialValue = false)
++    if (!isAvailable) return
+ 
+-    Preference(object : PreferenceModel {
+-        override val title = stringResource(R.string.time_spent_in_app_pref_title)
+-        override val summary = presenter.summaryLiveData.observeAsState(
+-            initial = stringResource(R.string.summary_placeholder),
+-        )
+-        override val enabled = stateOf(presenter.isEnabled())
+-        override val onClick = presenter::startActivity
+-    })
++    val summary = presenter.summaryFlow.collectAsStateWithLifecycle(
++        initialValue = stringResource(R.string.summary_placeholder),
++    )
++    Preference(
++        object : PreferenceModel {
++            override val title = stringResource(R.string.time_spent_in_app_pref_title)
++            override val summary = summary
++            override val enabled = stateOf(presenter.isEnabled())
++            override val onClick = presenter::startActivity
++        }
++    )
+ }
+ 
+ private class AppTimeSpentPresenter(
+     private val context: Context,
+     private val app: ApplicationInfo,
+ ) {
+-    private val intent = Intent(Settings.ACTION_APP_USAGE_SETTINGS).apply {
+-        putExtra(Intent.EXTRA_PACKAGE_NAME, app.packageName)
+-    }
++    private val intent =
++        Intent(Settings.ACTION_APP_USAGE_SETTINGS).apply {
++            // Limit the package for safer intents, since string resource is not null,
++            // we restrict the target to this single package.
++            setPackage(context.getString(com.android.internal.R.string.config_systemWellbeing))
++            putExtra(Intent.EXTRA_PACKAGE_NAME, app.packageName)
++        }
++
+     private val appFeatureProvider = FeatureFactory.getFactory(context)
+         .getApplicationFeatureProvider(context)
+ 
+-    fun isAvailable() = context.packageManager.queryIntentActivitiesAsUser(
+-        intent, ResolveInfoFlags.of(0), app.userId
+-    ).any { resolveInfo ->
+-        resolveInfo?.activityInfo?.applicationInfo?.isSystemApp == true
+-    }
++    val isAvailableFlow = flow { emit(resolveIntent() != null) }.flowOn(Dispatchers.Default)
++
++    // Resolve the intent first with PackageManager.MATCH_SYSTEM_ONLY flag to ensure that
++    // only system apps are resolved.
++    private fun resolveIntent(): ResolveInfo? =
++        context.packageManager.resolveActivityAsUser(
++            intent,
++            PackageManager.MATCH_SYSTEM_ONLY,
++            app.userId,
++        )
+ 
+     fun isEnabled() = app.hasFlag(ApplicationInfo.FLAG_INSTALLED)
+ 
+-    val summaryLiveData = liveData(Dispatchers.IO) {
+-        emit(appFeatureProvider.getTimeSpentInApp(app.packageName).toString())
+-    }
++    val summaryFlow =
++        flow { emit(appFeatureProvider.getTimeSpentInApp(app.packageName).toString()) }
++            .flowOn(Dispatchers.Default)
+ 
+     fun startActivity() {
+         context.startActivityAsUser(intent, app.userHandle)
+diff --git a/tests/spa_unit/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreferenceTest.kt b/tests/spa_unit/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreferenceTest.kt
+index 6cc3e3c57e..32b7e779ce 100644
+--- a/tests/spa_unit/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreferenceTest.kt
++++ b/tests/spa_unit/src/com/android/settings/spa/app/appinfo/AppTimeSpentPreferenceTest.kt
+@@ -17,17 +17,16 @@
+ package com.android.settings.spa.app.appinfo
+ 
+ import android.content.Context
+-import android.content.pm.ActivityInfo
+ import android.content.pm.ApplicationInfo
+ import android.content.pm.PackageManager
+-import android.content.pm.PackageManager.ResolveInfoFlags
+ import android.content.pm.ResolveInfo
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.ui.platform.LocalContext
+ import androidx.compose.ui.test.assertIsDisplayed
+-import androidx.compose.ui.test.assertIsEnabled
+ import androidx.compose.ui.test.assertIsNotDisplayed
+ import androidx.compose.ui.test.assertIsNotEnabled
++import androidx.compose.ui.test.hasText
++import androidx.compose.ui.test.isEnabled
+ import androidx.compose.ui.test.junit4.createComposeRule
+ import androidx.compose.ui.test.onNodeWithText
+ import androidx.compose.ui.test.onRoot
+@@ -35,12 +34,13 @@ import androidx.test.core.app.ApplicationProvider
+ import androidx.test.ext.junit.runners.AndroidJUnit4
+ import com.android.settings.R
+ import com.android.settings.testutils.FakeFeatureFactory
++import com.android.settingslib.spa.testutils.any
++import com.android.settingslib.spa.testutils.waitUntilExists
+ import org.junit.Before
+ import org.junit.Rule
+ import org.junit.Test
+ import org.junit.runner.RunWith
+ import org.mockito.Mock
+-import org.mockito.Mockito.any
+ import org.mockito.Mockito.anyInt
+ import org.mockito.Spy
+ import org.mockito.junit.MockitoJUnit
+@@ -59,39 +59,26 @@ class AppTimeSpentPreferenceTest {
+     private val context: Context = ApplicationProvider.getApplicationContext()
+ 
+     @Mock
+-    private lateinit var packageManager: PackageManager
++    private lateinit var mockPackageManager: PackageManager
+ 
+     private val fakeFeatureFactory = FakeFeatureFactory()
+     private val appFeatureProvider = fakeFeatureFactory.mockApplicationFeatureProvider
+ 
+     @Before
+     fun setUp() {
+-        whenever(context.packageManager).thenReturn(packageManager)
++        whenever(context.packageManager).thenReturn(mockPackageManager)
+         whenever(appFeatureProvider.getTimeSpentInApp(PACKAGE_NAME)).thenReturn(TIME_SPENT)
+     }
+ 
+-    private fun mockActivitiesQueryResult(resolveInfos: List<ResolveInfo>) {
++    private fun mockActivityQueryResult(resolveInfo: ResolveInfo?) {
+         whenever(
+-            packageManager.queryIntentActivitiesAsUser(any(), any<ResolveInfoFlags>(), anyInt())
+-        ).thenReturn(resolveInfos)
++            mockPackageManager.resolveActivityAsUser(any(), anyInt(), anyInt())
++        ).thenReturn(resolveInfo)
+     }
+ 
+     @Test
+     fun noIntentHandler_notDisplay() {
+-        mockActivitiesQueryResult(emptyList())
+-
+-        composeTestRule.setContent {
+-            CompositionLocalProvider(LocalContext provides context) {
+-                AppTimeSpentPreference(INSTALLED_APP)
+-            }
+-        }
+-
+-        composeTestRule.onRoot().assertIsNotDisplayed()
+-    }
+-
+-    @Test
+-    fun hasIntentHandler_notSystemApp_notDisplay() {
+-        mockActivitiesQueryResult(listOf(ResolveInfo()))
++        mockActivityQueryResult(null)
+ 
+         composeTestRule.setContent {
+             CompositionLocalProvider(LocalContext provides context) {
+@@ -104,7 +91,7 @@ class AppTimeSpentPreferenceTest {
+ 
+     @Test
+     fun installedApp_enabled() {
+-        mockActivitiesQueryResult(listOf(MATCHED_RESOLVE_INFO))
++        mockActivityQueryResult(ResolveInfo())
+ 
+         composeTestRule.setContent {
+             CompositionLocalProvider(LocalContext provides context) {
+@@ -112,18 +99,16 @@ class AppTimeSpentPreferenceTest {
+             }
+         }
+ 
+-        composeTestRule.onNodeWithText(context.getString(R.string.time_spent_in_app_pref_title))
+-            .assertIsDisplayed()
+-            .assertIsEnabled()
++        composeTestRule.waitUntilExists(
++            hasText(context.getString(R.string.time_spent_in_app_pref_title)) and isEnabled()
++        )
+         composeTestRule.onNodeWithText(TIME_SPENT).assertIsDisplayed()
+     }
+ 
+     @Test
+     fun notInstalledApp_disabled() {
+-        mockActivitiesQueryResult(listOf(MATCHED_RESOLVE_INFO))
+-        val notInstalledApp = ApplicationInfo().apply {
+-            packageName = PACKAGE_NAME
+-        }
++        mockActivityQueryResult(ResolveInfo())
++        val notInstalledApp = ApplicationInfo().apply { packageName = PACKAGE_NAME }
+ 
+         composeTestRule.setContent {
+             CompositionLocalProvider(LocalContext provides context) {
+@@ -131,25 +116,19 @@ class AppTimeSpentPreferenceTest {
+             }
+         }
+ 
+-        composeTestRule.onNodeWithText(context.getString(R.string.time_spent_in_app_pref_title))
++        composeTestRule
++            .onNodeWithText(context.getString(R.string.time_spent_in_app_pref_title))
+             .assertIsNotEnabled()
+     }
+ 
+     companion object {
+-        private const val PACKAGE_NAME = "package name"
++        private const val PACKAGE_NAME = "package.name"
+         private const val TIME_SPENT = "15 minutes"
+ 
+-        private val INSTALLED_APP = ApplicationInfo().apply {
+-            packageName = PACKAGE_NAME
+-            flags = ApplicationInfo.FLAG_INSTALLED
+-        }
+-
+-        private val MATCHED_RESOLVE_INFO = ResolveInfo().apply {
+-            activityInfo = ActivityInfo().apply {
+-                applicationInfo = ApplicationInfo().apply {
+-                    flags = ApplicationInfo.FLAG_SYSTEM
+-                }
++        private val INSTALLED_APP =
++            ApplicationInfo().apply {
++                packageName = PACKAGE_NAME
++                flags = ApplicationInfo.FLAG_INSTALLED
+             }
+-        }
+     }
+ }
+-- 
+2.47.1.613.gc27f4b7a9f-goog
+
