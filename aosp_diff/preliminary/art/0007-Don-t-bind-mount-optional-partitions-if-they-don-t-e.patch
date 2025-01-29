@@ -1,0 +1,115 @@
+From 461e7c773d49bef8ca3164959db72ba6a5974f72 Mon Sep 17 00:00:00 2001
+From: Jiakai Zhang <jiakaiz@google.com>
+Date: Tue, 15 Oct 2024 16:06:08 +0000
+Subject: [PATCH] Don't bind-mount optional partitions if they don't exist.
+
+On a device where an additional partition doesn't exist, the mount point
+of the partition is a absolute symlink to a directory inside /system. If
+we bind-mount that at the corresponding symlink inside chroot, the mount
+will follow the symlink and result at the location outside of chroot.
+
+This CL also adds CHECKs to prevent similar things from happening. The
+CHECKs are more strict than necessary, as it disallows any symlinks, to
+prevent unforeseen situations, while relative symlinks in the path could
+actually be fine. We may consider loosen the CHECKs in thee future if
+needed.
+
+Bug: 369736135
+Test: atest CtsCompilationTestCases:android.compilation.cts.PreRebootDexoptTest
+Change-Id: If9facfb2ebe07c5b9e7fc077a115c433ece7a325
+---
+ dexopt_chroot_setup/dexopt_chroot_setup.cc | 39 +++++++++++++++++++---
+ 1 file changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/dexopt_chroot_setup/dexopt_chroot_setup.cc b/dexopt_chroot_setup/dexopt_chroot_setup.cc
+index 7a1467a149..b9513df529 100644
+--- a/dexopt_chroot_setup/dexopt_chroot_setup.cc
++++ b/dexopt_chroot_setup/dexopt_chroot_setup.cc
+@@ -46,6 +46,7 @@
+ #include "android-base/result.h"
+ #include "android-base/scopeguard.h"
+ #include "android-base/strings.h"
++#include "android-base/unique_fd.h"
+ #include "android/binder_auto_utils.h"
+ #include "android/binder_manager.h"
+ #include "android/binder_process.h"
+@@ -72,10 +73,12 @@ using ::android::base::Join;
+ using ::android::base::make_scope_guard;
+ using ::android::base::NoDestructor;
+ using ::android::base::ReadFileToString;
++using ::android::base::Readlink;
+ using ::android::base::Result;
+ using ::android::base::SetProperty;
+ using ::android::base::Split;
+ using ::android::base::Tokenize;
++using ::android::base::unique_fd;
+ using ::android::base::WaitForProperty;
+ using ::android::base::WriteStringToFile;
+ using ::android::fs_mgr::FstabEntry;
+@@ -134,6 +137,29 @@ Result<void> CreateDir(const std::string& path) {
+   return {};
+ }
+ 
++Result<bool> IsSymlink(const std::string& path) {
++  std::error_code ec;
++  bool res = std::filesystem::is_symlink(path, ec);
++  if (ec) {
++    return Errorf("Failed to create dir '{}': {}", path, ec.message());
++  }
++  return res;
++}
++
++Result<bool> IsSelfOrParentSymlink(const std::string& path) {
++  // We don't use `Realpath` because it does a `stat(2)` call which requires the SELinux "getattr"
++  // permission. which we don't have on all mount points.
++  unique_fd fd(open(path.c_str(), O_PATH | O_CLOEXEC));
++  if (fd.get() < 0) {
++    return ErrnoErrorf("Failed to open '{}' to resolve real path", path);
++  }
++  std::string real_path;
++  if (!Readlink(ART_FORMAT("/proc/self/fd/{}", fd.get()), &real_path)) {
++    return ErrnoErrorf("Failed to resolve real path for '{}'", path);
++  }
++  return path != real_path;
++}
++
+ Result<void> Unmount(const std::string& target, bool logging = true) {
+   if (umount2(target.c_str(), UMOUNT_NOFOLLOW) == 0) {
+     LOG_IF(INFO, logging) << ART_FORMAT("Unmounted '{}'", target);
+@@ -154,6 +180,8 @@ Result<void> Unmount(const std::string& target, bool logging = true) {
+ // `BindMountDirect` is safe to use only if there is no child mount points under `target`. DO NOT
+ // mount or unmount under `target` because mount events propagate to `source`.
+ Result<void> BindMountDirect(const std::string& source, const std::string& target) {
++  // Don't follow symlinks.
++  CHECK(!OR_RETURN(IsSelfOrParentSymlink(target))) << target;
+   if (mount(source.c_str(),
+             target.c_str(),
+             /*fs_type=*/nullptr,
+@@ -169,6 +197,8 @@ Result<void> BindMountDirect(const std::string& source, const std::string& targe
+ Result<void> BindMount(const std::string& source, const std::string& target) {
+   // Don't bind-mount repeatedly.
+   CHECK(!PathStartsWith(source, DexoptChrootSetup::CHROOT_DIR));
++  // Don't follow symlinks.
++  CHECK(!OR_RETURN(IsSelfOrParentSymlink(target))) << target;
+   // system_server has a different mount namespace from init, and it uses slave mounts. E.g:
+   //
+   //    a: init mount ns: shared(1):          /foo
+@@ -559,10 +589,11 @@ Result<void> DexoptChrootSetup::SetUpChroot(const std::optional<std::string>& ot
+     // partitions are not remounted, bind-mounting "/system" doesn't hurt.
+     OR_RETURN(BindMount("/system", PathInChroot("/system")));
+     for (const auto& [partition, mount_point] : additional_system_partitions) {
+-      // Some additional partitions are optional, but that's okay. The root filesystem (mounted at
+-      // `/`) has empty directories for additional partitions. If additional partitions don't exist,
+-      // we'll just be bind-mounting empty directories.
+-      OR_RETURN(BindMount(mount_point, PathInChroot(mount_point)));
++      // Some additional partitions are optional. On a device where an additional partition doesn't
++      // exist, the mount point of the partition is a symlink to a directory inside /system.
++      if (!OR_RETURN(IsSymlink(mount_point))) {
++        OR_RETURN(BindMount(mount_point, PathInChroot(mount_point)));
++      }
+     }
+   } else {
+     CHECK(ota_slot.value() == "_a" || ota_slot.value() == "_b");
+-- 
+2.34.1
+
