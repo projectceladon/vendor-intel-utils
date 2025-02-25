@@ -1,0 +1,208 @@
+From 339d20053956ec0f92384f0b7cefda4fa7126290 Mon Sep 17 00:00:00 2001
+From: Billy Huang <billyhuang@google.com>
+Date: Wed, 2 Oct 2024 14:27:47 -0700
+Subject: [PATCH] RESTRICT AUTOMERGE backport "opp: validate that content uri
+ belongs to current user"
+
+Bug: 296915500
+Flag: EXEMPT trivial fix with complete testing coverage
+Test: atest GoogleBluetoothInstrumentationTests:BluetoothOppSendFileInfoTest
+Ignore-AOSP-First: fix for undisclosed vulnerability
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:2c5add83a18d87ea4a46bc8ab7f675e32c8d6a56)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:0de38e22f1771fde73340d7b209342751616fa0b)
+Merged-In: I0b6423025c95c13eeea3cbf584212913b5fbf307
+Change-Id: I0b6423025c95c13eeea3cbf584212913b5fbf307
+---
+ .../opp/BluetoothOppSendFileInfo.java         |  15 +++
+ .../opp/BluetoothOppSendFileInfoTest.java     | 107 +++++++++++++++++-
+ 2 files changed, 121 insertions(+), 1 deletion(-)
+
+diff --git a/android/app/src/com/android/bluetooth/opp/BluetoothOppSendFileInfo.java b/android/app/src/com/android/bluetooth/opp/BluetoothOppSendFileInfo.java
+index 2adb8e5f44..7ce134341a 100644
+--- a/android/app/src/com/android/bluetooth/opp/BluetoothOppSendFileInfo.java
++++ b/android/app/src/com/android/bluetooth/opp/BluetoothOppSendFileInfo.java
+@@ -32,6 +32,8 @@
+ 
+ package com.android.bluetooth.opp;
+ 
++import static android.os.UserHandle.myUserId;
++
+ import android.content.ContentResolver;
+ import android.content.Context;
+ import android.content.res.AssetFileDescriptor;
+@@ -39,6 +41,7 @@ import android.database.Cursor;
+ import android.database.sqlite.SQLiteException;
+ import android.net.Uri;
+ import android.provider.OpenableColumns;
++import android.text.TextUtils;
+ import android.util.EventLog;
+ import android.util.Log;
+ 
+@@ -49,6 +52,7 @@ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
++import java.util.Objects;
+ 
+ /**
+  * This class stores information about a single sending file It will only be
+@@ -117,6 +121,11 @@ public class BluetoothOppSendFileInfo {
+                 return SEND_FILE_INFO_ERROR;
+             }
+ 
++            if (isContentUriForOtherUser(uri)) {
++                Log.e(TAG, "Uri: " + uri + " is invalid for user " + myUserId());
++                return SEND_FILE_INFO_ERROR;
++            }
++
+             contentType = contentResolver.getType(uri);
+             Cursor metadataCursor;
+             try {
+@@ -253,6 +262,12 @@ public class BluetoothOppSendFileInfo {
+         return new BluetoothOppSendFileInfo(fileName, contentType, length, is, 0);
+     }
+ 
++    private static boolean isContentUriForOtherUser(Uri uri) {
++        String uriUserId = uri.getUserInfo();
++        return !TextUtils.isEmpty(uriUserId)
++                && !Objects.equals(uriUserId, String.valueOf(myUserId()));
++    }
++
+     private static long getStreamSize(FileInputStream is) throws IOException {
+         long length = 0;
+         byte[] unused = new byte[4096];
+diff --git a/android/app/tests/unit/src/com/android/bluetooth/opp/BluetoothOppSendFileInfoTest.java b/android/app/tests/unit/src/com/android/bluetooth/opp/BluetoothOppSendFileInfoTest.java
+index 756836afaa..acb58272fb 100644
+--- a/android/app/tests/unit/src/com/android/bluetooth/opp/BluetoothOppSendFileInfoTest.java
++++ b/android/app/tests/unit/src/com/android/bluetooth/opp/BluetoothOppSendFileInfoTest.java
+@@ -17,6 +17,8 @@
+ 
+ package com.android.bluetooth.opp;
+ 
++import static android.os.UserHandle.myUserId;
++
+ import static com.google.common.truth.Truth.assertThat;
+ 
+ import static org.mockito.ArgumentMatchers.any;
+@@ -31,7 +33,6 @@ import android.content.res.AssetFileDescriptor;
+ import android.database.MatrixCursor;
+ import android.net.Uri;
+ import android.provider.OpenableColumns;
+-import android.util.Log;
+ 
+ import androidx.test.platform.app.InstrumentationRegistry;
+ import androidx.test.runner.AndroidJUnit4;
+@@ -120,6 +121,110 @@ public class BluetoothOppSendFileInfoTest {
+         assertThat(info).isEqualTo(BluetoothOppSendFileInfo.SEND_FILE_INFO_ERROR);
+     }
+ 
++    @Test
++    public void generateFileInfo_withContentUriForOtherUser_returnsSendFileInfoError()
++            throws Exception {
++        String type = "image/jpeg";
++        Uri uri = buildContentUriWithEncodedAuthority((myUserId() + 1) + "@media");
++
++        long fileLength = 1000;
++        String fileName = "pic.jpg";
++
++        FileInputStream fs = mock(FileInputStream.class);
++        AssetFileDescriptor fd = mock(AssetFileDescriptor.class);
++        doReturn(fileLength).when(fd).getLength();
++        doReturn(fs).when(fd).createInputStream();
++
++        doReturn(fd).when(mCallProxy).contentResolverOpenAssetFileDescriptor(any(), eq(uri), any());
++
++        mCursor =
++                new MatrixCursor(new String[] {OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE});
++        mCursor.addRow(new Object[] {fileName, fileLength});
++
++        doReturn(mCursor)
++                .when(mCallProxy)
++                .contentResolverQuery(any(), eq(uri), any(), any(), any(), any());
++
++        BluetoothOppSendFileInfo info =
++                BluetoothOppSendFileInfo.generateFileInfo(mContext, uri, type, true);
++
++        assertThat(info).isEqualTo(BluetoothOppSendFileInfo.SEND_FILE_INFO_ERROR);
++    }
++
++    @Test
++    public void generateFileInfo_withContentUriForImplicitUser_returnsInfoWithCorrectLength()
++            throws Exception {
++        String type = "image/jpeg";
++        Uri uri = buildContentUriWithEncodedAuthority("media");
++
++        long fileLength = 1000;
++        String fileName = "pic.jpg";
++
++        FileInputStream fs = mock(FileInputStream.class);
++        AssetFileDescriptor fd = mock(AssetFileDescriptor.class);
++        doReturn(fileLength).when(fd).getLength();
++        doReturn(fs).when(fd).createInputStream();
++
++        doReturn(fd).when(mCallProxy).contentResolverOpenAssetFileDescriptor(any(), eq(uri), any());
++
++        mCursor =
++                new MatrixCursor(new String[] {OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE});
++        mCursor.addRow(new Object[] {fileName, fileLength});
++
++        doReturn(mCursor)
++                .when(mCallProxy)
++                .contentResolverQuery(any(), eq(uri), any(), any(), any(), any());
++
++        BluetoothOppSendFileInfo info =
++                BluetoothOppSendFileInfo.generateFileInfo(mContext, uri, type, true);
++
++        assertThat(info.mInputStream).isEqualTo(fs);
++        assertThat(info.mFileName).isEqualTo(fileName);
++        assertThat(info.mLength).isEqualTo(fileLength);
++        assertThat(info.mStatus).isEqualTo(0);
++    }
++
++    @Test
++    public void generateFileInfo_withContentUriForSameUser_returnsInfoWithCorrectLength()
++            throws Exception {
++        String type = "image/jpeg";
++        Uri uri = buildContentUriWithEncodedAuthority(myUserId() + "@media");
++
++        long fileLength = 1000;
++        String fileName = "pic.jpg";
++
++        FileInputStream fs = mock(FileInputStream.class);
++        AssetFileDescriptor fd = mock(AssetFileDescriptor.class);
++        doReturn(fileLength).when(fd).getLength();
++        doReturn(fs).when(fd).createInputStream();
++
++        doReturn(fd).when(mCallProxy).contentResolverOpenAssetFileDescriptor(any(), eq(uri), any());
++
++        mCursor =
++                new MatrixCursor(new String[] {OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE});
++        mCursor.addRow(new Object[] {fileName, fileLength});
++
++        doReturn(mCursor)
++                .when(mCallProxy)
++                .contentResolverQuery(any(), eq(uri), any(), any(), any(), any());
++
++        BluetoothOppSendFileInfo info =
++                BluetoothOppSendFileInfo.generateFileInfo(mContext, uri, type, true);
++
++        assertThat(info.mInputStream).isEqualTo(fs);
++        assertThat(info.mFileName).isEqualTo(fileName);
++        assertThat(info.mLength).isEqualTo(fileLength);
++        assertThat(info.mStatus).isEqualTo(0);
++    }
++
++    private static Uri buildContentUriWithEncodedAuthority(String authority) {
++        return new Uri.Builder()
++                .scheme("content")
++                .encodedAuthority(authority)
++                .path("external/images/media/1")
++                .build();
++    }
++
+     @Test
+     public void generateFileInfo_withoutPermissionForAccessingUri_returnsSendFileInfoError() {
+         String type = "text/plain";
+-- 
+2.48.1.262.g85cc9f2d1e-goog
+
