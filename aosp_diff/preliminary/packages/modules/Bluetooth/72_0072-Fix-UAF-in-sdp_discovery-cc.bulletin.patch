@@ -1,0 +1,77 @@
+From b2739368e7160de3a5c5fc33a0dfb10220226997 Mon Sep 17 00:00:00 2001
+From: Brian Delwiche <delwiche@google.com>
+Date: Wed, 9 Oct 2024 20:55:36 +0000
+Subject: [PATCH] Fix UAF in sdp_discovery.cc
+
+It is possible with modifications to a client to open two connections
+against the same SDP discovery database.  If this happens, it becomes
+possible to reference a freed instance of the discovery database in the
+second connection once the first one is closed.
+
+To guard against this, check during discovery if a database has already
+been allocated, and abort iff it has.
+
+Also, add a null check to process_service_search_attr_rsp to guard
+against unchecked calls to the SDP discovery database.
+
+Bug: 291281168
+Bug: 356201480
+Flag: com.android.bluetooth.flags.btsec_check_valid_discovery_database
+Test: atest bluetooth_test_gd_unit, net_test_stack_sdp
+Tag: #security
+Ignore-AOSP-First: Security
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:2c3b80e41630d9a252e63a3e30cc2997488fc3e4)
+Merged-In: I754bf8292e1e0d8e90e78fa87889284e26aa5818
+Change-Id: I754bf8292e1e0d8e90e78fa87889284e26aa5818
+---
+ system/bta/hf_client/bta_hf_client_sdp.cc | 13 +++++++++++++
+ system/stack/sdp/sdp_discovery.cc         |  9 +++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/system/bta/hf_client/bta_hf_client_sdp.cc b/system/bta/hf_client/bta_hf_client_sdp.cc
+index 96b7a6d14b..72e0a441b0 100755
+--- a/system/bta/hf_client/bta_hf_client_sdp.cc
++++ b/system/bta/hf_client/bta_hf_client_sdp.cc
+@@ -320,6 +320,19 @@ void bta_hf_client_do_disc(tBTA_HF_CLIENT_CB* client_cb) {
+     uuid_list[0] = Uuid::From16Bit(UUID_SERVCLASS_AG_HANDSFREE);
+   }
+ 
++  /* If we already have a non-null discovery database at this point, we can get
++   * into a race condition leading to UAF once this connection is closed.
++   * This should only happen with malicious modifications to a client. */
++  if (client_cb->p_disc_db != NULL) {
++    APPL_TRACE_ERROR(
++        "Tried to set up a HF client with a preexisting discovery database.");
++    client_cb->p_disc_db = NULL;
++    // We manually set the state here because it's possible to call this from an
++    // OPEN state, in which case the discovery fail event will be ignored.
++    client_cb->state = 0;  // BTA_HF_CLIENT_INIT_ST
++    return;
++  }
++
+   /* allocate buffer for sdp database */
+   client_cb->p_disc_db = (tSDP_DISCOVERY_DB*)osi_malloc(BT_DEFAULT_BUFFER_SIZE);
+ 
+diff --git a/system/stack/sdp/sdp_discovery.cc b/system/stack/sdp/sdp_discovery.cc
+index 38db6350b2..85d3dd3c24 100644
+--- a/system/stack/sdp/sdp_discovery.cc
++++ b/system/stack/sdp/sdp_discovery.cc
+@@ -604,6 +604,15 @@ static void process_service_search_attr_rsp(tCONN_CB* p_ccb, uint8_t* p_reply,
+     uint8_t* p;
+     uint16_t bytes_left = SDP_DATA_BUF_SIZE;
+ 
++    /* If we don't have a valid discovery database, we can't do anything. */
++    if (p_ccb->p_db == NULL) {
++      SDP_TRACE_WARNING(
++          "Attempted continuation or first time request with invalid discovery "
++          "database");
++      sdp_disconnect(p_ccb, tSDP_STATUS::SDP_INVALID_CONT_STATE);
++      return;
++    }
++
+     p_msg->offset = L2CAP_MIN_OFFSET;
+     p = p_start = (uint8_t*)(p_msg + 1) + L2CAP_MIN_OFFSET;
+ 
+-- 
+2.48.1.262.g85cc9f2d1e-goog
+
