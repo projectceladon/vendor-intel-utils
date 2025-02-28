@@ -1,0 +1,82 @@
+From 3380182d5c8660d6c6519c11294f0519e23583b4 Mon Sep 17 00:00:00 2001
+From: Himanshu Arora <hmarora@google.com>
+Date: Wed, 18 Dec 2024 12:40:54 +0000
+Subject: [PATCH] Ensure ownership validation in downloadprovider insert method
+
+Earlier, apps could access any file in Downloads by invoking the insert method in Downloadprovider. Now, it includes a check to ensure no existing record is present in Mediaprovider. If a record exists, the method validates the ownerPackageName before proceeding with the insert operation
+
+Bug: 304497167
+Test: manual
+Flag: EXEMPT, fix only
+(cherry picked from commit bf66a79ddcd8d93f502bf908621469893f513780)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:089bd5e1c622429b9c47f6b7ca1afe59d3d9b359)
+Merged-In: I8b2d24974cdf3ae8a9e5680c22cf422bce396940
+Change-Id: I8b2d24974cdf3ae8a9e5680c22cf422bce396940
+---
+ .../providers/downloads/DownloadProvider.java | 41 +++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/src/com/android/providers/downloads/DownloadProvider.java b/src/com/android/providers/downloads/DownloadProvider.java
+index 1afa0901..70650d70 100644
+--- a/src/com/android/providers/downloads/DownloadProvider.java
++++ b/src/com/android/providers/downloads/DownloadProvider.java
+@@ -84,6 +84,7 @@ import java.io.FileDescriptor;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.io.PrintWriter;
++import java.util.Arrays;
+ import java.util.Iterator;
+ import java.util.Map;
+ 
+@@ -1103,8 +1104,48 @@ public final class DownloadProvider extends ContentProvider {
+         Helpers.checkDestinationFilePathRestrictions(file, getCallingPackage(), getContext(),
+                 mAppOpsManager, getCallingAttributionTag(), isLegacyMode,
+                 /* allowDownloadsDirOnly */ true);
++        // check whether record already exists in MP or getCallingPackage owns this file
++        checkWhetherCallingAppHasAccess(file.getPath(), Binder.getCallingUid());
+     }
+ 
++    private void checkWhetherCallingAppHasAccess(String filePath, int uid) {
++        try (ContentProviderClient client = getContext().getContentResolver()
++                .acquireContentProviderClient(MediaStore.AUTHORITY)) {
++            if (client == null) {
++                Log.w(Constants.TAG, "Failed to acquire ContentProviderClient for MediaStore");
++                return;
++            }
++
++            Uri filesUri = MediaStore.setIncludePending(
++                    Helpers.getContentUriForPath(getContext(), filePath));
++
++            try (Cursor cursor = client.query(filesUri,
++                    new String[]{MediaStore.Files.FileColumns._ID,
++                            MediaStore.Files.FileColumns.OWNER_PACKAGE_NAME},
++                    MediaStore.Files.FileColumns.DATA + "=?", new String[]{filePath},
++                    null)) {
++                if (cursor != null && cursor.moveToFirst()) {
++                    String fetchedOwnerPackageName = cursor.getString(
++                            cursor.getColumnIndexOrThrow(
++                                    MediaStore.Files.FileColumns.OWNER_PACKAGE_NAME));
++                    String[] packageNames = getContext().getPackageManager().getPackagesForUid(uid);
++
++                    if (fetchedOwnerPackageName != null && packageNames != null) {
++                        boolean isCallerAuthorized = Arrays.asList(packageNames)
++                                .contains(fetchedOwnerPackageName);
++                        if (!isCallerAuthorized) {
++                            throw new SecurityException("Caller does not have access to this path");
++                        }
++                    }
++                }
++            }
++        } catch (RemoteException e) {
++            Log.w(Constants.TAG, "Failed to query MediaStore: " + e.getMessage());
++        }
++    }
++
++
++
+     /**
+      * Apps with the ACCESS_DOWNLOAD_MANAGER permission can access this provider freely, subject to
+      * constraints in the rest of the code. Apps without that may still access this provider through
+-- 
+2.48.1.262.g85cc9f2d1e-goog
+
