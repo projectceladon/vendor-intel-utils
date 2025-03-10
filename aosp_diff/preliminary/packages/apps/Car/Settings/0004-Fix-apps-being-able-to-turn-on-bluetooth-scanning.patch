@@ -1,0 +1,214 @@
+From 736b46495970b2c60d744b582d28abd2325b7b61 Mon Sep 17 00:00:00 2001
+From: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+Date: Thu, 6 Mar 2025 16:13:25 +0530
+Subject: [PATCH] Fix apps being able to turn on bluetooth scanning
+
+Any apps can get Bluetooth device picker activity and enable
+always discoverable and connectable scanning, which is vulnerable
+as anyone can connect to it.
+
+Fixes CVE_2022_20429 vulnerability issue by allowing only settings and
+system UI packages to turn on always discoverable BT scanning.
+
+Cherry picked from
+https://cs.android.com/android/_/android/platform/packages/apps/Car/Settings/+/7adb8ff6d30a1ab8f83c7b1fbddf04d76cfd9642
+
+Tests-done:
+1. Flash AAOS
+2. BT on success
+3. run android.security.cts.CVE_2022_20429.CVE_2022_20429#testPocCVE_2022_20429
+4. Test pass
+
+Tracked-On: OAM-130036
+Signed-off-by: Gowtham Anandha Babu <gowtham.anandha.babu@intel.com>
+---
+ ...nningDevicesGroupPreferenceController.java | 24 ++++++++++++-
+ .../settings/bluetooth/BluetoothUtils.java    | 34 +++++++++++++++++++
+ .../bluetooth/BluetoothUtilsTest.java         | 26 ++++++++++++++
+ 3 files changed, 83 insertions(+), 1 deletion(-)
+
+diff --git a/src/com/android/car/settings/bluetooth/BluetoothScanningDevicesGroupPreferenceController.java b/src/com/android/car/settings/bluetooth/BluetoothScanningDevicesGroupPreferenceController.java
+index 42155781a..1fdda0ebf 100644
+--- a/src/com/android/car/settings/bluetooth/BluetoothScanningDevicesGroupPreferenceController.java
++++ b/src/com/android/car/settings/bluetooth/BluetoothScanningDevicesGroupPreferenceController.java
+@@ -18,6 +18,7 @@ package com.android.car.settings.bluetooth;
+ 
+ import static android.os.UserManager.DISALLOW_CONFIG_BLUETOOTH;
+ 
++import android.app.ActivityManager;
+ import android.bluetooth.BluetoothAdapter;
+ import android.bluetooth.BluetoothDevice;
+ import android.bluetooth.BluetoothManager;
+@@ -26,6 +27,8 @@ import android.content.BroadcastReceiver;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.IntentFilter;
++import android.os.IBinder;
++import android.os.RemoteException;
+ 
+ import androidx.preference.PreferenceGroup;
+ 
+@@ -48,6 +51,8 @@ public abstract class BluetoothScanningDevicesGroupPreferenceController extends
+ 
+     protected final BluetoothAdapter mBluetoothAdapter;
+     private final AlwaysDiscoverable mAlwaysDiscoverable;
++    private final String mCallingAppPackageName;
++
+     private boolean mIsScanningEnabled;
+ 
+     public BluetoothScanningDevicesGroupPreferenceController(Context context, String preferenceKey,
+@@ -55,6 +60,7 @@ public abstract class BluetoothScanningDevicesGroupPreferenceController extends
+         super(context, preferenceKey, fragmentController, uxRestrictions);
+         mBluetoothAdapter = getContext().getSystemService(BluetoothManager.class).getAdapter();
+         mAlwaysDiscoverable = new AlwaysDiscoverable(context, mBluetoothAdapter);
++        mCallingAppPackageName = getCallingAppPackageName(getContext().getActivityToken());
+     }
+ 
+     @Override
+@@ -122,7 +128,13 @@ public abstract class BluetoothScanningDevicesGroupPreferenceController extends
+         if (!mBluetoothAdapter.isDiscovering()) {
+             mBluetoothAdapter.startDiscovery();
+         }
+-        mAlwaysDiscoverable.start();
++
++        if (BluetoothUtils.shouldEnableBTScanning(getContext(), mCallingAppPackageName)) {
++            mAlwaysDiscoverable.start();
++        } else {
++            LOG.d("Not enabling bluetooth scanning. Calling application " + mCallingAppPackageName
++                    + " is not Settings or SystemUi");
++        }
+         getPreference().setEnabled(true);
+     }
+ 
+@@ -154,6 +166,16 @@ public abstract class BluetoothScanningDevicesGroupPreferenceController extends
+         refreshUi();
+     }
+ 
++    private String getCallingAppPackageName(IBinder activityToken) {
++        String pkg = null;
++        try {
++            pkg = ActivityManager.getService().getLaunchedFromPackage(activityToken);
++        } catch (RemoteException e) {
++            LOG.e("Could not talk to activity manager.", e);
++        }
++        return pkg;
++    }
++
+     /**
+      * Helper class to keep the {@link BluetoothAdapter} in discoverable mode indefinitely. By
+      * default, setting the scan mode to BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE will
+diff --git a/src/com/android/car/settings/bluetooth/BluetoothUtils.java b/src/com/android/car/settings/bluetooth/BluetoothUtils.java
+index e2ac15103..e33fea6e8 100644
+--- a/src/com/android/car/settings/bluetooth/BluetoothUtils.java
++++ b/src/com/android/car/settings/bluetooth/BluetoothUtils.java
+@@ -25,6 +25,7 @@ import static com.android.car.settings.enterprise.ActionDisabledByAdminDialogFra
+ import static com.android.car.settings.enterprise.EnterpriseUtils.hasUserRestrictionByDpm;
+ import static com.android.car.settings.enterprise.EnterpriseUtils.hasUserRestrictionByUm;
+ 
++import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.SharedPreferences;
+ import android.content.res.Configuration;
+@@ -221,4 +222,37 @@ final class BluetoothUtils {
+     public static LocalBluetoothManager getLocalBtManager(Context context) {
+         return LocalBluetoothManager.getInstance(context, mOnInitCallback);
+     }
++
++    /**
++     * Determines whether to enable bluetooth scanning or not depending on the calling package. The
++     * calling package should be Settings or SystemUi.
++     *
++     * @param context The context to call
++     * @param callingPackageName The package name of the calling activity
++     * @return Whether bluetooth scanning should be enabled
++     */
++    public static boolean shouldEnableBTScanning(Context context, String callingPackageName) {
++        // Find Settings package name
++        String settingsPackageName = context.getPackageName();
++
++        // Find SystemUi package name
++        String systemUiPackageName;
++        String flattenName = context.getResources()
++                .getString(com.android.internal.R.string.config_systemUIServiceComponent);
++        if (TextUtils.isEmpty(flattenName)) {
++            throw new IllegalStateException("No "
++                    + "com.android.internal.R.string.config_systemUIServiceComponent resource");
++        }
++        try {
++            ComponentName componentName = ComponentName.unflattenFromString(flattenName);
++            systemUiPackageName =  componentName.getPackageName();
++        } catch (RuntimeException e) {
++            throw new IllegalStateException("Invalid component name defined by "
++                    + "com.android.internal.R.string.config_systemUIServiceComponent resource: "
++                    + flattenName);
++        }
++
++        return TextUtils.equals(callingPackageName, settingsPackageName)
++                || TextUtils.equals(callingPackageName, systemUiPackageName);
++    }
+ }
+diff --git a/tests/unit/src/com/android/car/settings/bluetooth/BluetoothUtilsTest.java b/tests/unit/src/com/android/car/settings/bluetooth/BluetoothUtilsTest.java
+index acca314fe..f283936ce 100644
+--- a/tests/unit/src/com/android/car/settings/bluetooth/BluetoothUtilsTest.java
++++ b/tests/unit/src/com/android/car/settings/bluetooth/BluetoothUtilsTest.java
+@@ -22,10 +22,12 @@ import static com.android.car.settings.common.PreferenceController.DISABLED_FOR_
+ 
+ import static com.google.common.truth.Truth.assertThat;
+ 
++import static org.mockito.ArgumentMatchers.anyInt;
+ import static org.mockito.Mockito.spy;
+ import static org.mockito.Mockito.when;
+ 
+ import android.content.Context;
++import android.content.res.Resources;
+ import android.os.UserManager;
+ 
+ import androidx.test.core.app.ApplicationProvider;
+@@ -44,15 +46,21 @@ public final class BluetoothUtilsTest {
+ 
+     private static final String TEST_RESTRICTION =
+             android.os.UserManager.DISALLOW_CONFIG_BLUETOOTH;
++    private static final String SYSTEM_UI_PACKAGE_NAME = "com.package.systemui";
++    private static final String SYSTEM_UI_COMPONENT_NAME = "com.package.systemui/testclass";
+     private final Context mContext = spy(ApplicationProvider.getApplicationContext());
+ 
+     @Mock
+     private UserManager mMockUserManager;
++    @Mock
++    private Resources mMockResources;
+ 
+     @Before
+     public void setUp() {
+         MockitoAnnotations.initMocks(this);
+         when(mContext.getSystemService(UserManager.class)).thenReturn(mMockUserManager);
++        when(mContext.getResources()).thenReturn(mMockResources);
++        when(mMockResources.getString(anyInt())).thenReturn(SYSTEM_UI_COMPONENT_NAME);
+     }
+ 
+     @Test
+@@ -87,4 +95,22 @@ public final class BluetoothUtilsTest {
+         assertThat(BluetoothUtils.getAvailabilityStatusRestricted(mContext))
+                 .isEqualTo(DISABLED_FOR_PROFILE);
+     }
++
++    @Test
++    public void isSystemCallingPackage_shouldEnableBluetoothScanning() {
++        String settingsPackage = mContext.getPackageName();
++
++        assertThat(BluetoothUtils.shouldEnableBTScanning(mContext, settingsPackage))
++                .isEqualTo(true);
++        assertThat(BluetoothUtils.shouldEnableBTScanning(mContext, SYSTEM_UI_PACKAGE_NAME))
++                .isEqualTo(true);
++    }
++
++    @Test
++    public void isNotSystemCallingPackage_shouldNotEnableBluetoothScanning() {
++        String fakePackage = "not.real.package";
++
++        assertThat(BluetoothUtils.shouldEnableBTScanning(mContext, fakePackage))
++                .isEqualTo(false);
++    }
+ }
+-- 
+2.17.1
+
