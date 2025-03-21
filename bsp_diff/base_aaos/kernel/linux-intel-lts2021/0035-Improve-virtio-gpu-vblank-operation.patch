@@ -1,0 +1,101 @@
+From 6177232eb64d757375cd80e13ae3b4f930df7119 Mon Sep 17 00:00:00 2001
+From: "Xue, Bosheng" <bosheng.xue@intel.com>
+Date: Fri, 22 Mar 2024 03:25:28 +0800
+Subject: [PATCH] Improve virtio gpu vblank operation
+
+set vblank on/off during atomic enable/disable
+add vblank_get to protect vblank event operation
+
+Signed-off-by: Xue, Bosheng <bosheng.xue@intel.com>
+---
+ drivers/gpu/drm/virtio/virtgpu_display.c | 14 ++++++++------
+ drivers/gpu/drm/virtio/virtgpu_drv.c     | 10 +++++++++-
+ 2 files changed, 17 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/virtio/virtgpu_display.c b/drivers/gpu/drm/virtio/virtgpu_display.c
+index f7cf13ee2a0f..28325e5099d8 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_display.c
++++ b/drivers/gpu/drm/virtio/virtgpu_display.c
+@@ -122,6 +122,7 @@ static void virtio_gpu_crtc_mode_set_nofb(struct drm_crtc *crtc)
+ static void virtio_gpu_crtc_atomic_enable(struct drm_crtc *crtc,
+ 					  struct drm_atomic_state *state)
+ {
++	drm_crtc_vblank_on(crtc);
+ }
+ 
+ static void virtio_gpu_crtc_atomic_disable(struct drm_crtc *crtc,
+@@ -131,6 +132,7 @@ static void virtio_gpu_crtc_atomic_disable(struct drm_crtc *crtc,
+ 	struct virtio_gpu_device *vgdev = dev->dev_private;
+ 	struct virtio_gpu_output *output = drm_crtc_to_virtio_gpu_output(crtc);
+ 
++	drm_crtc_vblank_off(crtc);
+ 	virtio_gpu_cmd_set_scanout(vgdev, output->index, 0, 0, 0, 0, 0);
+ 	virtio_gpu_notify(vgdev);
+ }
+@@ -149,16 +151,16 @@ static void virtio_gpu_crtc_atomic_flush(struct drm_crtc *crtc,
+ 	struct virtio_gpu_output *output = drm_crtc_to_virtio_gpu_output(crtc);
+ 	struct drm_device *drm = crtc->dev;
+ 
+-	spin_lock_irq(&drm->event_lock);
+-
+-
+ 	if (crtc->state->event) {
+-		drm_crtc_send_vblank_event(crtc, crtc->state->event);
++		spin_lock_irq(&drm->event_lock);
++		if (drm_crtc_vblank_get(crtc) != 0)
++			drm_crtc_send_vblank_event(crtc, crtc->state->event);
++		else
++			drm_crtc_arm_vblank_event(crtc, crtc->state->event);
++		spin_unlock_irq(&drm->event_lock);
+ 		crtc->state->event = NULL;
+ 	}
+ 
+-	spin_unlock_irq(&drm->event_lock);
+-
+ 	/*
+ 	 * virtio-gpu can't do modeset and plane update operations
+ 	 * independent from each other.  So the actual modeset happens
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index 10a84c241b6c..de48fa471eb2 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -171,12 +171,14 @@ static int virtgpu_freeze(struct virtio_device *vdev)
+ 	struct virtio_gpu_device *vgdev = dev->dev_private;
+ 	int error;
+ 
++	DRM_INFO("start to freezen\n");
+ 	error = drm_mode_config_helper_suspend(dev);
+ 	if (error) {
+ 		DRM_ERROR("suspend error %d\n", error);
+ 		return error;
+ 	}
+ 
++	vdev->config->reset(vdev);
+ 	flush_work(&vgdev->obj_free_work);
+ 	flush_work(&vgdev->ctrlq.dequeue_work);
+ 	flush_work(&vgdev->cursorq.dequeue_work);
+@@ -190,7 +192,7 @@ static int virtgpu_restore(struct virtio_device *vdev)
+ {
+ 	struct drm_device *dev = vdev->priv;
+ 	struct virtio_gpu_device *vgdev = dev->dev_private;
+-	int error;
++	int error, i;
+ 
+ 	error = virtio_gpu_find_vqs(vgdev);
+ 	if (error) {
+@@ -200,6 +202,12 @@ static int virtgpu_restore(struct virtio_device *vdev)
+ 
+ 	virtio_device_ready(vdev);
+ 
++	virtio_gpu_vblankq_notify(vgdev);
++
++	for(i = 0; i < vgdev->num_vblankq; i++)
++		virtqueue_disable_cb(vgdev->vblank[i].vblank.vq);
++
++
+ 	error = virtio_gpu_object_restore_all(vgdev);
+ 	if (error) {
+ 		DRM_ERROR("Failed to recover objects\n");
+-- 
+2.34.1
+
