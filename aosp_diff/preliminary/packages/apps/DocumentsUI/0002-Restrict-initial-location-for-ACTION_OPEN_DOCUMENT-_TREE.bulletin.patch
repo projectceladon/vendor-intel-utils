@@ -1,0 +1,352 @@
+From 954b6d5397eed78a59b570e0cf1df717c76804ce Mon Sep 17 00:00:00 2001
+From: Sergey Nikolaienkov <sergeynv@google.com>
+Date: Tue, 27 Jun 2023 21:11:16 +0200
+Subject: [PATCH] Restrict initial location for ACTION_OPEN_DOCUMENT/_TREE
+
+Implement privacy restriction introduced in Android 11 that application
+are not allowed to request initial location for intent actions
+ACTION_OPEN_DOCUMENT and ACTION_OPEN_DOCUMENT_TREE to be /Android/data/,
+/Android/obb/, /Android/sandbox/ and all their subdirectories.
+If an application does request the initial location to be one of these
+directories (or their subdirs) redirect to the default location - last
+accessed stack.
+
+Bug: 200034476
+Bug: 220066255
+Test: atest
+  DocumentsUIGoogleTests:com.android.documentsui.picker.ActionHandlerTest
+Test: adb shell am start
+  -a android.intent.action.OPEN_DOCUMENT_TREE
+  --eu android.provider.extra.INITIAL_URI
+  "content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fdata"
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:532711f83f3dbf493de849a4b148116b7164f164)
+Merged-In: I7e31a8fb76b5ddb0e3af67852b1e1ccc9a825648
+Change-Id: I7e31a8fb76b5ddb0e3af67852b1e1ccc9a825648
+---
+ .../documentsui/AbstractActionHandler.java    |  46 ++++---
+ .../documentsui/picker/ActionHandler.java     | 123 ++++++++++++++----
+ .../android/documentsui/util/FileUtils.java   |  58 +++++++++
+ 3 files changed, 189 insertions(+), 38 deletions(-)
+ create mode 100644 src/com/android/documentsui/util/FileUtils.java
+
+diff --git a/src/com/android/documentsui/AbstractActionHandler.java b/src/com/android/documentsui/AbstractActionHandler.java
+index a310acee2..4407a62b2 100644
+--- a/src/com/android/documentsui/AbstractActionHandler.java
++++ b/src/com/android/documentsui/AbstractActionHandler.java
+@@ -779,32 +779,48 @@ public abstract class AbstractActionHandler<T extends FragmentActivity & CommonA
+     }
+ 
+     protected final boolean launchToDocument(Uri uri) {
++        if (DEBUG) {
++            Log.d(TAG, "launchToDocument() uri=" + uri);
++        }
++
+         // We don't support launching to a document in an archive.
+-        if (!Providers.isArchiveUri(uri)) {
+-            loadDocument(uri, UserId.DEFAULT_USER, this::onStackLoaded);
+-            return true;
++        if (Providers.isArchiveUri(uri)) {
++            return false;
+         }
+ 
+-        return false;
++        loadDocument(uri, UserId.DEFAULT_USER, this::onStackToLaunchToLoaded);
++        return true;
+     }
+ 
+-    private void onStackLoaded(@Nullable DocumentStack stack) {
+-        if (stack != null) {
+-            if (!stack.peek().isDirectory()) {
+-                // Requested document is not a directory. Pop it so that we can launch into its
+-                // parent.
+-                stack.pop();
+-            }
+-            mState.stack.reset(stack);
+-            mActivity.refreshCurrentRootAndDirectory(AnimationView.ANIM_NONE);
++    /**
++     * Invoked <b>only</b> once, when the initial stack (that is the stack we are going to
++     * "launch to") is loaded.
++     *
++     * @see #launchToDocument(Uri)
++     */
++    private void onStackToLaunchToLoaded(@Nullable DocumentStack stack) {
++        if (DEBUG) {
++            Log.d(TAG, "onLaunchStackLoaded() stack=" + stack);
++        }
+ 
+-            Metrics.logLaunchAtLocation(mState, stack.getRoot().getUri());
+-        } else {
++        if (stack == null) {
+             Log.w(TAG, "Failed to launch into the given uri. Launch to default location.");
+             launchToDefaultLocation();
+ 
+             Metrics.logLaunchAtLocation(mState, null);
++            return;
+         }
++
++        // Make sure the document at the top of the stack is a directory (if it isn't - just pop
++        // one off).
++        if (!stack.peek().isDirectory()) {
++            stack.pop();
++        }
++
++        mState.stack.reset(stack);
++        mActivity.refreshCurrentRootAndDirectory(AnimationView.ANIM_NONE);
++
++        Metrics.logLaunchAtLocation(mState, stack.getRoot().getUri());
+     }
+ 
+     private void onRootLoaded(@Nullable RootInfo root) {
+diff --git a/src/com/android/documentsui/picker/ActionHandler.java b/src/com/android/documentsui/picker/ActionHandler.java
+index cc349a854..1fc35b360 100644
+--- a/src/com/android/documentsui/picker/ActionHandler.java
++++ b/src/com/android/documentsui/picker/ActionHandler.java
+@@ -16,6 +16,9 @@
+ 
+ package com.android.documentsui.picker;
+ 
++import static android.provider.DocumentsContract.isDocumentUri;
++import static android.provider.DocumentsContract.isRootUri;
++
+ import static com.android.documentsui.base.SharedMinimal.DEBUG;
+ import static com.android.documentsui.base.State.ACTION_CREATE;
+ import static com.android.documentsui.base.State.ACTION_GET_CONTENT;
+@@ -23,6 +26,8 @@ import static com.android.documentsui.base.State.ACTION_OPEN;
+ import static com.android.documentsui.base.State.ACTION_OPEN_TREE;
+ import static com.android.documentsui.base.State.ACTION_PICK_COPY_DESTINATION;
+ 
++import static java.util.regex.Pattern.CASE_INSENSITIVE;
++
+ import android.content.ActivityNotFoundException;
+ import android.content.ClipData;
+ import android.content.ComponentName;
+@@ -35,6 +40,8 @@ import android.provider.DocumentsContract;
+ import android.provider.Settings;
+ import android.util.Log;
+ 
++import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
+ import androidx.annotation.VisibleForTesting;
+ import androidx.fragment.app.FragmentActivity;
+ import androidx.fragment.app.FragmentManager;
+@@ -52,6 +59,7 @@ import com.android.documentsui.base.DocumentInfo;
+ import com.android.documentsui.base.DocumentStack;
+ import com.android.documentsui.base.Features;
+ import com.android.documentsui.base.Lookup;
++import com.android.documentsui.base.Providers;
+ import com.android.documentsui.base.RootInfo;
+ import com.android.documentsui.base.Shared;
+ import com.android.documentsui.base.State;
+@@ -61,14 +69,12 @@ import com.android.documentsui.picker.ActionHandler.Addons;
+ import com.android.documentsui.queries.SearchViewManager;
+ import com.android.documentsui.roots.ProvidersAccess;
+ import com.android.documentsui.services.FileOperationService;
++import com.android.documentsui.util.FileUtils;
+ 
+-import com.android.documentsui.util.VersionUtils;
++import java.io.IOException;
+ import java.util.Arrays;
+-import java.util.Locale;
+ import java.util.concurrent.Executor;
+-
+ import java.util.regex.Pattern;
+-import javax.annotation.Nullable;
+ 
+ /**
+  * Provides {@link PickActivity} action specializations to fragments.
+@@ -77,12 +83,24 @@ class ActionHandler<T extends FragmentActivity & Addons> extends AbstractActionH
+ 
+     private static final String TAG = "PickerActionHandler";
+ 
++    /**
++     * Used to prevent applications from using {@link Intent.ACTION_OPEN_DOCUMENT_TREE} and
++     * the {@link Intent.ACTION_OPEN_DOCUMENT} actions to request that the user select individual
++     * files from "/Android/data", "/Android/obb", "/Android/sandbox" directories and all their
++     * subdirectories (on the external storage), in accordance with the SAF privacy restrictions
++     * introduced in Android 11 (R).
++     *
++     * <p>
++     * See <a href="https://developer.android.com/about/versions/11/privacy/storage#file-access">
++     * Storage updates in Android 11</a>.
++     */
++    private static final Pattern PATTERN_RESTRICTED_INITIAL_PATH =
++            Pattern.compile("^/Android/(?:data|obb|sandbox).*", CASE_INSENSITIVE);
++
+     private final Features mFeatures;
+     private final ActivityConfig mConfig;
+     private final LastAccessedStorage mLastAccessed;
+     private final UserIdManager mUserIdManager;
+-    private final static Pattern PATTERN_BLOCK_PATH = Pattern.compile(
+-        ".*:android\\/(?:data|obb|sandbox)$");
+ 
+     private UpdatePickResultTask mUpdatePickResultTask;
+ 
+@@ -160,25 +178,84 @@ class ActionHandler<T extends FragmentActivity & Addons> extends AbstractActionH
+     }
+ 
+     private boolean launchToInitialUri(Intent intent) {
+-        Uri uri = intent.getParcelableExtra(DocumentsContract.EXTRA_INITIAL_URI);
+-        if (uri != null) {
+-            // In android S and above if path contains Android/data, Android/obb
+-            // or Android/sandbox redirect to the root for which
+-            // FLAG_DIR_BLOCKS_OPEN_DOCUMENT_TREE is already set
+-            if(Shared.shouldRestrictStorageAccessFramework(mActivity)
+-                && (PATTERN_BLOCK_PATH.matcher(uri.getPath().toLowerCase(Locale.ROOT)).matches())){
+-                loadDeviceRoot();
+-                return true;
+-            }
+-            if (DocumentsContract.isRootUri(mActivity, uri)) {
+-                loadRoot(uri, UserId.DEFAULT_USER);
+-                return true;
+-            } else if (DocumentsContract.isDocumentUri(mActivity, uri)) {
+-                return launchToDocument(uri);
+-            }
++        final Uri initialUri = intent.getParcelableExtra(DocumentsContract.EXTRA_INITIAL_URI);
++        if (initialUri == null) {
++            return false;
+         }
+ 
+-        return false;
++        final boolean isRoot = isRootUri(mActivity, initialUri);
++        final boolean isDocument = !isRoot && isDocumentUri(mActivity, initialUri);
++
++        if (!isRoot && !isDocument) {
++            // Neither a root nor a document.
++            return false;
++        }
++
++        if (isRoot) {
++            loadRoot(initialUri, UserId.DEFAULT_USER);
++            return true;
++        }
++        // From here onwards: isDoc == true.
++
++        if (shouldPreemptivelyRestrictRequestedInitialUri(initialUri)) {
++            Log.w(TAG, "Requested initial URI - " + initialUri + " - is restricted: "
++                    + "loading device root instead.");
++            return false;
++        }
++
++        return launchToDocument(initialUri);
++    }
++
++    /**
++     * Starting with Android 11 (R, API Level 30) applications are no longer allowed to use the
++     * {@link Intent#ACTION_OPEN_DOCUMENT} and {@link Intent#ACTION_OPEN_DOCUMENT_TREE} to request
++     * that the user select individual files from "Android/data/", "Android/obb/",
++     * "Android/sandbox/" directories and all their subdirectories on "external storage".
++     * <p>
++     * See <a href="https://developer.android.com/about/versions/11/privacy/storage#file-access">
++     * Storage updates in Android 11</a>.
++     * <p>
++     * Ideally, this should be handled on the {@code ExternalStorageProvider} side, but as of
++     * Android 14 (U) FRC, {@code ExternalStorageProvider} "hides" only "Android/data/",
++     * "Android/obb/" and "Android/sandbox/" directories, but NOT their subdirectories.
++     */
++    private boolean shouldPreemptivelyRestrictRequestedInitialUri(@NonNull Uri uri) {
++        // Not restricting SAF access for the calling app.
++        if (!Shared.shouldRestrictStorageAccessFramework(mActivity)) {
++            return false;
++        }
++
++        // We only need to restrict some locations on the "external" storage.
++        if (!Providers.AUTHORITY_STORAGE.equals(uri.getAuthority())) {
++            return false;
++        }
++
++        // TODO(b/283962634): in the future this will have to be platform-version specific.
++        //  For example, if the fix on the ExternalStorageProvider side makes it to the Android 15,
++        //  we would change this to check if the platform version >= 15.
++        //  In the upcoming Android 14 release, however, ExternalStorageProvider does NOT yet
++        //  implement this logic.
++        final boolean externalProviderImplementsSafRestrictions = false;
++        if (externalProviderImplementsSafRestrictions) {
++            return false;
++        }
++
++        // External Storage Provider's docId format is "root:path/to/file"
++        // The getPathFromStorageDocId() turns that into "/path/to/file"
++        // Note the missing leading "/" in the path part of the docId, while the path returned by
++        // the getPathFromStorageDocId() start with "/".
++        final String docId = DocumentsContract.getDocumentId(uri);
++        final String filePath;
++        try {
++             filePath = FileUtils.getPathFromStorageDocId(docId);
++        } catch (IOException e) {
++            Log.w(TAG, "Could not get canonical file path from docId '" + docId + "'");
++            return true;
++        }
++
++        // Check if the app is asking for /Android/data, /Android/obb, /Android/sandbox or any of
++        // their subdirectories (on the external storage).
++        return PATTERN_RESTRICTED_INITIAL_PATH.matcher(filePath).matches();
+     }
+ 
+     private void initLoadLastAccessedStack() {
+diff --git a/src/com/android/documentsui/util/FileUtils.java b/src/com/android/documentsui/util/FileUtils.java
+new file mode 100644
+index 000000000..40f7fbae9
+--- /dev/null
++++ b/src/com/android/documentsui/util/FileUtils.java
+@@ -0,0 +1,58 @@
++/*
++ * Copyright (C) 2023 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.documentsui.util;
++
++import androidx.annotation.NonNull;
++
++import java.io.File;
++import java.io.IOException;
++import java.util.Objects;
++
++public class FileUtils {
++
++    /**
++     * Returns the canonical pathname string of the provided abstract pathname.
++     *
++     * @return The canonical pathname string denoting the same file or directory as this abstract
++     *         pathname.
++     * @see File#getCanonicalPath()
++     */
++    @NonNull
++    public static String getCanonicalPath(@NonNull String path) throws IOException {
++        Objects.requireNonNull(path);
++        return new File(path).getCanonicalPath();
++    }
++
++    /**
++     * This is basically a very slightly tweaked fork of
++     * {@link com.android.externalstorage.ExternalStorageProvider#getPathFromDocId(String)}.
++     * The difference between this fork and the "original" method is that here we do not strip
++     * the leading and trailing "/"s (because we don't worry about those).
++     *
++     * @return canonicalized file path.
++     */
++    public static String getPathFromStorageDocId(String docId) throws IOException {
++        // Remove the root tag from the docId, e.g. "primary:", which should leave with the file
++        // path.
++        final String docIdPath = docId.substring(docId.indexOf(':', 1) + 1);
++
++        return getCanonicalPath(docIdPath);
++    }
++
++    private FileUtils() {
++    }
++}
+-- 
+2.48.1.262.g85cc9f2d1e-goog
+
