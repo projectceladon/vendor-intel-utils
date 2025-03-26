@@ -1,0 +1,122 @@
+From 9a26e999a7211ad56bcb827e5e0dd795f26ef023 Mon Sep 17 00:00:00 2001
+From: Siarhei Vishniakou <svv@google.com>
+Date: Tue, 14 Jan 2025 22:45:38 +0000
+Subject: [PATCH] Ensure objects remain valid after calling policy
+
+The function
+afterKeyEventLockedInterruptable releases the lock and calls into
+policy. During this time, the call to "removeInputChannel" might come
+in. This call would cause the waitQueue to be drained. Therefore, the
+dispatchEntry that's stored in this queue would be deleted.
+
+Before this CL, we obtained a reference to the EventEntry object before
+calling policy. If there aren't any more strong pointers remaining to
+the EventEntry, the object would become deleted, and the reference would
+end up pointing to freed memory.
+
+Previous flow of events:
+- KeyEntry is allocated during setFocusedWindow call, as part of
+  "synthesizeCancelationEvents".
+- App calls "finish" on an event, and dispatcher notifies policy about
+  the unhandled key event. But dispatcher must release lock before
+  calling policy.
+- After dispatcher has released the lock, but before it called policy,
+  there is a binder call to "removeInputChannel" that comes in. That
+  causes the waitQueue to be drained, and deletes the DispatchEntry. If
+  the dispatch entry is the last remaining reference to the KeyEntry,
+  then the KeyEntry gets deleted, as well.
+- The dispatcher calls policy, and uses the reference to the KeyEntry
+  that it was provided. But that reference points to freed memory. This
+  causes a crash.
+
+To deal with this, make a few changes in this CL:
+- Since the "doDispatchCycleFinishedCommand" is stored in queue, it
+  should have a strong pointer to the connection object, and not just
+  a reference. That means the Connection object will be valid when the
+  command actually runs (otherwise, someone might delete it)
+- Inside afterKeyEventLockedInterruptable, assume that the dispatchEntry
+  will be deleted after the lock is released. Make copies of the data
+  that we need after the lock is regained:
+  1) Add refcount for EventEntry
+  2) Store the "hasForegroundTarget" into a separate variable
+     (technically, it's not necessary, but it allows us to remove all
+     usages of "dispatchEntry" in the rest of the function.
+
+As an alternative, we could re-look up the DispatchEntry in the
+waitQueue after we regain the lock, but that seems more complex in terms
+of implementation / readability.
+
+DISABLE_TOPIC_PROTECTOR
+
+Bug: 343129193
+Test: atest --host inputflinger_tests
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:05ff4c730395819d5b4a1225881b459f41fda202)
+Merged-In: Ibea7117e4c85cd1e98bbd01872ce249cbb2d54bd
+Change-Id: Ibea7117e4c85cd1e98bbd01872ce249cbb2d54bd
+---
+ .../dispatcher/InputDispatcher.cpp            | 19 +++++++++++++------
+ .../inputflinger/dispatcher/InputDispatcher.h |  4 ++--
+ 2 files changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/services/inputflinger/dispatcher/InputDispatcher.cpp b/services/inputflinger/dispatcher/InputDispatcher.cpp
+index c906c3e0ce..1c9fb64b93 100644
+--- a/services/inputflinger/dispatcher/InputDispatcher.cpp
++++ b/services/inputflinger/dispatcher/InputDispatcher.cpp
+@@ -6166,9 +6166,7 @@ void InputDispatcher::doDispatchCycleFinishedCommand(nsecs_t finishTime,
+ 
+     bool restartEvent;
+     if (dispatchEntry->eventEntry->type == EventEntry::Type::KEY) {
+-        KeyEntry& keyEntry = static_cast<KeyEntry&>(*(dispatchEntry->eventEntry));
+-        restartEvent =
+-                afterKeyEventLockedInterruptable(connection, dispatchEntry, keyEntry, handled);
++        restartEvent = afterKeyEventLockedInterruptable(connection, dispatchEntry, handled);
+     } else if (dispatchEntry->eventEntry->type == EventEntry::Type::MOTION) {
+         MotionEntry& motionEntry = static_cast<MotionEntry&>(*(dispatchEntry->eventEntry));
+         restartEvent = afterMotionEventLockedInterruptable(connection, dispatchEntry, motionEntry,
+@@ -6386,8 +6384,17 @@ void InputDispatcher::processConnectionResponsiveLocked(const Connection& connec
+ }
+ 
+ bool InputDispatcher::afterKeyEventLockedInterruptable(
+-        const std::shared_ptr<Connection>& connection, DispatchEntry* dispatchEntry,
+-        KeyEntry& keyEntry, bool handled) {
++        const std::shared_ptr<Connection>& connection, DispatchEntry* dispatchEntry, bool handled) {
++    // The dispatchEntry is currently valid, but it might point to a deleted object after we release
++    // the lock. For simplicity, make copies of the data of interest here and assume that
++    // 'dispatchEntry' is not valid after this section.
++    // Hold a strong reference to the EventEntry to ensure it's valid for the duration of this
++    // function, even if the DispatchEntry gets destroyed and releases its share of the ownership.
++    std::shared_ptr<EventEntry> eventEntry = dispatchEntry->eventEntry;
++    const bool hasForegroundTarget = dispatchEntry->hasForegroundTarget();
++    KeyEntry& keyEntry = static_cast<KeyEntry&>(*(eventEntry));
++    // To prevent misuse, ensure dispatchEntry is no longer valid.
++    dispatchEntry = nullptr;
+     if (keyEntry.flags & AKEY_EVENT_FLAG_FALLBACK) {
+         if (!handled) {
+             // Report the key as unhandled, since the fallback was not handled.
+@@ -6404,7 +6411,7 @@ bool InputDispatcher::afterKeyEventLockedInterruptable(
+         connection->inputState.removeFallbackKey(originalKeyCode);
+     }
+ 
+-    if (handled || !dispatchEntry->hasForegroundTarget()) {
++    if (handled || !hasForegroundTarget) {
+         // If the application handles the original key for which we previously
+         // generated a fallback or if the window is not a foreground window,
+         // then cancel the associated fallback key, if any.
+diff --git a/services/inputflinger/dispatcher/InputDispatcher.h b/services/inputflinger/dispatcher/InputDispatcher.h
+index 2b8b37e42a..53efd7475d 100644
+--- a/services/inputflinger/dispatcher/InputDispatcher.h
++++ b/services/inputflinger/dispatcher/InputDispatcher.h
+@@ -685,8 +685,8 @@ private:
+             REQUIRES(mLock);
+     std::map<int32_t /*displayId*/, InputVerifier> mVerifiersByDisplay;
+     bool afterKeyEventLockedInterruptable(const std::shared_ptr<Connection>& connection,
+-                                          DispatchEntry* dispatchEntry, KeyEntry& keyEntry,
+-                                          bool handled) REQUIRES(mLock);
++                                          DispatchEntry* dispatchEntry, bool handled)
++            REQUIRES(mLock);
+     bool afterMotionEventLockedInterruptable(const std::shared_ptr<Connection>& connection,
+                                              DispatchEntry* dispatchEntry, MotionEntry& motionEntry,
+                                              bool handled) REQUIRES(mLock);
+-- 
+2.34.1
+

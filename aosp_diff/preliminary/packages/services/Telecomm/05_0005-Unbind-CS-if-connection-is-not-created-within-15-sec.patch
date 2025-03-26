@@ -1,0 +1,414 @@
+From 41ab2215c218ad5cf028ae34bfefb2e3df0059a1 Mon Sep 17 00:00:00 2001
+From: Grant Menke <grantmenke@google.com>
+Date: Mon, 28 Oct 2024 16:42:25 -0700
+Subject: [PATCH] Unbind CS if connection is not created within 15 seconds.
+
+This CL adds a check to ensure that connection creation occurs within 15 seconds after binding to that ConnectionService. If the connection/conference is not created in that timespan, this CL adds logic to manually unbind the ConnectionService at that point in time. This prevents malicious apps from keeping a declared permission in forever even in the background. This updated CL includes a null check to avoid a NPE that occurred in the first iteration of this change.
+
+Bug: 293458004
+Test: manually using the provided apk + atest CallsManagerTest
+Flag: EXEMPT Security High/Critical Severity CVE
+(cherry picked from commit 48d6b0df91fb1c8c0b11891f878084c6d8f9fa8a)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:ed874348d2e9f4a219381ac646452783fc91fbca)
+Merged-In: If46cfa26278f09854c10266af6eaa73382f20296
+Change-Id: If46cfa26278f09854c10266af6eaa73382f20296
+---
+ src/com/android/server/telecom/Call.java      |   1 +
+ .../telecom/ConnectionServiceWrapper.java     | 101 +++++++++++++++++-
+ src/com/android/server/telecom/LogUtils.java  |   2 +
+ .../server/telecom/tests/BasicCallTests.java  |   2 +
+ .../telecom/tests/CallsManagerTest.java       |  55 ++++++++++
+ .../tests/ComponentContextFixture.java        |  14 +++
+ 6 files changed, 172 insertions(+), 3 deletions(-)
+ mode change 100755 => 100644 src/com/android/server/telecom/ConnectionServiceWrapper.java
+
+diff --git a/src/com/android/server/telecom/Call.java b/src/com/android/server/telecom/Call.java
+index dd8e7e8a5..cf52ce97e 100644
+--- a/src/com/android/server/telecom/Call.java
++++ b/src/com/android/server/telecom/Call.java
+@@ -1121,6 +1121,7 @@ public class Call implements CreateConnectionResponse, EventManager.Loggable,
+         return (!mIsTransactionalCall ? mConnectionService : mTransactionalService);
+     }
+ 
++    @VisibleForTesting
+     public int getState() {
+         return mState;
+     }
+diff --git a/src/com/android/server/telecom/ConnectionServiceWrapper.java b/src/com/android/server/telecom/ConnectionServiceWrapper.java
+old mode 100755
+new mode 100644
+index d10efa91f..50e29278e
+--- a/src/com/android/server/telecom/ConnectionServiceWrapper.java
++++ b/src/com/android/server/telecom/ConnectionServiceWrapper.java
+@@ -46,6 +46,7 @@ import android.telecom.DisconnectCause;
+ import android.telecom.GatewayInfo;
+ import android.telecom.Log;
+ import android.telecom.Logging.Session;
++import android.telecom.Logging.Runnable;
+ import android.telecom.ParcelableConference;
+ import android.telecom.ParcelableConnection;
+ import android.telecom.PhoneAccountHandle;
+@@ -72,10 +73,13 @@ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
++import java.util.UUID;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ScheduledFuture;
+ import java.util.concurrent.TimeUnit;
+ import java.util.Objects;
+ 
+@@ -89,10 +93,28 @@ import java.util.Objects;
+ public class ConnectionServiceWrapper extends ServiceBinder implements
+         ConnectionServiceFocusManager.ConnectionServiceFocus {
+ 
++    /**
++     * Anomaly Report UUIDs and corresponding error descriptions specific to CallsManager.
++     */
++    public static final UUID CREATE_CONNECTION_TIMEOUT_ERROR_UUID =
++            UUID.fromString("54b7203d-a79f-4cbd-b639-85cd93a39cbb");
++    public static final String CREATE_CONNECTION_TIMEOUT_ERROR_MSG =
++            "Timeout expired before Telecom connection was created.";
++    public static final UUID CREATE_CONFERENCE_TIMEOUT_ERROR_UUID =
++            UUID.fromString("caafe5ea-2472-4c61-b2d8-acb9d47e13dd");
++    public static final String CREATE_CONFERENCE_TIMEOUT_ERROR_MSG =
++            "Timeout expired before Telecom conference was created.";
++
+     private static final String TELECOM_ABBREVIATION = "cast";
++    private static final long SERVICE_BINDING_TIMEOUT = 15000L;
+     private CompletableFuture<Pair<Integer, Location>> mQueryLocationFuture = null;
+     private @Nullable CancellationSignal mOngoingQueryLocationRequest = null;
+     private final ExecutorService mQueryLocationExecutor = Executors.newSingleThreadExecutor();
++    private ScheduledExecutorService mScheduledExecutor =
++            Executors.newSingleThreadScheduledExecutor();
++    // Pre-allocate space for 2 calls; realistically thats all we should ever need (tm)
++    private final Map<Call, ScheduledFuture<?>> mScheduledFutureMap = new ConcurrentHashMap<>(2);
++    private AnomalyReporterAdapter mAnomalyReporter = new AnomalyReporterAdapterImpl();
+ 
+     private final class Adapter extends IConnectionServiceAdapter.Stub {
+ 
+@@ -106,6 +128,12 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+             try {
+                 synchronized (mLock) {
+                     logIncoming("handleCreateConnectionComplete %s", callId);
++                    Call call = mCallIdMapper.getCall(callId);
++                    if (call != null && mScheduledFutureMap.containsKey(call)) {
++                        ScheduledFuture<?> existingTimeout = mScheduledFutureMap.get(call);
++                        existingTimeout.cancel(false /* cancelIfRunning */);
++                        mScheduledFutureMap.remove(call);
++                    }
+                     // Check status hints image for cross user access
+                     if (connection.getStatusHints() != null) {
+                         Icon icon = connection.getStatusHints().getIcon();
+@@ -1601,7 +1629,29 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+                         .setParticipants(call.getParticipants())
+                         .setIsAdhocConferenceCall(call.isAdhocConferenceCall())
+                         .build();
+-
++                Runnable r = new Runnable("CSW.cC", mLock) {
++                    @Override
++                    public void loggedRun() {
++                        if (!call.isCreateConnectionComplete()) {
++                            Log.e(this, new Exception(),
++                                    "Conference %s creation timeout",
++                                    getComponentName());
++                            Log.addEvent(call, LogUtils.Events.CREATE_CONFERENCE_TIMEOUT,
++                                    Log.piiHandle(call.getHandle()) + " via:" +
++                                            getComponentName().getPackageName());
++                            mAnomalyReporter.reportAnomaly(
++                                    CREATE_CONFERENCE_TIMEOUT_ERROR_UUID,
++                                    CREATE_CONFERENCE_TIMEOUT_ERROR_MSG);
++                            response.handleCreateConferenceFailure(
++                                    new DisconnectCause(DisconnectCause.ERROR));
++                        }
++                    }
++                };
++                // Post cleanup to the executor service and cache the future, so we can cancel it if
++                // needed.
++                ScheduledFuture<?> future = mScheduledExecutor.schedule(r.getRunnableToCancel(),
++                        SERVICE_BINDING_TIMEOUT, TimeUnit.MILLISECONDS);
++                mScheduledFutureMap.put(call, future);
+                 try {
+                     mServiceInterface.createConference(
+                             call.getConnectionManagerPhoneAccount(),
+@@ -1703,7 +1753,29 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+                         .setRttPipeFromInCall(call.getInCallToCsRttPipeForCs())
+                         .setRttPipeToInCall(call.getCsToInCallRttPipeForCs())
+                         .build();
+-
++                Runnable r = new Runnable("CSW.cC", mLock) {
++                    @Override
++                    public void loggedRun() {
++                        if (!call.isCreateConnectionComplete()) {
++                            Log.e(this, new Exception(),
++                                    "Connection %s creation timeout",
++                                    getComponentName());
++                            Log.addEvent(call, LogUtils.Events.CREATE_CONNECTION_TIMEOUT,
++                                    Log.piiHandle(call.getHandle()) + " via:" +
++                                            getComponentName().getPackageName());
++                            mAnomalyReporter.reportAnomaly(
++                                    CREATE_CONNECTION_TIMEOUT_ERROR_UUID,
++                                    CREATE_CONNECTION_TIMEOUT_ERROR_MSG);
++                            response.handleCreateConnectionFailure(
++                                    new DisconnectCause(DisconnectCause.ERROR));
++                        }
++                    }
++                };
++                // Post cleanup to the executor service and cache the future, so we can cancel it if
++                // needed.
++                ScheduledFuture<?> future = mScheduledExecutor.schedule(r.getRunnableToCancel(),
++                        SERVICE_BINDING_TIMEOUT, TimeUnit.MILLISECONDS);
++                mScheduledFutureMap.put(call, future);
+                 try {
+                     mServiceInterface.createConnection(
+                             call.getConnectionManagerPhoneAccount(),
+@@ -2161,7 +2233,8 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+         }
+     }
+ 
+-    void addCall(Call call) {
++    @VisibleForTesting
++    public void addCall(Call call) {
+         if (mCallIdMapper.getCallId(call) == null) {
+             mCallIdMapper.addCall(call);
+         }
+@@ -2377,6 +2450,13 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+     @Override
+     protected void removeServiceInterface() {
+         Log.v(this, "Removing Connection Service Adapter.");
++        if (mServiceInterface == null) {
++            // In some cases, we may receive multiple calls to
++            // remoteServiceInterface, such as when the remote process crashes
++            // (onBinderDied & onServiceDisconnected)
++            Log.w(this, "removeServiceInterface: mServiceInterface is null");
++            return;
++        }
+         removeConnectionServiceAdapter(mAdapter);
+         // We have lost our service connection. Notify the world that this service is done.
+         // We must notify the adapter before CallsManager. The adapter will force any pending
+@@ -2385,6 +2465,10 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+         handleConnectionServiceDeath();
+         mCallsManager.handleConnectionServiceDeath(this);
+         mServiceInterface = null;
++        if (mScheduledExecutor != null) {
++            mScheduledExecutor.shutdown();
++            mScheduledExecutor = null;
++        }
+     }
+ 
+     @Override
+@@ -2503,6 +2587,7 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+             }
+         }
+         mCallIdMapper.clear();
++        mScheduledFutureMap.clear();
+ 
+         if (mConnSvrFocusListener != null) {
+             mConnSvrFocusListener.onConnectionServiceDeath(this);
+@@ -2628,4 +2713,14 @@ public class ConnectionServiceWrapper extends ServiceBinder implements
+         sb.append("]");
+         return sb.toString();
+     }
++
++    @VisibleForTesting
++    public void setScheduledExecutorService(ScheduledExecutorService service) {
++        mScheduledExecutor = service;
++    }
++
++    @VisibleForTesting
++    public void setAnomalyReporterAdapter(AnomalyReporterAdapter mAnomalyReporterAdapter){
++        mAnomalyReporter = mAnomalyReporterAdapter;
++    }
+ }
+diff --git a/src/com/android/server/telecom/LogUtils.java b/src/com/android/server/telecom/LogUtils.java
+index 0d6acd51d..d98ebfe6b 100644
+--- a/src/com/android/server/telecom/LogUtils.java
++++ b/src/com/android/server/telecom/LogUtils.java
+@@ -139,8 +139,10 @@ public class LogUtils {
+         public static final String STOP_CALL_WAITING_TONE = "STOP_CALL_WAITING_TONE";
+         public static final String START_CONNECTION = "START_CONNECTION";
+         public static final String CREATE_CONNECTION_FAILED = "CREATE_CONNECTION_FAILED";
++        public static final String CREATE_CONNECTION_TIMEOUT = "CREATE_CONNECTION_TIMEOUT";
+         public static final String START_CONFERENCE = "START_CONFERENCE";
+         public static final String CREATE_CONFERENCE_FAILED = "CREATE_CONFERENCE_FAILED";
++        public static final String CREATE_CONFERENCE_TIMEOUT = "CREATE_CONFERENCE_TIMEOUT";
+         public static final String BIND_CS = "BIND_CS";
+         public static final String CS_BOUND = "CS_BOUND";
+         public static final String CONFERENCE_WITH = "CONF_WITH";
+diff --git a/tests/src/com/android/server/telecom/tests/BasicCallTests.java b/tests/src/com/android/server/telecom/tests/BasicCallTests.java
+index bd81a2ffe..51c3b33a9 100644
+--- a/tests/src/com/android/server/telecom/tests/BasicCallTests.java
++++ b/tests/src/com/android/server/telecom/tests/BasicCallTests.java
+@@ -995,6 +995,7 @@ public class BasicCallTests extends TelecomSystemTest {
+         call.setTargetPhoneAccount(mPhoneAccountA1.getAccountHandle());
+         assert(call.isVideoCallingSupportedByPhoneAccount());
+         assertEquals(VideoProfile.STATE_BIDIRECTIONAL, call.getVideoState());
++        call.setIsCreateConnectionComplete(true);
+     }
+ 
+     /**
+@@ -1018,6 +1019,7 @@ public class BasicCallTests extends TelecomSystemTest {
+         call.setTargetPhoneAccount(mPhoneAccountA2.getAccountHandle());
+         assert(!call.isVideoCallingSupportedByPhoneAccount());
+         assertEquals(VideoProfile.STATE_AUDIO_ONLY, call.getVideoState());
++        call.setIsCreateConnectionComplete(true);
+     }
+ 
+     /**
+diff --git a/tests/src/com/android/server/telecom/tests/CallsManagerTest.java b/tests/src/com/android/server/telecom/tests/CallsManagerTest.java
+index 56cf22fee..649e54a41 100644
+--- a/tests/src/com/android/server/telecom/tests/CallsManagerTest.java
++++ b/tests/src/com/android/server/telecom/tests/CallsManagerTest.java
+@@ -43,6 +43,7 @@ import static org.mockito.Mockito.timeout;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
++import static java.lang.Thread.sleep;
+ 
+ import android.Manifest;
+ import android.content.ComponentName;
+@@ -54,6 +55,7 @@ import android.media.AudioManager;
+ import android.net.Uri;
+ import android.os.Bundle;
+ import android.os.Handler;
++import android.os.IBinder;
+ import android.os.Looper;
+ import android.os.OutcomeReceiver;
+ import android.os.Process;
+@@ -80,6 +82,7 @@ import android.test.suitebuilder.annotation.SmallTest;
+ import android.util.Pair;
+ import android.widget.Toast;
+ 
++import com.android.internal.telecom.IConnectionService;
+ import com.android.server.telecom.AnomalyReporterAdapter;
+ import com.android.server.telecom.AsyncRingtonePlayer;
+ import com.android.server.telecom.Call;
+@@ -97,6 +100,7 @@ import com.android.server.telecom.ClockProxy;
+ import com.android.server.telecom.ConnectionServiceFocusManager;
+ import com.android.server.telecom.ConnectionServiceFocusManager.ConnectionServiceFocusManagerFactory;
+ import com.android.server.telecom.ConnectionServiceWrapper;
++import com.android.server.telecom.CreateConnectionResponse;
+ import com.android.server.telecom.DefaultDialerCache;
+ import com.android.server.telecom.EmergencyCallDiagnosticLogger;
+ import com.android.server.telecom.EmergencyCallHelper;
+@@ -277,6 +281,7 @@ public class CallsManagerTest extends TelecomTestCase {
+     @Mock private BlockedNumbersAdapter mBlockedNumbersAdapter;
+     @Mock private PhoneCapability mPhoneCapability;
+     @Mock private CallStreamingNotification mCallStreamingNotification;
++    @Mock private IConnectionService mIConnectionService;
+ 
+     private CallsManager mCallsManager;
+ 
+@@ -362,11 +367,17 @@ public class CallsManagerTest extends TelecomTestCase {
+                 eq(WORK_HANDLE), any())).thenReturn(WORK_ACCOUNT);
+         when(mToastFactory.makeText(any(), anyInt(), anyInt())).thenReturn(mToast);
+         when(mToastFactory.makeText(any(), any(), anyInt())).thenReturn(mToast);
++        when(mIConnectionService.asBinder()).thenReturn(mock(IBinder.class));
++
++        mComponentContextFixture.addConnectionService(
++                SIM_1_ACCOUNT.getAccountHandle().getComponentName(), mIConnectionService);
+     }
+ 
+     @Override
+     @After
+     public void tearDown() throws Exception {
++        mComponentContextFixture.removeConnectionService(
++                SIM_1_ACCOUNT.getAccountHandle().getComponentName(), mIConnectionService);
+         super.tearDown();
+     }
+ 
+@@ -2759,6 +2770,35 @@ public class CallsManagerTest extends TelecomTestCase {
+         assertTrue(result.contains("onReceiveResult"));
+     }
+ 
++    @Test
++    public void testConnectionServiceCreateConnectionTimeout() throws Exception {
++        ConnectionServiceWrapper service = new ConnectionServiceWrapper(
++                SIM_1_ACCOUNT.getAccountHandle().getComponentName(), null,
++                mPhoneAccountRegistrar, mCallsManager, mContext, mLock, null);
++        TestScheduledExecutorService scheduledExecutorService = new TestScheduledExecutorService();
++        service.setScheduledExecutorService(scheduledExecutorService);
++        Call call = addSpyCall();
++        service.addCall(call);
++        when(call.isCreateConnectionComplete()).thenReturn(false);
++        CreateConnectionResponse response = mock(CreateConnectionResponse.class);
++
++        service.createConnection(call, response);
++        waitUntilConditionIsTrueOrTimeout(new Condition() {
++            @Override
++            public Object expected() {
++                return true;
++            }
++
++            @Override
++            public Object actual() {
++                return scheduledExecutorService.isRunnableScheduledAtTime(15000L);
++            }
++        }, 5000L, "Expected job failed to schedule");
++        scheduledExecutorService.advanceTime(15000L);
++        verify(response).handleCreateConnectionFailure(
++                eq(new DisconnectCause(DisconnectCause.ERROR)));
++    }
++
+     @SmallTest
+     @Test
+     public void testOnFailedOutgoingCallUnholdsCallAfterLocallyDisconnect() {
+@@ -3355,4 +3395,19 @@ public class CallsManagerTest extends TelecomTestCase {
+         when(mockTelephonyManager.getPhoneCapability()).thenReturn(mPhoneCapability);
+         when(mPhoneCapability.getMaxActiveVoiceSubscriptions()).thenReturn(num);
+     }
++
++    private void waitUntilConditionIsTrueOrTimeout(Condition condition, long timeout,
++            String description) throws InterruptedException {
++        final long start = System.currentTimeMillis();
++        while (!condition.expected().equals(condition.actual())
++                && System.currentTimeMillis() - start < timeout) {
++            sleep(50);
++        }
++        assertEquals(description, condition.expected(), condition.actual());
++    }
++
++    protected interface Condition {
++        Object expected();
++        Object actual();
++    }
+ }
+diff --git a/tests/src/com/android/server/telecom/tests/ComponentContextFixture.java b/tests/src/com/android/server/telecom/tests/ComponentContextFixture.java
+index cc22de291..df855e937 100644
+--- a/tests/src/com/android/server/telecom/tests/ComponentContextFixture.java
++++ b/tests/src/com/android/server/telecom/tests/ComponentContextFixture.java
+@@ -735,6 +735,14 @@ public class ComponentContextFixture implements TestFixture<Context> {
+         mServiceInfoByComponentName.put(componentName, serviceInfo);
+     }
+ 
++    public void removeConnectionService(
++            ComponentName componentName,
++            IConnectionService service)
++            throws Exception {
++        removeService(ConnectionService.SERVICE_INTERFACE, componentName, service);
++        mServiceInfoByComponentName.remove(componentName);
++    }
++
+     public void addInCallService(
+             ComponentName componentName,
+             IInCallService service,
+@@ -828,6 +836,12 @@ public class ComponentContextFixture implements TestFixture<Context> {
+         mComponentNameByService.put(service, name);
+     }
+ 
++    private void removeService(String action, ComponentName name, IInterface service) {
++        mComponentNamesByAction.remove(action, name);
++        mServiceByComponentName.remove(name);
++        mComponentNameByService.remove(service);
++    }
++
+     private List<ResolveInfo> doQueryIntentServices(Intent intent, int flags) {
+         List<ResolveInfo> result = new ArrayList<>();
+         for (ComponentName componentName : mComponentNamesByAction.get(intent.getAction())) {
+-- 
+2.34.1
+
