@@ -1,0 +1,855 @@
+From e9023a85927845b837adf2072d259ac6a815b267 Mon Sep 17 00:00:00 2001
+From: "Jia, Lin A" <lin.a.jia@intel.com>
+Date: Tue, 25 Jul 2023 15:59:14 +0800
+Subject: [PATCH] drm/i915/dsi: Enable max dsi serdes/deserdes split/single
+ mode for 640 and 720p timing.
+
+---
+ drivers/gpu/drm/i915/Kconfig                  |   7 +
+ drivers/gpu/drm/i915/Makefile                 |   2 +
+ drivers/gpu/drm/i915/display/icl_dsi.c        |  20 +
+ .../gpu/drm/i915/display/intel_dsi_ser_drv.c  | 582 ++++++++++++++++++
+ .../gpu/drm/i915/display/intel_dsi_ser_drv.h  | 152 +++++
+ 5 files changed, 763 insertions(+)
+ create mode 100755 drivers/gpu/drm/i915/display/intel_dsi_ser_drv.c
+ create mode 100755 drivers/gpu/drm/i915/display/intel_dsi_ser_drv.h
+
+diff --git a/drivers/gpu/drm/i915/Kconfig b/drivers/gpu/drm/i915/Kconfig
+index 23f774799b78..84c9d33e0957 100644
+--- a/drivers/gpu/drm/i915/Kconfig
++++ b/drivers/gpu/drm/i915/Kconfig
+@@ -143,6 +143,13 @@ config DRM_I915_PXP
+ 	  protected session and manage the status of the alive software session,
+ 	  as well as its life cycle.
+ 
++config DRM_I915_DSI_SER
++	bool "Enable DSI serdes driver"
++	depends on DRM_I915
++	default n
++	help
++	  Enable DSI serdes driver
++
+ menu "drm/i915 Debugging"
+ depends on DRM_I915
+ depends on EXPERT
+diff --git a/drivers/gpu/drm/i915/Makefile b/drivers/gpu/drm/i915/Makefile
+index e202ea8a86bb..75a54339af9e 100644
+--- a/drivers/gpu/drm/i915/Makefile
++++ b/drivers/gpu/drm/i915/Makefile
+@@ -332,6 +332,8 @@ i915-y += \
+ 	display/intel_vrr.o \
+ 	display/vlv_dsi.o \
+ 	display/vlv_dsi_pll.o
++i915-$(CONFIG_DRM_I915_DSI_SER) += \
++	display/intel_dsi_ser_drv.o
+ 
+ i915-y += i915_perf.o
+ 
+diff --git a/drivers/gpu/drm/i915/display/icl_dsi.c b/drivers/gpu/drm/i915/display/icl_dsi.c
+index ed4d93942dbd..81e6baa3f982 100644
+--- a/drivers/gpu/drm/i915/display/icl_dsi.c
++++ b/drivers/gpu/drm/i915/display/icl_dsi.c
+@@ -46,6 +46,9 @@
+ #include "intel_vdsc.h"
+ #include "skl_scaler.h"
+ #include "skl_universal_plane.h"
++#ifdef CONFIG_DRM_I915_DSI_SER
++#include "intel_dsi_ser_drv.h"
++#endif
+ 
+ static int header_credits_available(struct drm_i915_private *dev_priv,
+ 				    enum transcoder dsi_trans)
+@@ -1172,6 +1175,10 @@ static void gen11_dsi_powerup_panel(struct intel_encoder *encoder)
+ 	struct drm_i915_private *dev_priv = to_i915(encoder->base.dev);
+ 	struct intel_dsi *intel_dsi = enc_to_intel_dsi(encoder);
+ 	struct mipi_dsi_device *dsi;
++	struct intel_connector *intel_connector = intel_dsi->attached_connector;
++	const struct drm_display_mode *fixed_mode =
++		intel_panel_preferred_fixed_mode(intel_connector);
++
+ 	enum port port;
+ 	enum transcoder dsi_trans;
+ 	u32 tmp;
+@@ -1201,6 +1208,11 @@ static void gen11_dsi_powerup_panel(struct intel_encoder *encoder)
+ 	intel_dsi_msleep(intel_dsi, intel_dsi->panel_on_delay);
+ 	intel_dsi_vbt_exec_sequence(intel_dsi, MIPI_SEQ_DEASSERT_RESET);
+ 	intel_dsi_vbt_exec_sequence(intel_dsi, MIPI_SEQ_INIT_OTP);
++
++#ifdef CONFIG_DRM_I915_DSI_SER
++	intel_dsi_ser_init(fixed_mode);
++#endif
++
+ 	intel_dsi_vbt_exec_sequence(intel_dsi, MIPI_SEQ_DISPLAY_ON);
+ 
+ 	/* ensure all panel commands dispatched before enabling transcoder */
+@@ -1777,6 +1789,9 @@ static bool gen11_dsi_initial_fastset_check(struct intel_encoder *encoder,
+ static void gen11_dsi_encoder_destroy(struct drm_encoder *encoder)
+ {
+ 	intel_encoder_destroy(encoder);
++#ifdef CONFIG_DRM_I915_DSI_SER
++	intel_dsi_ser_module_exit();
++#endif
+ }
+ 
+ static const struct drm_encoder_funcs gen11_dsi_encoder_funcs = {
+@@ -2097,6 +2112,11 @@ void icl_dsi_init(struct drm_i915_private *dev_priv)
+ 	icl_dphy_param_init(intel_dsi);
+ 
+ 	icl_dsi_add_properties(intel_connector);
++
++#ifdef CONFIG_DRM_I915_DSI_SER
++	intel_dsi_ser_module_init();
++#endif
++
+ 	return;
+ 
+ err:
+diff --git a/drivers/gpu/drm/i915/display/intel_dsi_ser_drv.c b/drivers/gpu/drm/i915/display/intel_dsi_ser_drv.c
+new file mode 100755
+index 000000000000..f168dd15a37e
+--- /dev/null
++++ b/drivers/gpu/drm/i915/display/intel_dsi_ser_drv.c
+@@ -0,0 +1,582 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include "intel_dsi_ser_drv.h"
++
++struct i2c_client       *max_dsi_client[MAX_DSI_ARRAY_SIZE];
++struct max_dsi_ser_priv *max_dsi_priv;
++
++static struct i2c_board_info max_dsi_i2c_board_info[] = {
++    {
++        I2C_BOARD_INFO("max96789", MAX_DSI_SER_TX_ADD),
++    },
++    {
++        I2C_BOARD_INFO("max96772A", MAX_DSI_SER_RX_ADD_A),
++    },
++    {
++        I2C_BOARD_INFO("max96772B", MAX_DSI_SER_RX_ADD_B),
++    },
++};
++
++char max_dsi_ser_read_reg(struct i2c_client *client, unsigned int reg_addr, u8 *val)
++{
++    u8 buf[2];
++    int ret = 0;
++
++    struct i2c_msg msg[2];
++
++    buf[0] = reg_addr >> 8;
++    buf[1] = reg_addr & 0xff;
++
++    msg[0].addr = client->addr;
++    msg[0].flags = client->flags;
++    msg[0].buf = buf;
++    msg[0].len = sizeof(buf);
++
++    msg[1].addr = client->addr;
++    msg[1].flags = client->flags | I2C_M_RD;
++    msg[1].buf = val;
++    msg[1].len = 1;
++
++    i2c_transfer(client->adapter, msg, 2);
++    if (ret < 0) {
++        pr_debug("MAX_DSI [-%s-%s-%d-], fail reg_addr=0x%x, val=%u\n",
++               __FILE__, __func__, __LINE__, reg_addr, *val);
++        return -ENODEV;
++    } else {
++        pr_debug("MAX_DSI 0x%02x, 0x%04x,0x%02x\n", client->addr,reg_addr, *val);
++    }
++    return 0;
++}
++
++bool max_dsi_ser_write_reg(struct i2c_client *client, unsigned int reg_addr, unsigned int val)
++{
++    int ret= 0;
++    struct i2c_msg msg;
++    u8 buf[3];
++    u8 read_val;
++
++    buf[0] = (reg_addr&0xff00) >> 8;
++    buf[1] = reg_addr & 0xff;
++    buf[2] = val;
++
++    msg.addr = client->addr;
++    msg.flags = client->flags;
++    msg.buf = buf;
++    msg.len = sizeof(buf);
++
++    ret=i2c_transfer(client->adapter, &msg, 1);
++    if (ret < 0) {
++        pr_debug("MAX_DSI [-%s-%s-%d-], fail client->addr=0x%x, reg_addr=0x%x, val=0x%x\n",
++         __FILE__, __func__, __LINE__, client->addr, reg_addr, val);
++        return false;
++    }  else {
++        max_dsi_ser_read_reg(client, reg_addr, &read_val);
++        return true;
++    }
++}
++
++void max_dsi_ser_update(struct i2c_client *client,
++        u32 reg, u32 mask, u8 val)
++{
++    u8 update_val;
++
++    max_dsi_ser_read_reg(client, reg, &update_val);
++    update_val = ((update_val & (~mask)) | (val & mask));
++    max_dsi_ser_write_reg(client, reg, update_val);
++}
++
++int max_dsi_ser_prepare(const struct drm_display_mode *fixed_mode)
++{
++    pr_debug("MAX_DSI %s: hdisplay =%d, vdisplay = %d\n", __func__, fixed_mode->hdisplay, fixed_mode->vdisplay);
++
++    if ((fixed_mode->hdisplay / fixed_mode->vdisplay) > 16/9)
++        max_dsi_priv->split_mode = true;
++    else
++        max_dsi_priv->split_mode = false;
++
++    if (max_dsi_priv->split_mode == true)
++    {
++        max_dsi_priv->Hres   = fixed_mode->hdisplay / 2;
++        max_dsi_priv->Hfp    = (fixed_mode->hsync_start - fixed_mode->hdisplay) / 2;
++        max_dsi_priv->Hsw    = (fixed_mode->hsync_end- fixed_mode->hsync_start) / 2;
++        max_dsi_priv->Hbp    = (fixed_mode->htotal - fixed_mode->hsync_end) / 2;
++        max_dsi_priv->Hwords = (fixed_mode->hdisplay *24/32) - 4;
++        max_dsi_priv->Mvid   = (fixed_mode->clock/1000)*32768/(2*270);
++    }
++    else
++    {
++        max_dsi_priv->Hres   = fixed_mode->hdisplay;
++        max_dsi_priv->Hfp    = fixed_mode->hsync_start - fixed_mode->hdisplay;
++        max_dsi_priv->Hsw    = fixed_mode->hsync_end- fixed_mode->hsync_start;
++        max_dsi_priv->Hbp    = fixed_mode->htotal - fixed_mode->hsync_end;
++        max_dsi_priv->Vres   = fixed_mode->vdisplay;
++        max_dsi_priv->Hwords = (fixed_mode->hdisplay*24/16) -4;
++        max_dsi_priv->Mvid   = (fixed_mode->clock/1000)*32768/270;
++     }
++
++    max_dsi_priv->Vres  = fixed_mode->vdisplay;
++    max_dsi_priv->Vfp   = fixed_mode->vsync_start - fixed_mode->vdisplay;
++    max_dsi_priv->Vsw   = fixed_mode->vsync_end- fixed_mode->vsync_start;
++    max_dsi_priv->Vbp   = fixed_mode->vtotal - fixed_mode->vsync_end;
++    max_dsi_priv->Hvpol = (fixed_mode->flags & 0x2) |
++                          ((fixed_mode->flags & 0x8) >> 3);
++
++    pr_debug("MAX_DSI %s: split_mode = %d\n", __func__, max_dsi_priv->split_mode);
++    pr_debug("MAX_DSI %s: max_dsi_priv->Hwords =%d, max_dsi_priv->Mvid = %d\n", __func__, max_dsi_priv->Hwords, max_dsi_priv->Mvid);
++    pr_debug("MAX_DSI %s: max_dsi_priv->Hvpol =%d\n", __func__, max_dsi_priv->Hvpol);
++
++    return 0;
++}
++
++bool max_dsi_ser_setup(struct i2c_client *client)
++{
++    // Video Pipe Enable
++    if (false == max_dsi_ser_write_reg(client, 0x02, 0x73)) {
++        pr_debug("MAX_DSI [-%s-%s-%d-] Max96789 setup fail\n", __FILE__, __func__, __LINE__);
++        return false;
++    }
++
++    // Max96789 splitter mode
++    if (true == max_dsi_priv->split_mode)
++    {
++        // Set Stream ID = 0 for GMSL PHY A
++        max_dsi_ser_write_reg(client, 0x53, 0x10);
++        //Set Stream ID = 1 for GMSL PHY B
++        max_dsi_ser_write_reg(client, 0x57, 0x21);
++        // Set Port A Lane Mapping
++        max_dsi_ser_write_reg(client, 0x332, 0x4E);
++        // Set Port B Lane Mapping
++        max_dsi_ser_write_reg(client, 0x333, 0xE4);
++        // Clock Select
++        max_dsi_ser_write_reg(client, 0x308, 0x5C);
++        // Start DSI Port
++        max_dsi_ser_write_reg(client, 0x311, 0x03);
++        // Number of Lanes
++        max_dsi_ser_write_reg(client, 0x331, 0x03);
++        // Set phy_config
++        max_dsi_ser_write_reg(client, 0x330, 0x06);
++        // Set soft_dtx_en
++        max_dsi_ser_write_reg(client, 0x31C, 0x98);
++        // Set soft_dtx
++        max_dsi_ser_write_reg(client, 0x321, 0x24);
++        // Set soft_dty_en
++        max_dsi_ser_write_reg(client, 0x31D, 0x98);
++        // Set soft_dty_
++        max_dsi_ser_write_reg(client, 0x322, 0x24);
++        // Enable Dual View Block Port A
++        max_dsi_ser_write_reg(client, 0x32A, 0x07);
++        // Video Pipe Enable
++        max_dsi_ser_write_reg(client, 0x02, 0x73);
++        // Enable splitter mode, reset one shot
++        max_dsi_ser_write_reg(client, 0x10, 0x23);
++    }
++    else
++    {
++        // Max96789 single mode
++        // Transmit Packets over GMSLA
++        max_dsi_ser_write_reg(client, 0x53, 0x10);
++        //Set Stream ID = 1 for GMSL PHY B
++        max_dsi_ser_write_reg(client, 0x57, 0x21);
++        // Set Port A Lane Mapping
++        max_dsi_ser_write_reg(client, 0x332, 0x4E);
++        // Set Port B Lane Mapping
++        max_dsi_ser_write_reg(client, 0x333, 0xE4);
++        // Clock Select
++        max_dsi_ser_write_reg(client, 0x308, 0x5c);
++        // Number of Lanes
++        max_dsi_ser_write_reg(client, 0x331, 0x03);
++        // Set phy_config
++        max_dsi_ser_write_reg(client, 0x330, 0x04);
++        // Set soft_dtx_en
++        max_dsi_ser_write_reg(client, 0x31C, 0x98);
++        // Set soft_dtx
++        max_dsi_ser_write_reg(client, 0x321, 0x24);
++        // Set soft_dty_en
++        max_dsi_ser_write_reg(client, 0x31D, 0x98);
++        // Set soft_dty_
++        max_dsi_ser_write_reg(client, 0x322, 0x24);
++        // Enable Dual View Block Port A
++        max_dsi_ser_write_reg(client, 0x32A, 0x00);
++        // Video Pipe Enable
++        max_dsi_ser_write_reg(client, 0x02, 0x73);
++        // Enable splitter mode, reset one shot
++        max_dsi_ser_write_reg(client, 0x10, 0x21);
++    }
++
++    return true;
++}
++
++int max_dsi_deser_setup(struct i2c_client *client)
++{
++    // Link Rate
++    max_dsi_ser_write_reg(client, 0xE790, 0x0A);
++    max_dsi_ser_write_reg(client, 0xE791, 0x00);
++    // Lane Count
++    max_dsi_ser_write_reg(client, 0xE792, 0x04);
++    max_dsi_ser_write_reg(client, 0xE793, 0x00);
++    // Hres
++    max_dsi_ser_write_reg(client, 0xE794, max_dsi_priv->Hres & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE795, max_dsi_priv->Hres >> 8);
++    // Hfp
++    max_dsi_ser_write_reg(client, 0xE796, max_dsi_priv->Hfp & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE797, max_dsi_priv->Hfp >> 8);
++    // Hsw
++    max_dsi_ser_write_reg(client, 0xE798, max_dsi_priv->Hsw & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE799, max_dsi_priv->Hsw >> 8);
++    // Hbp
++    max_dsi_ser_write_reg(client, 0xE79A, max_dsi_priv->Hbp & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE79B, max_dsi_priv->Hbp >> 8);
++    // Vres
++    max_dsi_ser_write_reg(client, 0xE79C, max_dsi_priv->Vres & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE79D, max_dsi_priv->Vres >> 8);
++    // Vfp
++    max_dsi_ser_write_reg(client, 0xE79E, max_dsi_priv->Vfp & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE79F, max_dsi_priv->Vfp >> 8);
++    // Vsw
++    max_dsi_ser_write_reg(client, 0xE7A0, max_dsi_priv->Vsw & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE7A1, max_dsi_priv->Vsw >> 8);
++    // Vbp
++    max_dsi_ser_write_reg(client, 0xE7A2, max_dsi_priv->Vbp & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE7A3, max_dsi_priv->Vbp >> 8);
++    // Hwords
++    max_dsi_ser_write_reg(client, 0xE7A4, max_dsi_priv->Hwords & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE7A5, max_dsi_priv->Hwords >> 8);
++    // Mvid PCLK
++    max_dsi_ser_write_reg(client, 0xE7A6, max_dsi_priv->Mvid & 0xFF);
++    max_dsi_ser_write_reg(client, 0xE7A7, max_dsi_priv->Mvid >> 8);
++    // Nvid Line Rate
++    max_dsi_ser_write_reg(client, 0xE7A8, 0x00);
++    max_dsi_ser_write_reg(client, 0xE7A9, 0x80);
++    // TUC_Value
++    max_dsi_ser_write_reg(client, 0xE7AA, 0x40);
++    max_dsi_ser_write_reg(client, 0xE7AB, 0x00);
++    // HVPOL
++    max_dsi_ser_write_reg(client, 0xE7AC, max_dsi_priv->Hvpol & 0x3);
++    max_dsi_ser_write_reg(client, 0xE7AD, 0x00);
++    // SSC Enable
++    max_dsi_ser_write_reg(client, 0xE7B0, 0x01);
++    max_dsi_ser_write_reg(client, 0xE7B1, 0x00);
++    // Spread Bit Ratio
++    max_dsi_ser_write_reg(client, 0x6003, 0x82);
++    // CLK_REF_BLOCK
++    max_dsi_ser_write_reg(client, 0xE7B2, 0x50);
++    max_dsi_ser_write_reg(client, 0xE7B3, 0x00);
++    max_dsi_ser_write_reg(client, 0xE7B4, 0x00);
++    max_dsi_ser_write_reg(client, 0xE7B5, 0x40);
++    max_dsi_ser_write_reg(client, 0xE7B6, 0x6C);
++    max_dsi_ser_write_reg(client, 0xE7B7, 0x20);
++    max_dsi_ser_write_reg(client, 0xE7B8, 0x07);
++    max_dsi_ser_write_reg(client, 0xE7B9, 0x00);
++    max_dsi_ser_write_reg(client, 0xE7BA, 0x01);
++    max_dsi_ser_write_reg(client, 0xE7BB, 0x00);
++    max_dsi_ser_write_reg(client, 0xE7BC, 0x00);
++    max_dsi_ser_write_reg(client, 0xE7BD, 0x00);
++    max_dsi_ser_write_reg(client, 0xE7BE, 0x52);
++    max_dsi_ser_write_reg(client, 0xE7BF, 0x00);
++    // Send eDP Controller Command - Start Link Training
++    max_dsi_ser_write_reg(client, 0xE776, 0x02);
++    max_dsi_ser_write_reg(client, 0xE777, 0x80);
++
++    return 0;
++}
++
++static int max_read_lock(struct i2c_client *client, unsigned int reg_addr,
++              u32 mask, u32 expected_value)
++{
++    u8 reg_data;
++
++    max_dsi_ser_read_reg(client, reg_addr, &reg_data);
++    if ((reg_data & mask) == expected_value)
++        return 0;
++
++    return -1;
++}
++
++bool max_dsi_ser_enable(const struct drm_display_mode *fixed_mode)
++{
++    max_dsi_ser_prepare(fixed_mode);
++    if (false == max_dsi_ser_setup(max_dsi_priv->priv_dsi_client[0]))
++    {
++        pr_debug("MAX_DSI Max96789 enable fail\n");
++        return false;
++    }
++    return true;
++}
++
++static void max_poll_gmsl_deser_lock(struct work_struct *work)
++{
++    int ret1_1 = 0;
++    int ret1_2 = 0;
++    int ret1_3 = 0;
++    int ret2_1 = 0;
++    int ret2_2 = 0;
++    int ret2_3 = 0;
++    static int count = 0;
++
++    ret1_1 = max_read_lock(max_dsi_priv->priv_dsi_client[1], MAX_DP_DESER_SS_B0,
++            MAX_DP_DESER_SS_B0_LOCK_MASK,
++            MAX_DP_DESER_SS_B0_LOCK_VAL);
++    if (ret1_1 < 0) {
++        pr_debug("MAX_DSI1 GMSL subsystem b0 statue is not set 0x01\n");
++    }
++
++    ret1_2 = max_read_lock(max_dsi_priv->priv_dsi_client[1], MAX_DP_DESER_SS_B1,
++            MAX_DP_DESER_SS_B1_LOCK_MASK,
++            MAX_DP_DESER_SS_B1_LOCK_VAL);
++    if (ret1_2 < 0) {
++        pr_debug("MAX_DSI1 GMSL subsystem b1 statue is not set 0x00\n");
++    }
++
++    ret1_3 = max_read_lock(max_dsi_priv->priv_dsi_client[1], MAX_DP_DESER_VID,
++            MAX_DP_DESER_VID_LOCK_MASK,
++            MAX_DP_DESER_VID_LOCK_VAL);
++    if (ret1_3 < 0) {
++        pr_debug("MAX_DSI1 GMSL video CLk is not set 0x01\n");
++    }
++
++    if (max_dsi_priv->split_mode == true) {
++        ret2_1 = max_read_lock(max_dsi_priv->priv_dsi_client[2], MAX_DP_DESER_SS_B0,
++                MAX_DP_DESER_SS_B0_LOCK_MASK,
++                MAX_DP_DESER_SS_B0_LOCK_VAL);
++        if (ret2_1 < 0) {
++            pr_debug("MAX_DSI2 GMSL subsystem b0 statue is not set 0x01\n");
++        }
++
++        ret2_2 = max_read_lock(max_dsi_priv->priv_dsi_client[2], MAX_DP_DESER_SS_B1,
++                MAX_DP_DESER_SS_B1_LOCK_MASK,
++                MAX_DP_DESER_SS_B1_LOCK_VAL);
++        if (ret2_2 < 0) {
++            pr_debug("MAX_DSI2 GMSL subsystem b1 statue is not set 0x00\n");
++        }
++
++        ret2_3 = max_read_lock(max_dsi_priv->priv_dsi_client[2], MAX_DP_DESER_VID,
++                MAX_DP_DESER_VID_LOCK_MASK,
++                MAX_DP_DESER_VID_LOCK_VAL);
++        if (ret2_3 < 0) {
++            pr_debug("MAX_DSI2 GMSL video CLk is not set 0x01\n");
++        }
++
++        if (ret1_1 < 0 || ret1_2 < 0 || ret1_3 < 0 ||
++            ret2_1 < 0 || ret2_2 < 0 || ret2_3 < 0) {
++            pr_debug("MAX_DSI deser rescheule\n");
++            goto reschedule;
++        }
++    }
++    else
++    {
++        if (ret1_1 < 0 || ret1_2 < 0 || ret1_3 < 0 ) {
++            pr_debug("MAX_DSI1 deser rescheule\n");
++            goto reschedule;
++        }
++    }
++
++    pr_debug("MAX_DSI DP deser lock completed, count = %d\n", count);
++
++    return;
++
++reschedule:
++    count++;
++    queue_delayed_work(max_dsi_priv->deser_wq, &max_dsi_priv->deser_work, msecs_to_jiffies(100));
++}
++
++void max_dsi_deser_enable(void)
++{
++    pr_debug("MAX_DSI [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    // Set Stream1 ID on eDP Deserializer
++    if (max_dsi_ser_write_reg(max_dsi_priv->priv_dsi_client[1], 0x0050, 0x00))
++    {
++        // Video1 Configuration Registers
++        max_dsi_deser_setup(max_dsi_priv->priv_dsi_client[1]);
++    }
++
++    // Set Stream2 ID on eDP Deserializer
++    if (max_dsi_ser_write_reg(max_dsi_priv->priv_dsi_client[2], 0x0050, 0x01))
++    {
++        // Video2 Configuration Registers
++        max_dsi_deser_setup(max_dsi_priv->priv_dsi_client[2]);
++    }
++    queue_delayed_work(max_dsi_priv->deser_wq, &max_dsi_priv->deser_work, msecs_to_jiffies(100));
++}
++
++static void max_poll_gmsl_training_lock(struct work_struct *work)
++{
++    int ret1 = 0;
++    int ret2 = 0;
++    int ret3 = 0;
++    static int count = 0;
++
++    ret1 = max_read_lock(max_dsi_priv->priv_dsi_client[0], MAX_DSI_SER_PCLK,
++            MAX_DSI_SER_PCLK_LOCK_MASK,
++            MAX_DSI_SER_PCLK_LOCK_VAL);
++    if (ret1 < 0) {
++        pr_debug("MAX_DSI GMSL PCLk is not set 0x8A\n");
++    }
++
++    ret2 = max_read_lock(max_dsi_priv->priv_dsi_client[0], MAX_DSI_SER_ERR,
++            MAX_DSI_SER_ERR_LOCK_MASK,
++            MAX_DSI_SER_ERR_LOCK_VAL);
++    if (ret2 < 0) {
++        pr_debug("MAX_DSI GMSL ERR is not set 0x00\n");
++    }
++
++    ret3 = max_read_lock(max_dsi_priv->priv_dsi_client[0], MAX_DSI_SER_HS_VS,
++            MAX_DSI_SER_HS_VS_LOCK_MASK,
++            MAX_DSI_SER_HS_VS_LOCK_VAL);
++    if (ret3 < 0) {
++        pr_debug("MAX_DSI GMSL HS_VS is not set 0x73\n");
++    }
++
++    if (ret1 < 0 || ret2 < 0 || ret3 < 0) {
++        pr_debug("MAX_DSI rescheule\n");
++        goto reschedule;
++    }
++
++    pr_debug("MAX_DSI ser training lock completed, count = %d\n", count);
++
++    max_dsi_deser_enable();
++
++    return;
++
++reschedule:
++    count++;
++    if (count > 4) {
++        pr_debug("MAX_DSI ser training lock failed, count = %d\n", count);
++        return;
++    }
++    queue_delayed_work(max_dsi_priv->wq, &max_dsi_priv->delay_work, msecs_to_jiffies(500));
++}
++
++static int max_dsi_ser_probe(struct i2c_client *client,
++        const struct i2c_device_id *idt)
++{
++    unsigned long type;
++    type = idt->driver_data;
++
++    if (max_dsi_priv == NULL){
++        max_dsi_priv = devm_kzalloc(&client->dev, sizeof(struct max_dsi_ser_priv),
++                       GFP_KERNEL);
++        if (max_dsi_priv == NULL)
++            return -ENOMEM;
++
++        max_dsi_priv->wq = alloc_workqueue("max_poll_gmsl_training_lock",
++                WQ_HIGHPRI, 0);
++
++        INIT_DELAYED_WORK(&max_dsi_priv->delay_work,
++                max_poll_gmsl_training_lock);
++
++        max_dsi_priv->deser_wq = alloc_workqueue("max_poll_gmsl_deser_lock",
++                WQ_HIGHPRI, 0);
++
++        INIT_DELAYED_WORK(&max_dsi_priv->deser_work,
++                max_poll_gmsl_deser_lock);
++    }
++
++    if (type == MAX96789) {
++        max_dsi_priv->priv_dsi_client[0] = client;
++        pr_debug("MAX_DSI [-%s-%s-%d-] MAX96789\n", __FILE__, __func__, __LINE__);
++    } else if (type == MAX96772A) {
++        max_dsi_priv->priv_dsi_client[1] = client;
++        pr_debug("MAX_DSI [-%s-%s-%d-] MAX96772A\n", __FILE__, __func__, __LINE__);
++    } else if (type == MAX96772B) {
++        max_dsi_priv->priv_dsi_client[2] = client;
++        pr_debug("MAX_DSI [-%s-%s-%d-] MAX96772B\n", __FILE__, __func__, __LINE__);
++    } else {
++        pr_debug("MAX_DSI fail [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    }
++
++    return 0;
++}
++
++static int max_dsi_ser_remove(struct i2c_client *client)
++{
++    pr_debug("MAX_DSI [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    return 0;
++}
++
++static const struct i2c_device_id max_dsi_ser_i2c_id_table[] = {
++    { "max96789",  MAX96789 },
++    { "max96772A", MAX96772A },
++    { "max96772B", MAX96772B },
++    { },
++};
++
++struct i2c_driver max_dsi_ser_drv = {
++    .probe = max_dsi_ser_probe,
++    .remove= max_dsi_ser_remove,
++    .driver= {
++    .name = "max96789",
++    },
++    .id_table = max_dsi_ser_i2c_id_table,
++};
++
++static int max_dsi_ser_client_init(void)
++{
++    int i = 0;
++    struct i2c_adapter *i2c_adap;
++
++    i2c_adap = i2c_get_adapter(BUS_DSI_NUMBER);
++    if (!i2c_adap) {
++        pr_debug("MAX_DSI Cannot find a valid i2c bus for max serdes\n");
++        return -ENOMEM;
++    }
++
++    for(i = 0; i < NUM_DSI_DEVICE; i++)
++        max_dsi_client[i]=i2c_new_client_device(i2c_adap, &max_dsi_i2c_board_info[i]);
++
++    i2c_put_adapter(i2c_adap);
++
++    return 0;
++}
++
++static void max_dsi_ser_client_exit(void)
++{
++    int i = 0;
++    for (i = 0; i < NUM_DSI_DEVICE; i++)
++        i2c_unregister_device(max_dsi_client[i]);
++    pr_debug("MAX_DSI [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++int intel_dsi_ser_init(const struct drm_display_mode *fixed_mode)
++{
++    if (true == max_dsi_ser_enable(fixed_mode))
++        queue_delayed_work(max_dsi_priv->wq, &max_dsi_priv->delay_work, msecs_to_jiffies(500));
++
++    return 0;
++}
++
++void intel_dsi_ser_module_exit(void)
++{
++    max_dsi_ser_client_exit();
++    i2c_del_driver(&max_dsi_ser_drv);
++    pr_debug("MAX_DSI [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++}
++
++int intel_dsi_ser_module_init(void)
++{
++    pr_debug("MAX_DSI [-%s-%s-%d-]\n", __FILE__, __func__, __LINE__);
++    max_dsi_ser_client_init();
++    return i2c_add_driver(&max_dsi_ser_drv);
++
++    return 0;
++}
+diff --git a/drivers/gpu/drm/i915/display/intel_dsi_ser_drv.h b/drivers/gpu/drm/i915/display/intel_dsi_ser_drv.h
+new file mode 100755
+index 000000000000..9017e07df812
+--- /dev/null
++++ b/drivers/gpu/drm/i915/display/intel_dsi_ser_drv.h
+@@ -0,0 +1,152 @@
++/*
++ * Copyright © 2023 Intel Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef __INTEL_DSI_SER_DEV_h__
++#define __INTEL_DSI_SER_DEV_h__
++
++//#define DEBUG
++
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/i2c.h>
++#include <linux/platform_device.h>
++#include <linux/delay.h>
++#include <linux/workqueue.h>
++#include <drm/drm_modes.h>
++
++#define MAX_DSI_SER_TX_ADD                  0x40
++#define MAX_DSI_SER_RX_ADD_A                0x4A
++#define MAX_DSI_SER_RX_ADD_B                0x48
++#define MAX_DSI_ARRAY_SIZE                  4
++
++#define MAX_DSI_SER_CTRL3                   0x13
++#define MAX_DSI_SER_CTRL3_LOCK_MASK         (1 << 3)
++#define MAX_DSI_SER_CTRL3_LOCK_VAL          (1 << 3)
++
++#define MAX_DSI_SER_LCTRL2_A                0x2A
++#define MAX_DSI_SER_LCTRL2_B                0x34
++#define MAX_DSI_SER_LCTRL2_LOCK_MASK        (1 << 0)
++#define MAX_DSI_SER_LCTRL2_LOCK_VAL         0x1
++
++#define MAX_DSI_SER_VID_TX_MASK             (1 << 0)
++#define MAX_DSI_SER_VID_TX_LINK_MASK        (3 << 1)
++#define MAX_DSI_SER_LINK_SEL_SHIFT_VAL      0x1
++
++#define MAX_DSI_SER_DPRX_TRAIN              0x641A
++#define MAX_DSI_SER_DPRX_TRAIN_STATE_MASK   (0xF << 4)
++#define MAX_DSI_SER_DPRX_TRAIN_STATE_VAL    0xF0
++
++#define MAX_DSI_SER_LINK_CTRL_PHY_A         0x29
++#define MAX_DSI_SER_LINK_CTRL_A_MASK        (1 << 0)
++
++#define MAX_DSI_SER_LCTRL2_A                0x2A
++#define MAX_DSI_SER_LCTRL2_B                0x34
++#define MAX_DSI_SER_LCTRL2_LOCK_MASK        (1 << 0)
++#define MAX_DSI_SER_LCTRL2_LOCK_VAL         0x1
++
++#define MAX_DSI_SER_LINK_CTRL_PHY_B         0x33
++#define MAX_DSI_SER_LINK_CTRL_B_MASK        (1 << 0)
++
++#define MAX_DSI_SER_PCLK                    0x102
++#define MAX_DSI_SER_PCLK_LOCK_MASK          (0x45 << 1)
++#define MAX_DSI_SER_PCLK_LOCK_VAL           0x8A
++
++#define MAX_DSI_SER_ERR                     0x3A0
++#define MAX_DSI_SER_ERR_LOCK_MASK           0xFF
++#define MAX_DSI_SER_ERR_LOCK_VAL            0x00
++
++#define MAX_DSI_SER_HS_VS                   0x55D
++#define MAX_DSI_SER_HS_VS_LOCK_MASK         0x73
++#define MAX_DSI_SER_HS_VS_LOCK_VAL          0x73
++
++#define MAX_DP_DESER_VID                    0x1DC
++#define MAX_DP_DESER_VID_LOCK_MASK          (1 << 0)
++#define MAX_DP_DESER_VID_LOCK_VAL           0x1
++
++#define MAX_DP_DESER_SS_B0                  0x7F0
++#define MAX_DP_DESER_SS_B0_LOCK_MASK        (1 << 0)
++#define MAX_DP_DESER_SS_B0_LOCK_VAL         0x1
++
++#define MAX_DP_DESER_SS_B1                  0x7F1
++#define MAX_DP_DESER_SS_B1_LOCK_MASK        0xFF
++#define MAX_DP_DESER_SS_B1_LOCK_VAL         0x00
++
++#define MAX_DSI_SER_VID_TX_X                0x100
++#define MAX_DSI_SER_VID_TX_Y                0x110
++#define MAX_DSI_SER_VID_TX_Z                0x120
++#define MAX_DSI_SER_VID_TX_U                0x130
++
++#define MAX96789                           0
++#define MAX96772A                          1
++#define MAX96772B                          2
++
++#define NUM_DSI_DEVICE                     3
++#define BUS_DSI_NUMBER                     2
++
++enum max_dsi_ser_current_mode {
++    MAX_MODE_DSI_480,
++    MAX_MODE_DSI_768,
++    MAX_MODE_DSI_720P,
++    MAX_MODE_DSI_1080P,
++};
++
++struct max_dsi_ser_priv {
++    struct gpio_desc *gpiod_pwrdn;
++    u8 dprx_lane_count;
++    u8 dprx_link_rate;
++    struct mutex mutex;
++    int ser_errb;
++    unsigned int ser_irq;
++    bool enable_mst;
++    u8 mst_payload_ids[MAX_DSI_ARRAY_SIZE];
++    u8 gmsl_stream_ids[MAX_DSI_ARRAY_SIZE];
++    u8 gmsl_link_select[MAX_DSI_ARRAY_SIZE];
++    bool link_a_is_enabled;
++    bool link_b_is_enabled;
++    bool dsc;
++    bool split_mode;
++    u16 Hres;
++    u16 Hfp;
++    u16 Hsw;
++    u16 Hbp;
++    u16 Vres;
++    u16 Vfp;
++    u16 Vsw;
++    u16 Vbp;
++    u16 Hwords;
++    u16 Mvid;
++    u8 Hvpol;
++    struct i2c_client *priv_dsi_client[NUM_DSI_DEVICE];
++    struct delayed_work delay_work;
++    struct workqueue_struct *wq;
++    struct delayed_work deser_work;
++    struct workqueue_struct *deser_wq;
++};
++
++void intel_dsi_ser_module_exit(void);
++int intel_dsi_ser_module_init(void);
++
++void intel_dsi_ser_exit(void);
++int intel_dsi_ser_init(const struct drm_display_mode *fixed_mode);
++
++#endif /* __INTEL_DSI_SER_DRV__ */
+-- 
+2.34.1
+
