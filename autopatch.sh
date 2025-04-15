@@ -7,6 +7,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+# Added test comment
+
 top_dir=`pwd`
 if [ ! "${top_dir}" ]; then
     echo "[autopatch.sh] Couldn't locate the top of the tree.  Try setting TOP." >&2
