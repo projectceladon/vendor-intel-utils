@@ -1,0 +1,181 @@
+From b90d4d01e1bfaacae0e1f144075f72b1fb036799 Mon Sep 17 00:00:00 2001
+From: Evan Severson <evanseverson@google.com>
+Date: Thu, 8 Aug 2024 17:20:47 -0700
+Subject: [PATCH] Delay appop revocation when only capability is lost
+
+On proc state changes, if the proc state doesn't change the uid state
+over the restriction threshold and if no new capabilities are added then
+delay the uid state commit. This fixes cases such as going from
+UID_STATE_TOP -> UID_STATE_FOREGROUND, we shouldn't be revoking appop
+access right away.
+
+Test: AppOpsUidStateTrackerTest
+Bug: 347891382
+Bug: 290086710
+Fixes: 382531813
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:991ca43e14ff06b8d290ac0dd1ef758d4826b61a)
+Merged-In: Ia23c0f5b79fa194539151ffbd04a36891e06361b
+Change-Id: Ia23c0f5b79fa194539151ffbd04a36891e06361b
+---
+ .../appop/AppOpsUidStateTrackerImpl.java      | 12 ++--
+ .../appop/AppOpsUidStateTrackerTest.java      | 62 +++++++++++++++++++
+ 2 files changed, 68 insertions(+), 6 deletions(-)
+
+diff --git a/services/core/java/com/android/server/appop/AppOpsUidStateTrackerImpl.java b/services/core/java/com/android/server/appop/AppOpsUidStateTrackerImpl.java
+index 23a384ff5d3b..2dbe28220bde 100644
+--- a/services/core/java/com/android/server/appop/AppOpsUidStateTrackerImpl.java
++++ b/services/core/java/com/android/server/appop/AppOpsUidStateTrackerImpl.java
+@@ -231,20 +231,20 @@ class AppOpsUidStateTrackerImpl implements AppOpsUidStateTracker {
+             mPendingUidStates.put(uid, uidState);
+             mPendingCapability.put(uid, capability);
+ 
++            boolean hasLostCapability = (prevCapability & ~capability) != 0;
++
+             if (procState == PROCESS_STATE_NONEXISTENT) {
+                 mPendingGone.put(uid, true);
+                 commitUidPendingState(uid);
+-            } else if (uidState < prevUidState
+-                    || (uidState <= UID_STATE_MAX_LAST_NON_RESTRICTED
+-                    && prevUidState > UID_STATE_MAX_LAST_NON_RESTRICTED)) {
++            } else if (uidState < prevUidState) {
+                 // We are moving to a more important state, or the new state may be in the
+                 // foreground and the old state is in the background, then always do it
+                 // immediately.
+                 commitUidPendingState(uid);
+-            } else if (uidState == prevUidState && capability != prevCapability) {
+-                // No change on process state, but process capability has changed.
++            } else if (uidState == prevUidState && !hasLostCapability) {
++                // No change on process state, but process capability has increased.
+                 commitUidPendingState(uid);
+-            } else if (uidState <= UID_STATE_MAX_LAST_NON_RESTRICTED) {
++            } else if (uidState <= UID_STATE_MAX_LAST_NON_RESTRICTED && !hasLostCapability) {
+                 // We are moving to a less important state, but it doesn't cross the restriction
+                 // threshold.
+                 commitUidPendingState(uid);
+diff --git a/services/tests/mockingservicestests/src/com/android/server/appop/AppOpsUidStateTrackerTest.java b/services/tests/mockingservicestests/src/com/android/server/appop/AppOpsUidStateTrackerTest.java
+index 1731590be3c9..4e11b723a5fa 100644
+--- a/services/tests/mockingservicestests/src/com/android/server/appop/AppOpsUidStateTrackerTest.java
++++ b/services/tests/mockingservicestests/src/com/android/server/appop/AppOpsUidStateTrackerTest.java
+@@ -325,6 +325,10 @@ public class AppOpsUidStateTrackerTest {
+                 .backgroundState()
+                 .update();
+ 
++        assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_RECORD_AUDIO, MODE_FOREGROUND));
++        assertEquals(MODE_IGNORED,
++                mIntf.evalMode(UID, OP_RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO, MODE_FOREGROUND));
++
+         procStateBuilder(UID)
+                 .backgroundState()
+                 .microphoneCapability()
+@@ -342,10 +346,21 @@ public class AppOpsUidStateTrackerTest {
+                 .microphoneCapability()
+                 .update();
+ 
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_RECORD_AUDIO, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED,
++                mIntf.evalMode(UID, OP_RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO, MODE_FOREGROUND));
++
+         procStateBuilder(UID)
+                 .backgroundState()
+                 .update();
+ 
++        mClock.advanceTime(mConstants.BG_STATE_SETTLE_TIME - 1);
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_RECORD_AUDIO, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED,
++                mIntf.evalMode(UID, OP_RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO,
++                        MODE_FOREGROUND));
++
++        mClock.advanceTime(1);
+         assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_RECORD_AUDIO, MODE_FOREGROUND));
+         assertEquals(MODE_IGNORED,
+                 mIntf.evalMode(UID, OP_RECEIVE_EXPLICIT_USER_INTERACTION_AUDIO, MODE_FOREGROUND));
+@@ -357,6 +372,8 @@ public class AppOpsUidStateTrackerTest {
+                 .backgroundState()
+                 .update();
+ 
++        assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_CAMERA, MODE_FOREGROUND));
++
+         procStateBuilder(UID)
+                 .backgroundState()
+                 .cameraCapability()
+@@ -372,10 +389,16 @@ public class AppOpsUidStateTrackerTest {
+                 .cameraCapability()
+                 .update();
+ 
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_CAMERA, MODE_FOREGROUND));
++
+         procStateBuilder(UID)
+                 .backgroundState()
+                 .update();
+ 
++        mClock.advanceTime(mConstants.BG_STATE_SETTLE_TIME - 1);
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_CAMERA, MODE_FOREGROUND));
++
++        mClock.advanceTime(1);
+         assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_CAMERA, MODE_FOREGROUND));
+     }
+ 
+@@ -385,6 +408,9 @@ public class AppOpsUidStateTrackerTest {
+                 .backgroundState()
+                 .update();
+ 
++        assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_COARSE_LOCATION, MODE_FOREGROUND));
++        assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_FINE_LOCATION, MODE_FOREGROUND));
++
+         procStateBuilder(UID)
+                 .backgroundState()
+                 .locationCapability()
+@@ -401,14 +427,50 @@ public class AppOpsUidStateTrackerTest {
+                 .locationCapability()
+                 .update();
+ 
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_COARSE_LOCATION, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_FINE_LOCATION, MODE_FOREGROUND));
++
+         procStateBuilder(UID)
+                 .backgroundState()
+                 .update();
+ 
++        mClock.advanceTime(mConstants.BG_STATE_SETTLE_TIME - 1);
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_COARSE_LOCATION, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_FINE_LOCATION, MODE_FOREGROUND));
++
++        mClock.advanceTime(1);
+         assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_COARSE_LOCATION, MODE_FOREGROUND));
+         assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_FINE_LOCATION, MODE_FOREGROUND));
+     }
+ 
++    @Test
++    public void testProcStateChangesAndStaysUnrestrictedAndCapabilityRemoved() {
++        procStateBuilder(UID)
++                .topState()
++                .microphoneCapability()
++                .cameraCapability()
++                .locationCapability()
++                .update();
++
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_RECORD_AUDIO, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_CAMERA, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_COARSE_LOCATION, MODE_FOREGROUND));
++
++        procStateBuilder(UID)
++                .foregroundState()
++                .update();
++
++        mClock.advanceTime(mConstants.TOP_STATE_SETTLE_TIME - 1);
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_RECORD_AUDIO, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_CAMERA, MODE_FOREGROUND));
++        assertEquals(MODE_ALLOWED, mIntf.evalMode(UID, OP_COARSE_LOCATION, MODE_FOREGROUND));
++
++        mClock.advanceTime(1);
++        assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_RECORD_AUDIO, MODE_FOREGROUND));
++        assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_CAMERA, MODE_FOREGROUND));
++        assertEquals(MODE_IGNORED, mIntf.evalMode(UID, OP_COARSE_LOCATION, MODE_FOREGROUND));
++    }
++
+     @Test
+     public void testVisibleAppWidget() {
+         procStateBuilder(UID)
+-- 
+2.49.0.395.g12beb8f557-goog
+
