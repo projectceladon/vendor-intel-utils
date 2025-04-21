@@ -1,0 +1,217 @@
+From 6bed47f63ec0600b3c57388449db37405c68dc58 Mon Sep 17 00:00:00 2001
+From: Jay Thomas Sullivan <jaysullivan@google.com>
+Date: Thu, 25 Apr 2024 19:24:08 -0700
+Subject: [PATCH] RESTRICT AUTOMERGE Merge multiple requests by an app in the
+ same task upwards (u)
+
+Merge older dialogs into newer ones, if an app makes multiple requests.
+
+(NOTE: this is a cherry-pick of of a change originally authored by
+ntmyren, with merge conflicts resolved.)
+
+Bug: 313909156
+Test: atest PermissionTest23#testAppCanOnlyShowOneDialog
+(cherry picked from commit 6edd098221133ffa0cd1e930b5c9aa593224313e)
+(cherry picked from commit 614473242f9e05a3f6e5e09ae8f18851c5061a15)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:87809935eb97150b31a7497c9fcb641272f9c252)
+Merged-In: I25f72c30c22429472bfc75073431f84431debd7b
+Change-Id: I25f72c30c22429472bfc75073431f84431debd7b
+---
+ .../ui/GrantPermissionsActivity.java          | 91 ++++++++++++++-----
+ 1 file changed, 66 insertions(+), 25 deletions(-)
+
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/ui/GrantPermissionsActivity.java b/PermissionController/src/com/android/permissioncontroller/permission/ui/GrantPermissionsActivity.java
+index ff63cdae5..963c922d5 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/ui/GrantPermissionsActivity.java
++++ b/PermissionController/src/com/android/permissioncontroller/permission/ui/GrantPermissionsActivity.java
+@@ -125,9 +125,14 @@ public class GrantPermissionsActivity extends SettingsActivity
+     public static final int DIALOG_WITH_FINE_LOCATION_ONLY = 4;
+     public static final int DIALOG_WITH_COARSE_LOCATION_ONLY = 5;
+ 
+-    public static final Map<String, Integer> PERMISSION_TO_BIT_SHIFT = Map.of(
+-            ACCESS_COARSE_LOCATION, 0,
+-            ACCESS_FINE_LOCATION, 1);
++    // The maximum number of dialogs we will allow the same package, on the same task, to launch
++    // simultaneously
++    public static final int MAX_DIALOGS_PER_PKG_TASK = 10;
++
++    public static final Map<String, Integer> PERMISSION_TO_BIT_SHIFT =
++            Map.of(
++                    ACCESS_COARSE_LOCATION, 0,
++                    ACCESS_FINE_LOCATION, 1);
+ 
+     public static final String INTENT_PHOTOS_SELECTED = "intent_extra_result";
+ 
+@@ -240,22 +245,40 @@ public class GrantPermissionsActivity extends SettingsActivity
+ 
+         mOriginalRequestedPermissions = mRequestedPermissions.toArray(new String[0]);
+ 
++        GrantPermissionsViewModelFactory factory =
++                new GrantPermissionsViewModelFactory(
++                        getApplication(),
++                        mTargetPackage,
++                        mRequestedPermissions,
++                        mSessionId,
++                        icicle);
++        mViewModel = factory.create(GrantPermissionsViewModel.class);
++
+         synchronized (sCurrentGrantRequests) {
+             mKey = new Pair<>(mTargetPackage, getTaskId());
+-            if (!sCurrentGrantRequests.containsKey(mKey)) {
++            GrantPermissionsActivity current = sCurrentGrantRequests.get(mKey);
++            if (current == null) {
+                 sCurrentGrantRequests.put(mKey, this);
+                 finishSystemStartedDialogsOnOtherTasksLocked();
+             } else if (mIsSystemTriggered) {
+                 // The system triggered dialog doesn't require results. Delegate, and finish.
+-                sCurrentGrantRequests.get(mKey).onNewFollowerActivity(null,
+-                        mRequestedPermissions);
++                current.onNewFollowerActivity(null, mRequestedPermissions, false);
+                 finishAfterTransition();
+                 return;
+-            } else if (sCurrentGrantRequests.get(mKey).mIsSystemTriggered) {
+-                // Normal permission requests should only merge into the system triggered dialog,
+-                // which has task overlay set
++            } else if (current.mIsSystemTriggered) {
++                // merge into the system triggered dialog, which has task overlay set
+                 mDelegated = true;
+-                sCurrentGrantRequests.get(mKey).onNewFollowerActivity(this, mRequestedPermissions);
++                current.onNewFollowerActivity(this, mRequestedPermissions, false);
++            } else {
++                // this + current + current.mFollowerActivities
++                if ((current.mFollowerActivities.size() + 2) > MAX_DIALOGS_PER_PKG_TASK) {
++                    // If there are too many dialogs for the same package, in the same task, cancel
++                    finishAfterTransition();
++                    return;
++                }
++                // Merge the old dialogs into the new
++                onNewFollowerActivity(current, current.mRequestedPermissions, true);
++                sCurrentGrantRequests.put(mKey, this);
+             }
+         }
+ 
+@@ -277,10 +300,7 @@ public class GrantPermissionsActivity extends SettingsActivity
+                     .GrantPermissionsViewHandlerImpl(this, this);
+         }
+ 
+-        GrantPermissionsViewModelFactory factory = new GrantPermissionsViewModelFactory(
+-                getApplication(), mTargetPackage, mRequestedPermissions, mSessionId, icicle);
+         if (!mDelegated) {
+-            mViewModel = factory.create(GrantPermissionsViewModel.class);
+             mViewModel.getRequestInfosLiveData().observe(this, this::onRequestInfoLoad);
+         }
+ 
+@@ -315,7 +335,7 @@ public class GrantPermissionsActivity extends SettingsActivity
+         // as the UI behaves differently for updates and initial creations.
+         if (icicle != null) {
+             mViewHandler.loadInstanceState(icicle);
+-        } else {
++        } else if (mRootView == null || mRootView.getVisibility() != View.VISIBLE) {
+             // Do not show screen dim until data is loaded
+             window.setDimAmount(0f);
+         }
+@@ -335,20 +355,41 @@ public class GrantPermissionsActivity extends SettingsActivity
+      * @param newPermissions The new permissions requested in the activity
+      */
+     private void onNewFollowerActivity(@Nullable GrantPermissionsActivity follower,
+-            @NonNull List<String> newPermissions) {
++            @NonNull List<String> newPermissions, boolean followerIsOlder) {
+         if (follower != null) {
+             // Ensure the list of follower activities is a stack
+             mFollowerActivities.add(0, follower);
+             follower.mViewModel = mViewModel;
++            if (followerIsOlder) {
++                follower.mDelegated = true;
++            }
+         }
+ 
+-        boolean isShowingGroup = mRootView != null && mRootView.getVisibility() == View.VISIBLE;
+-        List<RequestInfo> currentGroups = mViewModel.getRequestInfosLiveData().getValue();
++        // If the follower is older, examine it to find the pre-merge group
++        GrantPermissionsActivity olderActivity = follower != null && followerIsOlder
++                ? follower : this;
++        boolean isShowingGroup = olderActivity.mRootView != null
++                && olderActivity.mRootView.getVisibility() == View.VISIBLE;
++        List<RequestInfo> currentGroups =
++                olderActivity.mViewModel.getRequestInfosLiveData().getValue();
+         if (mPreMergeShownGroupName == null && isShowingGroup
+                 && currentGroups != null && !currentGroups.isEmpty()) {
+             mPreMergeShownGroupName = currentGroups.get(0).getGroupName();
+         }
+ 
++        if (isShowingGroup && mPreMergeShownGroupName != null
++                && followerIsOlder && currentGroups != null) {
++            // Load a request from the old activity
++            mRequestInfos = currentGroups;
++            showNextRequest();
++            olderActivity.mRootView.setVisibility(View.GONE);
++        }
++        if (follower != null && followerIsOlder) {
++            follower.mFollowerActivities.forEach((oldFollower) ->
++                    onNewFollowerActivity(oldFollower, new ArrayList<>(), true));
++            follower.mFollowerActivities.clear();
++        }
++
+         if (mRequestedPermissions.containsAll(newPermissions)) {
+             return;
+         }
+@@ -406,25 +447,23 @@ public class GrantPermissionsActivity extends SettingsActivity
+     }
+ 
+     private void showNextRequest() {
+-        if (mRequestInfos.isEmpty()) {
++        if (mRequestInfos.isEmpty() || mDelegated) {
+             return;
+         }
+ 
+         RequestInfo info = mRequestInfos.get(0);
+ 
+-        // Only the top activity can receive activity results
+-        Activity top = mFollowerActivities.isEmpty() ? this : mFollowerActivities.get(0);
+         if (info.getSendToSettingsImmediately()) {
+-            mViewModel.sendDirectlyToSettings(top, info.getGroupName());
++            mViewModel.sendDirectlyToSettings(this, info.getGroupName());
+             return;
+         } else if (info.getOpenPhotoPicker()) {
+-            mViewModel.openPhotoPicker(top, GRANTED_USER_SELECTED);
++            mViewModel.openPhotoPicker(this, GRANTED_USER_SELECTED);
+             return;
+         }
+ 
+         if (Utils.isHealthPermissionUiEnabled() && HEALTH_PERMISSION_GROUP.equals(
+                 info.getGroupName())) {
+-            mViewModel.handleHealthConnectPermissions(top);
++            mViewModel.handleHealthConnectPermissions(this);
+             return;
+         }
+ 
+@@ -639,7 +678,7 @@ public class GrantPermissionsActivity extends SettingsActivity
+                 && result == GrantPermissionsViewHandler.GRANTED_USER_SELECTED) {
+             // Only the top activity can receive activity results
+             Activity top = mFollowerActivities.isEmpty() ? this : mFollowerActivities.get(0);
+-            mViewModel.openPhotoPicker(top, result);
++            mViewModel.openPhotoPicker(this, result);
+             logGrantPermissionActivityButtons(name, affectedForegroundPermissions, result);
+             return;
+         }
+@@ -740,14 +779,16 @@ public class GrantPermissionsActivity extends SettingsActivity
+     private boolean setResultIfNeeded(int resultCode) {
+         if (!isResultSet()) {
+             List<String> oldRequestedPermissions = mRequestedPermissions;
++            mResultCode = resultCode;
+             removeActivityFromMap();
+             // If a new merge request came in before we managed to remove this activity from the
+             // map, then cancel the result set for now.
+             if (!Objects.equals(oldRequestedPermissions, mRequestedPermissions)) {
++                // Reset the result code back to its starting value of MAX_VALUE;
++                mResultCode = Integer.MAX_VALUE;
+                 return false;
+             }
+ 
+-            mResultCode = resultCode;
+             if (mViewModel != null) {
+                 mViewModel.logRequestedPermissionGroups();
+             }
+-- 
+2.49.0.395.g12beb8f557-goog
+
