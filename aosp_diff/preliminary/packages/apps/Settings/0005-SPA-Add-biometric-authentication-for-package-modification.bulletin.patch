@@ -1,0 +1,515 @@
+From f16fa58405ed94703ea1886c483a2e2ce1c2b176 Mon Sep 17 00:00:00 2001
+From: Shraddha Basantwani <basantwani@google.com>
+Date: Mon, 2 Dec 2024 09:36:05 +0000
+Subject: [PATCH] [SPA] Add biometric authentication for package modification
+
+Add an extra step of Lock Screen for disabling, force-stopping or
+uninstalling updates for protected packages
+
+Bug: 352504490, 344865740
+Test: atest AppButtonsPreferenceControllerTest PackageInfoPresenterTest
+Flag: EXEMPT High Security Bug
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:32e388ad3199de3c062bb2e2db5d3239f934d0eb)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:d31280f0aa61c4e19d667ad4d4ffb175291c7b1d)
+Merged-In: I0c494e307b02229d751de118abcc89e4e61a6861
+Change-Id: I0c494e307b02229d751de118abcc89e4e61a6861
+---
+ src/com/android/settings/Utils.java           |  16 +++
+ .../AppButtonsPreferenceController.java       |  64 ++++++---
+ .../spa/app/appinfo/PackageInfoPresenter.kt   |  48 ++++---
+ .../AppButtonsPreferenceControllerTest.java   |   3 +
+ .../testutils/shadow/ShadowUtils.java         |  11 ++
+ .../app/appinfo/PackageInfoPresenterTest.kt   | 125 +++++++++++++++---
+ 6 files changed, 219 insertions(+), 48 deletions(-)
+
+diff --git a/src/com/android/settings/Utils.java b/src/com/android/settings/Utils.java
+index 7ed6ba0969..44102257e3 100644
+--- a/src/com/android/settings/Utils.java
++++ b/src/com/android/settings/Utils.java
+@@ -125,6 +125,7 @@ import com.android.settings.password.ChooseLockSettingsHelper;
+ import com.android.settingslib.widget.ActionBarShadowController;
+ import com.android.settingslib.widget.AdaptiveIcon;
+ 
++import java.util.Arrays;
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Locale;
+@@ -1482,4 +1483,19 @@ public final class Utils extends com.android.settingslib.Utils {
+         pm.setComponentEnabledSetting(componentName,
+                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP);
+     }
++
++    /**
++     * Returns {@code true} if the supplied package is a protected package. Otherwise, returns
++     * {@code false}.
++     *
++     * @param context the context
++     * @param packageName the package name
++     */
++    public static boolean isProtectedPackage(
++            @NonNull Context context, @NonNull String packageName) {
++        final List<String> protectedPackageNames = Arrays.asList(context.getResources()
++                .getStringArray(com.android.internal.R.array
++                        .config_biometric_protected_package_names));
++        return protectedPackageNames != null && protectedPackageNames.contains(packageName);
++    }
+ }
+diff --git a/src/com/android/settings/applications/appinfo/AppButtonsPreferenceController.java b/src/com/android/settings/applications/appinfo/AppButtonsPreferenceController.java
+index 1d80099f5c..70bf78e879 100644
+--- a/src/com/android/settings/applications/appinfo/AppButtonsPreferenceController.java
++++ b/src/com/android/settings/applications/appinfo/AppButtonsPreferenceController.java
+@@ -53,6 +53,7 @@ import com.android.settings.R;
+ import com.android.settings.SettingsActivity;
+ import com.android.settings.Utils;
+ import com.android.settings.applications.ApplicationFeatureProvider;
++import com.android.settings.applications.appinfo.AppInfoDashboardFragment;
+ import com.android.settings.applications.specialaccess.deviceadmin.DeviceAdminAdd;
+ import com.android.settings.core.BasePreferenceController;
+ import com.android.settings.core.InstrumentedPreferenceFragment;
+@@ -240,13 +241,21 @@ public class AppButtonsPreferenceController extends BasePreferenceController imp
+             } else if ((mAppEntry.info.flags & ApplicationInfo.FLAG_SYSTEM) != 0) {
+                 if (mAppEntry.info.enabled && !isDisabledUntilUsed()) {
+                     showDialogInner(ButtonActionDialogFragment.DialogType.DISABLE);
++                } else if (mAppEntry.info.enabled) {
++                    requireAuthAndExecute(() -> {
++                        mMetricsFeatureProvider.action(
++                                mActivity,
++                                SettingsEnums.ACTION_SETTINGS_DISABLE_APP,
++                                getPackageNameForMetric());
++                        AsyncTask.execute(new DisableChangerRunnable(mPm,
++                                mAppEntry.info.packageName,
++                                PackageManager.COMPONENT_ENABLED_STATE_DEFAULT));
++                    });
+                 } else {
+                     mMetricsFeatureProvider.action(
+                             mActivity,
+-                            mAppEntry.info.enabled
+-                                    ? SettingsEnums.ACTION_SETTINGS_DISABLE_APP
+-                                    : SettingsEnums.ACTION_SETTINGS_ENABLE_APP,
+-                                    getPackageNameForMetric());
++                            SettingsEnums.ACTION_SETTINGS_ENABLE_APP,
++                            getPackageNameForMetric());
+                     AsyncTask.execute(new DisableChangerRunnable(mPm, mAppEntry.info.packageName,
+                             PackageManager.COMPONENT_ENABLED_STATE_DEFAULT));
+                 }
+@@ -289,17 +298,34 @@ public class AppButtonsPreferenceController extends BasePreferenceController imp
+         }
+     }
+ 
++    /**
++     * Runs the given action with restricted lock authentication if it is a protected package.
++     *
++     * @param action The action to run.
++     */
++    private void requireAuthAndExecute(Runnable action) {
++        if (Utils.isProtectedPackage(mContext, mAppEntry.info.packageName)) {
++            AppInfoDashboardFragment.showLockScreen(mContext, () -> action.run());
++        } else {
++            action.run();
++        }
++    }
++
+     public void handleDialogClick(int id) {
+         switch (id) {
+             case ButtonActionDialogFragment.DialogType.DISABLE:
+-                mMetricsFeatureProvider.action(mActivity,
+-                        SettingsEnums.ACTION_SETTINGS_DISABLE_APP,
+-                        getPackageNameForMetric());
+-                AsyncTask.execute(new DisableChangerRunnable(mPm, mAppEntry.info.packageName,
+-                        PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER));
++                requireAuthAndExecute(() -> {
++                    mMetricsFeatureProvider.action(mActivity,
++                            SettingsEnums.ACTION_SETTINGS_DISABLE_APP,
++                            getPackageNameForMetric());
++                    AsyncTask.execute(new DisableChangerRunnable(mPm, mAppEntry.info.packageName,
++                            PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER));
++                });
+                 break;
+             case ButtonActionDialogFragment.DialogType.FORCE_STOP:
+-                forceStopPackage(mAppEntry.info.packageName);
++                requireAuthAndExecute(() -> {
++                    forceStopPackage(mAppEntry.info.packageName);
++                });
+                 break;
+         }
+     }
+@@ -535,14 +561,16 @@ public class AppButtonsPreferenceController extends BasePreferenceController imp
+ 
+     @VisibleForTesting
+     void uninstallPkg(String packageName, boolean allUsers) {
+-        stopListeningToPackageRemove();
+-        // Create new intent to launch Uninstaller activity
+-        Uri packageUri = Uri.parse("package:" + packageName);
+-        Intent uninstallIntent = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, packageUri);
+-        uninstallIntent.putExtra(Intent.EXTRA_UNINSTALL_ALL_USERS, allUsers);
+-
+-        mMetricsFeatureProvider.action(mActivity, SettingsEnums.ACTION_SETTINGS_UNINSTALL_APP);
+-        mFragment.startActivityForResult(uninstallIntent, mRequestUninstall);
++        requireAuthAndExecute(() -> {
++            stopListeningToPackageRemove();
++            // Create new intent to launch Uninstaller activity
++            Uri packageUri = Uri.parse("package:" + packageName);
++            Intent uninstallIntent = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, packageUri);
++            uninstallIntent.putExtra(Intent.EXTRA_UNINSTALL_ALL_USERS, allUsers);
++
++            mMetricsFeatureProvider.action(mActivity, SettingsEnums.ACTION_SETTINGS_UNINSTALL_APP);
++            mFragment.startActivityForResult(uninstallIntent, mRequestUninstall);
++        });
+     }
+ 
+     @VisibleForTesting
+diff --git a/src/com/android/settings/spa/app/appinfo/PackageInfoPresenter.kt b/src/com/android/settings/spa/app/appinfo/PackageInfoPresenter.kt
+index 8dbcb14e83..36fe93e2f2 100644
+--- a/src/com/android/settings/spa/app/appinfo/PackageInfoPresenter.kt
++++ b/src/com/android/settings/spa/app/appinfo/PackageInfoPresenter.kt
+@@ -29,6 +29,8 @@ import android.os.UserHandle
+ import android.util.Log
+ import androidx.annotation.VisibleForTesting
+ import androidx.compose.runtime.Composable
++import com.android.settings.Utils
++import com.android.settings.applications.appinfo.AppInfoDashboardFragment
+ import com.android.settings.flags.FeatureFlags
+ import com.android.settings.flags.FeatureFlagsImpl
+ import com.android.settings.overlay.FeatureFactory.Companion.featureFactory
+@@ -116,6 +118,16 @@ class PackageInfoPresenter(
+ 
+     private fun isForThisApp(intent: Intent) = packageName == intent.data?.schemeSpecificPart
+ 
++    private fun requireAuthAndExecute(action: () -> Unit) {
++        if (Utils.isProtectedPackage(context, packageName)) {
++            AppInfoDashboardFragment.showLockScreen(context) {
++                action()
++            }
++        } else {
++            action()
++        }
++    }
++
+     /** Enables this package. */
+     fun enable() {
+         logAction(SettingsEnums.ACTION_SETTINGS_ENABLE_APP)
+@@ -129,17 +141,21 @@ class PackageInfoPresenter(
+     /** Disables this package. */
+     fun disable() {
+         logAction(SettingsEnums.ACTION_SETTINGS_DISABLE_APP)
+-        coroutineScope.launch(Dispatchers.IO) {
+-            userPackageManager.setApplicationEnabledSetting(
+-                packageName, PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER, 0
+-            )
++        requireAuthAndExecute {
++            coroutineScope.launch(Dispatchers.IO) {
++                userPackageManager.setApplicationEnabledSetting(
++                    packageName, PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER, 0
++                )
++            }
+         }
+     }
+ 
+     /** Starts the uninstallation activity. */
+     fun startUninstallActivity(forAllUsers: Boolean = false) {
+         logAction(SettingsEnums.ACTION_SETTINGS_UNINSTALL_APP)
+-        context.startUninstallActivity(packageName, userHandle, forAllUsers)
++        requireAuthAndExecute {
++            context.startUninstallActivity(packageName, userHandle, forAllUsers)
++        }
+     }
+ 
+     /** Clears this instant app. */
+@@ -153,17 +169,19 @@ class PackageInfoPresenter(
+     /** Force stops this package. */
+     fun forceStop() {
+         logAction(SettingsEnums.ACTION_APP_FORCE_STOP)
+-        coroutineScope.launch(Dispatchers.Default) {
+-            Log.d(TAG, "Stopping package $packageName")
+-            if (android.app.Flags.appRestrictionsApi()) {
+-                val uid = userPackageManager.getPackageUid(packageName, 0)
+-                context.activityManager.noteAppRestrictionEnabled(
+-                    packageName, uid,
+-                    ActivityManager.RESTRICTION_LEVEL_FORCE_STOPPED, true,
+-                    ActivityManager.RESTRICTION_REASON_USER, "settings",
+-                    ActivityManager.RESTRICTION_SOURCE_USER, 0)
++        requireAuthAndExecute {
++            coroutineScope.launch(Dispatchers.Default) {
++                Log.d(TAG, "Stopping package $packageName")
++                if (android.app.Flags.appRestrictionsApi()) {
++                    val uid = userPackageManager.getPackageUid(packageName, 0)
++                    context.activityManager.noteAppRestrictionEnabled(
++                        packageName, uid,
++                        ActivityManager.RESTRICTION_LEVEL_FORCE_STOPPED, true,
++                        ActivityManager.RESTRICTION_REASON_USER, "settings",
++                        ActivityManager.RESTRICTION_SOURCE_USER, 0)
++                }
++                context.activityManager.forceStopPackageAsUser(packageName, userId)
+             }
+-            context.activityManager.forceStopPackageAsUser(packageName, userId)
+         }
+     }
+ 
+diff --git a/tests/robotests/src/com/android/settings/applications/appinfo/AppButtonsPreferenceControllerTest.java b/tests/robotests/src/com/android/settings/applications/appinfo/AppButtonsPreferenceControllerTest.java
+index 6fc01fc52e..6c29036cb7 100644
+--- a/tests/robotests/src/com/android/settings/applications/appinfo/AppButtonsPreferenceControllerTest.java
++++ b/tests/robotests/src/com/android/settings/applications/appinfo/AppButtonsPreferenceControllerTest.java
+@@ -60,6 +60,7 @@ import com.android.settings.R;
+ import com.android.settings.SettingsActivity;
+ import com.android.settings.core.InstrumentedPreferenceFragment;
+ import com.android.settings.testutils.FakeFeatureFactory;
++import com.android.settings.testutils.shadow.ShadowUtils;
+ import com.android.settingslib.applications.AppUtils;
+ import com.android.settingslib.applications.ApplicationsState;
+ import com.android.settingslib.applications.instantapps.InstantAppDataProvider;
+@@ -85,6 +86,7 @@ import org.robolectric.util.ReflectionHelpers;
+ 
+ import java.util.Set;
+ 
++@Config(shadows = {ShadowUtils.class})
+ @RunWith(RobolectricTestRunner.class)
+ public class AppButtonsPreferenceControllerTest {
+ 
+@@ -168,6 +170,7 @@ public class AppButtonsPreferenceControllerTest {
+     @After
+     public void tearDown() {
+         ShadowAppUtils.reset();
++        ShadowUtils.reset();
+     }
+ 
+     @Test
+diff --git a/tests/robotests/testutils/com/android/settings/testutils/shadow/ShadowUtils.java b/tests/robotests/testutils/com/android/settings/testutils/shadow/ShadowUtils.java
+index ed03bcc841..7d115f81ac 100644
+--- a/tests/robotests/testutils/com/android/settings/testutils/shadow/ShadowUtils.java
++++ b/tests/robotests/testutils/com/android/settings/testutils/shadow/ShadowUtils.java
+@@ -51,6 +51,7 @@ public class ShadowUtils {
+     private static boolean sIsBatteryPresent;
+     private static boolean sIsMultipleBiometricsSupported;
+     private static boolean sIsPrivateProfile;
++    private static boolean sIsProtectedPackage;
+ 
+     @Implementation
+     protected static int enforceSameOwner(Context context, int userId) {
+@@ -84,6 +85,7 @@ public class ShadowUtils {
+         sIsBatteryPresent = true;
+         sIsMultipleBiometricsSupported = false;
+         sIsPrivateProfile = false;
++        sIsProtectedPackage = false;
+     }
+ 
+     public static void setIsDemoUser(boolean isDemoUser) {
+@@ -199,4 +201,13 @@ public class ShadowUtils {
+     public static void setIsPrivateProfile(boolean isPrivateProfile) {
+         sIsPrivateProfile = isPrivateProfile;
+     }
++
++    @Implementation
++    protected static boolean isProtectedPackage(Context context, String packageName) {
++        return sIsProtectedPackage;
++    }
++
++    public static void setIsProtectedPackage(boolean isProtectedPackage) {
++        sIsProtectedPackage = isProtectedPackage;
++    }
+ }
+diff --git a/tests/spa_unit/src/com/android/settings/spa/app/appinfo/PackageInfoPresenterTest.kt b/tests/spa_unit/src/com/android/settings/spa/app/appinfo/PackageInfoPresenterTest.kt
+index 5dd66e8fff..f35359fe66 100644
+--- a/tests/spa_unit/src/com/android/settings/spa/app/appinfo/PackageInfoPresenterTest.kt
++++ b/tests/spa_unit/src/com/android/settings/spa/app/appinfo/PackageInfoPresenterTest.kt
+@@ -17,6 +17,7 @@
+ package com.android.settings.spa.app.appinfo
+ 
+ import android.app.ActivityManager
++import android.app.KeyguardManager
+ import android.app.settings.SettingsEnums
+ import android.content.Context
+ import android.content.Intent
+@@ -25,6 +26,8 @@ import android.content.pm.PackageManager
+ import android.net.Uri
+ import androidx.test.core.app.ApplicationProvider
+ import androidx.test.ext.junit.runners.AndroidJUnit4
++import com.android.dx.mockito.inline.extended.ExtendedMockito
++import com.android.settings.Utils
+ import com.android.settings.testutils.FakeFeatureFactory
+ import com.android.settings.testutils.mockAsUser
+ import com.android.settingslib.spaprivileged.framework.common.activityManager
+@@ -33,8 +36,11 @@ import com.google.common.truth.Truth.assertThat
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.runBlocking
+ import kotlinx.coroutines.test.TestScope
++import org.junit.After
++import org.junit.Before
+ import org.junit.Test
+ import org.junit.runner.RunWith
++import org.mockito.MockitoSession
+ import org.mockito.kotlin.any
+ import org.mockito.kotlin.argumentCaptor
+ import org.mockito.kotlin.doNothing
+@@ -43,6 +49,7 @@ import org.mockito.kotlin.mock
+ import org.mockito.kotlin.spy
+ import org.mockito.kotlin.verify
+ import org.mockito.kotlin.whenever
++import org.mockito.quality.Strictness
+ 
+ @RunWith(AndroidJUnit4::class)
+ class PackageInfoPresenterTest {
+@@ -51,9 +58,14 @@ class PackageInfoPresenterTest {
+ 
+     private val mockActivityManager = mock<ActivityManager>()
+ 
++    private val mockKeyguardManager = mock<KeyguardManager>()
++
++    private lateinit var mockSession: MockitoSession
++
+     private val context: Context = spy(ApplicationProvider.getApplicationContext()) {
+         on { packageManager } doReturn mockPackageManager
+         on { activityManager } doReturn mockActivityManager
++        on { getSystemService(Context.KEYGUARD_SERVICE) } doReturn mockKeyguardManager
+         doNothing().whenever(mock).startActivityAsUser(any(), any())
+         mock.mockAsUser()
+     }
+@@ -66,6 +78,24 @@ class PackageInfoPresenterTest {
+     private val packageInfoPresenter =
+         PackageInfoPresenter(context, PACKAGE_NAME, USER_ID, TestScope(), packageManagers)
+ 
++    private var isUserAuthenticated: Boolean = false
++
++    @Before
++    fun setUp() {
++        mockSession = ExtendedMockito.mockitoSession()
++            .initMocks(this)
++            .mockStatic(Utils::class.java)
++            .strictness(Strictness.LENIENT)
++            .startMocking()
++        whenever(Utils.isProtectedPackage(context, PACKAGE_NAME)).thenReturn(false)
++    }
++
++    @After
++    fun tearDown() {
++        mockSession.finishMocking()
++        isUserAuthenticated = false
++    }
++
+     @Test
+     fun isInterestedAppChange_packageChanged_isInterested() {
+         val intent = Intent(Intent.ACTION_PACKAGE_CHANGED).apply {
+@@ -129,25 +159,37 @@ class PackageInfoPresenterTest {
+         packageInfoPresenter.disable()
+         delay(100)
+ 
+-        verifyAction(SettingsEnums.ACTION_SETTINGS_DISABLE_APP)
+-        verify(mockPackageManager).setApplicationEnabledSetting(
+-            PACKAGE_NAME, PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER, 0
+-        )
++        verifyDisablePackage()
++    }
++
++    @Test
++    fun disable_protectedPackage() = runBlocking {
++        mockProtectedPackage()
++        setAuthPassesAutomatically()
++
++        packageInfoPresenter.disable()
++        delay(100)
++
++        verifyUserAuthenticated()
++        verifyDisablePackage()
+     }
+ 
+     @Test
+     fun startUninstallActivity() = runBlocking {
+         packageInfoPresenter.startUninstallActivity()
+ 
+-        verifyAction(SettingsEnums.ACTION_SETTINGS_UNINSTALL_APP)
+-        val intent = argumentCaptor<Intent> {
+-            verify(context).startActivityAsUser(capture(), any())
+-        }.firstValue
+-        with(intent) {
+-            assertThat(action).isEqualTo(Intent.ACTION_UNINSTALL_PACKAGE)
+-            assertThat(data?.schemeSpecificPart).isEqualTo(PACKAGE_NAME)
+-            assertThat(getBooleanExtra(Intent.EXTRA_UNINSTALL_ALL_USERS, true)).isEqualTo(false)
+-        }
++        verifyUninstallPackage()
++    }
++
++    @Test
++    fun startUninstallActivity_protectedPackage() = runBlocking {
++        mockProtectedPackage()
++        setAuthPassesAutomatically()
++
++        packageInfoPresenter.startUninstallActivity()
++
++        verifyUserAuthenticated()
++        verifyUninstallPackage()
+     }
+ 
+     @Test
+@@ -164,8 +206,19 @@ class PackageInfoPresenterTest {
+         packageInfoPresenter.forceStop()
+         delay(100)
+ 
+-        verifyAction(SettingsEnums.ACTION_APP_FORCE_STOP)
+-        verify(mockActivityManager).forceStopPackageAsUser(PACKAGE_NAME, USER_ID)
++        verifyForceStop()
++    }
++
++    @Test
++    fun forceStop_protectedPackage() = runBlocking {
++        mockProtectedPackage()
++        setAuthPassesAutomatically()
++
++        packageInfoPresenter.forceStop()
++        delay(100)
++
++        verifyUserAuthenticated()
++        verifyForceStop()
+     }
+ 
+     @Test
+@@ -179,6 +232,48 @@ class PackageInfoPresenterTest {
+         verify(metricsFeatureProvider).action(context, category, PACKAGE_NAME)
+     }
+ 
++    private fun verifyDisablePackage() {
++        verifyAction(SettingsEnums.ACTION_SETTINGS_DISABLE_APP)
++        verify(mockPackageManager).setApplicationEnabledSetting(
++            PACKAGE_NAME, PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER, 0
++        )
++    }
++
++    private fun verifyUninstallPackage() {
++        verifyAction(SettingsEnums.ACTION_SETTINGS_UNINSTALL_APP)
++
++        val intent = argumentCaptor<Intent> {
++            verify(context).startActivityAsUser(capture(), any())
++        }.firstValue
++        with(intent) {
++            assertThat(action).isEqualTo(Intent.ACTION_UNINSTALL_PACKAGE)
++            assertThat(data?.schemeSpecificPart).isEqualTo(PACKAGE_NAME)
++            assertThat(getBooleanExtra(Intent.EXTRA_UNINSTALL_ALL_USERS, true)).isEqualTo(false)
++        }
++    }
++
++    private fun verifyForceStop() {
++        verifyAction(SettingsEnums.ACTION_APP_FORCE_STOP)
++        verify(mockActivityManager).forceStopPackageAsUser(PACKAGE_NAME, USER_ID)
++    }
++
++    private fun setAuthPassesAutomatically() {
++        whenever(mockKeyguardManager.isKeyguardSecure).thenReturn(mockUserAuthentication())
++    }
++
++    private fun mockUserAuthentication() : Boolean {
++        isUserAuthenticated = true
++        return false
++    }
++
++    private fun mockProtectedPackage() {
++        whenever(Utils.isProtectedPackage(context, PACKAGE_NAME)).thenReturn(true)
++    }
++
++    private fun verifyUserAuthenticated() {
++        assertThat(isUserAuthenticated).isTrue()
++    }
++
+     private companion object {
+         const val PACKAGE_NAME = "package.name"
+         const val USER_ID = 0
+-- 
+2.49.0.395.g12beb8f557-goog
+
