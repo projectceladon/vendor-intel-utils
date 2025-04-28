@@ -1,0 +1,96 @@
+From 0f3c01c326b6966590c652adec5baa61351756e4 Mon Sep 17 00:00:00 2001
+From: yutingfang <yutingfang@google.com>
+Date: Thu, 23 Jan 2025 11:18:35 -0800
+Subject: [PATCH] Impose a threshold on the number of attributed op entries
+ returned in a binder call
+
+In the binder call IAppOpsService#getPackagesForOpsForDevice, we return
+attributed op entries encapsulated in PackageOps. When there are too
+many attribution tags used for a lot of ops, the size of PackageOps can
+be bloated and exceeds the binder transaction limit. However, this is
+usually caused by DoS attack from malicious apps. A normal app wouldn't
+run into this problem.
+
+This CL adds a threshold on the number of attributed op entries that can
+be returned in a binder call. The threshold is calculated assuming each
+attribution tag is 50 bytes long.
+
+Bug: 372678095
+Test: manual. Using provided POC app from the reporter.
+Verified the exception is gone after the fix.
+Flag: EXEMPT bugfix
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:eec34e2716bfa613be30b0a0b9a173e2005a6c00)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:767b4f7c3657fa29548a4464da6790dbca8aebda)
+Merged-In: I43cd4b9774dbe554edcec296c4b8a3d7fc60c85c
+Change-Id: I43cd4b9774dbe554edcec296c4b8a3d7fc60c85c
+---
+ .../android/server/appop/AppOpsService.java   | 29 +++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/services/core/java/com/android/server/appop/AppOpsService.java b/services/core/java/com/android/server/appop/AppOpsService.java
+index 2076aadf9bd7..1dd864ded7cb 100644
+--- a/services/core/java/com/android/server/appop/AppOpsService.java
++++ b/services/core/java/com/android/server/appop/AppOpsService.java
+@@ -227,6 +227,13 @@ public class AppOpsService extends IAppOpsService.Stub {
+      */
+     private static final int CURRENT_VERSION = 1;
+ 
++    /**
++     * The upper limit of total number of attributed op entries that can be returned in a binder
++     * transaction to avoid TransactionTooLargeException
++     */
++    private static final int NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD = 2000;
++
++
+     private SensorPrivacyManager mSensorPrivacyManager;
+ 
+     // Write at most every 30 minutes.
+@@ -1660,6 +1667,8 @@ public class AppOpsService extends IAppOpsService.Stub {
+                 Manifest.permission.GET_APP_OPS_STATS,
+                 Binder.getCallingPid(), Binder.getCallingUid())
+                 == PackageManager.PERMISSION_GRANTED;
++        int totalAttributedOpEntryCount = 0;
++
+         if (ops == null) {
+             resOps = new ArrayList<>();
+             for (int j = 0; j < pkgOps.size(); j++) {
+@@ -1667,7 +1676,12 @@ public class AppOpsService extends IAppOpsService.Stub {
+                 if (opRestrictsRead(curOp.op) && !shouldReturnRestrictedAppOps) {
+                     continue;
+                 }
+-                resOps.add(getOpEntryForResult(curOp, persistentDeviceId));
++                if (totalAttributedOpEntryCount > NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD) {
++                    break;
++                }
++                OpEntry opEntry = getOpEntryForResult(curOp, persistentDeviceId);
++                resOps.add(opEntry);
++                totalAttributedOpEntryCount += opEntry.getAttributedOpEntries().size();
+             }
+         } else {
+             for (int j = 0; j < ops.length; j++) {
+@@ -1679,10 +1693,21 @@ public class AppOpsService extends IAppOpsService.Stub {
+                     if (opRestrictsRead(curOp.op) && !shouldReturnRestrictedAppOps) {
+                         continue;
+                     }
+-                    resOps.add(getOpEntryForResult(curOp, persistentDeviceId));
++                    if (totalAttributedOpEntryCount > NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD) {
++                        break;
++                    }
++                    OpEntry opEntry = getOpEntryForResult(curOp, persistentDeviceId);
++                    resOps.add(opEntry);
++                    totalAttributedOpEntryCount += opEntry.getAttributedOpEntries().size();
+                 }
+             }
+         }
++
++        if (totalAttributedOpEntryCount > NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD) {
++            Slog.w(TAG, "The number of attributed op entries has exceeded the threshold. This "
++                    + "could be due to DoS attack from malicious apps. The result is throttled.");
++        }
++
+         return resOps;
+     }
+ 
+-- 
+2.49.0.395.g12beb8f557-goog
+
