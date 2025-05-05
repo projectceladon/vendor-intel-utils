@@ -1,0 +1,246 @@
+From 9181e21a1805e2aa988ca9cb449a17b0bd937d98 Mon Sep 17 00:00:00 2001
+From: Junjie Mao <junjie.mao@intel.com>
+Date: Thu, 24 Aug 2023 21:34:49 -0400
+Subject: [PATCH 10/14] drm: allocate from shared memory for ivshmem-backend
+ virtio-gpu
+
+Signed-off-by: Junjie Mao <junjie.mao@intel.com>
+---
+ drivers/gpu/drm/drm_gem.c       |  16 ++++-
+ drivers/virtio/virtio_ivshmem.c | 118 ++++++++++++++++++++++++++++++--
+ 2 files changed, 129 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_gem.c b/drivers/gpu/drm/drm_gem.c
+index a2ebf0bb3f04..88b15c17e3f0 100644
+--- a/drivers/gpu/drm/drm_gem.c
++++ b/drivers/gpu/drm/drm_gem.c
+@@ -499,6 +499,9 @@ static void drm_gem_check_release_pagevec(struct pagevec *pvec)
+ 	cond_resched();
+ }
+ 
++extern struct page *virtio_ivshmem_allocate_page(struct device *dev);
++extern void virtio_ivshmem_free_page(struct device *dev, struct page *page);
++
+ /**
+  * drm_gem_get_pages - helper to allocate backing pages for a GEM object
+  * from shmem
+@@ -553,7 +556,11 @@ struct page **drm_gem_get_pages(struct drm_gem_object *obj)
+ 	mapping_set_unevictable(mapping);
+ 
+ 	for (i = 0; i < npages; i++) {
+-		p = shmem_read_mapping_page(mapping, i);
++		if (strcmp(obj->dev->dev->parent->driver->name, "virtio-ivshmem") == 0) {
++			p = virtio_ivshmem_allocate_page(obj->dev->dev->parent);
++		} else {
++			p = shmem_read_mapping_page(mapping, i);
++		}
+ 		if (IS_ERR(p))
+ 			goto fail;
+ 		pages[i] = p;
+@@ -575,6 +582,9 @@ struct page **drm_gem_get_pages(struct drm_gem_object *obj)
+ 	while (i--) {
+ 		if (!pagevec_add(&pvec, pages[i]))
+ 			drm_gem_check_release_pagevec(&pvec);
++		if (strcmp(obj->dev->dev->parent->driver->name, "virtio-ivshmem") == 0) {
++			virtio_ivshmem_free_page(obj->dev->dev->parent, pages[i]);
++		}
+ 	}
+ 	if (pagevec_count(&pvec))
+ 		drm_gem_check_release_pagevec(&pvec);
+@@ -623,6 +633,10 @@ void drm_gem_put_pages(struct drm_gem_object *obj, struct page **pages,
+ 		/* Undo the reference we took when populating the table */
+ 		if (!pagevec_add(&pvec, pages[i]))
+ 			drm_gem_check_release_pagevec(&pvec);
++
++		if (strcmp(obj->dev->dev->parent->driver->name, "virtio-ivshmem") == 0) {
++			virtio_ivshmem_free_page(obj->dev->dev->parent, pages[i]);
++		}
+ 	}
+ 	if (pagevec_count(&pvec))
+ 		drm_gem_check_release_pagevec(&pvec);
+diff --git a/drivers/virtio/virtio_ivshmem.c b/drivers/virtio/virtio_ivshmem.c
+index aa2d858a50e4..db6ac2c44dc0 100644
+--- a/drivers/virtio/virtio_ivshmem.c
++++ b/drivers/virtio/virtio_ivshmem.c
+@@ -11,6 +11,7 @@
+ #include <linux/mutex.h>
+ #include <linux/pci.h>
+ #include <linux/dma-map-ops.h>
++#include <linux/memremap.h>
+ #include <linux/virtio.h>
+ #include <linux/virtio_config.h>
+ #include <linux/virtio_ring.h>
+@@ -61,6 +62,7 @@ struct virtio_ivshmem_device {
+ 	u32 peer_id;
+ 
+ 	void *shmem;
++	resource_size_t shmem_phys_base;
+ 	resource_size_t shmem_sz;
+ 	struct virtio_ivshmem_header *virtio_header;
+ 
+@@ -643,6 +645,36 @@ static void virtio_ivshmem_release_dev(struct device *_d)
+ 	devm_kfree(&vi_dev->pci_dev->dev, vi_dev);
+ }
+ 
++static struct page *dma_addr_to_page(struct virtio_ivshmem_device *vi_dev, dma_addr_t dma_handle)
++{
++	unsigned long pfn;
++
++	if (dma_handle >= vi_dev->shmem_sz) {
++		WARN(1, "DMA handle 0x%llx is out of shared memory region [0x%p, 0x%p)\n",
++		     dma_handle, vi_dev->shmem, vi_dev->shmem + vi_dev->shmem_sz);
++		return NULL;
++	}
++
++	pfn = PHYS_PFN(vi_dev->shmem_phys_base + dma_handle);
++	return pfn_to_page(pfn);
++}
++
++static dma_addr_t page_to_dma_addr(struct virtio_ivshmem_device *vi_dev, struct page *page)
++{
++	unsigned long pfn;
++	dma_addr_t dma_handle;
++
++	pfn = page_to_pfn(page);
++	dma_handle = PFN_PHYS(pfn) - vi_dev->shmem_phys_base;
++	if (dma_handle >= vi_dev->shmem_sz) {
++		WARN(1, "PFN 0x%lx is out of shared memory region [0x%p, 0x%p)\n",
++		     pfn, vi_dev->shmem, vi_dev->shmem + vi_dev->shmem_sz);
++		return 0;
++	}
++
++	return dma_handle;
++}
++
+ static void *vi_dma_alloc(struct device *dev, size_t size,
+ 			  dma_addr_t *dma_handle, gfp_t flag,
+ 			  unsigned long attrs)
+@@ -729,6 +761,28 @@ static void vi_dma_unmap_page(struct device *dev, dma_addr_t dma_addr,
+ 	vi_dma_free(dev, size, buffer, dma_addr, attrs);
+ }
+ 
++static int vi_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
++			 enum dma_data_direction dir, unsigned long attrs)
++{
++	struct pci_dev *pci_dev = to_pci_dev(dev);
++	struct virtio_ivshmem_device *vi_dev = pci_get_drvdata(pci_dev);
++	struct scatterlist *s;
++	int i;
++
++	for_each_sg(sg, s, nents, i) {
++		sg_dma_address(s) = page_to_dma_addr(vi_dev, sg_page(s));
++		sg_dma_len(s) = s->length;
++	}
++
++	return nents;
++}
++
++static void vi_dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nents,
++			    enum dma_data_direction dir, unsigned long attrs)
++{
++	/* no op */
++}
++
+ static void
+ vi_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_addr,
+ 			   size_t size, enum dma_data_direction dir)
+@@ -758,10 +812,53 @@ static const struct dma_map_ops virtio_ivshmem_dma_ops = {
+ 	.free = vi_dma_free,
+ 	.map_page = vi_dma_map_page,
+ 	.unmap_page = vi_dma_unmap_page,
++	.map_sg = vi_dma_map_sg,
++	.unmap_sg = vi_dma_unmap_sg,
+ 	.sync_single_for_cpu = vi_dma_sync_single_for_cpu,
+ 	.sync_single_for_device = vi_dma_sync_single_for_device,
+ };
+ 
++struct page *virtio_ivshmem_allocate_page(struct device *dev)
++{
++	struct pci_dev *pci_dev = to_pci_dev(dev);
++	struct virtio_ivshmem_device *vi_dev = pci_get_drvdata(pci_dev);
++	void *addr;
++	dma_addr_t dma_handle;
++	struct page *page;
++
++	addr = vi_dma_alloc(dev, PAGE_SIZE, &dma_handle, 0, 0);
++	if (!addr)
++		return ERR_PTR(-ENOMEM);
++
++	page = dma_addr_to_page(vi_dev, dma_handle);
++	if (!page)
++		return ERR_PTR(-EINVAL);
++
++	return page;
++}
++
++void virtio_ivshmem_free_page(struct device *dev, struct page *page)
++{
++	struct pci_dev *pci_dev = to_pci_dev(dev);
++	struct virtio_ivshmem_device *vi_dev = pci_get_drvdata(pci_dev);
++	void *addr;
++	dma_addr_t dma_handle;
++
++	dma_handle = page_to_dma_addr(vi_dev, page);
++	addr = vi_dev->shmem + dma_handle;
++
++	vi_dma_free(dev, PAGE_SIZE, addr, dma_handle, 0);
++}
++
++static void virtio_ivshmem_region_page_free(struct page *page)
++{
++	/* No op here. Only to suppress the warning in free_zone_device_page(). */
++}
++
++static const struct dev_pagemap_ops virtio_ivshmem_region_pgmap_ops = {
++	.page_free		= virtio_ivshmem_region_page_free,
++};
++
+ static int virtio_ivshmem_probe(struct pci_dev *pci_dev,
+ 				const struct pci_device_id *pci_id)
+ {
+@@ -771,6 +868,7 @@ static int virtio_ivshmem_probe(struct pci_dev *pci_dev,
+ 	phys_addr_t section_addr;
+ 	u32 id;
+ 	int ret;
++	struct dev_pagemap *pgmap;
+ 
+ 	vi_dev = devm_kzalloc(&pci_dev->dev, sizeof(*vi_dev), GFP_KERNEL);
+ 	if (!vi_dev)
+@@ -815,9 +913,22 @@ static int virtio_ivshmem_probe(struct pci_dev *pci_dev,
+ 				     DRV_NAME))
+ 		return -EBUSY;
+ 
++	pgmap = devm_kzalloc(&pci_dev->dev, sizeof(*pgmap), GFP_KERNEL);
++	if (!pgmap)
++		return -ENOMEM;
++
++	pgmap->type = MEMORY_DEVICE_FS_DAX;
++
++	pgmap->range = (struct range) {
++		.start = (phys_addr_t) section_addr,
++		.end = (phys_addr_t) section_addr + section_sz - 1,
++	};
++	pgmap->nr_range = 1;
++	pgmap->ops = &virtio_ivshmem_region_pgmap_ops;
++
++	vi_dev->shmem_phys_base = section_addr;
+ 	vi_dev->shmem_sz = section_sz;
+-	vi_dev->shmem = devm_memremap(&pci_dev->dev, section_addr, section_sz,
+-				      MEMREMAP_WC);
++	vi_dev->shmem = devm_memremap_pages(&pci_dev->dev, pgmap);
+ 	if (!vi_dev->shmem)
+ 		return -ENOMEM;
+ 
+@@ -878,8 +989,7 @@ static void virtio_ivshmem_remove(struct pci_dev *pci_dev)
+ }
+ 
+ static const struct pci_device_id virtio_ivshmem_id_table[] = {
+-	{ PCI_DEVICE(PCI_VENDOR_ID_REDHAT_QUMRANET, 0x1110),
+-	  (PCI_CLASS_OTHERS << 16) | IVSHM_PROTO_VIRTIO_FRONT, 0xffff00 },
++	{ PCI_DEVICE(PCI_VENDOR_ID_REDHAT_QUMRANET, 0x1110) },
+ 	{ 0 }
+ };
+ 
+-- 
+2.17.1
+

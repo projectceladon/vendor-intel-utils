@@ -1,0 +1,531 @@
+From 1dd3c18a425942758b7c11203d14347db2f7ee60 Mon Sep 17 00:00:00 2001
+From: HeYue <yue.he@intel.com>
+Date: Mon, 25 Sep 2023 11:08:28 +0800
+Subject: [PATCH 04/14] ivshm: map control registers to user space and signal
+ interrupts
+
+Signed-off-by: Junjie Mao <junjie.mao@intel.com>
+---
+ drivers/ivshm/ivshm.c         | 189 ++++++++++++++++++++++++++++++++--
+ drivers/ivshm/ivshm.h         |  38 ++++---
+ drivers/ivshm/ivshm_ivshmem.c |  84 ++++++++++++++-
+ 3 files changed, 284 insertions(+), 27 deletions(-)
+
+diff --git a/drivers/ivshm/ivshm.c b/drivers/ivshm/ivshm.c
+index dea111151d73..8d2cc813c4ce 100644
+--- a/drivers/ivshm/ivshm.c
++++ b/drivers/ivshm/ivshm.c
+@@ -10,6 +10,8 @@
+ #include <linux/fs.h>
+ #include <linux/io.h>
+ #include <linux/memremap.h>
++#include <linux/eventfd.h>
++#include <linux/slab.h>
+ 
+ #include "ivshm.h"
+ 
+@@ -117,8 +119,85 @@ static void ivshm_free_minor(struct idr *idr, unsigned long minor)
+  * Char device operations
+  */
+ 
++static const struct vm_operations_struct ivshm_vm_ops = {
++#ifdef CONFIG_HAVE_IOREMAP_PROT
++	.access = generic_access_phys,
++#endif
++};
++
++static int ivshm_open(struct inode *inode, struct file *filep)
++{
++	struct ivshm_device *idev;
++	struct ivshm_user *user;
++	int err = 0;
++
++	mutex_lock(&minor_lock);
++	idev = idr_find(&ivshm_idr, iminor(inode));
++	mutex_unlock(&minor_lock);
++	if (!idev) {
++		err = -ENODEV;
++		goto out;
++	}
++
++	get_device(&idev->dev);
++
++	if (!try_module_get(idev->owner)) {
++		err = -ENODEV;
++		goto out_put_device;
++	}
++
++	user = kmalloc(sizeof(*user), GFP_KERNEL);
++	if (!user) {
++		err = -ENOMEM;
++		goto out_put_module;
++	}
++
++	user->idev = idev;
++	filep->private_data = user;
++
++	return 0;
++
++out_put_module:
++	module_put(idev->owner);
++out_put_device:
++	put_device(&idev->dev);
++out:
++	return err;
++}
++
++static int ivshm_release(struct inode *inode, struct file *filep)
++{
++	struct ivshm_user *user = filep->private_data;
++	struct ivshm_device *idev = user->idev;
++	int err = 0;
++
++	kfree(user);
++	module_put(idev->owner);
++	put_device(&idev->dev);
++
++	return err;
++}
++
++static int ivshm_mmap(struct file *filep, struct vm_area_struct *vma)
++{
++	struct ivshm_user *user = filep->private_data;
++	struct ivshm_device *idev = user->idev;
++	int err = 0;
++
++	if (vma->vm_end < vma->vm_start)
++		return -EINVAL;
++
++	vma->vm_ops = &ivshm_vm_ops;
++	err = vm_iomap_memory(vma, idev->info->dev_ctrls, idev->info->dev_ctrls_len);
++
++	return err;
++}
++
+ static const struct file_operations ivshm_fops = {
+ 	.owner		= THIS_MODULE,
++	.open		= ivshm_open,
++	.release	= ivshm_release,
++	.mmap		= ivshm_mmap,
+ 	.llseek		= noop_llseek,
+ };
+ 
+@@ -149,6 +228,8 @@ static int ivshm_region_open(struct inode *inode, struct file *filep)
+ 		goto out_put_module;
+ 	}
+ 
++	INIT_LIST_HEAD(&user->listeners);
++	spin_lock_init(&user->listeners_list_lock);
+ 	user->iregion = iregion;
+ 	filep->private_data = user;
+ 
+@@ -168,8 +249,19 @@ static int ivshm_region_release(struct inode *inode, struct file *filep)
+ {
+ 	struct ivshm_region_user *user = filep->private_data;
+ 	struct ivshm_region *iregion = user->iregion;
++	struct ivshm_listener *listener, *next;
+ 	int err = 0;
+ 
++	spin_lock(&user->listeners_list_lock);
++	list_for_each_entry_safe(listener, next, &user->listeners, region_user_list) {
++		spin_lock(&iregion->listeners[listener->vector].list_lock);
++		list_del(&iregion->listeners[listener->vector].list);
++		spin_unlock(&iregion->listeners[listener->vector].list_lock);
++		eventfd_ctx_put(listener->evt);
++		kfree(listener);
++	}
++	spin_unlock(&user->listeners_list_lock);
++
+ 	kfree(user);
+ 	module_put(iregion->owner);
+ 	put_device(&iregion->dev);
+@@ -225,12 +317,6 @@ static ssize_t ivshm_region_write(struct file *filep, const char __user *buf,
+ 	return ret;
+ }
+ 
+-static const struct vm_operations_struct ivshm_region_vm_ops = {
+-#ifdef CONFIG_HAVE_IOREMAP_PROT
+-	.access = generic_access_phys,
+-#endif
+-};
+-
+ static int ivshm_region_mmap(struct file *filep, struct vm_area_struct *vma)
+ {
+ 	struct ivshm_region_user *user = filep->private_data;
+@@ -240,12 +326,67 @@ static int ivshm_region_mmap(struct file *filep, struct vm_area_struct *vma)
+ 	if (vma->vm_end < vma->vm_start)
+ 		return -EINVAL;
+ 
+-	vma->vm_ops = &ivshm_region_vm_ops;
++	vma->vm_ops = &ivshm_vm_ops;
+ 	err = vm_iomap_memory(vma, iregion->base, iregion->len);
+ 
+ 	return err;
+ }
+ 
++static int ivshm_region_add_listener(struct ivshm_region_user *user, struct ivshm_region *iregion, unsigned long arg)
++{
++	struct ivshm_listener_data args;
++	struct ivshm_listener *listener;
++	struct eventfd_ctx *evt;
++
++	if (copy_from_user(&args, (void __user *)arg, sizeof(args)))
++		return -EFAULT;
++
++	if (args.vector >= iregion->nr_vectors)
++		return -EINVAL;
++
++	evt = eventfd_ctx_fdget(args.evt_fd);
++	if (!evt)
++		return -EINVAL;
++
++	listener = kzalloc(sizeof(*listener), GFP_KERNEL);
++	if (!listener)
++		return -ENOMEM;
++
++	INIT_LIST_HEAD(&listener->region_user_list);
++	INIT_LIST_HEAD(&listener->region_list);
++
++	listener->vector = args.vector;
++	listener->evt = evt;
++
++	spin_lock(&user->listeners_list_lock);
++	spin_lock(&iregion->listeners[args.vector].list_lock);
++	list_add(&iregion->listeners[args.vector].list, &listener->region_list);
++	list_add(&user->listeners, &listener->region_user_list);
++	spin_unlock(&iregion->listeners[args.vector].list_lock);
++	spin_unlock(&user->listeners_list_lock);
++
++	return 0;
++}
++
++static long ivshm_region_ioctl(struct file *filep, unsigned int cmd, unsigned long arg)
++{
++	struct ivshm_region_user *user = filep->private_data;
++	struct ivshm_region *iregion = user->iregion;
++	int err;
++
++	switch (cmd) {
++	case IVSHM_ADD_LISTENER:
++		err = ivshm_region_add_listener(user, iregion, arg);
++		break;
++	default:
++		dev_err(&iregion->dev, "Unsupported ioctl command: 0x%x.\n", cmd);
++		err = -EOPNOTSUPP;
++		break;
++	}
++
++	return err;
++}
++
+ static const struct file_operations ivshm_region_fops = {
+ 	.owner		= THIS_MODULE,
+ 	.open		= ivshm_region_open,
+@@ -254,7 +395,7 @@ static const struct file_operations ivshm_region_fops = {
+ 	.write		= ivshm_region_write,
+ 	.mmap		= ivshm_region_mmap,
+ 	.poll		= NULL,
+-	.unlocked_ioctl	= NULL,
++	.unlocked_ioctl	= ivshm_region_ioctl,
+ 	.fasync		= NULL,
+ 	.llseek		= default_llseek,
+ };
+@@ -268,6 +409,21 @@ static const struct dev_pagemap_ops ivshm_region_pgmap_ops = {
+ 	.page_free		= ivshm_region_page_free,
+ };
+ 
++/**
++ * Interrupt notifier
++ */
++
++void ivshm_notify_listeners(struct ivshm_region *iregion, int vector)
++{
++	struct ivshm_listener *listener;
++
++	spin_lock(&iregion->listeners[vector].list_lock);
++	list_for_each_entry(listener, &iregion->listeners[vector].list, region_list) {
++		eventfd_signal(listener->evt, 1);
++	}
++	spin_unlock(&iregion->listeners[vector].list_lock);
++}
++
+ /**
+  * Device registeration
+  */
+@@ -389,11 +545,14 @@ void ivshm_unregister_device(struct ivshm_info *info)
+ }
+ EXPORT_SYMBOL_GPL(ivshm_unregister_device);
+ 
+-int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_size_t base, resource_size_t len)
++int
++ivshm_register_region(struct ivshm_device *idev, const char *name,
++		      resource_size_t base, resource_size_t len,
++		      size_t nr_vectors, struct ivshm_region **out)
+ {
+ 	struct ivshm_region *iregion;
+ 	struct dev_pagemap *pgmap;
+-	int ret;
++	int ret, i;
+ 
+ 	iregion = kzalloc(sizeof(*iregion), GFP_KERNEL);
+ 	if (!iregion)
+@@ -410,12 +569,17 @@ int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_
+ 		goto err_get_minor;
+ 	}
+ 
+-	iregion->listeners = kcalloc(idev->info->nr_vectors, sizeof(*iregion->listeners), GFP_KERNEL);
++	iregion->listeners = kcalloc(nr_vectors, sizeof(*iregion->listeners), GFP_KERNEL);
+ 	if (!iregion->listeners) {
+ 		ret = -ENOMEM;
+ 		goto err_alloc_lists;
+ 	}
+ 
++	for (i = 0; i < nr_vectors; i++) {
++		INIT_LIST_HEAD(&iregion->listeners[i].list);
++		spin_lock_init(&iregion->listeners[i].list_lock);
++	}
++
+ 	device_initialize(&iregion->dev);
+ 	iregion->dev.devt = MKDEV(ivshm_region_major, iregion->minor);
+ 	iregion->dev.class = &ivshm_region_class;
+@@ -433,6 +597,7 @@ int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_
+ 
+ 	iregion->base = base;
+ 	iregion->len = len;
++	iregion->nr_vectors = nr_vectors;
+ 
+ 	pgmap = devm_kzalloc(&iregion->dev, sizeof(*pgmap), GFP_KERNEL);
+ 	if (!pgmap)
+@@ -454,6 +619,8 @@ int ivshm_register_region(struct ivshm_device *idev, const char *name, resource_
+ 	}
+ 
+ 	list_add(&iregion->list, &idev->regions);
++	if (out)
++		*out = iregion;
+ 
+ 	return 0;
+ 
+diff --git a/drivers/ivshm/ivshm.h b/drivers/ivshm/ivshm.h
+index d7a29b1a3e9c..12b66f02252c 100644
+--- a/drivers/ivshm/ivshm.h
++++ b/drivers/ivshm/ivshm.h
+@@ -10,19 +10,12 @@
+  * Ioctl APIs
+  */
+ 
+-#define IVSHM_LISTENER_EVENTFD    0
+-
+-union ivshm_listener_data {
+-	int fd;
+-};
+-
+-struct ivshm_add_listener {
++struct ivshm_listener_data {
+ 	int vector;
+-	int listener_type;
+-	union ivshm_listener_data data;
++	int evt_fd;
+ };
+ 
+-#define IVSHM_ADD_LISTENER	_IOW('u', 100, struct ivshm_add_listener)
++#define IVSHM_ADD_LISTENER	_IOW('u', 100, struct ivshm_listener_data)
+ 
+ /*
+  * Internal data structures
+@@ -50,27 +43,38 @@ struct ivshm_region {
+ 	resource_size_t        base;
+ 	resource_size_t        len;
+ 	void                  *mem;
+-	struct list_head      *listeners;
++	struct {
++		struct list_head       list;
++		spinlock_t             list_lock;
++	} *listeners;
++	size_t                 nr_vectors;
+ 
+ 	int                    minor;
+ };
+ 
++struct ivshm_user {
++	struct ivshm_device   *idev;
++};
++
+ struct ivshm_region_user {
+ 	struct ivshm_region   *iregion;
+ 	struct list_head       listeners;
++	spinlock_t             listeners_list_lock;
+ };
+ 
+ struct ivshm_listener {
+ 	struct list_head       region_user_list;
+ 	struct list_head       region_list;
+ 
+-	int type;
+-	union ivshm_listener_data data;
++	int vector;
++	struct eventfd_ctx *evt;
+ };
+ 
+ struct ivshm_info {
++	resource_size_t        dev_ctrls;
++	resource_size_t        dev_ctrls_len;
++
+ 	struct ivshm_device   *ivshm_dev;
+-	size_t                 nr_vectors;
+ };
+ 
+ extern int __must_check
+@@ -82,6 +86,10 @@ __devm_ivshm_register_device(struct module *owner,
+ 
+ extern void ivshm_unregister_device(struct ivshm_info *info);
+ 
+-extern int ivshm_register_region(struct ivshm_device *dev, const char *name, resource_size_t base, resource_size_t size);
++extern int ivshm_register_region(struct ivshm_device *dev, const char *name,
++				 resource_size_t base, resource_size_t size,
++				 size_t nr_vectors, struct ivshm_region **out);
++
++extern void ivshm_notify_listeners(struct ivshm_region *iregion, int vector);
+ 
+ #endif
+diff --git a/drivers/ivshm/ivshm_ivshmem.c b/drivers/ivshm/ivshm_ivshmem.c
+index a7ab1f882547..b395c06e561a 100644
+--- a/drivers/ivshm/ivshm_ivshmem.c
++++ b/drivers/ivshm/ivshm_ivshmem.c
+@@ -3,6 +3,7 @@
+ #include <linux/device.h>
+ #include <linux/module.h>
+ #include <linux/pci.h>
++#include <linux/interrupt.h>
+ 
+ #include "ivshm.h"
+ 
+@@ -10,16 +11,76 @@
+ #define DRIVER_AUTHOR	"Junjie Mao <junjie.mao@intel.com>"
+ #define DRIVER_DESC	"Inter-VM shared memory driver for QEMU ivshmem devices"
+ 
++#define IVSHMEM_REG_BAR  0
+ #define IVSHMEM_MEM_BAR  2
+ 
+ struct ivshm_ivshmem_dev {
+ 	struct ivshm_info  info;
+ 	struct pci_dev    *pdev;
++
++	struct ivshm_region *iregion;
++	struct msix_entry   *msix_entries;
++	int                  nvecs;
+ };
+ 
++static irqreturn_t ivshmem_irq_handler(int irq, void *arg)
++{
++	struct ivshm_ivshmem_dev *idev = (struct ivshm_ivshmem_dev *)arg;
++	irqreturn_t ret = IRQ_NONE;
++	int i;
++
++	for (i = 0; i < idev->nvecs; i++) {
++		if (idev->msix_entries[i].vector == irq) {
++			ivshm_notify_listeners(idev->iregion, i);
++			ret = IRQ_HANDLED;
++		}
++	}
++
++	return ret;
++}
++
++static int ivshmem_init_msix(struct ivshm_ivshmem_dev *idev)
++{
++	int i, nvecs;
++	int err;
++
++	nvecs = pci_msix_vec_count(idev->pdev);
++	if (!nvecs)
++		return -EINVAL;
++
++	idev->msix_entries = devm_kcalloc(&idev->pdev->dev, nvecs,
++					  sizeof(*idev->msix_entries), GFP_KERNEL);
++	if (!idev->msix_entries)
++		return -ENOMEM;
++
++	for (i = 0; i < nvecs; i++)
++		idev->msix_entries[i].entry = i;
++
++	err = pci_enable_msix_exact(idev->pdev, idev->msix_entries, nvecs);
++	if (err)
++		return err;
++
++	for (i = 0; i < nvecs; i++) {
++		err = request_irq(idev->msix_entries[i].vector, ivshmem_irq_handler, 0, "ivshmem", idev);
++		if (err) {
++			int j;
++			for (j = 0; j < i; j++) {
++				free_irq(idev->msix_entries[i].vector, idev);
++			}
++
++			pci_disable_msix(idev->pdev);
++			return err;
++		}
++	}
++
++	idev->nvecs = nvecs;
++	return 0;
++}
++
+ static int probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ {
+ 	struct ivshm_ivshmem_dev *idev;
++	struct ivshm_region *iregion;
+ 	resource_size_t start, len;
+ 	int err;
+ 
+@@ -41,6 +102,9 @@ static int probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 		goto out_release_region;
+ 	}
+ 
++	idev->pdev = pdev;
++	idev->info.dev_ctrls = pci_resource_start(pdev, IVSHMEM_REG_BAR);
++	idev->info.dev_ctrls_len = pci_resource_len(pdev, IVSHMEM_REG_BAR);
+ 	err = devm_ivshm_register_device(&pdev->dev, &idev->info);
+ 	if (err) {
+ 		dev_err(&pdev->dev, "Failed to register ivshm device.\n");
+@@ -49,13 +113,22 @@ static int probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 
+ 	start = pci_resource_start(pdev, IVSHMEM_MEM_BAR);
+ 	len = pci_resource_len(pdev, IVSHMEM_MEM_BAR);
+-	err = ivshm_register_region(idev->info.ivshm_dev, "default", start, len);
++	err = ivshm_register_region(idev->info.ivshm_dev, "default", start, len, pci_msix_vec_count(pdev), &iregion);
+ 	if (err) {
+ 		dev_err(&pdev->dev, "Failed to register ivshm region.\n");
+ 		goto out_unregister_device;
+ 	}
+ 
++	idev->iregion = iregion;
++
++	err = ivshmem_init_msix(idev);
++	if (err) {
++		dev_err(&pdev->dev, "Failed to enable MSI-X.\n");
++		goto out_unregister_device;
++	}
++
+ 	pci_set_master(pdev);
++	pci_set_drvdata(pdev, idev);
+ 
+ 	return 0;
+ 
+@@ -70,6 +143,15 @@ static int probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ 
+ static void remove(struct pci_dev *pdev)
+ {
++	struct ivshm_ivshmem_dev *idev = pci_get_drvdata(pdev);
++	int i;
++
++	for (i = 0; i < idev->nvecs; i++)
++		free_irq(idev->msix_entries[i].vector, idev);
++
++	ivshm_unregister_device(&idev->info);
++	pci_release_regions(pdev);
++	pci_disable_device(pdev);
+ }
+ 
+ static struct pci_driver ivshmem_pci_driver = {
+-- 
+2.17.1
+
