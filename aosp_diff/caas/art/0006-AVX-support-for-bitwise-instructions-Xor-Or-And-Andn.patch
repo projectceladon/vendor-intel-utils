@@ -1,0 +1,1328 @@
+From 4ea3712301efe61774f0047856d3f8923788145a Mon Sep 17 00:00:00 2001
+From: Neeraj Solanki <neeraj.solanki@intel.com>
+Date: Mon, 5 Aug 2019 23:16:56 +0530
+Subject: [PATCH] AVX support for bitwise instructions (Xor, Or, And, Andn)
+
+Test: ./test.py --host --64, test-art-host-gtest
+
+Change-Id: Ia8302d12d3ebb8447d73db576fb5b945485c11e1
+Signed-off-by: Neeraj Solanki <neeraj.solanki@intel.com>
+---
+ compiler/optimizing/code_generator_vector_x86.cc   |  70 ++--
+ .../optimizing/code_generator_vector_x86_64.cc     |  70 ++--
+ compiler/utils/x86/assembler_x86.cc                | 244 ++++++++++++++
+ compiler/utils/x86/assembler_x86.h                 |  12 +
+ compiler/utils/x86/assembler_x86_test.cc           |  48 +++
+ compiler/utils/x86_64/assembler_x86_64.cc          | 359 +++++++++++++++++++++
+ compiler/utils/x86_64/assembler_x86_64.h           |  12 +
+ compiler/utils/x86_64/assembler_x86_64_test.cc     |  61 ++++
+ 8 files changed, 832 insertions(+), 44 deletions(-)
+
+diff --git a/compiler/optimizing/code_generator_vector_x86.cc b/compiler/optimizing/code_generator_vector_x86.cc
+index 29a1354..68aef77 100644
+--- a/compiler/optimizing/code_generator_vector_x86.cc
++++ b/compiler/optimizing/code_generator_vector_x86.cc
+@@ -63,9 +63,10 @@ void InstructionCodeGeneratorX86::VisitVecReplicateScalar(HVecReplicateScalar* i
+   LocationSummary* locations = instruction->GetLocations();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+ 
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   // Shorthand for any type of zero.
+   if (IsZeroBitPattern(instruction->InputAt(0))) {
+-    __ xorps(dst, dst);
++    cpu_has_avx ? __ vxorps(dst, dst, dst) : __ xorps(dst, dst);
+     return;
+   }
+ 
+@@ -808,14 +809,20 @@ void InstructionCodeGeneratorX86::VisitVecMax(HVecMax* instruction) {
+ }
+ 
+ void LocationsBuilderX86::VisitVecAnd(HVecAnd* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecAnd(HVecAnd* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -826,15 +833,15 @@ void InstructionCodeGeneratorX86::VisitVecAnd(HVecAnd* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ pand(dst, src);
++      cpu_has_avx ? __ vpand(dst, other_src, src) : __ pand(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ andps(dst, src);
++      cpu_has_avx ? __ vandps(dst, other_src, src) : __ andps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ andpd(dst, src);
++      cpu_has_avx ? __ vandpd(dst, other_src, src) : __ andpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -843,14 +850,20 @@ void InstructionCodeGeneratorX86::VisitVecAnd(HVecAnd* instruction) {
+ }
+ 
+ void LocationsBuilderX86::VisitVecAndNot(HVecAndNot* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecAndNot(HVecAndNot* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -861,15 +874,15 @@ void InstructionCodeGeneratorX86::VisitVecAndNot(HVecAndNot* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ pandn(dst, src);
++      cpu_has_avx ? __ vpandn(dst, other_src, src) : __ pandn(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ andnps(dst, src);
++      cpu_has_avx ? __ vandnps(dst, other_src, src) : __ andnps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ andnpd(dst, src);
++      cpu_has_avx ? __ vandnpd(dst, other_src, src) : __ andnpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -878,14 +891,20 @@ void InstructionCodeGeneratorX86::VisitVecAndNot(HVecAndNot* instruction) {
+ }
+ 
+ void LocationsBuilderX86::VisitVecOr(HVecOr* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecOr(HVecOr* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -896,15 +915,15 @@ void InstructionCodeGeneratorX86::VisitVecOr(HVecOr* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ por(dst, src);
++      cpu_has_avx ? __ vpor(dst, other_src, src) : __ por(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ orps(dst, src);
++      cpu_has_avx ? __ vorps(dst, other_src, src) : __ orps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ orpd(dst, src);
++      cpu_has_avx ? __ vorpd(dst, other_src, src) : __ orpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -913,14 +932,20 @@ void InstructionCodeGeneratorX86::VisitVecOr(HVecOr* instruction) {
+ }
+ 
+ void LocationsBuilderX86::VisitVecXor(HVecXor* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86::VisitVecXor(HVecXor* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -931,15 +956,15 @@ void InstructionCodeGeneratorX86::VisitVecXor(HVecXor* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ pxor(dst, src);
++      cpu_has_avx ? __ vpxor(dst, other_src, src) : __ pxor(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ xorps(dst, src);
++      cpu_has_avx ? __ vxorps(dst, other_src, src) : __ xorps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ xorpd(dst, src);
++      cpu_has_avx ? __ vxorpd(dst, other_src, src) : __ xorpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -1092,7 +1117,8 @@ void InstructionCodeGeneratorX86::VisitVecSetScalars(HVecSetScalars* instruction
+   DCHECK_EQ(1u, instruction->InputCount());  // only one input currently implemented
+ 
+   // Zero out all other elements first.
+-  __ xorps(dst, dst);
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
++  cpu_has_avx ? __ vxorps(dst, dst, dst) : __ xorps(dst, dst);
+ 
+   // Shorthand for any type of zero.
+   if (IsZeroBitPattern(instruction->InputAt(0))) {
+diff --git a/compiler/optimizing/code_generator_vector_x86_64.cc b/compiler/optimizing/code_generator_vector_x86_64.cc
+index f28268b..19dfd1d 100644
+--- a/compiler/optimizing/code_generator_vector_x86_64.cc
++++ b/compiler/optimizing/code_generator_vector_x86_64.cc
+@@ -58,9 +58,10 @@ void InstructionCodeGeneratorX86_64::VisitVecReplicateScalar(HVecReplicateScalar
+   LocationSummary* locations = instruction->GetLocations();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
+ 
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   // Shorthand for any type of zero.
+   if (IsZeroBitPattern(instruction->InputAt(0))) {
+-    __ xorps(dst, dst);
++    cpu_has_avx ? __ vxorps(dst, dst, dst) : __ xorps(dst, dst);
+     return;
+   }
+ 
+@@ -791,14 +792,20 @@ void InstructionCodeGeneratorX86_64::VisitVecMax(HVecMax* instruction) {
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecAnd(HVecAnd* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecAnd(HVecAnd* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -809,15 +816,15 @@ void InstructionCodeGeneratorX86_64::VisitVecAnd(HVecAnd* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ pand(dst, src);
++      cpu_has_avx ? __ vpand(dst, other_src, src) : __ pand(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ andps(dst, src);
++      cpu_has_avx ? __ vandps(dst, other_src, src) : __ andps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ andpd(dst, src);
++      cpu_has_avx ? __ vandpd(dst, other_src, src) : __ andpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -826,14 +833,20 @@ void InstructionCodeGeneratorX86_64::VisitVecAnd(HVecAnd* instruction) {
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecAndNot(HVecAndNot* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecAndNot(HVecAndNot* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -844,15 +857,15 @@ void InstructionCodeGeneratorX86_64::VisitVecAndNot(HVecAndNot* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ pandn(dst, src);
++      cpu_has_avx ? __ vpandn(dst, other_src, src) : __ pandn(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ andnps(dst, src);
++      cpu_has_avx ? __ vandnps(dst, other_src, src) : __ andnps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ andnpd(dst, src);
++      cpu_has_avx ? __ vandnpd(dst, other_src, src) : __ andnpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -861,14 +874,20 @@ void InstructionCodeGeneratorX86_64::VisitVecAndNot(HVecAndNot* instruction) {
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecOr(HVecOr* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecOr(HVecOr* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -879,15 +898,15 @@ void InstructionCodeGeneratorX86_64::VisitVecOr(HVecOr* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ por(dst, src);
++      cpu_has_avx ? __ vpor(dst, other_src, src) : __ por(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ orps(dst, src);
++      cpu_has_avx ? __ vorps(dst, other_src, src) : __ orps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ orpd(dst, src);
++      cpu_has_avx ? __ vorpd(dst, other_src, src) : __ orpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -896,14 +915,20 @@ void InstructionCodeGeneratorX86_64::VisitVecOr(HVecOr* instruction) {
+ }
+ 
+ void LocationsBuilderX86_64::VisitVecXor(HVecXor* instruction) {
+-  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  if (CpuHasAvxFeatureFlag()) {
++    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
++  } else {
++    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
++  }
+ }
+ 
+ void InstructionCodeGeneratorX86_64::VisitVecXor(HVecXor* instruction) {
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
+   LocationSummary* locations = instruction->GetLocations();
+-  DCHECK(locations->InAt(0).Equals(locations->Out()));
++  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
+   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
++  DCHECK(cpu_has_avx || other_src == dst);
+   switch (instruction->GetPackedType()) {
+     case DataType::Type::kBool:
+     case DataType::Type::kUint8:
+@@ -914,15 +939,15 @@ void InstructionCodeGeneratorX86_64::VisitVecXor(HVecXor* instruction) {
+     case DataType::Type::kInt64:
+       DCHECK_LE(2u, instruction->GetVectorLength());
+       DCHECK_LE(instruction->GetVectorLength(), 16u);
+-      __ pxor(dst, src);
++      cpu_has_avx ? __ vpxor(dst, other_src, src) : __ pxor(dst, src);
+       break;
+     case DataType::Type::kFloat32:
+       DCHECK_EQ(4u, instruction->GetVectorLength());
+-      __ xorps(dst, src);
++      cpu_has_avx ? __ vxorps(dst, other_src, src) : __ xorps(dst, src);
+       break;
+     case DataType::Type::kFloat64:
+       DCHECK_EQ(2u, instruction->GetVectorLength());
+-      __ xorpd(dst, src);
++      cpu_has_avx ? __ vxorpd(dst, other_src, src) : __ xorpd(dst, src);
+       break;
+     default:
+       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
+@@ -1070,7 +1095,8 @@ void InstructionCodeGeneratorX86_64::VisitVecSetScalars(HVecSetScalars* instruct
+   DCHECK_EQ(1u, instruction->InputCount());  // only one input currently implemented
+ 
+   // Zero out all other elements first.
+-  __ xorps(dst, dst);
++  bool cpu_has_avx = CpuHasAvxFeatureFlag();
++  cpu_has_avx ? __ vxorps(dst, dst, dst) : __ xorps(dst, dst);
+ 
+   // Shorthand for any type of zero.
+   if (IsZeroBitPattern(instruction->InputAt(0))) {
+diff --git a/compiler/utils/x86/assembler_x86.cc b/compiler/utils/x86/assembler_x86.cc
+index 84a8564..166aec8 100644
+--- a/compiler/utils/x86/assembler_x86.cc
++++ b/compiler/utils/x86/assembler_x86.cc
+@@ -1872,6 +1872,68 @@ void X86Assembler::pxor(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++/* VEX.128.66.0F.WIG EF /r VPXOR xmm1, xmm2, xmm3/m128 */
++void X86Assembler::vpxor(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0xEF);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++/* VEX.128.0F.WIG 57 /r VXORPS xmm1,xmm2, xmm3/m128 */
++void X86Assembler::vxorps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_NONE);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x57);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++/* VEX.128.66.0F.WIG 57 /r VXORPD xmm1,xmm2, xmm3/m128 */
++void X86Assembler::vxorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x57);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::andpd(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -1915,8 +1977,66 @@ void X86Assembler::pand(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++/* VEX.128.66.0F.WIG DB /r VPAND xmm1, xmm2, xmm3/m128 */
++void X86Assembler::vpand(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0xDB);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
++/* VEX.128.0F 54 /r VANDPS xmm1,xmm2, xmm3/m128 */
++void X86Assembler::vandps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_NONE);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x54);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
++/* VEX.128.66.0F 54 /r VANDPD xmm1, xmm2, xmm3/m128 */
++void X86Assembler::vandpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x54);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::andnpd(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -1943,6 +2063,68 @@ void X86Assembler::pandn(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++/* VEX.128.66.0F.WIG DF /r VPANDN xmm1, xmm2, xmm3/m128 */
++void X86Assembler::vpandn(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0xDF);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++/* VEX.128.0F 55 /r VANDNPS xmm1, xmm2, xmm3/m128 */
++void X86Assembler::vandnps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_NONE);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x55);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++/* VEX.128.66.0F 55 /r VANDNPD xmm1, xmm2, xmm3/m128 */
++void X86Assembler::vandnpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x55);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::orpd(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -1987,6 +2169,68 @@ void X86Assembler::por(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst, src);
+ }
+ 
++/* VEX.128.66.0F.WIG EB /r VPOR xmm1, xmm2, xmm3/m128 */
++void X86Assembler::vpor(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0xEB);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++/* VEX.128.0F 56 /r VORPS xmm1,xmm2, xmm3/m128 */
++void X86Assembler::vorps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_NONE);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x56);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
++
++/* VEX.128.66.0F 56 /r VORPD xmm1,xmm2, xmm3/m128 */
++void X86Assembler::vorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  uint8_t ByteZero = 0x00, ByteOne = 0x00;
++  /* Instruction VEX Prefix */
++  ByteZero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ true);
++  /* REX prefix is necessary only if an instruction references one of extended
++  registers or uses a 64-bit operand. */
++  ByteOne = EmitVexPrefixByteOne(/*R=*/ false,
++                                 X86ManagedRegister::FromXmmRegister(src1),
++                                 SET_VEX_L_128,
++                                 SET_VEX_PP_66);
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  // Instruction Opcode
++  EmitUint8(0x56);
++  // Instruction Operands
++  EmitXmmRegisterOperand(dst, src2);
++}
+ 
+ void X86Assembler::pavgb(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+diff --git a/compiler/utils/x86/assembler_x86.h b/compiler/utils/x86/assembler_x86.h
+index dce546e..1b6941c 100644
+--- a/compiler/utils/x86/assembler_x86.h
++++ b/compiler/utils/x86/assembler_x86.h
+@@ -545,21 +545,33 @@ class X86Assembler final : public Assembler {
+   void xorps(XmmRegister dst, const Address& src);
+   void xorps(XmmRegister dst, XmmRegister src);
+   void pxor(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
++  void vpxor(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vxorps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vxorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void andpd(XmmRegister dst, XmmRegister src);
+   void andpd(XmmRegister dst, const Address& src);
+   void andps(XmmRegister dst, XmmRegister src);
+   void andps(XmmRegister dst, const Address& src);
+   void pand(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
++  void vpand(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void andn(Register dst, Register src1, Register src2);  // no addr variant (for now)
+   void andnpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+   void andnps(XmmRegister dst, XmmRegister src);
+   void pandn(XmmRegister dst, XmmRegister src);
++  void vpandn(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandnps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandnpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void orpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+   void orps(XmmRegister dst, XmmRegister src);
+   void por(XmmRegister dst, XmmRegister src);
++  void vpor(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vorps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void pavgb(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+   void pavgw(XmmRegister dst, XmmRegister src);
+diff --git a/compiler/utils/x86/assembler_x86_test.cc b/compiler/utils/x86/assembler_x86_test.cc
+index bce0346..12d9646 100644
+--- a/compiler/utils/x86/assembler_x86_test.cc
++++ b/compiler/utils/x86/assembler_x86_test.cc
+@@ -861,6 +861,18 @@ TEST_F(AssemblerX86Test, PXor) {
+   DriverStr(RepeatFF(&x86::X86Assembler::pxor, "pxor %{reg2}, %{reg1}"), "pxor");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VPXor) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vpxor, "vpxor %{reg3}, %{reg2}, %{reg1}"), "vpxor");
++}
++
++TEST_F(AssemblerX86AVXTest, VXorPS) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vxorps, "vxorps %{reg3}, %{reg2}, %{reg1}"), "vxorps");
++}
++
++TEST_F(AssemblerX86AVXTest, VXorPD) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vxorpd, "vxorpd %{reg3}, %{reg2}, %{reg1}"), "vxorpd");
++}
++
+ TEST_F(AssemblerX86Test, AndPD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::andpd, "andpd %{reg2}, %{reg1}"), "andpd");
+ }
+@@ -873,6 +885,18 @@ TEST_F(AssemblerX86Test, PAnd) {
+   DriverStr(RepeatFF(&x86::X86Assembler::pand, "pand %{reg2}, %{reg1}"), "pand");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VPAnd) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vpand, "vpand %{reg3}, %{reg2}, %{reg1}"), "vpand");
++}
++
++TEST_F(AssemblerX86AVXTest, VAndPS) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vandps, "vandps %{reg3}, %{reg2}, %{reg1}"), "vandps");
++}
++
++TEST_F(AssemblerX86AVXTest, VAndPD) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vandpd, "vandpd %{reg3}, %{reg2}, %{reg1}"), "vandpd");
++}
++
+ TEST_F(AssemblerX86Test, Andn) {
+   DriverStr(RepeatRRR(&x86::X86Assembler::andn, "andn %{reg3}, %{reg2}, %{reg1}"), "andn");
+ }
+@@ -889,6 +913,18 @@ TEST_F(AssemblerX86Test, PAndn) {
+   DriverStr(RepeatFF(&x86::X86Assembler::pandn, "pandn %{reg2}, %{reg1}"), "pandn");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VPAndn) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vpandn, "vpandn %{reg3}, %{reg2}, %{reg1}"), "vpandn");
++}
++
++TEST_F(AssemblerX86AVXTest, VAndnPS) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vandnps, "vandnps %{reg3}, %{reg2}, %{reg1}"), "vandnps");
++}
++
++TEST_F(AssemblerX86AVXTest, VAndnPD) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vandnpd, "vandnpd %{reg3}, %{reg2}, %{reg1}"), "vandnpd");
++}
++
+ TEST_F(AssemblerX86Test, OrPD) {
+   DriverStr(RepeatFF(&x86::X86Assembler::orpd, "orpd %{reg2}, %{reg1}"), "orpd");
+ }
+@@ -901,6 +937,18 @@ TEST_F(AssemblerX86Test, POr) {
+   DriverStr(RepeatFF(&x86::X86Assembler::por, "por %{reg2}, %{reg1}"), "por");
+ }
+ 
++TEST_F(AssemblerX86AVXTest, VPor) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vpor, "vpor %{reg3}, %{reg2}, %{reg1}"), "vpor");
++}
++
++TEST_F(AssemblerX86AVXTest, VorPS) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vorps, "vorps %{reg3}, %{reg2}, %{reg1}"), "vorps");
++}
++
++TEST_F(AssemblerX86AVXTest, VorPD) {
++  DriverStr(RepeatFFF(&x86::X86Assembler::vorpd, "vorpd %{reg3}, %{reg2}, %{reg1}"), "vorpd");
++}
++
+ TEST_F(AssemblerX86Test, PAvgB) {
+   DriverStr(RepeatFF(&x86::X86Assembler::pavgb, "pavgb %{reg2}, %{reg1}"), "pavgb");
+ }
+diff --git a/compiler/utils/x86_64/assembler_x86_64.cc b/compiler/utils/x86_64/assembler_x86_64.cc
+index be8fe59..64246aa 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.cc
++++ b/compiler/utils/x86_64/assembler_x86_64.cc
+@@ -2643,6 +2643,95 @@ void X86_64Assembler::pxor(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++/* VEX.128.66.0F.WIG EF /r VPXOR xmm1, xmm2, xmm3/m128 */
++void X86_64Assembler::vpxor(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0xEF);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.0F.WIG 57 /r VXORPS xmm1,xmm2, xmm3/m128 */
++void X86_64Assembler::vxorps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x57);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.66.0F.WIG 57 /r VXORPD xmm1,xmm2, xmm3/m128 */
++void X86_64Assembler::vxorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x57);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
+ 
+ void X86_64Assembler::andpd(XmmRegister dst, const Address& src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+@@ -2679,6 +2768,96 @@ void X86_64Assembler::pand(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++/* VEX.128.66.0F.WIG DB /r VPAND xmm1, xmm2, xmm3/m128 */
++void X86_64Assembler::vpand(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0xDB);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.0F 54 /r VANDPS xmm1,xmm2, xmm3/m128 */
++void X86_64Assembler::vandps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x54);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.66.0F 54 /r VANDPD xmm1, xmm2, xmm3/m128 */
++void X86_64Assembler::vandpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x54);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
+ void X86_64Assembler::andn(CpuRegister dst, CpuRegister src1, CpuRegister src2) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   uint8_t byte_zero = EmitVexPrefixByteZero(/*is_twobyte_form=*/ false);
+@@ -2724,6 +2903,96 @@ void X86_64Assembler::pandn(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++/* VEX.128.66.0F.WIG DF /r VPANDN xmm1, xmm2, xmm3/m128 */
++void X86_64Assembler::vpandn(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0xDF);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.0F 55 /r VANDNPS xmm1, xmm2, xmm3/m128 */
++void X86_64Assembler::vandnps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x55);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.66.0F 55 /r VANDNPD xmm1, xmm2, xmm3/m128 */
++void X86_64Assembler::vandnpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x55);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
+ void X86_64Assembler::orpd(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitUint8(0x66);
+@@ -2750,6 +3019,96 @@ void X86_64Assembler::por(XmmRegister dst, XmmRegister src) {
+   EmitXmmRegisterOperand(dst.LowBits(), src);
+ }
+ 
++/* VEX.128.66.0F.WIG EB /r VPOR xmm1, xmm2, xmm3/m128 */
++void X86_64Assembler::vpor(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0xEB);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.0F 56 /r VORPS xmm1,xmm2, xmm3/m128 */
++void X86_64Assembler::vorps(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_NONE);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x56);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
++/* VEX.128.66.0F 56 /r VORPD xmm1,xmm2, xmm3/m128 */
++void X86_64Assembler::vorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2) {
++  DCHECK(CpuHasAVXorAVX2FeatureFlag());
++  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
++  bool is_twobyte_form = false;
++  uint8_t ByteZero = 0x00, ByteOne = 0x00, ByteTwo = 0x00;
++  if (!src2.NeedsRex()) {
++    is_twobyte_form = true;
++  }
++  X86_64ManagedRegister vvvv_reg =
++      X86_64ManagedRegister::FromXmmRegister(src1.AsFloatRegister());
++  ByteZero = EmitVexPrefixByteZero(is_twobyte_form);
++  if (is_twobyte_form) {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(), vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  } else {
++    ByteOne = EmitVexPrefixByteOne(dst.NeedsRex(),
++                                   /*X=*/ false,
++                                   src2.NeedsRex(),
++                                   SET_VEX_M_0F);
++    ByteTwo = EmitVexPrefixByteTwo(/*W=*/ false, vvvv_reg, SET_VEX_L_128, SET_VEX_PP_66);
++  }
++  EmitUint8(ByteZero);
++  EmitUint8(ByteOne);
++  if (!is_twobyte_form) {
++    EmitUint8(ByteTwo);
++  }
++  EmitUint8(0x56);
++  EmitXmmRegisterOperand(dst.LowBits(), src2);
++}
++
+ void X86_64Assembler::pavgb(XmmRegister dst, XmmRegister src) {
+   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+   EmitUint8(0x66);
+diff --git a/compiler/utils/x86_64/assembler_x86_64.h b/compiler/utils/x86_64/assembler_x86_64.h
+index 100707a..15f3ab9 100644
+--- a/compiler/utils/x86_64/assembler_x86_64.h
++++ b/compiler/utils/x86_64/assembler_x86_64.h
+@@ -584,20 +584,32 @@ class X86_64Assembler final : public Assembler {
+   void xorps(XmmRegister dst, const Address& src);
+   void xorps(XmmRegister dst, XmmRegister src);
+   void pxor(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
++  void vpxor(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vxorps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vxorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void andpd(XmmRegister dst, const Address& src);
+   void andpd(XmmRegister dst, XmmRegister src);
+   void andps(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+   void pand(XmmRegister dst, XmmRegister src);
++  void vpand(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void andn(CpuRegister dst, CpuRegister src1, CpuRegister src2);
+   void andnpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+   void andnps(XmmRegister dst, XmmRegister src);
+   void pandn(XmmRegister dst, XmmRegister src);
++  void vpandn(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandnps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vandnpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void orpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+   void orps(XmmRegister dst, XmmRegister src);
+   void por(XmmRegister dst, XmmRegister src);
++  void vpor(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vorps(XmmRegister dst, XmmRegister src1, XmmRegister src2);
++  void vorpd(XmmRegister dst, XmmRegister src1, XmmRegister src2);
+ 
+   void pavgb(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+   void pavgw(XmmRegister dst, XmmRegister src);
+diff --git a/compiler/utils/x86_64/assembler_x86_64_test.cc b/compiler/utils/x86_64/assembler_x86_64_test.cc
+index 3d58a6d..e3b8390 100644
+--- a/compiler/utils/x86_64/assembler_x86_64_test.cc
++++ b/compiler/utils/x86_64/assembler_x86_64_test.cc
+@@ -1625,6 +1625,21 @@ TEST_F(AssemblerX86_64Test, Pxor) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pxor, "pxor %{reg2}, %{reg1}"), "pxor");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VPXor) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vpxor,
++                      "vpxor %{reg3}, %{reg2}, %{reg1}"), "vpxor");
++}
++
++TEST_F(AssemblerX86_64AVXTest, VXorps) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vxorps,
++                      "vxorps %{reg3}, %{reg2}, %{reg1}"), "vxorps");
++}
++
++TEST_F(AssemblerX86_64AVXTest, VXorpd) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vxorpd,
++                      "vxorpd %{reg3}, %{reg2}, %{reg1}"), "vxorpd");
++}
++
+ TEST_F(AssemblerX86_64Test, Andps) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::andps, "andps %{reg2}, %{reg1}"), "andps");
+ }
+@@ -1636,6 +1651,22 @@ TEST_F(AssemblerX86_64Test, Andpd) {
+ TEST_F(AssemblerX86_64Test, Pand) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pand, "pand %{reg2}, %{reg1}"), "pand");
+ }
++
++TEST_F(AssemblerX86_64AVXTest, VPAnd) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vpand,
++                      "vpand %{reg3}, %{reg2}, %{reg1}"), "vpand");
++}
++
++TEST_F(AssemblerX86_64AVXTest, VAndps) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vandps,
++                      "vandps %{reg3}, %{reg2}, %{reg1}"), "vandps");
++}
++
++TEST_F(AssemblerX86_64AVXTest, VAndpd) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vandpd,
++                      "vandpd %{reg3}, %{reg2}, %{reg1}"), "vandpd");
++}
++
+ TEST_F(AssemblerX86_64Test, Andn) {
+   DriverStr(RepeatRRR(&x86_64::X86_64Assembler::andn, "andn %{reg3}, %{reg2}, %{reg1}"), "andn");
+ }
+@@ -1651,6 +1682,21 @@ TEST_F(AssemblerX86_64Test, Pandn) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pandn, "pandn %{reg2}, %{reg1}"), "pandn");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VPAndn) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vpandn,
++                      "vpandn %{reg3}, %{reg2}, %{reg1}"), "vpandn");
++}
++
++TEST_F(AssemblerX86_64AVXTest, VAndnps) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vandnps,
++                      "vandnps %{reg3}, %{reg2}, %{reg1}"), "vandnps");
++}
++
++TEST_F(AssemblerX86_64AVXTest, VAndnpd) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vandnpd,
++                      "vandnpd %{reg3}, %{reg2}, %{reg1}"), "vandnpd");
++}
++
+ TEST_F(AssemblerX86_64Test, Orps) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::orps, "orps %{reg2}, %{reg1}"), "orps");
+ }
+@@ -1663,6 +1709,21 @@ TEST_F(AssemblerX86_64Test, Por) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::por, "por %{reg2}, %{reg1}"), "por");
+ }
+ 
++TEST_F(AssemblerX86_64AVXTest, VPor) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vpor,
++                      "vpor %{reg3}, %{reg2}, %{reg1}"), "vpor");
++}
++
++TEST_F(AssemblerX86_64AVXTest, Vorps) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vorps,
++                      "vorps %{reg3}, %{reg2}, %{reg1}"), "vorps");
++}
++
++TEST_F(AssemblerX86_64AVXTest, Vorpd) {
++  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vorpd,
++                      "vorpd %{reg3}, %{reg2}, %{reg1}"), "vorpd");
++}
++
+ TEST_F(AssemblerX86_64Test, Pavgb) {
+   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pavgb, "pavgb %{reg2}, %{reg1}"), "pavgb");
+ }
+-- 
+2.7.4
+
