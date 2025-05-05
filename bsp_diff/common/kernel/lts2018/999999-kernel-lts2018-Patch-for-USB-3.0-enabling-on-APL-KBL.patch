@@ -1,0 +1,226 @@
+From 6a0085851b40c862c2ec5e442f61ddf9f5e53736 Mon Sep 17 00:00:00 2001
+From: Balaji <m.balaji@intel.com>
+Date: Fri, 6 Sep 2019 12:35:18 +0530
+Subject: [PATCH] kernel: lts2018: Patch for USB 3.0 enabling on APL/KBL/WHL
+
+Change-Id: Ic62f676d458f7dea86fb0fce4a02bf5103050c9f
+Tracked-On:
+Signed-off-by: Balaji <m.balaji@intel.com>
+---
+ drivers/usb/dwc3/core.c                       | 88 ++++++++++++++++++-
+ drivers/usb/dwc3/core.h                       |  1 +
+ drivers/usb/dwc3/ep0.c                        |  6 ++
+ drivers/usb/dwc3/gadget.c                     |  4 +
+ .../usb/roles/intel-xhci-usb-role-switch.c    |  4 +
+ 5 files changed, 102 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/usb/dwc3/core.c b/drivers/usb/dwc3/core.c
+index c25ec758e29b..2ff4491b6aa0 100644
+--- a/drivers/usb/dwc3/core.c
++++ b/drivers/usb/dwc3/core.c
+@@ -26,6 +26,7 @@
+ #include <linux/acpi.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/reset.h>
++#include <linux/timer.h>
+ 
+ #include <linux/usb/ch9.h>
+ #include <linux/usb/gadget.h>
+@@ -40,6 +41,89 @@
+ 
+ #define DWC3_DEFAULT_AUTOSUSPEND_DELAY	5000 /* ms */
+ 
++#define COMP_MODE_RECOVERY_MSECS 2000
++
++static void compliance_mode_recovery(unsigned long arg)
++{
++	struct dwc3 *dwc3;
++	int state;
++	unsigned long flags;
++
++	dwc3 = (struct dwc3 *) arg;
++
++
++	// Read link state
++
++	spin_lock_irqsave(&dwc3->lock, flags);
++	state = dwc3_gadget_get_link_state(dwc3);
++
++	// if in compliance mode or loopback mode, we need to revert the link to normal operation
++	// Couple options for resetting link state
++	// * setting link state to RESET - NOT WORKING
++	// * setting linsk state to SS disabled or RX detect
++	// * try a hard reset (we're afraid we will have to reconfigure the gadget with this method)
++	if (state == DWC3_LINK_STATE_CMPLY || state == DWC3_LINK_STATE_LPBK) {
++		printk("dwc3 compliance mode detected. Attempting recovery\n");
++
++		state = dwc3_gadget_set_link_state(dwc3, DWC3_LINK_STATE_SS_DIS);
++		if (state < 0) {
++			printk("Compliance -> SS.Disabled transition failed: %d (Timed out?)\n", state);
++
++		}
++
++		udelay(1000);
++		state = dwc3_gadget_set_link_state(dwc3, DWC3_LINK_STATE_RX_DET);
++		if (state < 0) {
++			printk("SS.Disabled -> Rx.Detect transition failed: %d (Timed out?)\n", state);
++		}
++	}
++
++	spin_unlock_irqrestore(&dwc3->lock, flags);
++/*
++	struct *xhci;
++	struct usb_hcd *hcd;
++	u32 temp;
++	int i;
++
++	xhci = (struct xhci_hcd *)arg;
++
++	for (i = 0; i < xhci->num_usb3_ports; i++) {
++		temp = xhci_readl(xhci, xhci->usb3_ports[i]);
++		if ((temp & PORT_PLS_MASK) == USB_SS_PORT_LS_COMP_MOD) {
++			xhci_dbg(xhci, "Compliance Mode Detected->Port %d!\n",
++					i + 1);
++			xhci_dbg(xhci, "Attempting Recovery routine!\n");
++			hcd = xhci->shared_hcd;
++
++			if (hcd->state == HC_STATE_SUSPENDED)
++				usb_hcd_resume_root_hub(hcd);
++
++			usb_hcd_poll_rh_status(hcd);
++		}
++	}
++
++	if (xhci->port_status_u0 != ((1 << xhci->num_usb3_ports)-1))
++		mod_timer(&xhci->comp_mode_recovery_timer,
++			jiffies + msecs_to_jiffies(COMP_MODE_RCVRY_MSECS));
++*/
++	/* TODO: figure out when we don't need to keep re-enabling this timer anymore */
++	mod_timer(&dwc3->comp_mode_recovery_timer,
++		jiffies + msecs_to_jiffies(COMP_MODE_RECOVERY_MSECS));
++}
++
++static void compliance_mode_recovery_timer_init(struct dwc3 *dwc3)
++{
++	timer_setup(&dwc3->comp_mode_recovery_timer,
++		compliance_mode_recovery, 0);
++
++	dwc3->comp_mode_recovery_timer.expires = jiffies +
++			msecs_to_jiffies(COMP_MODE_RECOVERY_MSECS);
++
++	add_timer(&dwc3->comp_mode_recovery_timer);
++	printk("Compliance Mode Recovery Timer Initialized.\n");
++}
++
++
+ /**
+  * dwc3_get_dr_mode - Validates and sets dr_mode
+  * @dwc: pointer to our context structure
+@@ -686,6 +770,7 @@ static void dwc3_core_exit(struct dwc3 *dwc)
+ 	clk_bulk_disable(dwc->num_clks, dwc->clks);
+ 	clk_bulk_unprepare(dwc->num_clks, dwc->clks);
+ 	reset_control_assert(dwc->reset);
++	del_timer_sync(&dwc->comp_mode_recovery_timer);
+ }
+ 
+ static bool dwc3_core_is_valid(struct dwc3 *dwc)
+@@ -1037,7 +1122,8 @@ static int dwc3_core_init(struct dwc3 *dwc)
+ 			dwc3_writel(dwc->regs, DWC3_GTXTHRCFG, reg);
+ 		}
+ 	}
+-
++	/* Enable timer to check for and recover from entering compliance mode */
++	compliance_mode_recovery_timer_init(dwc);
+ 	return 0;
+ 
+ err4:
+diff --git a/drivers/usb/dwc3/core.h b/drivers/usb/dwc3/core.h
+index 84d97e61e035..8e842473dead 100644
+--- a/drivers/usb/dwc3/core.h
++++ b/drivers/usb/dwc3/core.h
+@@ -1009,6 +1009,7 @@ struct dwc3_scratchpad_array {
+  *                 increments or 0 to disable.
+  */
+ struct dwc3 {
++	struct timer_list	comp_mode_recovery_timer;
+ 	struct work_struct	drd_work;
+ 	struct dwc3_trb		*ep0_trb;
+ 	void			*bounce;
+diff --git a/drivers/usb/dwc3/ep0.c b/drivers/usb/dwc3/ep0.c
+index 8efde178eef4..122cd3d60f04 100644
+--- a/drivers/usb/dwc3/ep0.c
++++ b/drivers/usb/dwc3/ep0.c
+@@ -330,10 +330,12 @@ static int dwc3_ep0_handle_status(struct dwc3 *dwc,
+ 		if ((dwc->speed == DWC3_DSTS_SUPERSPEED) ||
+ 		    (dwc->speed == DWC3_DSTS_SUPERSPEED_PLUS)) {
+ 			reg = dwc3_readl(dwc->regs, DWC3_DCTL);
++                        /*
+ 			if (reg & DWC3_DCTL_INITU1ENA)
+ 				usb_status |= 1 << USB_DEV_STAT_U1_ENABLED;
+ 			if (reg & DWC3_DCTL_INITU2ENA)
+ 				usb_status |= 1 << USB_DEV_STAT_U2_ENABLED;
++			*/
+ 		}
+ 
+ 		break;
+@@ -381,6 +383,7 @@ static int dwc3_ep0_handle_u1(struct dwc3 *dwc, enum usb_device_state state,
+ 		return -EINVAL;
+ 
+ 	reg = dwc3_readl(dwc->regs, DWC3_DCTL);
++        set = 0;
+ 	if (set)
+ 		reg |= DWC3_DCTL_INITU1ENA;
+ 	else
+@@ -403,6 +406,7 @@ static int dwc3_ep0_handle_u2(struct dwc3 *dwc, enum usb_device_state state,
+ 		return -EINVAL;
+ 
+ 	reg = dwc3_readl(dwc->regs, DWC3_DCTL);
++	set = 0;
+ 	if (set)
+ 		reg |= DWC3_DCTL_INITU2ENA;
+ 	else
+@@ -625,9 +629,11 @@ static int dwc3_ep0_set_config(struct dwc3 *dwc, struct usb_ctrlrequest *ctrl)
+ 			 * Enable transition to U1/U2 state when
+ 			 * nothing is pending from application.
+ 			 */
++/*
+ 			reg = dwc3_readl(dwc->regs, DWC3_DCTL);
+ 			reg |= (DWC3_DCTL_ACCEPTU1ENA | DWC3_DCTL_ACCEPTU2ENA);
+ 			dwc3_writel(dwc->regs, DWC3_DCTL, reg);
++*/
+ 		}
+ 		break;
+ 
+diff --git a/drivers/usb/dwc3/gadget.c b/drivers/usb/dwc3/gadget.c
+index 8b1c6bfc4325..2b929f70650b 100644
+--- a/drivers/usb/dwc3/gadget.c
++++ b/drivers/usb/dwc3/gadget.c
+@@ -1793,6 +1793,10 @@ static void dwc3_gadget_setup_nump(struct dwc3 *dwc)
+ static inline bool platform_is_bxtp(void)
+ {
+ #ifdef CONFIG_X86_64
++
++        printk("\n Return bxt check \n ");
++        return false;
++
+ 	if ((boot_cpu_data.x86_model == 0x5c || boot_cpu_data.x86_model == 0x8e)
+ 		&& (boot_cpu_data.x86_stepping >= 0x8)
+ 		&& (boot_cpu_data.x86_stepping <= 0xf))
+diff --git a/drivers/usb/roles/intel-xhci-usb-role-switch.c b/drivers/usb/roles/intel-xhci-usb-role-switch.c
+index 9e1f7df082c1..1ba419b6f118 100644
+--- a/drivers/usb/roles/intel-xhci-usb-role-switch.c
++++ b/drivers/usb/roles/intel-xhci-usb-role-switch.c
+@@ -201,6 +201,10 @@ static int intel_xhci_usb_probe(struct platform_device *pdev)
+ 	if (IS_ERR(data->role_sw))
+ 		return PTR_ERR(data->role_sw);
+ 
++	intel_xhci_usb_set_role(dev, USB_ROLE_HOST);
++	msleep(10);
++	intel_xhci_usb_set_role(dev, USB_ROLE_DEVICE);
++
+ 	data->dev = dev;
+ 	data->pm_nb.notifier_call = intel_xhci_usb_pm_notifier;
+ 	register_pm_notifier(&data->pm_nb);
+-- 
+2.21.0
+
