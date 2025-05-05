@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 # autopatch.sh: script to manage patches on top of repo
 # Copyright (C) 2019 Intel Corporation. All rights reserved.
 # Author: sgnanase <sundar.gnanasekaran@intel.com>
