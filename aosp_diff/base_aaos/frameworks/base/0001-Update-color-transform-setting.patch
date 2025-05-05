@@ -1,0 +1,689 @@
+From 9493b1fe9ec847210409c8541364380f62f891f2 Mon Sep 17 00:00:00 2001
+From: zhonghuis <zhonghui.shi@intel.com>
+Date: Mon, 15 Apr 2024 14:53:20 +0000
+Subject: [PATCH] Update color transform setting
+
+update default settings for color transform parameters
+update color transform matrix setting for hue, whitebalance and saturation
+add new handler for handling contrast and luminance change
+
+Signed-off-by: zhonghuis <zhonghui.shi@intel.com>
+---
+ core/api/system-current.txt                   |   6 +-
+ .../hardware/display/ColorDisplayManager.java |   6 +-
+ .../display/color/ColorDisplayService.java    | 106 ++++++++++++++-
+ .../color/DisplayTransformManager.java        | 127 ++++++++++++++++++
+ .../color/GlobalContrastTintController.java   |  45 +++----
+ .../color/GlobalHueTintController.java        |  34 ++---
+ .../color/GlobalLuminanceTintController.java  |  52 ++++---
+ .../color/GlobalSaturationTintController.java |  28 ++--
+ .../GlobalWhitebalanceTintController.java     |   1 +
+ .../server/display/color/TintController.java  |  10 ++
+ 10 files changed, 316 insertions(+), 99 deletions(-)
+
+diff --git a/core/api/system-current.txt b/core/api/system-current.txt
+index 7394e34fa4bd..d4af27f0cce3 100644
+--- a/core/api/system-current.txt
++++ b/core/api/system-current.txt
+@@ -4484,9 +4484,9 @@ package android.hardware.display {
+     method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public int getNightDisplayAutoMode();
+     method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public int getTransformCapabilities();
+     method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setAppSaturationLevel(@NonNull String, @IntRange(from=0, to=100) int);
+-    method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setContrastLevel(@IntRange(from=0, to=100) int);
+-    method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setHueLevel(@IntRange(from=0, to=100) int);
+-    method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setLuminanceLevel(@IntRange(from=0, to=100) int);
++    method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setContrastLevel(@IntRange(from=0, to=255) int);
++    method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setHueLevel(@IntRange(from=0, to=360) int);
++    method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setLuminanceLevel(@IntRange(from=0, to=255) int);
+     method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setWhitebalanceLevel(@IntRange(from=0, to=100) int);
+     method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setNightDisplayAutoMode(int);
+     method @RequiresPermission(android.Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS) public boolean setNightDisplayCustomEndTime(@NonNull java.time.LocalTime);
+diff --git a/core/java/android/hardware/display/ColorDisplayManager.java b/core/java/android/hardware/display/ColorDisplayManager.java
+index db4c8da88579..fe1b5be16718 100644
+--- a/core/java/android/hardware/display/ColorDisplayManager.java
++++ b/core/java/android/hardware/display/ColorDisplayManager.java
+@@ -400,7 +400,7 @@ public final class ColorDisplayManager {
+      */
+     @SystemApi
+     @RequiresPermission(Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS)
+-    public boolean setHueLevel(@IntRange(from = 0, to = 100) int hueLevel) {
++    public boolean setHueLevel(@IntRange(from = 0, to = 360) int hueLevel) {
+         return mManager.setHueLevel(hueLevel);
+     }
+ 
+@@ -413,7 +413,7 @@ public final class ColorDisplayManager {
+      */
+     @SystemApi
+     @RequiresPermission(Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS)
+-    public boolean setContrastLevel(@IntRange(from = 0, to = 100) int contrastLevel) {
++    public boolean setContrastLevel(@IntRange(from = 0, to = 255) int contrastLevel) {
+         return mManager.setContrastLevel(contrastLevel);
+     }
+ 
+@@ -439,7 +439,7 @@ public final class ColorDisplayManager {
+      */
+     @SystemApi
+     @RequiresPermission(Manifest.permission.CONTROL_DISPLAY_COLOR_TRANSFORMS)
+-    public boolean setLuminanceLevel(@IntRange(from = 0, to = 100) int luminanceLevel) {
++    public boolean setLuminanceLevel(@IntRange(from = 0, to = 255) int luminanceLevel) {
+         return mManager.setLuminanceLevel(luminanceLevel);
+     }
+ 
+diff --git a/services/core/java/com/android/server/display/color/ColorDisplayService.java b/services/core/java/com/android/server/display/color/ColorDisplayService.java
+index 1bbb34c47461..38f548529088 100644
+--- a/services/core/java/com/android/server/display/color/ColorDisplayService.java
++++ b/services/core/java/com/android/server/display/color/ColorDisplayService.java
+@@ -91,6 +91,7 @@ import java.time.LocalDateTime;
+ import java.time.LocalTime;
+ import java.time.ZoneId;
+ import java.time.format.DateTimeParseException;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ /**
+  * Controls the display's color transforms.
+@@ -124,6 +125,9 @@ public final class ColorDisplayService extends SystemService {
+ 
+     private static final int MSG_APPLY_GLOBAL_LUMINANCE = 10;
+ 
++    private static final int MIN_COLOR_TEMPERATURE = 4000;
++    private static final int WHITE_BALANCE_SCALE = 20;
++
+     /**
+      * Return value if a setting has not been set.
+      */
+@@ -444,11 +448,11 @@ public final class ColorDisplayService extends SystemService {
+                         .setActivated(mNightDisplayTintController.isActivatedSetting());
+             }
+         }
+-
++        
+         if (mDisplayWhiteBalanceTintController.isAvailable(getContext())) {
+             // Prepare the display white balance transform matrix.
+             mDisplayWhiteBalanceTintController.setUp(getContext(), true /* needsLinear */);
+-
++            
+             updateDisplayWhiteBalanceStatus();
+         }
+ 
+@@ -810,6 +814,94 @@ public final class ColorDisplayService extends SystemService {
+         }
+     }
+ 
++    private void applyContrast(TintController tintController, boolean immediate) {
++        tintController.cancelAnimator();
++
++        final DisplayTransformManager dtm = getLocalService(DisplayTransformManager.class);
++        final AtomicInteger from = dtm.getColorContrast(tintController.getLevel());
++        final AtomicInteger to = tintController.getValue();
++
++        if (immediate) {
++            dtm.setColorContrast(tintController.getLevel(), to);
++        } else {
++            ValueAnimator valueAnimator = new ValueAnimator();
++            valueAnimator.setObjectValues(from == null ? 128 : from.get(), to.get());
++            tintController.setAnimator(valueAnimator);
++            valueAnimator.setInterpolator(AnimationUtils.loadInterpolator(
++                    getContext(), android.R.interpolator.fast_out_slow_in));
++            valueAnimator.addUpdateListener((ValueAnimator animator) -> {
++                final AtomicInteger value = new AtomicInteger((Integer) animator.getAnimatedValue());
++                dtm.setColorContrast(tintController.getLevel(), value);
++            });
++            valueAnimator.addListener(new AnimatorListenerAdapter() {
++
++                private boolean mIsCancelled;
++
++                @Override
++                public void onAnimationCancel(Animator animator) {
++                    mIsCancelled = true;
++                }
++
++                @Override
++                public void onAnimationEnd(Animator animator) {
++                    ValueAnimator t = (ValueAnimator) animator;
++                    if (!mIsCancelled) {
++                        // Ensure final color value is set at the end of the animation. If the
++                        // animation is cancelled then don't set the final color value so the new
++                        // animator can pick up from where this one left off.
++                        dtm.setColorContrast(tintController.getLevel(), to);
++                    }
++                    tintController.setAnimator(null);
++                }
++            });
++            valueAnimator.start();
++        }
++    }
++
++    private void applyLuminance(TintController tintController, boolean immediate) {
++        tintController.cancelAnimator();
++
++        final DisplayTransformManager dtm = getLocalService(DisplayTransformManager.class);
++        final AtomicInteger from = dtm.getColorLuminance(tintController.getLevel());
++        final AtomicInteger to = tintController.getValue();
++
++        if (immediate) {
++            dtm.setColorLuminance(tintController.getLevel(), to);
++        } else {
++            ValueAnimator valueAnimator = new ValueAnimator();
++            valueAnimator.setObjectValues(from == null ? 128 : from.get(), to.get());
++            tintController.setAnimator(valueAnimator);
++            valueAnimator.setInterpolator(AnimationUtils.loadInterpolator(
++                    getContext(), android.R.interpolator.fast_out_slow_in));
++            valueAnimator.addUpdateListener((ValueAnimator animator) -> {
++                final AtomicInteger value = new AtomicInteger((Integer) animator.getAnimatedValue());
++                dtm.setColorLuminance(tintController.getLevel(), value);
++            });
++            valueAnimator.addListener(new AnimatorListenerAdapter() {
++
++                private boolean mIsCancelled;
++
++                @Override
++                public void onAnimationCancel(Animator animator) {
++                    mIsCancelled = true;
++                }
++
++                @Override
++                public void onAnimationEnd(Animator animator) {
++                    ValueAnimator t = (ValueAnimator) animator;
++                    if (!mIsCancelled) {
++                        // Ensure final color matrix is set at the end of the animation. If the
++                        // animation is cancelled then don't set the final color matrix so the new
++                        // animator can pick up from where this one left off.
++                        dtm.setColorLuminance(tintController.getLevel(), to);
++                    }
++                    tintController.setAnimator(null);
++                }
++            });
++            valueAnimator.start();
++        }
++    }
++
+     /**
+      * Returns the first date time corresponding to the local time that occurs before the provided
+      * date time.
+@@ -1036,7 +1128,7 @@ public final class ColorDisplayService extends SystemService {
+             // Prepare the display white balance transform matrix.
+             mDisplayWhiteBalanceTintController.setUp(getContext(), true /* needsLinear */);
+             mDisplayWhiteBalanceTintController.setActivated(true);
+-            mDisplayWhiteBalanceTintController.setMatrix(whitebalanceLevel);
++            mDisplayWhiteBalanceTintController.setMatrix(whitebalanceLevel * WHITE_BALANCE_SCALE + MIN_COLOR_TEMPERATURE);
+             mHandler.sendEmptyMessage(MSG_APPLY_DISPLAY_WHITE_BALANCE);
+         }
+     }
+@@ -1764,16 +1856,16 @@ public final class ColorDisplayService extends SystemService {
+                     applyTint(mGlobalHueTintController, false);
+                     break;
+                 case MSG_APPLY_GLOBAL_CONTRAST:
+-                    mGlobalContrastTintController.setMatrix(msg.arg1);
+-                    applyTint(mGlobalContrastTintController, false);
++                    mGlobalContrastTintController.setValue(msg.arg1);
++                    applyContrast(mGlobalContrastTintController, false);
+                     break;
+                 case MSG_APPLY_GLOBAL_WHITEBALANCE:
+                     mGlobalWhitebalanceTintController.setMatrix(msg.arg1);
+                     applyTint(mGlobalWhitebalanceTintController, false);
+                     break;
+                 case MSG_APPLY_GLOBAL_LUMINANCE:
+-                    mGlobalLuminanceTintController.setMatrix(msg.arg1);
+-                    applyTint(mGlobalLuminanceTintController, false);
++                    mGlobalLuminanceTintController.setValue(msg.arg1);
++                    applyLuminance(mGlobalLuminanceTintController, false);
+                     break;
+                 case MSG_APPLY_REDUCE_BRIGHT_COLORS:
+                     applyTint(mReduceBrightColorsTintController, true);
+diff --git a/services/core/java/com/android/server/display/color/DisplayTransformManager.java b/services/core/java/com/android/server/display/color/DisplayTransformManager.java
+index 181ac90a0d38..96ddedfb4799 100644
+--- a/services/core/java/com/android/server/display/color/DisplayTransformManager.java
++++ b/services/core/java/com/android/server/display/color/DisplayTransformManager.java
+@@ -32,6 +32,7 @@ import com.android.internal.annotations.GuardedBy;
+ import com.android.internal.annotations.VisibleForTesting;
+ 
+ import java.util.Arrays;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ /**
+  * Manager for applying color transformations to the display.
+@@ -84,6 +85,8 @@ public class DisplayTransformManager {
+     public static final int LEVEL_COLOR_MATRIX_INVERT_COLOR = 300;
+ 
+     private static final int SURFACE_FLINGER_TRANSACTION_COLOR_MATRIX = 1015;
++    private static final int SURFACE_FLINGER_TRANSACTION_COLOR_CONTRAST = 1016;
++    private static final int SURFACE_FLINGER_TRANSACTION_COLOR_LUMINANCE = 1012;
+     private static final int SURFACE_FLINGER_TRANSACTION_DALTONIZER = 1014;
+     /**
+      * SurfaceFlinger global saturation factor.
+@@ -124,6 +127,18 @@ public class DisplayTransformManager {
+     @GuardedBy("mColorMatrix")
+     private final float[][] mTempColorMatrix = new float[2][16];
+ 
++    /**
++     * Value of lumunance level -> color transformation value.
++     */
++    @GuardedBy("mColorLuminance")
++    private final SparseArray<AtomicInteger> mColorLuminance = new SparseArray<>(6);
++
++    /**
++     * Value of contrast level -> color transformation value.
++     */
++    @GuardedBy("mColorContrast")
++    private final SparseArray<AtomicInteger> mColorContrast = new SparseArray<>(6);
++
+     /**
+      * Lock used for synchronize access to {@link #mDaltonizerMode}.
+      */
+@@ -179,6 +194,76 @@ public class DisplayTransformManager {
+         }
+     }
+ 
++    /**
++     * Returns a copy of the color transform contrast set for a given level.
++     */
++    public AtomicInteger getColorContrast(int key) {
++        synchronized (mColorContrast) {
++            final AtomicInteger value = mColorContrast.get(key);
++            return value == null ? null : value;
++        }
++    }
++
++    /**
++     * Sets and applies a current color transform contrast value for a given level.
++     * <p>
++     *
++     * @param level the level used to identify and compose the color transform (low -> high)
++     * @param value the color transform value, or {@code null} to
++     * remove the color transform value associated with the provided level
++     */
++    public void setColorContrast(int level, AtomicInteger value) {
++        synchronized (mColorContrast) {
++            final AtomicInteger oldValue = mColorContrast.get(level);
++            if (oldValue != value) {
++                if (value == null) {
++                    mColorContrast.remove(level);
++                } else if (oldValue == null) {
++                    mColorContrast.put(level, value);
++                } else {
++                    oldValue.set(value.get());
++                }
++                // Update the current color transform.
++                applyColorContrast(value.get());
++            }
++        }
++    }
++
++    /**
++     * Returns a copy of the color transform value set for a given level.
++     */
++    public AtomicInteger getColorLuminance(int key) {
++        synchronized (mColorLuminance) {
++            final AtomicInteger value = mColorLuminance.get(key);
++            return value == null ? null : value;
++        }
++    }
++
++    /**
++     * Sets and applies a current color transform luminance value for a given level.
++     * <p>
++     *
++     * @param level the level used to identify and compose the color transform (low -> high)
++     * @param value the color transform value, or {@code null} to
++     * remove the color transform value associated with the provided level
++     */
++    public void setColorLuminance(int level, AtomicInteger value) {
++        synchronized (mColorLuminance) {
++            final AtomicInteger oldValue = mColorLuminance.get(level);
++            if (oldValue != value) {
++                if (value == null) {
++                    mColorLuminance.remove(level);
++                } else if (oldValue == null) {
++                    mColorLuminance.put(level, value);
++                } else {
++                    oldValue.set(value.get());
++                }
++                // Update the current color transform.
++                applyColorLuminance(value.get());
++            }
++        }
++    }
++
+     /**
+      * Sets the current Daltonization mode. This adjusts the color space to correct for or simulate
+      * various types of color blindness.
+@@ -236,6 +321,48 @@ public class DisplayTransformManager {
+         }
+     }
+ 
++    /**
++     * Propagates the provided color transformation Contrast to the SurfaceFlinger.
++     */
++    private static void applyColorContrast(Integer v) {
++        final Parcel data = Parcel.obtain();
++        data.writeInterfaceToken("android.ui.ISurfaceComposer");
++        if (v != null) {
++            data.writeInt(1);
++            data.writeInt(v);
++        } else {
++            data.writeInt(0);
++        }
++        try {
++            sFlinger.transact(SURFACE_FLINGER_TRANSACTION_COLOR_CONTRAST, data, null, 0);
++        } catch (RemoteException ex) {
++            Slog.e(TAG, "Failed to set color transform", ex);
++        } finally {
++            data.recycle();
++        }
++    }
++
++    /**
++     * Propagates the provided color transformation Luminance to the SurfaceFlinger.
++     */
++    private static void applyColorLuminance(Integer v) {
++        final Parcel data = Parcel.obtain();
++        data.writeInterfaceToken("android.ui.ISurfaceComposer");
++        if (v != null) {
++            data.writeInt(1);
++            data.writeInt(v);
++        } else {
++            data.writeInt(0);
++        }
++        try {
++            sFlinger.transact(SURFACE_FLINGER_TRANSACTION_COLOR_LUMINANCE, data, null, 0);
++        } catch (RemoteException ex) {
++            Slog.e(TAG, "Failed to set color transform", ex);
++        } finally {
++            data.recycle();
++        }
++    }
++
+     /**
+      * Propagates the provided Daltonization mode to the SurfaceFlinger.
+      */
+diff --git a/services/core/java/com/android/server/display/color/GlobalContrastTintController.java b/services/core/java/com/android/server/display/color/GlobalContrastTintController.java
+index b2f97c0463e3..381f95ecaab2 100644
+--- a/services/core/java/com/android/server/display/color/GlobalContrastTintController.java
++++ b/services/core/java/com/android/server/display/color/GlobalContrastTintController.java
+@@ -24,49 +24,40 @@ import android.opengl.Matrix;
+ import android.util.Slog;
+ 
+ import java.util.Arrays;
+-
++import java.util.concurrent.atomic.AtomicInteger;
+ /** Control the color transform for global device contrast. */
+ final class GlobalContrastTintController extends TintController {
+ 
+-    private final float[] mMatrixGlobalContrast = new float[16];
++    private final AtomicInteger mGlobalContrast = new AtomicInteger(0);
+ 
+     @Override
+     public void setUp(Context context, boolean needsLinear) {
+     }
+ 
+-    @Override
+-    public float[] getMatrix() {
+-        return Arrays.copyOf(mMatrixGlobalContrast, mMatrixGlobalContrast.length);
++    public AtomicInteger getValue() {
++        return mGlobalContrast;
+     }
+ 
+     @Override
+-    public void setMatrix(int contrastLevel) {
++    public void setValue(int contrastLevel) {
+         if (contrastLevel < 0) {
+             contrastLevel = 0;
+-        } else if (contrastLevel > 100) {
+-            contrastLevel = 100;
++        } else if (contrastLevel > 255) {
++            contrastLevel = 255;
+         }
+         Slog.d(ColorDisplayService.TAG, "Setting contrast level: " + contrastLevel);
++        setActivated(true);
++        mGlobalContrast.set(contrastLevel);
++    }
+ 
+-        if (contrastLevel == 100) {
+-            setActivated(false);
+-            Matrix.setIdentityM(mMatrixGlobalContrast, 0);
+-        } else {
+-            setActivated(true);
+-            float contrast = contrastLevel * 0.01f;
+-            float decontrast = 1.0f - contrast;
+-            float[] luminance = {0.231f * decontrast, 0.715f * decontrast,
+-                    0.072f * decontrast};
+-            mMatrixGlobalContrast[0] = luminance[0] + contrast;
+-            mMatrixGlobalContrast[1] = luminance[0];
+-            mMatrixGlobalContrast[2] = luminance[0];
+-            mMatrixGlobalContrast[4] = luminance[1];
+-            mMatrixGlobalContrast[5] = luminance[1] + contrast;
+-            mMatrixGlobalContrast[6] = luminance[1];
+-            mMatrixGlobalContrast[8] = luminance[2];
+-            mMatrixGlobalContrast[9] = luminance[2];
+-            mMatrixGlobalContrast[10] = luminance[2] + contrast;
+-        }
++    @Override
++    public float[] getMatrix() {
++        return new float[0];
++    }
++
++    @Override
++    public void setMatrix(int value) {
++        return;
+     }
+ 
+     @Override
+diff --git a/services/core/java/com/android/server/display/color/GlobalHueTintController.java b/services/core/java/com/android/server/display/color/GlobalHueTintController.java
+index 86dd5cbcc94b..2cb15393e860 100644
+--- a/services/core/java/com/android/server/display/color/GlobalHueTintController.java
++++ b/services/core/java/com/android/server/display/color/GlobalHueTintController.java
+@@ -43,29 +43,31 @@ final class GlobalHueTintController extends TintController {
+     public void setMatrix(int hueLevel) {
+         if (hueLevel < 0) {
+             hueLevel = 0;
+-        } else if (hueLevel > 100) {
+-            hueLevel = 100;
++        } else if (hueLevel > 360) {
++            hueLevel = 360;
+         }
++        hueLevel = (hueLevel + 180) % 360;
+         Slog.d(ColorDisplayService.TAG, "Setting Hue level: " + hueLevel);
+ 
+-        if (hueLevel == 100) {
++        if (hueLevel == 0) {
+             setActivated(false);
+             Matrix.setIdentityM(mMatrixGlobalHue, 0);
+         } else {
+             setActivated(true);
+-            float Hue = hueLevel * 0.01f;
+-            float deHue = 1.0f - Hue;
+-            float[] luminance = {0.231f * deHue, 0.715f * deHue,
+-                    0.072f * deHue};
+-            mMatrixGlobalHue[0] = luminance[0] + Hue;
+-            mMatrixGlobalHue[1] = luminance[0];
+-            mMatrixGlobalHue[2] = luminance[0];
+-            mMatrixGlobalHue[4] = luminance[1];
+-            mMatrixGlobalHue[5] = luminance[1] + Hue;
+-            mMatrixGlobalHue[6] = luminance[1];
+-            mMatrixGlobalHue[8] = luminance[2];
+-            mMatrixGlobalHue[9] = luminance[2];
+-            mMatrixGlobalHue[10] = luminance[2] + Hue;
++            float hue_shift = hueLevel * (float)Math.PI / 180.0f;
++            float c = (float)Math.cos(hue_shift);
++            float s = (float)Math.sin(hue_shift);
++            float[] luminance = {0.2125f, 0.7154f, 0.0721f};
++            mMatrixGlobalHue[0] = luminance[0] + c * (1 - luminance[0]) + s * (-luminance[0]);
++            mMatrixGlobalHue[1] = luminance[0] + c * (-luminance[0]) + s * (0.143f);
++            mMatrixGlobalHue[2] = luminance[0] + c * (-luminance[0]) + s * (-(1 - luminance[0]));
++            mMatrixGlobalHue[4] = luminance[1] + c * (-luminance[1]) + s * (-luminance[1]);
++            mMatrixGlobalHue[5] = luminance[1] + c * (1 - luminance[1]) + s * (0.140f);
++            mMatrixGlobalHue[6] = luminance[1] + c * (-luminance[1]) + s * (luminance[1]);
++            mMatrixGlobalHue[8] = luminance[2] + c * (-luminance[2]) + s * (1 - luminance[2]);
++            mMatrixGlobalHue[9] = luminance[2] + c * (-luminance[2]) + s * (-0.283f);
++            mMatrixGlobalHue[10] = luminance[2] + c * (1 - luminance[2]) + s * (luminance[2]);
++            mMatrixGlobalHue[15] = 1;
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/display/color/GlobalLuminanceTintController.java b/services/core/java/com/android/server/display/color/GlobalLuminanceTintController.java
+index fb92345af02a..5eee175e997f 100644
+--- a/services/core/java/com/android/server/display/color/GlobalLuminanceTintController.java
++++ b/services/core/java/com/android/server/display/color/GlobalLuminanceTintController.java
+@@ -24,51 +24,45 @@ import android.opengl.Matrix;
+ import android.util.Slog;
+ 
+ import java.util.Arrays;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ /** Control the color transform for global device luminance. */
+ final class GlobalLuminanceTintController extends TintController {
+ 
+-    private final float[] mMatrixGlobalLuminance = new float[16];
++    private final AtomicInteger mGlobalLuminance = new AtomicInteger(0);
+ 
+     @Override
+     public void setUp(Context context, boolean needsLinear) {
+     }
+ 
+-    @Override
+-    public float[] getMatrix() {
+-        return Arrays.copyOf(mMatrixGlobalLuminance, mMatrixGlobalLuminance.length);
++    public AtomicInteger getValue() {
++        return mGlobalLuminance;
+     }
+ 
+     @Override
+-    public void setMatrix(int luminanceLevel) {
+-        if (luminanceLevel < 0) {
+-            luminanceLevel = 0;
+-        } else if (luminanceLevel > 100) {
+-            luminanceLevel = 100;
++    public void setValue(int LuminanceLevel) {
++        if (LuminanceLevel < 0) {
++            LuminanceLevel = 0;
++        } else if (LuminanceLevel > 255) {
++            LuminanceLevel = 255;
+         }
+-        Slog.d(ColorDisplayService.TAG, "Setting luminance level: " + luminanceLevel);
++        Slog.d(ColorDisplayService.TAG, "Setting Luminance level: " + LuminanceLevel);
++        setActivated(true);
+ 
+-        if (luminanceLevel == 100) {
+-            setActivated(false);
+-            Matrix.setIdentityM(mMatrixGlobalLuminance, 0);
+-        } else {
+-            setActivated(true);
+-            float luminance = luminanceLevel * 0.01f;
+-            float deluminance = 1.0f - luminance;
+-            float[] luminance_arr = {0.231f * deluminance, 0.715f * deluminance,
+-                    0.072f * deluminance};
+-            mMatrixGlobalLuminance[0] = luminance_arr[0] + luminance;
+-            mMatrixGlobalLuminance[1] = luminance_arr[0];
+-            mMatrixGlobalLuminance[2] = luminance_arr[0];
+-            mMatrixGlobalLuminance[4] = luminance_arr[1];
+-            mMatrixGlobalLuminance[5] = luminance_arr[1] + luminance;
+-            mMatrixGlobalLuminance[6] = luminance_arr[1];
+-            mMatrixGlobalLuminance[8] = luminance_arr[2];
+-            mMatrixGlobalLuminance[9] = luminance_arr[2];
+-            mMatrixGlobalLuminance[10] = luminance_arr[2] + luminance;
+-        }
++        mGlobalLuminance.set(LuminanceLevel);
+     }
+ 
++    @Override
++    public float[] getMatrix() {
++        return new float[0];
++    }
++
++    @Override
++    public void setMatrix(int value) {
++        return;
++    }
++
++
+     @Override
+     public int getLevel() {
+         return LEVEL_COLOR_MATRIX_LUMINANCE;
+diff --git a/services/core/java/com/android/server/display/color/GlobalSaturationTintController.java b/services/core/java/com/android/server/display/color/GlobalSaturationTintController.java
+index a3d758d311cc..596f2233cb28 100644
+--- a/services/core/java/com/android/server/display/color/GlobalSaturationTintController.java
++++ b/services/core/java/com/android/server/display/color/GlobalSaturationTintController.java
+@@ -46,26 +46,26 @@ final class GlobalSaturationTintController extends TintController {
+         } else if (saturationLevel > 100) {
+             saturationLevel = 100;
+         }
++        saturationLevel = saturationLevel * 2 - 100;
+         Slog.d(ColorDisplayService.TAG, "Setting saturation level: " + saturationLevel);
+ 
+-        if (saturationLevel == 100) {
++        if (saturationLevel == 0) {
+             setActivated(false);
+             Matrix.setIdentityM(mMatrixGlobalSaturation, 0);
+         } else {
+             setActivated(true);
+-            float saturation = saturationLevel * 0.01f;
+-            float desaturation = 1.0f - saturation;
+-            float[] luminance = {0.231f * desaturation, 0.715f * desaturation,
+-                    0.072f * desaturation};
+-            mMatrixGlobalSaturation[0] = luminance[0] + saturation;
+-            mMatrixGlobalSaturation[1] = luminance[0];
+-            mMatrixGlobalSaturation[2] = luminance[0];
+-            mMatrixGlobalSaturation[4] = luminance[1];
+-            mMatrixGlobalSaturation[5] = luminance[1] + saturation;
+-            mMatrixGlobalSaturation[6] = luminance[1];
+-            mMatrixGlobalSaturation[8] = luminance[2];
+-            mMatrixGlobalSaturation[9] = luminance[2];
+-            mMatrixGlobalSaturation[10] = luminance[2] + saturation;
++            float x = 1f + ((saturationLevel > 0) ? (3 * saturationLevel / 100f) : (saturationLevel / 100f));
++            float[] luminance = {0.3086f, 0.6094f, 0.0820f};
++            mMatrixGlobalSaturation[0] = luminance[0] * (1 - x) + x;
++            mMatrixGlobalSaturation[1] = luminance[0] * (1 - x);
++            mMatrixGlobalSaturation[2] = luminance[0] * (1 - x);
++            mMatrixGlobalSaturation[4] = luminance[1] * (1 - x);
++            mMatrixGlobalSaturation[5] = luminance[1] * (1 - x) + x;
++            mMatrixGlobalSaturation[6] = luminance[1] * (1 - x);
++            mMatrixGlobalSaturation[8] = luminance[2] * (1 - x);
++            mMatrixGlobalSaturation[9] = luminance[2] * (1 - x);
++            mMatrixGlobalSaturation[10] = luminance[2] * (1 - x) + x;
++            mMatrixGlobalSaturation[15] = 1;
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/display/color/GlobalWhitebalanceTintController.java b/services/core/java/com/android/server/display/color/GlobalWhitebalanceTintController.java
+index 1b04076499f9..29649bdc0557 100644
+--- a/services/core/java/com/android/server/display/color/GlobalWhitebalanceTintController.java
++++ b/services/core/java/com/android/server/display/color/GlobalWhitebalanceTintController.java
+@@ -66,6 +66,7 @@ final class GlobalWhitebalanceTintController extends TintController {
+             mMatrixGlobalWhitebalance[8] = luminance[2];
+             mMatrixGlobalWhitebalance[9] = luminance[2];
+             mMatrixGlobalWhitebalance[10] = luminance[2] + whitebalance;
++            mMatrixGlobalWhitebalance[15] = 1;
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/display/color/TintController.java b/services/core/java/com/android/server/display/color/TintController.java
+index 384333a574b5..0f3245744006 100644
+--- a/services/core/java/com/android/server/display/color/TintController.java
++++ b/services/core/java/com/android/server/display/color/TintController.java
+@@ -21,6 +21,7 @@ import android.content.Context;
+ import android.util.Slog;
+ 
+ import java.io.PrintWriter;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ abstract class TintController {
+ 
+@@ -96,6 +97,15 @@ abstract class TintController {
+      */
+     public abstract float[] getMatrix();
+ 
++    /**
++     * Sets the color value to apply.
++     */
++    public void setValue(int level) {}
++
++    /**
++     * Get the color value to apply.
++     */
++    public AtomicInteger getValue() { return null; }
+     /**
+      * Get the color transform level to apply the matrix.
+      */
+-- 
+2.34.1
+
