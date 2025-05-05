@@ -1,0 +1,429 @@
+From d4c2b8af4e0056ec9f62b267282c7641f9c1a917 Mon Sep 17 00:00:00 2001
+From: gkdeepa <g.k.deepa@intel.com>
+Date: Wed, 30 Sep 2020 12:52:32 +0530
+Subject: [PATCH] include lock_ycbcr changes in default gralloc
+
+Tracked-On:
+---
+ modules/gralloc/framebuffer.cpp |  13 ++-
+ modules/gralloc/gralloc.cpp     | 181 +++++++++++++++++++++++++-------
+ modules/gralloc/gralloc_priv.h  |   8 +-
+ 3 files changed, 159 insertions(+), 43 deletions(-)
+
+diff --git a/modules/gralloc/framebuffer.cpp b/modules/gralloc/framebuffer.cpp
+index b2ec3e44..a475a43d 100644
+--- a/modules/gralloc/framebuffer.cpp
++++ b/modules/gralloc/framebuffer.cpp
+@@ -160,7 +160,6 @@ int mapFrameBufferLocked(struct private_module_t* module, int format)
+      * Request NUM_BUFFERS screens (at lest 2 for page flipping)
+      */
+     info.yres_virtual = info.yres * NUM_BUFFERS;
+-
+     switch (format) {
+     case HAL_PIXEL_FORMAT_RGBA_8888:
+         info.bits_per_pixel = 32;
+@@ -171,11 +170,12 @@ int mapFrameBufferLocked(struct private_module_t* module, int format)
+         info.blue.offset = 16;
+         info.blue.length = 8;
+         break;
+-    default:
++        default:
+         ALOGW("unknown format: %d", format);
+         break;
+     }
+ 
++
+     uint32_t flags = PAGE_FLIP;
+ #if USE_PAN_DISPLAY
+     if (ioctl(fd, FBIOPAN_DISPLAY, &info) == -1) {
+@@ -235,7 +235,9 @@ int mapFrameBufferLocked(struct private_module_t* module, int format)
+             "bpp          = %d\n"
+             "r            = %2u:%u\n"
+             "g            = %2u:%u\n"
+-            "b            = %2u:%u\n",
++            "b            = %2u:%u\n"
++            "a            = %2u:%u\n",
++
+             fd,
+             finfo.id,
+             info.xres,
+@@ -245,7 +247,8 @@ int mapFrameBufferLocked(struct private_module_t* module, int format)
+             info.bits_per_pixel,
+             info.red.offset, info.red.length,
+             info.green.offset, info.green.length,
+-            info.blue.offset, info.blue.length
++            info.blue.offset, info.blue.length,
++            info.transp.offset, info.transp.length
+     );
+ 
+     ALOGI(   "width        = %d mm (%f dpi)\n"
+@@ -276,7 +279,7 @@ int mapFrameBufferLocked(struct private_module_t* module, int format)
+      */
+ 
+     size_t fbSize = roundUpToPageSize(finfo.line_length * info.yres_virtual);
+-    module->framebuffer = new private_handle_t(dup(fd), fbSize, 0);
++    module->framebuffer = new private_handle_t(dup(fd), fbSize, 0,0,info.width,info.height);
+ 
+     module->numBuffers = info.yres_virtual / info.yres;
+     module->bufferMask = 0;
+diff --git a/modules/gralloc/gralloc.cpp b/modules/gralloc/gralloc.cpp
+index 87bda975..1664a305 100644
+--- a/modules/gralloc/gralloc.cpp
++++ b/modules/gralloc/gralloc.cpp
+@@ -36,6 +36,7 @@
+ #include "gralloc_priv.h"
+ #include "gr.h"
+ 
++
+ /*****************************************************************************/
+ 
+ struct gralloc_context_t {
+@@ -44,13 +45,15 @@ struct gralloc_context_t {
+ };
+ 
+ static int gralloc_alloc_buffer(alloc_device_t* dev,
+-        size_t size, int usage, buffer_handle_t* pHandle);
++        size_t size, int usage, buffer_handle_t* pHandle, uint32_t format, uint32_t width, uint32_t height);
+ 
++static int gralloc_lock_ycbcr(gralloc_module_t const *module,
++                              buffer_handle_t handle, int usage,
++                              int l, int t, int w, int h,
++                              android_ycbcr *ycbcr);
+ /*****************************************************************************/
+-
+ int fb_device_open(const hw_module_t* module, const char* name,
+         hw_device_t** device);
+-
+ static int gralloc_device_open(const hw_module_t* module, const char* name,
+         hw_device_t** device);
+ 
+@@ -59,7 +62,7 @@ extern int gralloc_lock(gralloc_module_t const* module,
+         int l, int t, int w, int h,
+         void** vaddr);
+ 
+-extern int gralloc_unlock(gralloc_module_t const* module, 
++extern int gralloc_unlock(gralloc_module_t const* module,
+         buffer_handle_t handle);
+ 
+ extern int gralloc_register_buffer(gralloc_module_t const* module,
+@@ -88,6 +91,7 @@ struct private_module_t HAL_MODULE_INFO_SYM = {
+         .registerBuffer = gralloc_register_buffer,
+         .unregisterBuffer = gralloc_unregister_buffer,
+         .lock = gralloc_lock,
++        .lock_ycbcr = gralloc_lock_ycbcr,
+         .unlock = gralloc_unlock,
+     },
+     .framebuffer = 0,
+@@ -101,7 +105,7 @@ struct private_module_t HAL_MODULE_INFO_SYM = {
+ /*****************************************************************************/
+ 
+ static int gralloc_alloc_framebuffer_locked(alloc_device_t* dev,
+-        size_t size, int format, int usage, buffer_handle_t* pHandle)
++        size_t size, int usage, buffer_handle_t* pHandle, uint32_t format, uint32_t width, uint32_t height)
+ {
+     private_module_t* m = reinterpret_cast<private_module_t*>(
+             dev->common.module);
+@@ -118,24 +122,25 @@ static int gralloc_alloc_framebuffer_locked(alloc_device_t* dev,
+ 
+     const uint32_t bufferMask = m->bufferMask;
+     const uint32_t numBuffers = m->numBuffers;
+-    const size_t bufferSize = m->finfo.line_length * m->info.yres;
+     if (numBuffers == 1) {
+         // If we have only one buffer, we never use page-flipping. Instead,
+         // we return a regular buffer which will be memcpy'ed to the main
+         // screen when post is called.
+         int newUsage = (usage & ~GRALLOC_USAGE_HW_FB) | GRALLOC_USAGE_HW_2D;
+-        return gralloc_alloc_buffer(dev, bufferSize, newUsage, pHandle);
++        ALOGE("gralloc_alloc_buffer is called here"); 
++        return gralloc_alloc_buffer(dev, size, newUsage, pHandle, format, width, height);
+     }
+ 
+     if (bufferMask >= ((1LU<<numBuffers)-1)) {
+         // We ran out of buffers.
++        ALOGE("Deepa We ran out of buffers.");
+         return -ENOMEM;
+     }
+ 
+     // create a "fake" handles for it
+     intptr_t vaddr = intptr_t(m->framebuffer->base);
+     private_handle_t* hnd = new private_handle_t(dup(m->framebuffer->fd), size,
+-            private_handle_t::PRIV_FLAGS_FRAMEBUFFER);
++            private_handle_t::PRIV_FLAGS_FRAMEBUFFER, format, width, height);
+ 
+     // find a free slot
+     for (uint32_t i=0 ; i<numBuffers ; i++) {
+@@ -143,43 +148,41 @@ static int gralloc_alloc_framebuffer_locked(alloc_device_t* dev,
+             m->bufferMask |= (1LU<<i);
+             break;
+         }
+-        vaddr += bufferSize;
++        vaddr += size;
+     }
+-    
++
+     hnd->base = vaddr;
+     hnd->offset = vaddr - intptr_t(m->framebuffer->base);
+     *pHandle = hnd;
+-
+     return 0;
+ }
+ 
+ static int gralloc_alloc_framebuffer(alloc_device_t* dev,
+-        size_t size, int format, int usage, buffer_handle_t* pHandle)
++        size_t size, int usage, buffer_handle_t* pHandle, uint32_t format, uint32_t width, uint32_t height)
+ {
+     private_module_t* m = reinterpret_cast<private_module_t*>(
+             dev->common.module);
+     pthread_mutex_lock(&m->lock);
+-    int err = gralloc_alloc_framebuffer_locked(dev, size, format, usage, pHandle);
++    int err = gralloc_alloc_framebuffer_locked(dev, size, usage, pHandle, format, width, height);
+     pthread_mutex_unlock(&m->lock);
+     return err;
+ }
+-
+ static int gralloc_alloc_buffer(alloc_device_t* dev,
+-        size_t size, int /*usage*/, buffer_handle_t* pHandle)
++        size_t size, int /*usage*/, buffer_handle_t* pHandle, uint32_t format,
++        uint32_t width, uint32_t height)
+ {
+     int err = 0;
+     int fd = -1;
+ 
+     size = roundUpToPageSize(size);
+-    
+     fd = ashmem_create_region("gralloc-buffer", size);
+     if (fd < 0) {
+-        ALOGE("couldn't create ashmem (%s)", strerror(-errno));
++        ALOGE("Deepa couldn't create ashmem (%s)", strerror(-errno));
+         err = -errno;
+     }
+ 
+     if (err == 0) {
+-        private_handle_t* hnd = new private_handle_t(fd, size, 0);
++        private_handle_t* hnd = new private_handle_t(fd, size, 0, format, width, height);
+         gralloc_module_t* module = reinterpret_cast<gralloc_module_t*>(
+                 dev->common.module);
+         err = mapBuffer(module, hnd);
+@@ -187,7 +190,7 @@ static int gralloc_alloc_buffer(alloc_device_t* dev,
+             *pHandle = hnd;
+         }
+     }
+-    
++
+     ALOGE_IF(err, "gralloc failed err=%s", strerror(-err));
+     
+     return err;
+@@ -205,47 +208,65 @@ static int gralloc_alloc(alloc_device_t* dev,
+         buffer_handle_t* pHandle, int* pStride)
+ {
+     if (!pHandle || !pStride)
++    {
++        ALOGE("Deepa gralloc_alloc returning error"); 
+         return -EINVAL;
++    }
+ 
+-    int bytesPerPixel = 0;
++    const size_t tileWidth = 2;
++    const size_t tileHeight = 2;
++    size_t stride = align(width, tileWidth);
++    size_t y_stride = align(stride, 16);
++    size_t uv_stride = align(y_stride/2,16);
++    size_t size  = 0;
++    int bpp = 0;
+     switch (format) {
+-        case HAL_PIXEL_FORMAT_RGBA_FP16:
+-            bytesPerPixel = 8;
+-            break;
+         case HAL_PIXEL_FORMAT_RGBA_8888:
+         case HAL_PIXEL_FORMAT_RGBX_8888:
+         case HAL_PIXEL_FORMAT_BGRA_8888:
+-            bytesPerPixel = 4;
++            bpp = 32;
++            size = align(height, tileHeight) * stride * bpp / 8 + 4;
+             break;
+         case HAL_PIXEL_FORMAT_RGB_888:
+-            bytesPerPixel = 3;
++        case HAL_PIXEL_FORMAT_YCBCR_420_888:
++            bpp = 24;
++            size = align(height, tileHeight) * stride * bpp / 8 + 4;
+             break;
+         case HAL_PIXEL_FORMAT_RGB_565:
+         case HAL_PIXEL_FORMAT_RAW16:
+-            bytesPerPixel = 2;
++            bpp = 16;
++            size = align(height, tileHeight) * stride * bpp / 8 + 4;
++            break;
++        case HAL_PIXEL_FORMAT_YV12:
++            size = align(height, tileHeight) * y_stride + align(height, tileHeight) * uv_stride +4;
+             break;
+         default:
+             return -EINVAL;
+     }
+ 
+-    const size_t tileWidth = 2;
+-    const size_t tileHeight = 2;
+-
+-    size_t stride = align(width, tileWidth);
+-    size_t size = align(height, tileHeight) * stride * bytesPerPixel + 4;
+ 
+     int err;
+     if (usage & GRALLOC_USAGE_HW_FB) {
+-        err = gralloc_alloc_framebuffer(dev, size, format, usage, pHandle);
++        err = gralloc_alloc_framebuffer(dev, size, usage, pHandle, format, width, height);
+     } else {
+-        err = gralloc_alloc_buffer(dev, size, usage, pHandle);
++        err = gralloc_alloc_buffer(dev, size, usage, pHandle, format, width, height);
+     }
+ 
+     if (err < 0) {
++        ALOGE("Deepa returning error for gralloc_alloc_framebuffer");
+         return err;
+     }
+ 
+-    *pStride = stride;
++    switch (format)
++    {
++    case HAL_PIXEL_FORMAT_YCbCr_420_888:
++        *pStride = 0;
++        break;
++    default:
++        *pStride = stride;
++        break;
++    }
++     return 0;
+     return 0;
+ }
+ 
+@@ -262,8 +283,8 @@ static int gralloc_free(alloc_device_t* dev,
+                 dev->common.module);
+         const size_t bufferSize = m->finfo.line_length * m->info.yres;
+         int index = (hnd->base - m->framebuffer->base) / bufferSize;
+-        m->bufferMask &= ~(1<<index); 
+-    } else { 
++        m->bufferMask &= ~(1<<index);
++    } else {
+         gralloc_module_t* module = reinterpret_cast<gralloc_module_t*>(
+                 dev->common.module);
+         terminateBuffer(module, const_cast<private_handle_t*>(hnd));
+@@ -315,3 +336,91 @@ int gralloc_device_open(const hw_module_t* module, const char* name,
+     }
+     return status;
+ }
++
++inline int formatToYcbcr(
++    int format, int width, int height, void *base_v, android_ycbcr *ycbcr)
++{
++    uint8_t *cpu_addr = (uint8_t *)base_v;
++
++    // Calculate offsets to underlying YUV data
++    size_t yStride;
++    size_t cStride;
++    size_t cSize;
++    size_t yOffset;
++    size_t uOffset;
++    size_t vOffset;
++    size_t cStep;
++    size_t align;
++    switch (format)
++    {
++    case HAL_PIXEL_FORMAT_YCrCb_420_SP:
++        yStride = width;
++        cStride = width;
++        yOffset = 0;
++        vOffset = yStride * height;
++        uOffset = vOffset + 1;
++        cStep = 2;
++        break;
++    case HAL_PIXEL_FORMAT_YV12:
++        // https://developer.android.com/reference/android/graphics/ImageFormat.html#YV12
++        align = 16;
++        yStride = (width + (align - 1)) & ~(align - 1);
++        cStride = (yStride / 2 + (align - 1)) & ~(align - 1);
++        yOffset = 0;
++        cSize = cStride * height / 2;
++        vOffset = yStride * height;
++        uOffset = vOffset + cSize;
++        cStep = 1;
++        break;
++    case HAL_PIXEL_FORMAT_YCbCr_420_888:
++        yStride = width;
++        cStride = width;
++        yOffset = 0;
++        vOffset = yStride * height;
++        uOffset = vOffset + 1;
++        cStep = 2;
++        break;
++    default:
++        return -EINVAL;
++    }
++
++    ycbcr->y = cpu_addr + yOffset;
++    ycbcr->cb = cpu_addr + uOffset;
++    ycbcr->cr = cpu_addr + vOffset;
++    ycbcr->ystride = yStride;
++    ycbcr->cstride = cStride;
++    ycbcr->chroma_step = cStep;
++
++    // Zero out reserved fields
++    memset(ycbcr->reserved, 0, sizeof(ycbcr->reserved));
++    return 0;
++}
++
++static int gralloc_lock_ycbcr(gralloc_module_t const *module,
++                              buffer_handle_t handle, int usage,
++                              int l, int t, int w, int h,
++                              android_ycbcr *ycbcr)
++{
++    if (!ycbcr)
++    {
++        ALOGE("%s: got NULL ycbcr struct! -EINVAL", __FUNCTION__);
++        return -EINVAL;
++    }
++
++    if (private_handle_t::validate(handle) < 0)
++    {
++        ALOGE("%s: bad handle. -EINVAL", __FUNCTION__);
++        return -EINVAL;
++    }
++
++    void *mapped;
++    int retval = gralloc_lock(module, handle, usage, l, t, w, h, &mapped);
++    if (retval)
++    {
++        ALOGE("%s: gralloc_lock error: retval = %d", __FUNCTION__, retval);
++        return retval;
++    }
++    private_handle_t *hnd = (private_handle_t *)handle;
++    int ret = formatToYcbcr(hnd->droid_format, hnd->width, hnd->height, mapped, ycbcr);
++    return ret;
++}
+diff --git a/modules/gralloc/gralloc_priv.h b/modules/gralloc/gralloc_priv.h
+index 2cd10072..cfbb4a0b 100644
+--- a/modules/gralloc/gralloc_priv.h
++++ b/modules/gralloc/gralloc_priv.h
+@@ -77,6 +77,9 @@ struct private_handle_t {
+     // FIXME: the attributes below should be out-of-line
+     uint64_t base __attribute__((aligned(8)));
+     int     pid;
++    uint32_t droid_format;
++    uint32_t width;
++    uint32_t height;
+ 
+ #ifdef __cplusplus
+     static inline int sNumInts() {
+@@ -85,9 +88,10 @@ struct private_handle_t {
+     static const int sNumFds = 1;
+     static const int sMagic = 0x3141592;
+ 
+-    private_handle_t(int fd, int size, int flags) :
++    private_handle_t(int fd, int size, int flags, uint32_t format, uint32_t width, uint32_t height) :
+         fd(fd), magic(sMagic), flags(flags), size(size), offset(0),
+-        base(0), pid(getpid())
++        base(0), pid(getpid()), droid_format(format),
++        width(width), height(height)
+     {
+         version = sizeof(native_handle);
+         numInts = sNumInts();
+-- 
+2.17.1
+
