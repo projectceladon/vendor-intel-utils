@@ -1,0 +1,192 @@
+From 22e0899ec7d7d0fe3b73b10ccd8c713a252f5212 Mon Sep 17 00:00:00 2001
+From: "Bhadouria, Aman" <aman.bhadouria@intel.com>
+Date: Wed, 4 Dec 2024 07:53:13 +0000
+Subject: [PATCH] Metadata fix
+
+---
+ flags/avrcp_controller.aconfig    | 10 +++++
+ system/bta/av/bta_av_act.cc       |  4 +-
+ system/stack/avct/avct_bcb_act.cc | 75 ++++++++++++++++++-------------
+ system/stack/include/avct_api.h   |  6 +++
+ 4 files changed, 63 insertions(+), 32 deletions(-)
+
+diff --git a/flags/avrcp_controller.aconfig b/flags/avrcp_controller.aconfig
+index 27d110b88c..c870a40e4e 100644
+--- a/flags/avrcp_controller.aconfig
++++ b/flags/avrcp_controller.aconfig
+@@ -20,3 +20,13 @@ flag {
+         purpose: PURPOSE_BUGFIX
+     }
+ }
++
++flag {
++    name: "associate_browse_l2cap_request_with_active_control_channel"
++    namespace: "bluetooth"
++    description: " Associate a browse l2cap channel connection with the control channel from that same device regardless of specified role"
++    bug: "373482555"
++    metadata {
++        purpose: PURPOSE_BUGFIX
++    }
++}
+\ No newline at end of file
+diff --git a/system/bta/av/bta_av_act.cc b/system/bta/av/bta_av_act.cc
+index 36aab0f070..725f8e6062 100644
+--- a/system/bta/av/bta_av_act.cc
++++ b/system/bta/av/bta_av_act.cc
+@@ -664,13 +664,13 @@ void bta_av_rc_opened(tBTA_AV_CB* p_cb, tBTA_AV_DATA* p_data) {
+   if ((p_cb->features & BTA_AV_FEAT_BROWSE) &&
+       (rc_open.peer_features & BTA_AV_FEAT_BROWSE) &&
+       ((p_cb->rcb[i].status & BTA_AV_RC_ROLE_MASK) == BTA_AV_RC_ROLE_INT)) {
+-    log::verbose("Not opening AVRC Browse channel as INT");
++    log::verbose("abhadour Not opening AVRC Browse channel as INT");
+     /* Commenting the below line as for IVI use case, for A2DP SNK, we dont
+      * support browsing channel. So no need to open browsing channel as
+      * INITIATOR. Revert this when have logic to resolve this conflict in
+      * stack/avct.
+      */
+-    // AVRC_OpenBrowse(p_data->rc_conn_chg.handle, AVCT_INT);
++      AVRC_OpenBrowse(p_data->rc_conn_chg.handle, AVCT_INT);
+   }
+ }
+ 
+diff --git a/system/stack/avct/avct_bcb_act.cc b/system/stack/avct/avct_bcb_act.cc
+index c4ad431904..1d73c45bac 100644
+--- a/system/stack/avct/avct_bcb_act.cc
++++ b/system/stack/avct/avct_bcb_act.cc
+@@ -28,6 +28,7 @@
+ #define LOG_TAG "bluetooth"
+ 
+ #include <bluetooth/log.h>
++#include <com_android_bluetooth_flags.h>
+ #include <string.h>
+ 
+ #include "avct_api.h"
+@@ -38,6 +39,8 @@
+ #include "osi/include/allocator.h"
+ #include "osi/include/osi.h"
+ #include "stack/avct/avct_defs.h"
++#include "stack/avct/avct_int.h"
++#include "stack/include/avct_api.h"
+ #include "stack/include/bt_hdr.h"
+ #include "stack/include/bt_types.h"
+ 
+@@ -155,57 +158,69 @@ void avct_bcb_unbind_disc(tAVCT_BCB* /* p_bcb */, tAVCT_LCB_EVT* p_data) {
+  * Returns          Nothing.
+  *
+  ******************************************************************************/
++namespace {
++bool is_valid_role_check(const tAVCT_CCB* p_ccb) {
++  log::warn("abhadour Inside valid role check");
++  return com::android::bluetooth::flags::
++                         associate_browse_l2cap_request_with_active_control_channel()
++                 ? true
++                 : p_ccb->cc.role == AVCT_ROLE_ACCEPTOR;
++}
++}  // namespace
++
+ void avct_bcb_open_ind(tAVCT_BCB* p_bcb, tAVCT_LCB_EVT* p_data) {
+   tAVCT_CCB* p_ccb = &avct_cb.ccb[0];
+-  tAVCT_CCB* p_ccb_bind = NULL;
+-  bool bind = false;
+-  tAVCT_UL_MSG ul_msg;
++  tAVCT_CCB* p_ccb_bind = nullptr;
+ 
+   for (int idx = 0; idx < AVCT_NUM_CONN; idx++, p_ccb++) {
+-    /* if ccb allocated and */
+-    if (p_ccb->allocated) {
+-      /* if bound to this bcb send connect confirm event */
+-      if (p_ccb->p_bcb == p_bcb) {
+-        bind = true;
+-        p_ccb_bind = p_ccb;
+-        p_ccb->cc.p_ctrl_cback(avct_ccb_to_idx(p_ccb), AVCT_BROWSE_CONN_CFM_EVT,
+-                               0, &p_ccb->p_lcb->peer_addr);
+-      }
++    if (!p_ccb->allocated) {
++      continue;
++    }
++
++    /* if ccb allocated and bound to this bcb send connect confirm event */
++    if (p_ccb->p_bcb == p_bcb) {
++      p_ccb_bind = p_ccb;
++      p_ccb->cc.p_ctrl_cback(avct_ccb_to_idx(p_ccb), AVCT_BROWSE_CONN_CFM_EVT, 0,
++                             &p_ccb->p_lcb->peer_addr);
++    } else if ((p_ccb->p_bcb == NULL) && is_valid_role_check(p_ccb) && (p_ccb->p_lcb != NULL) &&
++               p_bcb->peer_addr == p_ccb->p_lcb->peer_addr) {
+       /* if unbound acceptor and lcb allocated and bd_addr are the same for bcb
+          and lcb */
+-      else if ((p_ccb->p_bcb == NULL) && (p_ccb->cc.role == AVCT_ACP) &&
+-               (p_ccb->p_lcb != NULL) &&
+-               p_bcb->peer_addr == p_ccb->p_lcb->peer_addr) {
+-        /* bind bcb to ccb and send connect ind event */
+-        bind = true;
+-        p_ccb_bind = p_ccb;
+-        p_ccb->p_bcb = p_bcb;
+-        p_ccb->cc.p_ctrl_cback(avct_ccb_to_idx(p_ccb), AVCT_BROWSE_CONN_IND_EVT,
+-                               0, &p_ccb->p_lcb->peer_addr);
+-      }
++      /* bind bcb to ccb and send connect ind event */
++      p_ccb_bind = p_ccb;
++      p_ccb->p_bcb = p_bcb;
++      p_ccb->cc.p_ctrl_cback(avct_ccb_to_idx(p_ccb), AVCT_BROWSE_CONN_IND_EVT, 0,
++                             &p_ccb->p_lcb->peer_addr);
+     }
+   }
+ 
+   /* if no ccbs bound to this lcb, disconnect */
+-  if (!bind) {
++  if (p_ccb_bind == nullptr) {
++    log::warn("abhadour Ignoring incoming browse request and closing channel from peer:{} lcid:0x{:04x}",
++              p_bcb->peer_addr, p_bcb->ch_lcid);
+     avct_bcb_event(p_bcb, AVCT_LCB_INT_CLOSE_EVT, p_data);
+     return;
+   }
+ 
+-  if (!p_bcb->p_tx_msg || !p_ccb_bind) {
++  if (!p_bcb->p_tx_msg) {
++    log::warn("abhadour Received browse packet with no browse data peer:{} lcid:0x{:04x}", p_bcb->peer_addr,
++              p_bcb->ch_lcid);
+     return;
+   }
+ 
+-  ul_msg.p_buf = p_bcb->p_tx_msg;
+-  ul_msg.p_ccb = p_ccb_bind;
+-  ul_msg.label = (uint8_t)(p_bcb->p_tx_msg->layer_specific & 0xFF);
+-  ul_msg.cr = (uint8_t)((p_bcb->p_tx_msg->layer_specific & 0xFF00) >> 8);
++  tAVCT_UL_MSG ul_msg = {
++          .p_buf = p_bcb->p_tx_msg,
++          .p_ccb = p_ccb_bind,
++          .label = (uint8_t)(p_bcb->p_tx_msg->layer_specific & 0xFF),
++          .cr = (uint8_t)((p_bcb->p_tx_msg->layer_specific & 0xFF00) >> 8),
++  };
+   p_bcb->p_tx_msg->layer_specific = AVCT_DATA_BROWSE;
+   p_bcb->p_tx_msg = NULL;
+ 
+   /* send msg event to bcb */
+-  tAVCT_LCB_EVT avct_lcb_evt;
+-  avct_lcb_evt.ul_msg = ul_msg;
++  tAVCT_LCB_EVT avct_lcb_evt = {
++          .ul_msg = ul_msg,
++  };
+   avct_bcb_event(p_bcb, AVCT_LCB_UL_MSG_EVT, &avct_lcb_evt);
+ }
+ 
+diff --git a/system/stack/include/avct_api.h b/system/stack/include/avct_api.h
+index 220ac679fa..88acc8443d 100644
+--- a/system/stack/include/avct_api.h
++++ b/system/stack/include/avct_api.h
+@@ -68,6 +68,12 @@
+ #define AVCT_MSG_OFFSET 15
+ #define AVCT_BROWSE_OFFSET 17 /* the default offset for browsing channel */
+ 
++typedef enum {
++  AVCT_ROLE_INITIATOR = 0, /* Initiator connection */
++  AVCT_ROLE_ACCEPTOR = 1,  /* Acceptor connection */
++} tAVCT_ROLE;
++
++
+ /* Connection role. */
+ #define AVCT_INT 0 /* Initiator connection */
+ #define AVCT_ACP 1 /* Acceptor connection */
+-- 
+2.34.1
+
