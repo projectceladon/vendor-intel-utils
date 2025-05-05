@@ -1,0 +1,2243 @@
+From 9c1cb0768f17dbf0096227eb4eda7926f06ac51e Mon Sep 17 00:00:00 2001
+From: Ren Chenglei <chenglei.ren@intel.com>
+Date: Fri, 9 Jun 2023 19:41:27 +0530
+Subject: [PATCH] INTERNAL: Add Gralloc1 support needed for vendor codec2
+
+Signed-off-by: Yang, Dong <dong.yang@intel.com>
+Signed-off-by: Ren Chenglei <chenglei.ren@intel.com>
+---
+ Android.bp                                    |  54 +-
+ cros_gralloc/cros_gralloc_buffer.cc           |  48 +
+ cros_gralloc/cros_gralloc_buffer.h            |   3 +
+ cros_gralloc/cros_gralloc_driver.cc           |  63 ++
+ cros_gralloc/cros_gralloc_driver.h            |   4 +
+ cros_gralloc/cros_gralloc_handle.h            |  15 +
+ cros_gralloc/cros_gralloc_helpers.cc          |  52 ++
+ cros_gralloc/cros_gralloc_helpers.h           |  10 +
+ cros_gralloc/gralloc1/cros_gralloc1_module.cc | 818 ++++++++++++++++++
+ cros_gralloc/gralloc1/cros_gralloc1_module.h  | 355 ++++++++
+ cros_gralloc/i915_private_android.cc          | 104 +++
+ cros_gralloc/i915_private_android.h           |  19 +
+ cros_gralloc/i915_private_android_types.h     |  93 ++
+ i915.c                                        |  17 +
+ i915_private.c                                | 204 +++++
+ i915_private.h                                |  57 ++
+ i915_private_types.h                          |  11 +
+ 17 files changed, 1925 insertions(+), 2 deletions(-)
+ create mode 100644 cros_gralloc/gralloc1/cros_gralloc1_module.cc
+ create mode 100644 cros_gralloc/gralloc1/cros_gralloc1_module.h
+ create mode 100644 cros_gralloc/i915_private_android.cc
+ create mode 100644 cros_gralloc/i915_private_android.h
+ create mode 100644 cros_gralloc/i915_private_android_types.h
+ create mode 100644 i915_private.c
+ create mode 100644 i915_private.h
+ create mode 100644 i915_private_types.h
+
+diff --git a/Android.bp b/Android.bp
+index 77bf638..59656dc 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -67,6 +67,11 @@ filegroup {
+     srcs: ["cros_gralloc/gralloc0/gralloc0.cc"],
+ }
+ 
++filegroup {
++    name: "minigbm_gralloc1_files",
++    srcs: ["cros_gralloc/gralloc1/cros_gralloc1_module.cc"],
++}
++
+ cc_defaults {
+     name: "minigbm_defaults",
+ 
+@@ -83,7 +88,7 @@ cc_defaults {
+ 
+     product_variables: {
+         platform_sdk_version: {
+-            cflags: ["-DANDROID_API_LEVEL=%d"],
++            cflags: ["-DANDROID_API_LEVEL=33"],
+         },
+     },
+ }
+@@ -140,6 +145,21 @@ cc_defaults {
+     srcs: [":minigbm_gralloc0_files"],
+ }
+ 
++cc_defaults {
++    name: "minigbm_cros_gralloc1_defaults",
++
++    defaults: ["minigbm_cros_gralloc_defaults"],
++    relative_install_path: "hw",
++
++    srcs: [":minigbm_gralloc1_files"],
++    cflags: [
++        "-Wno-switch",
++        "-Wno-cast-qual",
++        "-DUSE_GRALLOC1",
++    ],
++
++}
++
+ cc_library {
+     name: "libgbm",
+     defaults: ["minigbm_defaults"],
+@@ -192,8 +212,20 @@ cc_library_shared {
+ cc_library_shared {
+     name: "libminigbm_gralloc_intel",
+     defaults: ["minigbm_cros_gralloc_library_defaults"],
+-    cflags: ["-DDRV_I915"],
++    srcs: [
++        "i915_private.c",
++        "cros_gralloc/i915_private_android.cc",
++    ],
++    cflags: [
++        "-DDRV_I915",
++        "-DUSE_GRALLOC1",
++        "-Wno-cast-qual",
++        "-DHAVE_MEMFD_CREATE",
++    ],
+     enabled: false,
++    local_include_dirs: [
++        "cros_gralloc",
++    ],
+     arch: {
+         x86: {
+             enabled: true,
+@@ -219,6 +251,24 @@ cc_library_shared {
+     },
+ }
+ 
++cc_library_shared {
++    name: "gralloc.intel",
++    defaults: ["minigbm_cros_gralloc1_defaults"],
++    shared_libs: ["libminigbm_gralloc_intel"],
++    enabled: false,
++    local_include_dirs: [
++        "cros_gralloc",
++    ],
++    arch: {
++        x86: {
++            enabled: true,
++        },
++        x86_64: {
++            enabled: true,
++        },
++    },
++}
++
+ // Meson
+ cc_library_shared {
+     name: "libminigbm_gralloc_meson",
+diff --git a/cros_gralloc/cros_gralloc_buffer.cc b/cros_gralloc/cros_gralloc_buffer.cc
+index 44652a9..4e0c2dd 100644
+--- a/cros_gralloc/cros_gralloc_buffer.cc
++++ b/cros_gralloc/cros_gralloc_buffer.cc
+@@ -179,6 +179,54 @@ int32_t cros_gralloc_buffer::lock(const struct rectangle *rect, uint32_t map_fla
+ 	return 0;
+ }
+ 
++#ifdef USE_GRALLOC1
++int32_t cros_gralloc_buffer::lock(uint32_t map_flags, uint8_t *addr[DRV_MAX_PLANES])
++{
++	void *vaddr = nullptr;
++
++	memset(addr, 0, DRV_MAX_PLANES * sizeof(*addr));
++
++	/*
++	 * Gralloc consumers don't support more than one kernel buffer per buffer object yet, so
++	 * just use the first kernel buffer.
++	 */
++	if (drv_num_buffers_per_bo(bo_) != 1) {
++		ALOGE("Can only support one buffer per bo.");
++		return -EINVAL;
++	}
++
++	if (map_flags) {
++		if (lock_data_[0]) {
++			drv_bo_invalidate(bo_, lock_data_[0]);
++			vaddr = lock_data_[0]->vma->addr;
++		} else {
++			struct rectangle r = {0, 0, 0, 0};
++
++			if (!r.width && !r.height && !r.x && !r.y) {
++				/*
++				 * Android IMapper.hal: An accessRegion of all-zeros means the
++				 * entire buffer.
++				 */
++				r.width = drv_bo_get_width(bo_);
++				r.height = drv_bo_get_height(bo_);
++			}
++			vaddr = drv_bo_map(bo_, &r, map_flags, &lock_data_[0], 0);
++		}
++
++		if (vaddr == MAP_FAILED) {
++			ALOGE("Mapping failed.");
++			return -EFAULT;
++		}
++	}
++
++	for (uint32_t plane = 0; plane < hnd_->num_planes; plane++)
++		addr[plane] = static_cast<uint8_t *>(vaddr) + drv_bo_get_plane_offset(bo_, plane);
++
++	lockcount_++;
++	return 0;
++}
++#endif
++
+ int32_t cros_gralloc_buffer::unlock()
+ {
+ 	if (lockcount_ <= 0) {
+diff --git a/cros_gralloc/cros_gralloc_buffer.h b/cros_gralloc/cros_gralloc_buffer.h
+index b477faa..8baf82f 100644
+--- a/cros_gralloc/cros_gralloc_buffer.h
++++ b/cros_gralloc/cros_gralloc_buffer.h
+@@ -39,6 +39,9 @@ class cros_gralloc_buffer
+ 
+ 	int32_t lock(const struct rectangle *rect, uint32_t map_flags,
+ 		     uint8_t *addr[DRV_MAX_PLANES]);
++#ifdef USE_GRALLOC1
++	int32_t lock(uint32_t map_flags, uint8_t *addr[DRV_MAX_PLANES]);
++#endif
+ 	int32_t unlock();
+ 	int32_t resource_info(uint32_t strides[DRV_MAX_PLANES], uint32_t offsets[DRV_MAX_PLANES],
+ 			      uint64_t *format_modifier);
+diff --git a/cros_gralloc/cros_gralloc_driver.cc b/cros_gralloc/cros_gralloc_driver.cc
+index a714798..5b21f23 100644
+--- a/cros_gralloc/cros_gralloc_driver.cc
++++ b/cros_gralloc/cros_gralloc_driver.cc
+@@ -16,6 +16,10 @@
+ 
+ #include "../util.h"
+ 
++#ifdef USE_GRALLOC1
++#include "i915_private_android.h"
++#endif
++
+ // Constants taken from pipe_loader_drm.c in Mesa
+ 
+ #define DRM_NUM_NODES 63
+@@ -250,6 +254,9 @@ int cros_gralloc_driver::create_reserved_region(const std::string &buffer_name,
+ int32_t cros_gralloc_driver::allocate(const struct cros_gralloc_buffer_descriptor *descriptor,
+ 				      native_handle_t **out_handle)
+ {
++#ifdef USE_GRALLOC1
++	uint64_t mod;
++#endif
+ 	int ret = 0;
+ 	size_t num_planes;
+ 	size_t num_fds;
+@@ -266,8 +273,18 @@ int32_t cros_gralloc_driver::allocate(const struct cros_gralloc_buffer_descripto
+ 		return -EINVAL;
+ 	}
+ 
++#ifdef USE_GRALLOC1
++	if (descriptor->modifier == 0) {
++		bo = drv_bo_create(drv_.get(), descriptor->width, descriptor->height, resolved_format,
++				   resolved_use_flags);
++	} else {
++		bo = drv_bo_create_with_modifiers(drv_.get(), descriptor->width, descriptor->height,
++						  resolved_format, &descriptor->modifier, 1);
++	}
++#else
+ 	bo = drv_bo_create(drv_.get(), descriptor->width, descriptor->height, resolved_format,
+ 			   resolved_use_flags);
++#endif
+ 	if (!bo) {
+ 		ALOGE("Failed to create bo.");
+ 		return -errno;
+@@ -308,6 +325,11 @@ int32_t cros_gralloc_driver::allocate(const struct cros_gralloc_buffer_descripto
+ 		hnd->strides[plane] = drv_bo_get_plane_stride(bo, plane);
+ 		hnd->offsets[plane] = drv_bo_get_plane_offset(bo, plane);
+ 		hnd->sizes[plane] = drv_bo_get_plane_size(bo, plane);
++#ifdef USE_GRALLOC1
++		mod = drv_bo_get_format_modifier(bo);
++		hnd->format_modifiers[2 * plane] = static_cast<uint32_t>(mod >> 32);
++		hnd->format_modifiers[2 * plane + 1] = static_cast<uint32_t>(mod);
++#endif
+ 	}
+ 
+ 	hnd->reserved_region_size = descriptor->reserved_region_size;
+@@ -330,7 +352,19 @@ int32_t cros_gralloc_driver::allocate(const struct cros_gralloc_buffer_descripto
+ 	bytes_per_pixel = drv_bytes_per_pixel_from_format(hnd->format, 0);
+ 	hnd->pixel_stride = DIV_ROUND_UP(hnd->strides[0], bytes_per_pixel);
+ 	hnd->magic = cros_gralloc_magic;
++#ifdef USE_GRALLOC1
++	hnd->producer_usage = descriptor->producer_usage;
++	hnd->consumer_usage = descriptor->consumer_usage;
++	{
++		int32_t format = i915_private_invert_format(hnd->format);
++		if (format == 0) {
++			format =  descriptor->droid_format;
++		}
++		hnd->droid_format = format;
++	}
++#else
+ 	hnd->droid_format = descriptor->droid_format;
++#endif
+ 	hnd->usage = descriptor->droid_usage;
+ 	hnd->total_size = descriptor->reserved_region_size + drv_bo_get_total_size(bo);
+ 
+@@ -487,6 +521,31 @@ int32_t cros_gralloc_driver::lock(buffer_handle_t handle, int32_t acquire_fence,
+ 	return buffer->lock(rect, map_flags, addr);
+ }
+ 
++#ifdef USE_GRALLOC1
++int32_t cros_gralloc_driver::lock(buffer_handle_t handle, int32_t acquire_fence, uint32_t map_flags,
++				  uint8_t *addr[DRV_MAX_PLANES])
++{
++	int32_t ret = cros_gralloc_sync_wait(acquire_fence);
++	if (ret)
++		return ret;
++
++	std::lock_guard<std::mutex> lock(mutex_);
++	auto hnd = cros_gralloc_convert_handle(handle);
++	if (!hnd) {
++		ALOGE("Invalid handle.");
++		return -EINVAL;
++	}
++
++	auto buffer = get_buffer(hnd);
++	if (!buffer) {
++		ALOGE("Invalid Reference.");
++		return -EINVAL;
++	}
++
++	return buffer->lock(map_flags, addr);
++}
++#endif
++
+ int32_t cros_gralloc_driver::unlock(buffer_handle_t handle, int32_t *release_fence)
+ {
+ 	std::lock_guard<std::mutex> lock(mutex_);
+@@ -561,6 +620,9 @@ int32_t cros_gralloc_driver::get_backing_store(buffer_handle_t handle, uint64_t
+ 		return -EINVAL;
+ 	}
+ 
++#ifdef USE_GRALLOC1
++	*out_store = static_cast<uint64_t>(hnd->id);
++#else
+ 	auto buffer = get_buffer(hnd);
+ 	if (!buffer) {
+ 		ALOGE("Invalid reference (get_backing_store() called on unregistered handle).");
+@@ -568,6 +630,7 @@ int32_t cros_gralloc_driver::get_backing_store(buffer_handle_t handle, uint64_t
+ 	}
+ 
+ 	*out_store = static_cast<uint64_t>(buffer->get_id());
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/cros_gralloc/cros_gralloc_driver.h b/cros_gralloc/cros_gralloc_driver.h
+index f35757c..182e8ce 100644
+--- a/cros_gralloc/cros_gralloc_driver.h
++++ b/cros_gralloc/cros_gralloc_driver.h
+@@ -33,6 +33,10 @@ class cros_gralloc_driver
+ 	int32_t lock(buffer_handle_t handle, int32_t acquire_fence, bool close_acquire_fence,
+ 		     const struct rectangle *rect, uint32_t map_flags,
+ 		     uint8_t *addr[DRV_MAX_PLANES]);
++#ifdef USE_GRALLOC1
++	int32_t lock(buffer_handle_t handle, int32_t acquire_fence, uint32_t map_flags,
++			                     uint8_t *addr[DRV_MAX_PLANES]);
++#endif
+ 	int32_t unlock(buffer_handle_t handle, int32_t *release_fence);
+ 
+ 	int32_t invalidate(buffer_handle_t handle);
+diff --git a/cros_gralloc/cros_gralloc_handle.h b/cros_gralloc/cros_gralloc_handle.h
+index 167972e..cdcd5dc 100644
+--- a/cros_gralloc/cros_gralloc_handle.h
++++ b/cros_gralloc/cros_gralloc_handle.h
+@@ -40,6 +40,21 @@ struct cros_gralloc_handle : public native_handle_t {
+ 	uint32_t num_planes;
+ 	uint64_t reserved_region_size;
+ 	uint64_t total_size; /* Total allocation size */
++#ifdef USE_GRALLOC1
++	uint32_t consumer_usage;
++	uint32_t producer_usage;
++	uint32_t yuv_color_range;   // YUV Color range.
++	uint32_t is_updated;        // frame updated flag
++	uint32_t is_encoded;        // frame encoded flag
++	uint32_t is_encrypted;
++	uint32_t is_key_frame;
++	uint32_t is_interlaced;
++	uint32_t is_mmc_capable;
++	uint32_t compression_mode;
++	uint32_t compression_hint;
++	uint32_t codec;
++	uint32_t format_modifiers[2 * DRV_MAX_PLANES];
++#endif
+ } __attribute__((packed));
+ 
+ typedef const struct cros_gralloc_handle *cros_gralloc_handle_t;
+diff --git a/cros_gralloc/cros_gralloc_helpers.cc b/cros_gralloc/cros_gralloc_helpers.cc
+index 8c86c66..7041aee 100644
+--- a/cros_gralloc/cros_gralloc_helpers.cc
++++ b/cros_gralloc/cros_gralloc_helpers.cc
+@@ -9,6 +9,10 @@
+ #include <hardware/gralloc.h>
+ #include <sync/sync.h>
+ 
++#ifdef USE_GRALLOC1
++#include "i915_private_android.h"
++#endif
++
+ /* Define to match AIDL BufferUsage::VIDEO_DECODER. */
+ #define BUFFER_USAGE_VIDEO_DECODER (1 << 22)
+ 
+@@ -21,6 +25,20 @@
+ /* Define to match AIDL PixelFormat::R_8. */
+ #define HAL_PIXEL_FORMAT_R8 0x38
+ 
++#ifdef USE_GRALLOC1
++bool is_flex_format(uint32_t format)
++{
++	switch (format) {
++	case DRM_FORMAT_FLEX_IMPLEMENTATION_DEFINED:
++	case DRM_FORMAT_FLEX_YCbCr_420_888:
++		return true;
++	default:
++		return false;
++	}
++	return false;
++}
++#endif
++
+ uint32_t cros_gralloc_convert_format(int format)
+ {
+ 	/*
+@@ -80,7 +98,11 @@ uint32_t cros_gralloc_convert_format(int format)
+ #endif
+ 	}
+ 
++#ifdef USE_GRALLOC1
++	return i915_private_convert_format(format);
++#else
+ 	return DRM_FORMAT_NONE;
++#endif
+ }
+ 
+ static inline void handle_usage(uint64_t *gralloc_usage, uint64_t gralloc_mask,
+@@ -190,6 +212,36 @@ int32_t cros_gralloc_sync_wait(int32_t fence, bool close_fence)
+ 	return 0;
+ }
+ 
++#ifdef USE_GRALLOC1
++int32_t cros_gralloc_sync_wait(int32_t acquire_fence)
++{
++	if (acquire_fence < 0)
++		return 0;
++
++	/*
++	 * Wait initially for 1000 ms, and then wait indefinitely. The SYNC_IOC_WAIT
++	 * documentation states the caller waits indefinitely on the fence if timeout < 0.
++	 */
++	int err = sync_wait(acquire_fence, 1000);
++	if (err < 0) {
++		ALOGE("Timed out on sync wait, err = %s", strerror(errno));
++		err = sync_wait(acquire_fence, -1);
++		if (err < 0) {
++			ALOGE("sync wait error = %s", strerror(errno));
++			return -errno;
++		}
++	}
++
++	err = close(acquire_fence);
++	if (err) {
++		ALOGE("Unable to close fence fd, err = %s", strerror(errno));
++		return -errno;
++	}
++
++	return 0;
++}
++#endif
++
+ std::string get_drm_format_string(uint32_t drm_format)
+ {
+ 	char *sequence = (char *)&drm_format;
+diff --git a/cros_gralloc/cros_gralloc_helpers.h b/cros_gralloc/cros_gralloc_helpers.h
+index fe72165..a2bf85c 100644
+--- a/cros_gralloc/cros_gralloc_helpers.h
++++ b/cros_gralloc/cros_gralloc_helpers.h
+@@ -33,6 +33,11 @@ struct cros_gralloc_buffer_descriptor {
+ 	uint64_t use_flags;
+ 	uint64_t reserved_region_size;
+ 	std::string name;
++#ifdef USE_GRALLOC1
++	uint32_t consumer_usage;
++	uint32_t producer_usage;
++	uint64_t modifier;
++#endif
+ };
+ 
+ constexpr uint32_t cros_gralloc_magic = 0xABCDDCBA;
+@@ -49,6 +54,11 @@ cros_gralloc_handle_t cros_gralloc_convert_handle(buffer_handle_t handle);
+ 
+ int32_t cros_gralloc_sync_wait(int32_t fence, bool close_fence);
+ 
++#ifdef USE_GRALLOC1
++int32_t cros_gralloc_sync_wait(int32_t acquire_fence);
++bool is_flex_format(uint32_t format);
++#endif
++
+ std::string get_drm_format_string(uint32_t drm_format);
+ 
+ #endif
+diff --git a/cros_gralloc/gralloc1/cros_gralloc1_module.cc b/cros_gralloc/gralloc1/cros_gralloc1_module.cc
+new file mode 100644
+index 0000000..e11d502
+--- /dev/null
++++ b/cros_gralloc/gralloc1/cros_gralloc1_module.cc
+@@ -0,0 +1,818 @@
++/*
++ * Copyright 2016 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#undef LOG_TAG
++#define LOG_TAG "CrosGralloc1 "
++
++#include "cros_gralloc1_module.h"
++
++#include <hardware/gralloc.h>
++
++#include <inttypes.h>
++
++#include "i915_private_android.h"
++
++#include "i915_private_android_types.h"
++
++template <typename PFN, typename T> static gralloc1_function_pointer_t asFP(T function)
++{
++	static_assert(std::is_same<PFN, T>::value, "Incompatible function pointer");
++	return reinterpret_cast<gralloc1_function_pointer_t>(function);
++}
++
++uint64_t cros_gralloc1_convert_usage(uint64_t producer_flags, uint64_t consumer_flags)
++{
++	uint64_t usage = BO_USE_NONE;
++
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_CURSOR)
++		usage |= BO_USE_CURSOR;
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_CPU_READ)
++		usage |= BO_USE_SW_READ_RARELY;
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN)
++		usage |= BO_USE_SW_READ_OFTEN;
++	if ((consumer_flags & GRALLOC1_CONSUMER_USAGE_HWCOMPOSER) ||
++	    (consumer_flags & GRALLOC1_CONSUMER_USAGE_CLIENT_TARGET)) {
++		/* HWC wants to use display hardware, but can defer to OpenGL. */
++		usage |= BO_USE_SCANOUT | BO_USE_TEXTURE;
++	} else if (consumer_flags & GRALLOC1_CONSUMER_USAGE_GPU_TEXTURE) {
++		usage |= BO_USE_TEXTURE;
++	}
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_VIDEO_ENCODER)
++		/*HACK: See b/30054495 */
++		usage |= BO_USE_SW_READ_OFTEN;
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_CAMERA)
++		usage |= BO_USE_CAMERA_READ;
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_RENDERSCRIPT)
++		/* We use CPU for compute. */
++		usage |= BO_USE_RENDERSCRIPT;
++
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_READ)
++		usage |= BO_USE_SW_READ_RARELY;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_READ_OFTEN)
++		usage |= BO_USE_SW_READ_OFTEN;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_WRITE)
++		usage |= BO_USE_SW_WRITE_RARELY;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN)
++		usage |= BO_USE_SW_WRITE_OFTEN;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_GPU_RENDER_TARGET)
++		usage |= BO_USE_RENDERING;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_VIDEO_DECODER)
++		/* Video wants to use display hardware, but can defer to OpenGL. */
++		usage |= BO_USE_SCANOUT | BO_USE_RENDERING;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_PROTECTED)
++		usage |= BO_USE_PROTECTED;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CAMERA)
++		usage |= BO_USE_CAMERA_WRITE;
++
++	return usage;
++}
++
++uint64_t cros_gralloc1_convert_map_usage(uint64_t producer_flags, uint64_t consumer_flags)
++{
++	uint64_t usage = BO_USE_NONE;
++
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_CPU_READ)
++		usage |= BO_MAP_READ;
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN)
++		usage |= BO_MAP_READ;
++	if (consumer_flags & GRALLOC1_CONSUMER_USAGE_VIDEO_ENCODER)
++		/*HACK: See b/30054495 */
++		usage |= BO_MAP_READ;
++
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_READ)
++		usage |= BO_MAP_READ;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_READ_OFTEN)
++		usage |= BO_MAP_READ;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_WRITE)
++		usage |= BO_MAP_WRITE;
++	if (producer_flags & GRALLOC1_PRODUCER_USAGE_CPU_WRITE_OFTEN)
++		usage |= BO_MAP_WRITE;
++
++	return usage;
++}
++
++bool IsSupportedYUVFormat(uint32_t droid_format)
++{
++	switch (droid_format) {
++	case HAL_PIXEL_FORMAT_YCbCr_420_888:
++	case HAL_PIXEL_FORMAT_YV12:
++	case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
++		return true;
++	default:
++		return i915_private_supported_yuv_format(droid_format);
++	}
++
++	return false;
++}
++
++namespace android
++{
++
++/* CrosGralloc1 is a Singleton and pCrosGralloc1 holds pointer to its instance*/
++static CrosGralloc1 *pCrosGralloc1 = NULL;
++static uint32_t ref_count = 0;
++//static SpinLock global_lock_;
++static std::mutex global_mutex_;
++
++CrosGralloc1::CrosGralloc1()
++{
++	getCapabilities = getCapabilitiesHook;
++	getFunction = getFunctionHook;
++	common.tag = HARDWARE_DEVICE_TAG;
++	common.version = HARDWARE_MODULE_API_VERSION(1, 0);
++	common.close = HookDevClose;
++}
++
++CrosGralloc1::~CrosGralloc1()
++{
++}
++
++bool CrosGralloc1::Init()
++{
++	if (driver)
++		return true;
++
++	driver = cros_gralloc_driver::get_instance();
++	if (!driver) {
++		ALOGE("Failed to initialize driver.");
++		return false;
++	}
++
++	return true;
++}
++
++void CrosGralloc1::doGetCapabilities(uint32_t *outCount, int32_t *outCapabilities)
++{
++	if (outCapabilities == nullptr) {
++		*outCount = 0;
++	}
++}
++
++gralloc1_function_pointer_t CrosGralloc1::doGetFunction(int32_t intDescriptor)
++{
++	constexpr auto lastDescriptor = static_cast<int32_t>(GRALLOC1_LAST_FUNCTION);
++	if (intDescriptor < 0 || ((intDescriptor > lastDescriptor) && ((intDescriptor < 100) || (intDescriptor > GRALLOC1_LAST_CUSTOM)))) {
++		ALOGE("Invalid function descriptor %d", intDescriptor);
++		return nullptr;
++	}
++
++	auto descriptor = static_cast<gralloc1_function_descriptor_t>(intDescriptor);
++	switch (descriptor) {
++	case GRALLOC1_FUNCTION_DUMP:
++		return asFP<GRALLOC1_PFN_DUMP>(dumpHook);
++	case GRALLOC1_FUNCTION_CREATE_DESCRIPTOR:
++		return asFP<GRALLOC1_PFN_CREATE_DESCRIPTOR>(createDescriptorHook);
++	case GRALLOC1_FUNCTION_DESTROY_DESCRIPTOR:
++		return asFP<GRALLOC1_PFN_DESTROY_DESCRIPTOR>(destroyDescriptorHook);
++	case GRALLOC1_FUNCTION_SET_CONSUMER_USAGE:
++		return asFP<GRALLOC1_PFN_SET_CONSUMER_USAGE>(setConsumerUsageHook);
++	case GRALLOC1_FUNCTION_SET_DIMENSIONS:
++		return asFP<GRALLOC1_PFN_SET_DIMENSIONS>(setDimensionsHook);
++	case GRALLOC1_FUNCTION_SET_FORMAT:
++		return asFP<GRALLOC1_PFN_SET_FORMAT>(setFormatHook);
++	case GRALLOC1_FUNCTION_SET_PRODUCER_USAGE:
++		return asFP<GRALLOC1_PFN_SET_PRODUCER_USAGE>(setProducerUsageHook);
++	case GRALLOC1_FUNCTION_GET_BACKING_STORE:
++		return asFP<GRALLOC1_PFN_GET_BACKING_STORE>(getBackingStoreHook);
++	case GRALLOC1_FUNCTION_GET_CONSUMER_USAGE:
++		return asFP<GRALLOC1_PFN_GET_CONSUMER_USAGE>(getConsumerUsageHook);
++	case GRALLOC1_FUNCTION_GET_DIMENSIONS:
++		return asFP<GRALLOC1_PFN_GET_DIMENSIONS>(getDimensionsHook);
++	case GRALLOC1_FUNCTION_GET_FORMAT:
++		return asFP<GRALLOC1_PFN_GET_FORMAT>(getFormatHook);
++	case GRALLOC1_FUNCTION_GET_PRODUCER_USAGE:
++		return asFP<GRALLOC1_PFN_GET_PRODUCER_USAGE>(getProducerUsageHook);
++	case GRALLOC1_FUNCTION_GET_STRIDE:
++		return asFP<GRALLOC1_PFN_GET_STRIDE>(getStrideHook);
++	case GRALLOC1_FUNCTION_GET_BYTE_STRIDE:
++		return asFP<GRALLOC1_PFN_GET_BYTE_STRIDE>(getByteStrideHook);
++	case GRALLOC1_FUNCTION_GET_PRIME:
++		return asFP<GRALLOC1_PFN_GET_PRIME>(getPrimeHook);
++	case GRALLOC1_FUNCTION_ALLOCATE:
++		if (driver) {
++			return asFP<GRALLOC1_PFN_ALLOCATE>(allocateBuffers);
++		} else {
++			return nullptr;
++		}
++	case GRALLOC1_FUNCTION_RETAIN:
++		return asFP<GRALLOC1_PFN_RETAIN>(managementHook<&CrosGralloc1::retain>);
++	case GRALLOC1_FUNCTION_RELEASE:
++		return asFP<GRALLOC1_PFN_RELEASE>(managementHook<&CrosGralloc1::release>);
++	case GRALLOC1_FUNCTION_GET_NUM_FLEX_PLANES:
++		return asFP<GRALLOC1_PFN_GET_NUM_FLEX_PLANES>(getNumFlexPlanesHook);
++	case GRALLOC1_FUNCTION_LOCK:
++		return asFP<GRALLOC1_PFN_LOCK>(lockHook<void *, &CrosGralloc1::lock>);
++	case GRALLOC1_FUNCTION_LOCK_FLEX:
++		return asFP<GRALLOC1_PFN_LOCK_FLEX>(
++		    lockHook<struct android_flex_layout, &CrosGralloc1::lockFlex>);
++	case GRALLOC1_FUNCTION_UNLOCK:
++		return asFP<GRALLOC1_PFN_UNLOCK>(unlockHook);
++	case GRALLOC1_FUNCTION_SET_MODIFIER:
++		return asFP<GRALLOC1_PFN_SET_MODIFIER>(setModifierHook);
++	case GRALLOC1_FUNCTION_SET_INTERLACE:
++		return asFP<GRALLOC1_PFN_SET_INTERLACE>(setInterlaceHook);
++	case GRALLOC1_FUNCTION_SET_PROTECTIONINFO:
++		return asFP<GRALLOC1_PFN_SET_PROTECTIONINFO>(setProtectionInfoHook);
++	case GRALLOC1_FUNCTION_VALIDATE_BUFFER_SIZE:
++		return asFP<GRALLOC1_PFN_VALIDATE_BUFFER_SIZE>(validateBufferSizeHook);
++	case GRALLOC1_FUNCTION_GET_TRANSPORT_SIZE:
++		return asFP<GRALLOC1_PFN_GET_TRANSPORT_SIZE>(getTransportSizeHook);
++	case GRALLOC1_FUNCTION_IMPORT_BUFFER:
++		return asFP<GRALLOC1_PFN_IMPORT_BUFFER>(importBufferHook);
++	case GRALLOC1_FUNCTION_INVALID:
++		ALOGE("Invalid function descriptor");
++		return nullptr;
++	}
++
++	ALOGE("Unknown function descriptor: %d", intDescriptor);
++	return nullptr;
++}
++
++void CrosGralloc1::dump(uint32_t *outSize, char *outBuffer)
++{
++	ALOGD("dump(%u (%p), %p", outSize ? *outSize : 0, outSize, outBuffer);
++}
++
++int32_t CrosGralloc1::createDescriptor(gralloc1_buffer_descriptor_t *outDescriptor)
++{
++	if (!outDescriptor)
++		return CROS_GRALLOC_ERROR_BAD_DESCRIPTOR;
++
++	struct cros_gralloc_buffer_descriptor *hnd = new cros_gralloc_buffer_descriptor();
++	*outDescriptor = (gralloc1_buffer_descriptor_t)hnd;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::destroyDescriptor(gralloc1_buffer_descriptor_t descriptor)
++{
++	auto hnd = (struct cros_gralloc_buffer_descriptor *)descriptor;
++	delete hnd;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::setConsumerUsage(gralloc1_buffer_descriptor_t descriptorId, uint64_t intUsage)
++{
++	auto hnd = (struct cros_gralloc_buffer_descriptor *)descriptorId;
++	hnd->consumer_usage = intUsage;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::setProducerUsage(gralloc1_buffer_descriptor_t descriptorId, uint64_t intUsage)
++{
++	auto hnd = (struct cros_gralloc_buffer_descriptor *)descriptorId;
++	hnd->producer_usage = intUsage;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::setDimensions(gralloc1_buffer_descriptor_t descriptorId, uint32_t width,
++				    uint32_t height)
++{
++	auto hnd = (struct cros_gralloc_buffer_descriptor *)descriptorId;
++	hnd->width = width;
++	hnd->height = height;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::setFormat(gralloc1_buffer_descriptor_t descriptorId, int32_t format)
++{
++	auto hnd = (struct cros_gralloc_buffer_descriptor *)descriptorId;
++	hnd->droid_format = format;
++	hnd->drm_format = cros_gralloc_convert_format(format);
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::setModifier(gralloc1_buffer_descriptor_t descriptorId, uint64_t modifier)
++{
++	auto hnd = (struct cros_gralloc_buffer_descriptor *)descriptorId;
++	hnd->modifier = modifier;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::setInterlace(buffer_handle_t buffer, uint32_t interlace)
++{
++	auto hnd = (cros_gralloc_handle*) cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++	hnd->is_interlaced = interlace;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::setProtectionInfo(buffer_handle_t buffer, uint32_t protection_info)
++{
++	auto hnd = (cros_gralloc_handle *)cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++	hnd->is_encrypted = protection_info;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::validateBufferSize(buffer_handle_t buffer,
++					 const gralloc1_buffer_descriptor_info_t *descriptorInfo,
++					 uint32_t stride)
++{
++	auto hnd = (cros_gralloc_handle *)cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	if (!is_flex_format(cros_gralloc_convert_format(descriptorInfo->format)) &&
++	    cros_gralloc_convert_format(descriptorInfo->format) != hnd->format) {
++		return CROS_GRALLOC_ERROR_BAD_VALUE;
++	}
++
++	// Do not support GRALLOC1_CAPABILITY_LAYERED_BUFFERS, only allocate buffers with a
++	// single layer.
++	if (descriptorInfo->layerCount != 1) {
++		return CROS_GRALLOC_ERROR_BAD_VALUE;
++	}
++	if (stride > hnd->pixel_stride || descriptorInfo->width > hnd->width ||
++	    descriptorInfo->height > hnd->height) {
++		return CROS_GRALLOC_ERROR_BAD_VALUE;
++	}
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getTransportSize(buffer_handle_t buffer, uint32_t *outNumFds,
++				       uint32_t *outNumInts)
++{
++	auto hnd = (cros_gralloc_handle *)cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++	*outNumFds = hnd->numFds;
++	*outNumInts = hnd->numInts;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::importBuffer(const buffer_handle_t rawHandle, buffer_handle_t *outBuffer)
++{
++	if (!rawHandle) {
++		*outBuffer = NULL;
++		return GRALLOC1_ERROR_BAD_HANDLE;
++	}
++	auto error = driver->retain(rawHandle);
++	if (error != GRALLOC1_ERROR_NONE) {
++		*outBuffer = NULL;
++		return error;
++	}
++
++	*outBuffer = rawHandle;
++	return GRALLOC1_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::allocate(struct cros_gralloc_buffer_descriptor *descriptor,
++			       buffer_handle_t *outBufferHandle)
++{
++	native_handle_t *handle;
++
++	// If this function is being called, it's because we handed out its function
++	// pointer, which only occurs when mDevice has been loaded successfully and
++	// we are permitted to allocate
++
++	uint64_t usage =
++	    cros_gralloc1_convert_usage(descriptor->producer_usage, descriptor->consumer_usage);
++	descriptor->use_flags = usage;
++
++	if (!(driver->is_supported(descriptor))) {
++		ALOGE("Unsupported combination -- HAL format: %u, HAL flags: %" PRIu64 ", "
++			"drv_format: %u, drv_flags: %" PRIu64 "",
++			descriptor->droid_format, usage, descriptor->drm_format,
++			descriptor->use_flags);
++		return CROS_GRALLOC_ERROR_UNSUPPORTED;
++	}
++
++	if (driver->allocate(descriptor, &handle))
++		return CROS_GRALLOC_ERROR_NO_RESOURCES;
++
++	*outBufferHandle = handle;
++
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::allocateBuffers(gralloc1_device_t *device, uint32_t numDescriptors,
++				      const gralloc1_buffer_descriptor_t *descriptors,
++				      buffer_handle_t *outBuffers)
++{
++	auto adapter = getAdapter(device);
++	for (uint32_t i = 0; i < numDescriptors; i++) {
++		auto descriptor = (struct cros_gralloc_buffer_descriptor *)descriptors[i];
++		if (!descriptor) {
++			return CROS_GRALLOC_ERROR_BAD_DESCRIPTOR;
++		}
++
++		buffer_handle_t bufferHandle = nullptr;
++		int32_t error = adapter->allocate(descriptor, &bufferHandle);
++		if (error != CROS_GRALLOC_ERROR_NONE) {
++			return error;
++		}
++
++		outBuffers[i] = bufferHandle;
++	}
++
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::retain(buffer_handle_t bufferHandle)
++{
++	if (driver->retain(bufferHandle))
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::release(buffer_handle_t bufferHandle)
++{
++	if (!bufferHandle) {
++		ALOGE("Failed to freeBuffer, empty handle.\n");
++		return GRALLOC1_ERROR_BAD_HANDLE;
++	}
++
++	int ret = driver->release(bufferHandle);
++	if (ret) {
++		ALOGE("Failed to release handle, bad handle.\n");
++		return GRALLOC1_ERROR_BAD_HANDLE;
++	}
++
++
++	return GRALLOC1_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::lock(buffer_handle_t bufferHandle, gralloc1_producer_usage_t producerUsage,
++			   gralloc1_consumer_usage_t consumerUsage,
++			   const gralloc1_rect_t &accessRegion, void **outData,
++			   int32_t acquireFence)
++{
++	uint64_t map_flags;
++	uint8_t *addr[DRV_MAX_PLANES];
++
++	auto hnd = cros_gralloc_convert_handle(bufferHandle);
++	if (!hnd) {
++		ALOGE("Invalid handle.");
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	map_flags = cros_gralloc1_convert_map_usage(producerUsage, consumerUsage);
++
++	if (driver->lock(bufferHandle, acquireFence, map_flags, addr)) {
++		ALOGW("Plz switch to mapper 4.0 or call importBuffer & freeBuffer with mapper 2.0 before lock");
++		native_handle_t* buffer_handle = native_handle_clone(bufferHandle);
++		auto error = retain(buffer_handle);
++		if (error != GRALLOC1_ERROR_NONE) {
++			native_handle_close(buffer_handle);
++			native_handle_delete(buffer_handle);
++			return error;
++		}
++		bufferHandle = buffer_handle;
++		if (driver->lock(bufferHandle, acquireFence, map_flags, addr))
++			return CROS_GRALLOC_ERROR_BAD_HANDLE;
++		native_handle_close(buffer_handle);
++		native_handle_delete(buffer_handle);
++	}
++
++	*outData = addr[0];
++
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++thread_local android_flex_plane_t ycbcrplanes[3];
++
++int32_t update_flex_layout(struct android_ycbcr *ycbcr, struct android_flex_layout *outFlexLayout)
++{
++	outFlexLayout->format = FLEX_FORMAT_YCbCr;
++	outFlexLayout->num_planes = 3;
++	for (uint32_t i = 0; i < outFlexLayout->num_planes; i++) {
++		ycbcrplanes[i].bits_per_component = 8;
++		ycbcrplanes[i].bits_used = 8;
++	}
++
++	ycbcrplanes[0].top_left = static_cast<uint8_t *>(ycbcr->y);
++	ycbcrplanes[0].component = FLEX_COMPONENT_Y;
++	ycbcrplanes[0].h_increment = 1;
++	ycbcrplanes[0].v_increment = static_cast<int32_t>(ycbcr->ystride);
++
++	ycbcrplanes[1].top_left = static_cast<uint8_t *>(ycbcr->cb);
++	ycbcrplanes[1].component = FLEX_COMPONENT_Cb;
++	ycbcrplanes[1].h_increment = static_cast<int32_t>(ycbcr->chroma_step);
++	ycbcrplanes[1].v_increment = static_cast<int32_t>(ycbcr->cstride);
++
++	ycbcrplanes[2].top_left = static_cast<uint8_t *>(ycbcr->cr);
++	ycbcrplanes[2].component = FLEX_COMPONENT_Cr;
++	ycbcrplanes[2].h_increment = static_cast<int32_t>(ycbcr->chroma_step);
++	ycbcrplanes[2].v_increment = static_cast<int32_t>(ycbcr->cstride);
++
++	outFlexLayout->planes = ycbcrplanes;
++	return 0;
++}
++
++int32_t CrosGralloc1::lockFlex(buffer_handle_t bufferHandle,
++			       gralloc1_producer_usage_t producerUsage,
++			       gralloc1_consumer_usage_t consumerUsage,
++			       const gralloc1_rect_t &accessRegion,
++			       struct android_flex_layout *outData, int32_t acquireFence)
++{
++	int32_t ret = -EINVAL;
++	struct android_ycbcr ycbcrData;
++
++	/*Check the format and support only for YUV format */
++	auto hnd = cros_gralloc_convert_handle(bufferHandle);
++	if (!hnd) {
++		ALOGE("lockFlex: Invalid handle.");
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	if (!IsSupportedYUVFormat(hnd->droid_format)) {
++		ALOGE("lockFlex: Non-YUV format not compatible.");
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	ret = lockYCbCr(bufferHandle, producerUsage, consumerUsage, accessRegion, &ycbcrData,
++			acquireFence);
++
++	/* convert the data in flex format*/
++	update_flex_layout(&ycbcrData, outData);
++
++	return ret;
++}
++
++int32_t CrosGralloc1::lockYCbCr(buffer_handle_t bufferHandle,
++				gralloc1_producer_usage_t producerUsage,
++				gralloc1_consumer_usage_t consumerUsage,
++				const gralloc1_rect_t &accessRegion, struct android_ycbcr *ycbcr,
++				int32_t acquireFence)
++{
++	uint64_t map_flags;
++	uint8_t *addr[DRV_MAX_PLANES] = { nullptr, nullptr, nullptr, nullptr };
++
++	auto hnd = cros_gralloc_convert_handle(bufferHandle);
++	if (!hnd) {
++		ALOGE("Invalid handle.");
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	if (!IsSupportedYUVFormat(hnd->droid_format)) {
++		ALOGE("Non-YUV format not compatible.");
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	map_flags = cros_gralloc1_convert_map_usage(producerUsage, consumerUsage);
++
++	if (driver->lock(bufferHandle, acquireFence, map_flags, addr)) {
++		ALOGW("Plz switch to mapper 4.0 or call importBuffer & freeBuffer with mapper 2.0 before lockFlex");
++		native_handle_t* buffer_handle = native_handle_clone(bufferHandle);
++		auto error = retain(buffer_handle);
++		if (error != GRALLOC1_ERROR_NONE) {
++			native_handle_close(buffer_handle);
++			native_handle_delete(buffer_handle);
++			return error;
++		}
++		bufferHandle = buffer_handle;
++		if (driver->lock(bufferHandle, acquireFence, map_flags, addr))
++			return CROS_GRALLOC_ERROR_BAD_HANDLE;
++		driver->release(buffer_handle);
++		native_handle_close(buffer_handle);
++		native_handle_delete(buffer_handle);
++	}
++
++	switch (hnd->format) {
++	case DRM_FORMAT_NV12:
++	case DRM_FORMAT_NV12_Y_TILED_INTEL:
++		ycbcr->y = addr[0];
++		ycbcr->cb = addr[1];
++		ycbcr->cr = addr[1] + 1;
++		ycbcr->ystride = hnd->strides[0];
++		ycbcr->cstride = hnd->strides[1];
++		ycbcr->chroma_step = 2;
++		break;
++	case DRM_FORMAT_YVU420:
++	case DRM_FORMAT_YVU420_ANDROID:
++		ycbcr->y = addr[0];
++		ycbcr->cb = addr[2];
++		ycbcr->cr = addr[1];
++		ycbcr->ystride = hnd->strides[0];
++		ycbcr->cstride = hnd->strides[1];
++		ycbcr->chroma_step = 1;
++		break;
++	case DRM_FORMAT_P010:
++		ycbcr->y = addr[0];
++		ycbcr->cb = addr[1];
++		ycbcr->cr = addr[1] + 2;
++		ycbcr->ystride = hnd->strides[0];
++		ycbcr->cstride = hnd->strides[1];
++		ycbcr->chroma_step = 4;
++		break;
++	default:
++		return CROS_GRALLOC_ERROR_UNSUPPORTED;
++	}
++
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::unlock(buffer_handle_t bufferHandle, int32_t *outReleaseFence)
++{
++	if (driver->unlock(bufferHandle, outReleaseFence))
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getNumFlexPlanes(buffer_handle_t buffer, uint32_t *outNumPlanes)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		ALOGE("Invalid handle.");
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	*outNumPlanes = drv_num_planes_from_format(hnd->format);
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getBackingStore(buffer_handle_t buffer, gralloc1_backing_store_t *outStore)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		ALOGE("Invalid handle.");
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	if (driver->get_backing_store(buffer, outStore))
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getConsumerUsage(buffer_handle_t buffer,
++				       uint64_t * /*gralloc1_consumer_usage_t*/ outUsage)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	*outUsage = hnd->consumer_usage;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getDimensions(buffer_handle_t buffer, uint32_t *outWidth, uint32_t *outHeight)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	*outWidth = hnd->width;
++	*outHeight = hnd->height;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getFormat(buffer_handle_t buffer, int32_t *outFormat)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	*outFormat = hnd->droid_format;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getProducerUsage(buffer_handle_t buffer,
++				       uint64_t * /*gralloc1_producer_usage_t*/ outUsage)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	*outUsage = hnd->producer_usage;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getStride(buffer_handle_t buffer, uint32_t *outStride)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	*outStride = hnd->pixel_stride;
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getByteStride(buffer_handle_t buffer, uint32_t *outStride, uint32_t size)
++{
++    auto hnd = cros_gralloc_convert_handle(buffer);
++
++    if (!outStride)
++	return -EINVAL;
++
++    if (!hnd) {
++	return CROS_GRALLOC_ERROR_BAD_HANDLE;
++    }
++
++    if (size != drv_num_planes_from_format(hnd->format)) {
++	ALOGE("Invalid array size- %d", size);
++	return -EINVAL;
++    }
++
++    memcpy(outStride, hnd->strides, sizeof(*outStride) * size);
++    return CROS_GRALLOC_ERROR_NONE;
++}
++
++int32_t CrosGralloc1::getPrime(buffer_handle_t buffer, uint32_t *prime)
++{
++	auto hnd = cros_gralloc_convert_handle(buffer);
++	if (!hnd) {
++		return CROS_GRALLOC_ERROR_BAD_HANDLE;
++	}
++
++	*prime = hnd->fds[0];
++	return CROS_GRALLOC_ERROR_NONE;
++}
++
++// static
++int CrosGralloc1::HookDevOpen(const struct hw_module_t *mod, const char *name,
++			      struct hw_device_t **device)
++{
++	if (strcmp(name, GRALLOC_HARDWARE_MODULE_ID)) {
++		ALOGE("Invalid module name- %s", name);
++		return -EINVAL;
++	}
++
++	//ScopedSpinLock lock(global_lock_);
++	std::lock_guard<std::mutex> lock(global_mutex_);
++	ref_count++;
++
++	if (pCrosGralloc1 != NULL) {
++		*device = &pCrosGralloc1->common;
++		return 0;
++	} else
++		pCrosGralloc1 = new CrosGralloc1();
++
++	std::unique_ptr<CrosGralloc1> ctx(pCrosGralloc1);
++	if (!ctx) {
++		ALOGE("Failed to allocate CrosGralloc1");
++		return -ENOMEM;
++	}
++
++	if (!ctx->Init()) {
++		ALOGE("Failed to initialize CrosGralloc1. \n");
++		return -EINVAL;
++	}
++
++	ctx->common.module = const_cast<hw_module_t *>(mod);
++	*device = &ctx->common;
++	ctx.release();
++	return 0;
++}
++
++// static
++int CrosGralloc1::HookDevClose(hw_device_t * /*dev*/)
++{
++	//ScopedSpinLock lock(global_lock_);
++	std::lock_guard<std::mutex> lock(global_mutex_);
++	if (ref_count > 0) {
++		ref_count--;
++	}
++
++	if (ref_count > 0) {
++		return 0;
++	}
++
++	if (pCrosGralloc1) {
++		delete pCrosGralloc1;
++		pCrosGralloc1 = NULL;
++	}
++
++	return 0;
++}
++
++} // namespace android
++
++static struct hw_module_methods_t cros_gralloc_module_methods = {
++	.open = android::CrosGralloc1::HookDevOpen,
++};
++
++hw_module_t HAL_MODULE_INFO_SYM = {
++	.tag = HARDWARE_MODULE_TAG,
++	.module_api_version = HARDWARE_MODULE_API_VERSION(1, 0),
++	.id = GRALLOC_HARDWARE_MODULE_ID,
++	.name = "Gralloc 1.0 module",
++	.author = "Intel Android",
++	.methods = &cros_gralloc_module_methods,
++};
+diff --git a/cros_gralloc/gralloc1/cros_gralloc1_module.h b/cros_gralloc/gralloc1/cros_gralloc1_module.h
+new file mode 100644
+index 0000000..fe22f39
+--- /dev/null
++++ b/cros_gralloc/gralloc1/cros_gralloc1_module.h
+@@ -0,0 +1,355 @@
++/*
++ * Copyright 2016 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef CROS_GRALLOC1_MODULE_H
++#define CROS_GRALLOC1_MODULE_H
++
++#include <memory.h>
++
++#include "cros_gralloc_driver.h"
++
++#include <hardware/gralloc1.h>
++
++#include "drv.h"
++
++struct cros_gralloc_module;
++
++namespace android
++{
++
++typedef enum {
++	CROS_GRALLOC_ERROR_NONE = 0,
++	CROS_GRALLOC_ERROR_BAD_DESCRIPTOR = 1,
++	CROS_GRALLOC_ERROR_BAD_HANDLE = 2,
++	CROS_GRALLOC_ERROR_BAD_VALUE = 3,
++	CROS_GRALLOC_ERROR_NOT_SHARED = 4,
++	CROS_GRALLOC_ERROR_NO_RESOURCES = 5,
++	CROS_GRALLOC_ERROR_UNDEFINED = 6,
++	CROS_GRALLOC_ERROR_UNSUPPORTED = 7,
++} cros_gralloc_error_t;
++
++class CrosGralloc1 : public gralloc1_device_t
++{
++      public:
++	CrosGralloc1();
++	~CrosGralloc1();
++
++	bool Init();
++
++	static int HookDevOpen(const struct hw_module_t *mod, const char *name,
++			       struct hw_device_t **device);
++	static int HookDevClose(hw_device_t *dev);
++
++      private:
++	static inline CrosGralloc1 *getAdapter(gralloc1_device_t *device)
++	{
++		return static_cast<CrosGralloc1 *>(device);
++	}
++
++	// getCapabilities
++
++	void doGetCapabilities(uint32_t *outCount,
++			       int32_t * /*gralloc1_capability_t*/ outCapabilities);
++	static void getCapabilitiesHook(gralloc1_device_t *device, uint32_t *outCount,
++					int32_t * /*gralloc1_capability_t*/ outCapabilities)
++	{
++		getAdapter(device)->doGetCapabilities(outCount, outCapabilities);
++	};
++
++	// getFunction
++
++	gralloc1_function_pointer_t
++	    doGetFunction(int32_t /*gralloc1_function_descriptor_t*/ descriptor);
++	static gralloc1_function_pointer_t
++	getFunctionHook(gralloc1_device_t *device,
++			int32_t /*gralloc1_function_descriptor_t*/ descriptor)
++	{
++		return getAdapter(device)->doGetFunction(descriptor);
++	}
++
++	// dump
++
++	void dump(uint32_t *outSize, char *outBuffer);
++	static void dumpHook(gralloc1_device_t *device, uint32_t *outSize, char *outBuffer)
++	{
++		return getAdapter(device)->dump(outSize, outBuffer);
++	}
++
++	// Buffer descriptor functions
++
++	int32_t setConsumerUsage(gralloc1_buffer_descriptor_t descriptorId, uint64_t intUsage);
++
++	int32_t setProducerUsage(gralloc1_buffer_descriptor_t descriptorId, uint64_t intUsage);
++
++	int32_t setDimensions(gralloc1_buffer_descriptor_t descriptorId, uint32_t width,
++			      uint32_t height);
++
++	int32_t setFormat(gralloc1_buffer_descriptor_t descriptorId, int32_t format);
++
++	int32_t setInterlace(buffer_handle_t buffer, uint32_t interlace);
++	int32_t setProtectionInfo(buffer_handle_t buffer, uint32_t protection_info);
++
++	int32_t createDescriptor(gralloc1_buffer_descriptor_t *outDescriptor);
++	static int32_t createDescriptorHook(gralloc1_device_t *device,
++					    gralloc1_buffer_descriptor_t *outDescriptor)
++	{
++		return getAdapter(device)->createDescriptor(outDescriptor);
++	}
++
++	int32_t destroyDescriptor(gralloc1_buffer_descriptor_t descriptor);
++	static int32_t destroyDescriptorHook(gralloc1_device_t *device,
++					     gralloc1_buffer_descriptor_t descriptor)
++	{
++		return getAdapter(device)->destroyDescriptor(descriptor);
++	}
++
++	static int32_t setConsumerUsageHook(gralloc1_device_t *device,
++					    gralloc1_buffer_descriptor_t descriptorId,
++					    uint64_t intUsage)
++	{
++		return getAdapter(device)->setConsumerUsage(descriptorId, intUsage);
++	}
++
++	static int32_t setDimensionsHook(gralloc1_device_t *device,
++					 gralloc1_buffer_descriptor_t descriptorId, uint32_t width,
++					 uint32_t height)
++	{
++		return getAdapter(device)->setDimensions(descriptorId, width, height);
++	}
++
++	static int32_t setFormatHook(gralloc1_device_t *device,
++				     gralloc1_buffer_descriptor_t descriptorId, int32_t format)
++	{
++		return getAdapter(device)->setFormat(descriptorId, format);
++	}
++
++	static int32_t setInterlaceHook(gralloc1_device_t *device,
++				     buffer_handle_t buffer, uint32_t interlace)
++	{
++		return getAdapter(device)->setInterlace(buffer, interlace);
++	}
++
++	static int32_t setProtectionInfoHook(gralloc1_device_t *device,
++				     buffer_handle_t buffer, uint32_t protection_info)
++	{
++		return getAdapter(device)->setProtectionInfo(buffer, protection_info);
++	}
++
++	static int32_t setProducerUsageHook(gralloc1_device_t *device,
++					    gralloc1_buffer_descriptor_t descriptorId,
++					    uint64_t intUsage)
++	{
++		return getAdapter(device)->setProducerUsage(descriptorId, intUsage);
++	}
++
++	int32_t getNumFlexPlanes(buffer_handle_t buffer, uint32_t *outNumPlanes);
++	static int32_t getNumFlexPlanesHook(gralloc1_device_t *device, buffer_handle_t buffer,
++					    uint32_t *outNumPlanes)
++	{
++		return getAdapter(device)->getNumFlexPlanes(buffer, outNumPlanes);
++	}
++
++	int32_t getBackingStore(buffer_handle_t buffer, gralloc1_backing_store_t *outStore);
++	static int32_t getBackingStoreHook(gralloc1_device_t *device, buffer_handle_t buffer,
++					   gralloc1_backing_store_t *outStore)
++	{
++		return getAdapter(device)->getBackingStore(buffer, outStore);
++	}
++
++	int32_t getConsumerUsage(buffer_handle_t buffer,
++				 uint64_t * /*gralloc1_consumer_usage_t*/ outUsage);
++	static int32_t getConsumerUsageHook(gralloc1_device_t *device, buffer_handle_t buffer,
++					    uint64_t * /*gralloc1_consumer_usage_t*/ outUsage)
++	{
++		return getAdapter(device)->getConsumerUsage(buffer, outUsage);
++	}
++
++	int32_t getDimensions(buffer_handle_t buffer, uint32_t *outWidth, uint32_t *outHeight);
++	static int32_t getDimensionsHook(gralloc1_device_t *device, buffer_handle_t buffer,
++					 uint32_t *outWidth, uint32_t *outHeight)
++	{
++		return getAdapter(device)->getDimensions(buffer, outWidth, outHeight);
++	}
++
++	int32_t getFormat(buffer_handle_t buffer, int32_t *outFormat);
++	static int32_t getFormatHook(gralloc1_device_t *device, buffer_handle_t buffer,
++				     int32_t *outFormat)
++	{
++		return getAdapter(device)->getFormat(buffer, outFormat);
++	}
++
++	int32_t validateBufferSize(buffer_handle_t buffer,
++				   const gralloc1_buffer_descriptor_info_t *descriptorInfo,
++				   uint32_t stride);
++	static int32_t
++	validateBufferSizeHook(gralloc1_device_t *device, buffer_handle_t buffer,
++			       const gralloc1_buffer_descriptor_info_t *descriptorInfo,
++			       uint32_t stride)
++	{
++		return getAdapter(device)->validateBufferSize(buffer, descriptorInfo, stride);
++	}
++
++	int32_t getTransportSize(buffer_handle_t buffer, uint32_t *outNumFds, uint32_t *outNumInts);
++	static int32_t getTransportSizeHook(gralloc1_device_t *device, buffer_handle_t buffer,
++					    uint32_t *outNumFds, uint32_t *outNumInts)
++	{
++		return getAdapter(device)->getTransportSize(buffer, outNumFds, outNumInts);
++	}
++
++	int32_t importBuffer(const buffer_handle_t rawHandle, buffer_handle_t *outBuffer);
++	static int32_t importBufferHook(gralloc1_device_t *device, const buffer_handle_t rawHandle,
++					buffer_handle_t *outBuffer)
++	{
++		return getAdapter(device)->importBuffer(rawHandle, outBuffer);
++	}
++
++	int32_t getProducerUsage(buffer_handle_t buffer,
++				 uint64_t * /*gralloc1_producer_usage_t*/ outUsage);
++	static int32_t getProducerUsageHook(gralloc1_device_t *device, buffer_handle_t buffer,
++					    uint64_t * /*gralloc1_producer_usage_t*/ outUsage)
++	{
++		return getAdapter(device)->getProducerUsage(buffer, outUsage);
++	}
++
++	int32_t getStride(buffer_handle_t buffer, uint32_t *outStride);
++	static int32_t getStrideHook(gralloc1_device_t *device, buffer_handle_t buffer,
++				     uint32_t *outStride)
++	{
++		return getAdapter(device)->getStride(buffer, outStride);
++	}
++
++	int32_t getByteStride(buffer_handle_t buffer, uint32_t *outStride, uint32_t size);
++	static int32_t getByteStrideHook(gralloc1_device_t *device, buffer_handle_t buffer,
++				     uint32_t *outStride, uint32_t size)
++	{
++		return getAdapter(device)->getByteStride(buffer, outStride, size);
++	}
++
++	int32_t getPrime(buffer_handle_t buffer, uint32_t *prime);
++	static int32_t getPrimeHook(gralloc1_device_t *device, buffer_handle_t buffer,
++				     uint32_t *prime)
++	{
++		return getAdapter(device)->getPrime(buffer, prime);
++	}
++
++	// Buffer Management functions
++	int32_t allocate(struct cros_gralloc_buffer_descriptor *descriptor,
++			 buffer_handle_t *outBufferHandle);
++	static int32_t allocateBuffers(gralloc1_device_t *device, uint32_t numDescriptors,
++				       const gralloc1_buffer_descriptor_t *descriptors,
++				       buffer_handle_t *outBuffers);
++
++	int32_t release(buffer_handle_t bufferHandle);
++	int32_t retain(buffer_handle_t bufferHandle);
++
++	// Member function pointer 'member' will either be retain or release
++	template <int32_t (CrosGralloc1::*member)(buffer_handle_t bufferHandle)>
++	static int32_t managementHook(gralloc1_device_t *device, buffer_handle_t bufferHandle)
++	{
++		auto adapter = getAdapter(device);
++		return ((*adapter).*member)(bufferHandle);
++	}
++
++	// Buffer access functions
++	int32_t lock(buffer_handle_t bufferHandle, gralloc1_producer_usage_t producerUsage,
++		     gralloc1_consumer_usage_t consumerUsage, const gralloc1_rect_t &accessRegion,
++		     void **outData, int32_t acquireFence);
++	int32_t lockFlex(buffer_handle_t bufferHandle, gralloc1_producer_usage_t producerUsage,
++			 gralloc1_consumer_usage_t consumerUsage,
++			 const gralloc1_rect_t &accessRegion, struct android_flex_layout *outFlex,
++			 int32_t acquireFence);
++	int32_t lockYCbCr(buffer_handle_t bufferHandle, gralloc1_producer_usage_t producerUsage,
++			  gralloc1_consumer_usage_t consumerUsage,
++			  const gralloc1_rect_t &accessRegion, struct android_ycbcr *outFlex,
++			  int32_t acquireFence);
++
++	template <typename OUT,
++		  int32_t (CrosGralloc1::*member)(
++		      buffer_handle_t bufferHandle, gralloc1_producer_usage_t,
++		      gralloc1_consumer_usage_t, const gralloc1_rect_t &, OUT *, int32_t)>
++	static int32_t lockHook(gralloc1_device_t *device, buffer_handle_t bufferHandle,
++				uint64_t /*gralloc1_producer_usage_t*/ uintProducerUsage,
++				uint64_t /*gralloc1_consumer_usage_t*/ uintConsumerUsage,
++				const gralloc1_rect_t *accessRegion, OUT *outData,
++				int32_t acquireFenceFd)
++	{
++		auto adapter = getAdapter(device);
++
++		// Exactly one of producer and consumer usage must be *_USAGE_NONE,
++		// but we can't check this until the upper levels of the framework
++		// correctly distinguish between producer and consumer usage
++		/*
++		bool hasProducerUsage =
++			uintProducerUsage != GRALLOC1_PRODUCER_USAGE_NONE;
++		bool hasConsumerUsage =
++			uintConsumerUsage != GRALLOC1_CONSUMER_USAGE_NONE;
++		if (hasProducerUsage && hasConsumerUsage ||
++			!hasProducerUsage && !hasConsumerUsage) {
++		    return static_cast<int32_t>(GRALLOC1_ERROR_BAD_VALUE);
++		}
++		*/
++
++		auto producerUsage = static_cast<gralloc1_producer_usage_t>(uintProducerUsage);
++		auto consumerUsage = static_cast<gralloc1_consumer_usage_t>(uintConsumerUsage);
++
++		if (!outData) {
++			const auto producerCpuUsage =
++			    GRALLOC1_PRODUCER_USAGE_CPU_READ | GRALLOC1_PRODUCER_USAGE_CPU_WRITE;
++			if (producerUsage & (producerCpuUsage != 0)) {
++				return CROS_GRALLOC_ERROR_BAD_VALUE;
++			}
++			if (consumerUsage & (GRALLOC1_CONSUMER_USAGE_CPU_READ != 0)) {
++				return CROS_GRALLOC_ERROR_BAD_VALUE;
++			}
++		}
++
++		if (!accessRegion) {
++			ALOGE("accessRegion is null");
++			return CROS_GRALLOC_ERROR_BAD_VALUE;
++		}
++
++		return ((*adapter).*member)(bufferHandle, producerUsage, consumerUsage,
++					    *accessRegion, outData, acquireFenceFd);
++	}
++
++	int32_t unlock(buffer_handle_t bufferHandle, int32_t *outReleaseFence);
++	static int32_t unlockHook(gralloc1_device_t *device, buffer_handle_t bufferHandle,
++				  int32_t *outReleaseFenceFd)
++	{
++		auto adapter = getAdapter(device);
++		*outReleaseFenceFd = -1;
++		int32_t releaseFence;
++		auto error = adapter->unlock(bufferHandle, &releaseFence);
++		if (error == CROS_GRALLOC_ERROR_NONE && releaseFence > 0) {
++			*outReleaseFenceFd = dup(releaseFence);
++		}
++		return error;
++	}
++
++	int32_t setModifier(gralloc1_buffer_descriptor_t descriptor, uint64_t modifier);
++	static int32_t setModifierHook(gralloc1_device_t *device,
++				       gralloc1_buffer_descriptor_t descriptor, uint64_t modifier)
++	{
++		return getAdapter(device)->setModifier(descriptor, modifier);
++	}
++
++	// Adapter internals
++	cros_gralloc_driver *driver = nullptr;
++};
++
++} // namespace android
++
++#endif
+diff --git a/cros_gralloc/i915_private_android.cc b/cros_gralloc/i915_private_android.cc
+new file mode 100644
+index 0000000..aa8cb49
+--- /dev/null
++++ b/cros_gralloc/i915_private_android.cc
+@@ -0,0 +1,104 @@
++/*
++ * Copyright 2017 The Chromium OS Authors. All rights reserved.
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file.
++ */
++
++#include "i915_private_android.h"
++#include "i915_private_android_types.h"
++
++#include "cros_gralloc_helpers.h"
++
++#include <hardware/gralloc.h>
++
++#include "drv.h"
++
++uint32_t i915_private_convert_format(int format)
++{
++	switch (format) {
++	case HAL_PIXEL_FORMAT_NV12:
++		return DRM_FORMAT_NV12;
++	case HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL:
++		return DRM_FORMAT_NV12_Y_TILED_INTEL;
++	case HAL_PIXEL_FORMAT_YCbCr_422_I:
++		return DRM_FORMAT_YUYV;
++	case HAL_PIXEL_FORMAT_Y16:
++		return DRM_FORMAT_R16;
++	case HAL_PIXEL_FORMAT_YCbCr_444_888:
++		return DRM_FORMAT_YUV444;
++	case HAL_PIXEL_FORMAT_YCrCb_420_SP:
++		return DRM_FORMAT_NV21;
++	case HAL_PIXEL_FORMAT_YCbCr_422_SP:
++		return DRM_FORMAT_NV16;
++	case HAL_PIXEL_FORMAT_YCbCr_422_888:
++		return DRM_FORMAT_YUV422;
++	case HAL_PIXEL_FORMAT_P010_INTEL:
++		return DRM_FORMAT_P010;
++	}
++
++	return DRM_FORMAT_NONE;
++}
++
++int32_t i915_private_invert_format(int format)
++{
++	/* Convert the DRM FourCC into the most specific HAL pixel format. */
++	switch (format) {
++	case DRM_FORMAT_ARGB8888:
++		return HAL_PIXEL_FORMAT_BGRA_8888;
++	case DRM_FORMAT_RGB565:
++		return HAL_PIXEL_FORMAT_RGB_565;
++	case DRM_FORMAT_RGB888:
++		return HAL_PIXEL_FORMAT_RGB_888;
++	case DRM_FORMAT_ABGR8888:
++		return HAL_PIXEL_FORMAT_RGBA_8888;
++	case DRM_FORMAT_XBGR8888:
++		return HAL_PIXEL_FORMAT_RGBX_8888;
++	case DRM_FORMAT_FLEX_YCbCr_420_888:
++		return HAL_PIXEL_FORMAT_YCbCr_420_888;
++	case DRM_FORMAT_YVU420_ANDROID:
++		return HAL_PIXEL_FORMAT_YV12;
++	case DRM_FORMAT_R8:
++		return HAL_PIXEL_FORMAT_BLOB;
++	case DRM_FORMAT_NV12:
++		return HAL_PIXEL_FORMAT_NV12;
++	case DRM_FORMAT_NV12_Y_TILED_INTEL:
++		return HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL;
++	case DRM_FORMAT_YUYV:
++		return HAL_PIXEL_FORMAT_YCbCr_422_I;
++	case DRM_FORMAT_R16:
++		return HAL_PIXEL_FORMAT_Y16;
++	case DRM_FORMAT_P010:
++		return HAL_PIXEL_FORMAT_P010_INTEL;
++	case DRM_FORMAT_YUV444:
++		return HAL_PIXEL_FORMAT_YCbCr_444_888;
++	case DRM_FORMAT_NV21:
++		return HAL_PIXEL_FORMAT_YCrCb_420_SP;
++	case DRM_FORMAT_NV16:
++		return HAL_PIXEL_FORMAT_YCbCr_422_SP;
++	case DRM_FORMAT_YUV422:
++		return HAL_PIXEL_FORMAT_YCbCr_422_888;
++	default:
++		ALOGE("Unhandled DRM format %4.4s", get_drm_format_string(format).c_str());
++	}
++
++	return 0;
++}
++
++bool i915_private_supported_yuv_format(uint32_t droid_format)
++{
++	switch (droid_format) {
++	case HAL_PIXEL_FORMAT_NV12:
++	case HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL:
++	case HAL_PIXEL_FORMAT_YCbCr_422_I:
++	case HAL_PIXEL_FORMAT_YCbCr_422_888:
++	case HAL_PIXEL_FORMAT_YCbCr_444_888:
++	case HAL_PIXEL_FORMAT_YCrCb_420_SP:
++	case HAL_PIXEL_FORMAT_Y16:
++	case HAL_PIXEL_FORMAT_P010_INTEL:
++		return true;
++	default:
++		return false;
++	}
++
++	return false;
++}
+diff --git a/cros_gralloc/i915_private_android.h b/cros_gralloc/i915_private_android.h
+new file mode 100644
+index 0000000..70c41f2
+--- /dev/null
++++ b/cros_gralloc/i915_private_android.h
+@@ -0,0 +1,19 @@
++/*
++ * Copyright 2017 The Chromium OS Authors. All rights reserved.
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file.
++ */
++#ifndef I915_PRIVATE_ANDROID
++#define I915_PRIVATE_ANDROID
++
++#include <stdint.h>
++
++#include "i915_private.h"
++
++uint32_t i915_private_convert_format(int format);
++
++int32_t i915_private_invert_format(int format);
++
++bool i915_private_supported_yuv_format(uint32_t droid_format);
++
++#endif
+diff --git a/cros_gralloc/i915_private_android_types.h b/cros_gralloc/i915_private_android_types.h
+new file mode 100644
+index 0000000..a7072d0
+--- /dev/null
++++ b/cros_gralloc/i915_private_android_types.h
+@@ -0,0 +1,93 @@
++/*
++ * Copyright 2017 The Chromium OS Authors. All rights reserved.
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file.
++ */
++#ifndef I915_PRIVATE_ANDROID_TYPE
++#define I915_PRIVATE_ANDROID_TYPE
++/*
++ * Android graphics.h defines the formats and leaves 0x100 - 0x1FF
++ * range available for HAL implementation specific formats.
++ */
++
++#include <hardware/gralloc1.h>
++
++enum { HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL = 0x100,
++       HAL_PIXEL_FORMAT_NV12_LINEAR_INTEL = 0x101,
++       HAL_PIXEL_FORMAT_YCrCb_422_H_INTEL = 0x102,
++       HAL_PIXEL_FORMAT_NV12_LINEAR_PACKED_INTEL = 0x103,
++       HAL_PIXEL_FORMAT_YCbCr_422_H_INTEL = 0x104,
++       HAL_PIXEL_FORMAT_NV12_X_TILED_INTEL = 0x105,
++       HAL_PIXEL_FORMAT_RGBA_5551_INTEL = 0x106,
++       HAL_PIXEL_FORMAT_RGBA_4444_INTEL = 0x107,
++       HAL_PIXEL_FORMAT_GENERIC_8BIT_INTEL = 0x108,
++       HAL_PIXEL_FORMAT_YCbCr_411_INTEL = 0x109,
++       HAL_PIXEL_FORMAT_YCbCr_420_H_INTEL = 0x10A,
++       HAL_PIXEL_FORMAT_YCbCr_422_V_INTEL = 0x10B,
++       HAL_PIXEL_FORMAT_YCbCr_444_INTEL = 0x10C,
++       HAL_PIXEL_FORMAT_RGBP_INTEL = 0x10D,
++       HAL_PIXEL_FORMAT_BGRP_INTEL = 0x10E,
++       HAL_PIXEL_FORMAT_NV12_LINEAR_CAMERA_INTEL = 0x10F,
++       HAL_PIXEL_FORMAT_P010_INTEL = 0x110,
++       HAL_PIXEL_FORMAT_Z16_INTEL = 0x111,
++       HAL_PIXEL_FORMAT_UVMAP64_INTEL = 0x112,
++       HAL_PIXEL_FORMAT_A2R10G10B10_INTEL = 0x113,
++       HAL_PIXEL_FORMAT_A2B10G10R10_INTEL = 0x114,
++       HAL_PIXEL_FORMAT_YCrCb_NORMAL_INTEL = 0x115,
++       HAL_PIXEL_FORMAT_YCrCb_SWAPUVY_INTEL = 0x116,
++       HAL_PIXEL_FORMAT_YCrCb_SWAPUV_INTEL = 0x117,
++       HAL_PIXEL_FORMAT_YCrCb_SWAPY_INTEL = 0x118,
++       HAL_PIXEL_FORMAT_X2R10G10B10_INTEL = 0x119,
++       HAL_PIXEL_FORMAT_X2B10G10R10_INTEL = 0x11A,
++       HAL_PIXEL_FORMAT_P016_INTEL = 0x11C,
++       HAL_PIXEL_FORMAT_Y210_INTEL = 0x11D,
++       HAL_PIXEL_FORMAT_Y216_INTEL = 0x11E,
++       HAL_PIXEL_FORMAT_Y410_INTEL = 0x11F,
++       HAL_PIXEL_FORMAT_Y416_INTEL = 0x120,
++       HAL_PIXEL_FORMAT_Y8I_INTEL = 0x121,
++       HAL_PIXEL_FORMAT_Y12I_INTEL = 0x122,
++       HAL_PIXEL_FORMAT_YUYV_INTEL = HAL_PIXEL_FORMAT_YCrCb_NORMAL_INTEL,
++       HAL_PIXEL_FORMAT_YUY2_INTEL = HAL_PIXEL_FORMAT_YCrCb_NORMAL_INTEL,
++       HAL_PIXEL_FORMAT_VYUY_INTEL = HAL_PIXEL_FORMAT_YCrCb_SWAPUVY_INTEL,
++       HAL_PIXEL_FORMAT_YVYU_INTEL = HAL_PIXEL_FORMAT_YCrCb_SWAPUV_INTEL,
++       HAL_PIXEL_FORMAT_UYVY_INTEL = HAL_PIXEL_FORMAT_YCrCb_SWAPY_INTEL,
++       HAL_PIXEL_FORMAT_NV12_TILED_INTEL = HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL,
++       HAL_PIXEL_FORMAT_NV12_INTEL = HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL,
++       HAL_PIXEL_FORMAT_INTEL_NV12 = HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL,
++       HAL_PIXEL_FORMAT_NV12 = 0x10F,
++       HAL_PIXEL_FORMAT_YUV420PackedSemiPlanar_INTEL = 0x7FA00E00,
++       HAL_PIXEL_FORMAT_YUV420PackedSemiPlanar_Tiled_INTEL = 0x7FA00F00,
++};
++
++enum { GRALLOC1_FUNCTION_SET_MODIFIER = 101,
++       GRALLOC1_FUNCTION_GET_BYTE_STRIDE = 102,
++       GRALLOC1_FUNCTION_GET_PRIME = 103,
++       GRALLOC1_FUNCTION_SET_INTERLACE = 104,
++       GRALLOC1_FUNCTION_SET_PROTECTIONINFO = 105,
++       GRALLOC1_LAST_CUSTOM = 500 };
++
++typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_SET_MODIFIER)(
++    gralloc1_device_t *device, gralloc1_buffer_descriptor_t descriptor, uint64_t modifier);
++
++typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_GET_BYTE_STRIDE)(
++    gralloc1_device_t *device, buffer_handle_t buffer, uint32_t *outStride, uint32_t size);
++
++typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_GET_PRIME)(
++    gralloc1_device_t *device, buffer_handle_t buffer, uint32_t *prime);
++
++typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_SET_INTERLACE)(
++        gralloc1_device_t *device, buffer_handle_t buffer, uint32_t interlace);
++
++typedef int32_t /*gralloc1_error_t*/ (*GRALLOC1_PFN_SET_PROTECTIONINFO)(
++        gralloc1_device_t *device, buffer_handle_t buffer, uint32_t protection_info);
++
++typedef union intel_protection_info_type_t {
++       uint32_t value;
++       struct {
++           uint32_t is_encrypted  : 8;
++           uint32_t pavp_sesion_id : 8;
++           uint32_t pavp_instance_id: 16;
++       };
++}intel_protection_info_type_t;
++
++#endif
+diff --git a/i915.c b/i915.c
+index 8619580..a6a2cdc 100644
+--- a/i915.c
++++ b/i915.c
+@@ -20,6 +20,10 @@
+ #include "external/i915_drm.h"
+ #include "util.h"
+ 
++#ifdef USE_GRALLOC1
++#include "i915_private.h"
++#endif
++
+ #define I915_CACHELINE_SIZE 64
+ #define I915_CACHELINE_MASK (I915_CACHELINE_SIZE - 1)
+ 
+@@ -63,6 +67,10 @@ struct i915_device {
+ 	bool is_mtl;
+ 	int32_t num_fences_avail;
+ 	bool has_mmap_offset;
++#ifdef USE_GRALLOC1
++	uint64_t cursor_width;
++	uint64_t cursor_height;
++#endif
+ };
+ 
+ static void i915_info_from_device_id(struct i915_device *i915)
+@@ -317,6 +325,10 @@ static int i915_add_combinations(struct driver *drv)
+ 				     ARRAY_SIZE(scanout_render_formats), &metadata_y_tiled,
+ 				     render_not_linear);
+ 	}
++
++#ifdef USE_GRALLOC1
++	i915_private_add_combinations(drv);
++#endif
+ 	return 0;
+ }
+ 
+@@ -470,6 +482,11 @@ static int i915_init(struct driver *drv)
+ 		i915->has_hw_protection = 1;
+ 
+ 	drv->priv = i915;
++
++#ifdef USE_GRALLOC1
++	i915_private_init(drv, &i915->cursor_width, &i915->cursor_height);
++#endif
++
+ 	return i915_add_combinations(drv);
+ }
+ 
+diff --git a/i915_private.c b/i915_private.c
+new file mode 100644
+index 0000000..014b1da
+--- /dev/null
++++ b/i915_private.c
+@@ -0,0 +1,204 @@
++/*
++ * Copyright 2017 The Chromium OS Authors. All rights reserved.
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file.
++ */
++#include <assert.h>
++#include <errno.h>
++#include <i915_drm.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <drm_fourcc.h>
++#include <xf86drm.h>
++
++#include "drv_priv.h"
++#include "drv_helpers.h"
++#include "util.h"
++#include "i915_private.h"
++
++static const uint32_t private_linear_source_formats[] = { DRM_FORMAT_R16,    DRM_FORMAT_NV16,
++							  DRM_FORMAT_YUV420, DRM_FORMAT_YUV422,
++							  DRM_FORMAT_YUV444, DRM_FORMAT_NV21,
++							  DRM_FORMAT_P010 };
++
++static const uint32_t private_source_formats[] = { DRM_FORMAT_P010, DRM_FORMAT_NV12_Y_TILED_INTEL };
++
++#if !defined(DRM_CAP_CURSOR_WIDTH)
++#define DRM_CAP_CURSOR_WIDTH 0x8
++#endif
++
++#if !defined(DRM_CAP_CURSOR_HEIGHT)
++#define DRM_CAP_CURSOR_HEIGHT 0x9
++#endif
++
++static const uint32_t kDefaultCursorWidth = 64;
++static const uint32_t kDefaultCursorHeight = 64;
++
++#define BO_USE_CAMERA_MASK BO_USE_CAMERA_READ | BO_USE_SCANOUT | BO_USE_CAMERA_WRITE
++
++static void get_preferred_cursor_attributes(uint32_t drm_fd, uint64_t *cursor_width,
++					    uint64_t *cursor_height)
++{
++	uint64_t width = 0, height = 0;
++	if (drmGetCap(drm_fd, DRM_CAP_CURSOR_WIDTH, &width)) {
++		fprintf(stderr, "cannot get cursor width. \n");
++	} else if (drmGetCap(drm_fd, DRM_CAP_CURSOR_HEIGHT, &height)) {
++		fprintf(stderr, "cannot get cursor height. \n");
++	}
++
++	if (!width)
++		width = kDefaultCursorWidth;
++
++	*cursor_width = width;
++
++	if (!height)
++		height = kDefaultCursorHeight;
++
++	*cursor_height = height;
++}
++
++int i915_private_init(struct driver *drv, uint64_t *cursor_width, uint64_t *cursor_height)
++{
++	get_preferred_cursor_attributes(drv->fd, cursor_width, cursor_height);
++	return 0;
++}
++
++int i915_private_add_combinations(struct driver *drv)
++{
++	struct format_metadata metadata;
++	uint64_t render_flags, texture_flags;
++
++	render_flags = BO_USE_RENDER_MASK;
++	texture_flags = BO_USE_TEXTURE_MASK;
++
++	metadata.tiling = I915_TILING_NONE;
++	metadata.priority = 1;
++	metadata.modifier = DRM_FORMAT_MOD_NONE;
++
++	drv_modify_combination(drv, DRM_FORMAT_ABGR8888, &metadata, BO_USE_CURSOR | BO_USE_SCANOUT);
++	drv_modify_combination(drv, DRM_FORMAT_NV12, &metadata,
++			       BO_USE_RENDERING | BO_USE_TEXTURE | BO_USE_CAMERA_MASK);
++	drv_modify_combination(drv, DRM_FORMAT_YUYV, &metadata,
++			       BO_USE_TEXTURE | BO_USE_CAMERA_MASK | BO_USE_RENDERING);
++	drv_modify_combination(drv, DRM_FORMAT_VYUY, &metadata,
++			       BO_USE_TEXTURE | BO_USE_CAMERA_MASK | BO_USE_RENDERING);
++	drv_modify_combination(drv, DRM_FORMAT_UYVY, &metadata,
++			       BO_USE_TEXTURE | BO_USE_CAMERA_MASK | BO_USE_RENDERING);
++	drv_modify_combination(drv, DRM_FORMAT_YVYU, &metadata,
++			       BO_USE_TEXTURE | BO_USE_CAMERA_MASK | BO_USE_RENDERING);
++	drv_modify_combination(drv, DRM_FORMAT_YVU420_ANDROID, &metadata,
++			       BO_USE_TEXTURE | BO_USE_CAMERA_MASK);
++
++	/* Media/Camera expect these formats support. */
++	metadata.tiling = I915_TILING_NONE;
++	metadata.priority = 1;
++	metadata.modifier = DRM_FORMAT_MOD_NONE;
++	drv_add_combinations(drv, private_linear_source_formats,
++			     ARRAY_SIZE(private_linear_source_formats), &metadata,
++			     texture_flags | BO_USE_CAMERA_MASK);
++
++	metadata.tiling = I915_TILING_Y;
++	metadata.priority = 3;
++	metadata.modifier = I915_FORMAT_MOD_Y_TILED;
++	drv_add_combinations(drv, private_source_formats, ARRAY_SIZE(private_source_formats),
++			     &metadata, texture_flags | BO_USE_NON_GPU_HW);
++
++	texture_flags &= ~BO_USE_RENDERSCRIPT;
++	texture_flags &= ~BO_USE_SW_WRITE_OFTEN;
++	texture_flags &= ~BO_USE_SW_READ_OFTEN;
++	texture_flags &= ~BO_USE_LINEAR;
++
++	metadata.tiling = I915_TILING_X;
++	metadata.priority = 2;
++	metadata.modifier = I915_FORMAT_MOD_X_TILED;
++
++	drv_add_combinations(drv, private_linear_source_formats,
++                             ARRAY_SIZE(private_linear_source_formats), &metadata,
++                             texture_flags | BO_USE_CAMERA_MASK);
++
++	return 0;
++}
++
++void i915_private_align_dimensions(uint32_t format, uint32_t *vertical_alignment)
++{
++	switch (format) {
++	case DRM_FORMAT_NV12_Y_TILED_INTEL:
++		*vertical_alignment = 64;
++		break;
++	}
++}
++
++uint32_t i915_private_bpp_from_format(uint32_t format, size_t plane)
++{
++	assert(plane < drv_num_planes_from_format(format));
++
++	switch (format) {
++	case DRM_FORMAT_NV12_Y_TILED_INTEL:
++		return (plane == 0) ? 8 : 4;
++	case DRM_FORMAT_P010:
++		return (plane == 0) ? 16 : 8;
++	case DRM_FORMAT_YUV420:
++	case DRM_FORMAT_YUV422:
++	case DRM_FORMAT_YUV444:
++	case DRM_FORMAT_NV16:
++		return 8;
++	case DRM_FORMAT_R16:
++		return 16;
++	}
++
++	fprintf(stderr, "drv: UNKNOWN FORMAT %d\n", format);
++	return 0;
++}
++
++void i915_private_vertical_subsampling_from_format(uint32_t *vertical_subsampling, uint32_t format,
++						   size_t plane)
++{
++	switch (format) {
++	case DRM_FORMAT_NV12_Y_TILED_INTEL:
++	case DRM_FORMAT_YUV420:
++	case DRM_FORMAT_P010:
++		*vertical_subsampling = (plane == 0) ? 1 : 2;
++		break;
++	default:
++		*vertical_subsampling = 1;
++	}
++}
++
++size_t i915_private_num_planes_from_format(uint32_t format)
++{
++	switch (format) {
++	case DRM_FORMAT_R16:
++		return 1;
++	case DRM_FORMAT_NV12_Y_TILED_INTEL:
++	case DRM_FORMAT_NV16:
++	case DRM_FORMAT_P010:
++		return 2;
++	case DRM_FORMAT_YUV420:
++	case DRM_FORMAT_YUV422:
++	case DRM_FORMAT_YUV444:
++		return 3;
++	}
++
++	fprintf(stderr, "drv: UNKNOWN FORMAT %d\n", format);
++	return 0;
++}
++
++uint32_t i915_private_resolve_format(uint32_t format, uint64_t usage, uint32_t *resolved_format)
++{
++	switch (format) {
++	case DRM_FORMAT_FLEX_IMPLEMENTATION_DEFINED:
++		/* KBL camera subsystem requires NV12. */
++		if (usage & (BO_USE_CAMERA_READ | BO_USE_CAMERA_WRITE)) {
++			*resolved_format = DRM_FORMAT_NV12;
++                        return 1;
++                }
++
++		if (usage & BO_USE_TEXTURE) {
++			*resolved_format = DRM_FORMAT_ABGR8888;
++			return 1;
++		}
++	}
++
++	return 0;
++}
+diff --git a/i915_private.h b/i915_private.h
+new file mode 100644
+index 0000000..6aef317
+--- /dev/null
++++ b/i915_private.h
+@@ -0,0 +1,57 @@
++/*
++ * Copyright 2017 The Chromium OS Authors. All rights reserved.
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file.
++ */
++#ifndef I915_PRIVATE
++#define I915_PRIVATE
++
++#include <stdint.h>
++
++struct driver;
++
++/*
++ * 2 plane YCbCr MSB aligned
++ * index 0 = Y plane, [15:0] Y:x [10:6] little endian
++ * index 1 = Cr:Cb plane, [31:0] Cr:x:Cb:x [10:6:10:6] little endian
++ */
++#ifndef DRM_FORMAT_P010
++#define DRM_FORMAT_P010		fourcc_code('P', '0', '1', '0') /* 2x2 subsampled Cr:Cb plane 10 bits per channel */
++#endif
++
++/*
++ * 2 plane YCbCr MSB aligned
++ * index 0 = Y plane, [15:0] Y:x [12:4] little endian
++ * index 1 = Cr:Cb plane, [31:0] Cr:x:Cb:x [12:4:12:4] little endian
++ */
++#define DRM_FORMAT_P012		fourcc_code('P', '0', '1', '2') /* 2x2 subsampled Cr:Cb plane 12 bits per channel */
++
++/*
++ * 2 plane YCbCr MSB aligned
++ * index 0 = Y plane, [15:0] Y little endian
++ * index 1 = Cr:Cb plane, [31:0] Cr:Cb [16:16] little endian
++ */
++#define DRM_FORMAT_P016		fourcc_code('P', '0', '1', '6') /* 2x2 subsampled Cr:Cb plane 16 bits per channel */
++
++/* 64 bpp RGB */
++#define DRM_FORMAT_XRGB161616  fourcc_code('X', 'R', '4', '8') /* [63:0] x:R:G:B 16:16:16:16 little endian */
++#define DRM_FORMAT_XBGR161616  fourcc_code('X', 'B', '4', '8') /* [63:0] x:B:G:R 16:16:16:16 little endian */
++
++#define DRM_FORMAT_NV12_Y_TILED_INTEL fourcc_code('9', '9', '9', '6')
++
++int i915_private_init(struct driver *drv, uint64_t *cursor_width, uint64_t *cursor_height);
++
++int i915_private_add_combinations(struct driver *drv);
++
++void i915_private_align_dimensions(uint32_t format, uint32_t *vertical_alignment);
++
++uint32_t i915_private_bpp_from_format(uint32_t format, size_t plane);
++
++void i915_private_vertical_subsampling_from_format(uint32_t *vertical_subsampling, uint32_t format,
++						   size_t plane);
++
++size_t i915_private_num_planes_from_format(uint32_t format);
++
++uint32_t i915_private_resolve_format(uint32_t format, uint64_t usage, uint32_t *resolved_format);
++
++#endif
+diff --git a/i915_private_types.h b/i915_private_types.h
+new file mode 100644
+index 0000000..57d3ec4
+--- /dev/null
++++ b/i915_private_types.h
+@@ -0,0 +1,11 @@
++/*
++ * Copyright 2017 The Chromium OS Authors. All rights reserved.
++ * Use of this source code is governed by a BSD-style license that can be
++ * found in the LICENSE file.
++ */
++#ifndef I915_PRIVATE_TYPES
++#define I915_PRIVATE_TYPES
++
++#define DRM_FORMAT_NV12_Y_TILED_INTEL fourcc_code('9', '9', '9', '6')
++
++#endif
+-- 
+2.40.1
+
