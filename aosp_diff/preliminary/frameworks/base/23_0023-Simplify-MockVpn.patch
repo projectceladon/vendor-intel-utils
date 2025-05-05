@@ -1,0 +1,184 @@
+From 68578f657aa735ed692ab43db058162d480cab3a Mon Sep 17 00:00:00 2001
+From: Lorenzo Colitti <lorenzo@google.com>
+Date: Mon, 16 Nov 2020 16:05:44 +0900
+Subject: [PATCH] Simplify MockVpn.
+
+This CL removes four methods in MockVpn by slightly changing the
+test code to leverage the actual methods implemented by the
+(production) Vpn superclass.
+
+This works because setting mInterface results in
+isRunningLocked() returning true, which makes a number of methods
+behave as if the VPN is connected (which is what the test
+expects).
+
+The more realistic behaviour exposes a minor bug in the treatment
+of underlying networks. Add a TODO to fix it.
+
+Bug: 172870110
+Test: test-only change
+Change-Id: I49421183538ba61ca790af71e309ece36b653bf9
+Merged-In: I49421183538ba61ca790af71e309ece36b653bf9
+(cherry picked from commit 7c4ae16b94ce8f36e4e047ac4c825794d1c21db2)
+---
+ .../com/android/server/connectivity/Vpn.java  |  3 +-
+ .../server/ConnectivityServiceTest.java       | 53 ++++++++-----------
+ 2 files changed, 25 insertions(+), 31 deletions(-)
+
+diff --git a/services/core/java/com/android/server/connectivity/Vpn.java b/services/core/java/com/android/server/connectivity/Vpn.java
+index bcb17bc9e2dc..9edb0e440baa 100644
+--- a/services/core/java/com/android/server/connectivity/Vpn.java
++++ b/services/core/java/com/android/server/connectivity/Vpn.java
+@@ -202,7 +202,8 @@ public class Vpn {
+     @VisibleForTesting protected String mPackage;
+     private int mOwnerUID;
+     private boolean mIsPackageTargetingAtLeastQ;
+-    private String mInterface;
++    @VisibleForTesting
++    protected String mInterface;
+     private Connection mConnection;
+
+     /** Tracks the runners for all VPN types managed by the platform (eg. LegacyVpn, PlatformVpn) */
+diff --git a/tests/net/java/com/android/server/ConnectivityServiceTest.java b/tests/net/java/com/android/server/ConnectivityServiceTest.java
+index 0c1bf548db6d..572ea12358ec 100644
+--- a/tests/net/java/com/android/server/ConnectivityServiceTest.java
++++ b/tests/net/java/com/android/server/ConnectivityServiceTest.java
+@@ -319,6 +319,7 @@ public class ConnectivityServiceTest {
+     private static final String MOBILE_IFNAME = "test_rmnet_data0";
+     private static final String WIFI_IFNAME = "test_wlan0";
+     private static final String WIFI_WOL_IFNAME = "test_wlan_wol";
++    private static final String VPN_IFNAME = "tun10042";
+     private static final String TEST_PACKAGE_NAME = "com.android.test.package";
+     private static final String[] EMPTY_STRING_ARRAY = new String[0];
+
+@@ -1033,12 +1034,14 @@ public class ConnectivityServiceTest {
+         public MockVpn(int userId) {
+             super(startHandlerThreadAndReturnLooper(), mServiceContext, mNetworkManagementService,
+                     userId, mock(KeyStore.class));
++            mConfig = new VpnConfig();
+         }
+
+         public void setNetworkAgent(TestNetworkAgentWrapper agent) {
+             agent.waitForIdle(TIMEOUT_MS);
+             mMockNetworkAgent = agent;
+             mNetworkAgent = agent.getNetworkAgent();
++            mInterface = VPN_IFNAME;
+             mNetworkCapabilities.set(agent.getNetworkCapabilities());
+         }
+
+@@ -1059,16 +1062,6 @@ public class ConnectivityServiceTest {
+             return mMockNetworkAgent.getNetwork().netId;
+         }
+
+-        @Override
+-        public boolean appliesToUid(int uid) {
+-            return mConnected;  // Trickery to simplify testing.
+-        }
+-
+-        @Override
+-        protected boolean isCallerEstablishedOwnerLocked() {
+-            return mConnected;  // Similar trickery
+-        }
+-
+         @Override
+         public int getActiveAppVpnType() {
+             return mVpnType;
+@@ -1077,7 +1070,6 @@ public class ConnectivityServiceTest {
+         private void connect(boolean isAlwaysMetered) {
+             mNetworkCapabilities.set(mMockNetworkAgent.getNetworkCapabilities());
+             mConnected = true;
+-            mConfig = new VpnConfig();
+             mConfig.isMetered = isAlwaysMetered;
+         }
+
+@@ -1108,7 +1100,6 @@ public class ConnectivityServiceTest {
+
+         public void disconnect() {
+             mConnected = false;
+-            mConfig = null;
+         }
+
+         @Override
+@@ -1121,18 +1112,6 @@ public class ConnectivityServiceTest {
+         private synchronized void setVpnInfo(VpnInfo vpnInfo) {
+             mVpnInfo = vpnInfo;
+         }
+-
+-        @Override
+-        public synchronized Network[] getUnderlyingNetworks() {
+-            if (mUnderlyingNetworks != null) return mUnderlyingNetworks;
+-
+-            return super.getUnderlyingNetworks();
+-        }
+-
+-        /** Don't override behavior for {@link Vpn#setUnderlyingNetworks}. */
+-        private synchronized void overrideUnderlyingNetworks(Network[] underlyingNetworks) {
+-            mUnderlyingNetworks = underlyingNetworks;
+-        }
+     }
+
+     private void mockVpn(int uid) {
+@@ -5210,7 +5189,7 @@ public class ConnectivityServiceTest {
+         final Network wifiNetwork = new Network(mNetIdManager.peekNextNetId());
+         mMockVpn.setNetworkAgent(vpnNetworkAgent);
+         mMockVpn.setUids(ranges);
+-        mMockVpn.setUnderlyingNetworks(new Network[]{wifiNetwork});
++        mService.setUnderlyingNetworksForVpn(new Network[]{wifiNetwork});
+         vpnNetworkAgent.connect(false);
+         mMockVpn.connect();
+         callback.expectAvailableCallbacksUnvalidated(vpnNetworkAgent);
+@@ -5224,8 +5203,17 @@ public class ConnectivityServiceTest {
+         mWiFiNetworkAgent = new TestNetworkAgentWrapper(TRANSPORT_WIFI);
+         assertEquals(wifiNetwork, mWiFiNetworkAgent.getNetwork());
+         mWiFiNetworkAgent.connect(false);
+-        callback.expectAvailableCallbacksUnvalidated(mWiFiNetworkAgent);
++        // TODO: the callback for the VPN happens before any callbacks are called for the wifi
++        // network that has just connected. There appear to be two issues here:
++        // 1. The VPN code will accept an underlying network as soon as getNetworkCapabilities() for
++        //    it returns non-null (which happens very early, during handleRegisterNetworkAgent).
++        //    This is not correct because that that point the network is not connected and cannot
++        //    pass any traffic.
++        // 2. When a network connects, updateNetworkInfo propagates underlying network capabilities
++        //    before rematching networks.
++        // Given that this scenario can't really happen, this is probably fine for now.
+         callback.expectCallback(CallbackEntry.NETWORK_CAPS_UPDATED, vpnNetworkAgent);
++        callback.expectAvailableCallbacksUnvalidated(mWiFiNetworkAgent);
+         assertTrue(mCm.getNetworkCapabilities(vpnNetworkAgent.getNetwork())
+                 .hasTransport(TRANSPORT_VPN));
+         assertTrue(mCm.getNetworkCapabilities(vpnNetworkAgent.getNetwork())
+@@ -5289,7 +5277,7 @@ public class ConnectivityServiceTest {
+
+         vpnNetworkAgent.connect(false);
+         mMockVpn.connect();
+-        mMockVpn.setUnderlyingNetworks(new Network[0]);
++        mService.setUnderlyingNetworksForVpn(new Network[0]);
+
+         genericNetworkCallback.expectAvailableCallbacksUnvalidated(vpnNetworkAgent);
+         genericNotVpnNetworkCallback.assertNoCallback();
+@@ -7249,16 +7237,21 @@ public class ConnectivityServiceTest {
+         // active
+         final VpnInfo info = new VpnInfo();
+         info.ownerUid = Process.myUid();
+-        info.vpnIface = "interface";
++        info.vpnIface = VPN_IFNAME;
+         mMockVpn.setVpnInfo(info);
+-        mMockVpn.overrideUnderlyingNetworks(new Network[] {network});
++
++        final TestNetworkAgentWrapper vpnNetworkAgent = new TestNetworkAgentWrapper(TRANSPORT_VPN);
++        mMockVpn.setNetworkAgent(vpnNetworkAgent);
++        mMockVpn.connect();
++
++        assertTrue(mService.setUnderlyingNetworksForVpn(new Network[] {network}));
+         assertTrue(
+                 "Active VPN permission not applied",
+                 mService.checkConnectivityDiagnosticsPermissions(
+                         Process.myPid(), Process.myUid(), naiWithoutUid,
+                         mContext.getOpPackageName()));
+
+-        mMockVpn.overrideUnderlyingNetworks(null);
++        assertTrue(mService.setUnderlyingNetworksForVpn(null));
+         assertFalse(
+                 "VPN shouldn't receive callback on non-underlying network",
+                 mService.checkConnectivityDiagnosticsPermissions(
+--
+2.29.0
