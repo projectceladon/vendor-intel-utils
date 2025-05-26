@@ -1,0 +1,385 @@
+From 1aedae6e1049aa794b3554183bf07634c8fa291b Mon Sep 17 00:00:00 2001
+From: Jiakai Zhang <jiakaiz@google.com>
+Date: Tue, 4 Mar 2025 08:07:16 -0800
+Subject: [PATCH] Ensure the dex use database cannot grow unboundedly.
+
+Its size can theoretically be
+
+  O(<owning package> X <dex path> X <loading package>)
+
+Owning and loading packages are limited by the valid entries in the
+package database. Dex paths from primary dex'es are also limited by the
+installed packages. However dex paths for secondary dex'es can
+potentially be unbounded, so impose a limit on them.
+
+The limit is fixed for any given owning package, which is simpler than
+limiting based on loading package. That restricts a package from adding
+an arbitrary number of secondary dex files in itself. Also check that
+the dex file exists if the loading package is different from the owning
+one, so that the former cannot consume entries up to the limit for the
+latter.
+
+The class loader context strings for secondary dex files are also not
+guaranteed bounded, so impose a limit on them as well.
+
+Test: atest DexUseManagerTest
+Test: Install app_debug.apk from b/391895923  #comment3 and verify that
+      it can run until OOM repeatedly without growing the database to
+      more than 650 KiB.
+Bug: 391895923
+Flag: EXEMPT bugfix
+Ignore-AOSP-First: Security fix
+(cherry picked from commit e29eb53ebf11fdb891762db7dd927e95a0858fc0)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:1c45139acc64ad0990ce8038f7188ada3b91c81c)
+Merged-In: Ic50bf22000730282d90a4f6aa1c49379357fe77a
+Change-Id: Ic50bf22000730282d90a4f6aa1c49379357fe77a
+---
+ .../server/art/DexUseManagerLocal.java        |  74 +++++++++--
+ .../android/server/art/DexUseManagerTest.java | 120 +++++++++++++++++-
+ libartservice/service/proto/dex_use.proto     |  14 +-
+ 3 files changed, 188 insertions(+), 20 deletions(-)
+
+diff --git a/libartservice/service/java/com/android/server/art/DexUseManagerLocal.java b/libartservice/service/java/com/android/server/art/DexUseManagerLocal.java
+index 153e83b54b..3110f59837 100644
+--- a/libartservice/service/java/com/android/server/art/DexUseManagerLocal.java
++++ b/libartservice/service/java/com/android/server/art/DexUseManagerLocal.java
+@@ -108,6 +108,16 @@ public class DexUseManagerLocal {
+      */
+     @VisibleForTesting public static final long INTERVAL_MS = 15_000;
+ 
++    // Impose a limit on the input accepted by notifyDexContainersLoaded per owning package.
++    /** @hide */
++    @VisibleForTesting public static final int MAX_PATH_LENGTH = 4096;
++
++    /** @hide */
++    @VisibleForTesting public static final int MAX_CLASS_LOADER_CONTEXT_LENGTH = 10000;
++
++    /** @hide */
++    private static final int MAX_SECONDARY_DEX_FILES_PER_OWNER = 500;
++
+     private static final Object sLock = new Object();
+     @GuardedBy("sLock") @Nullable private static DexUseManagerLocal sInstance = null;
+ 
+@@ -483,16 +493,40 @@ public class DexUseManagerLocal {
+     private void addSecondaryDexUse(@NonNull String owningPackageName, @NonNull String dexPath,
+             @NonNull String loadingPackageName, boolean isolatedProcess,
+             @NonNull String classLoaderContext, @NonNull String abiName, long lastUsedAtMs) {
++        DexLoader loader = DexLoader.create(loadingPackageName, isolatedProcess);
++        // This is to avoid a loading package from using up the SecondaryDexUse entries for another
++        // package (up to the MAX_SECONDARY_DEX_FILES_PER_OWNER limit). We don't care about the
++        // loading package messing up its own SecondaryDexUse entries.
++        // Note that we are using system_server's permission to check the existence. This is fine
++        // with the assumption that the file must be world readable to be used by other apps.
++        // We could use artd's permission to check the existence, and then there wouldn't be any
++        // permission issue, but that requires bringing up the artd service, which may be too
++        // expensive.
++        // TODO(jiakaiz): Check if the assumption is true.
++        if (isLoaderOtherApp(loader, owningPackageName) && !mInjector.pathExists(dexPath)) {
++            Log.w(TAG, "Not recording non-existent secondary dex file '" + dexPath + "'");
++            return;
++        }
+         synchronized (mLock) {
++            PackageDexUse packageDexUse = mDexUse.mPackageDexUseByOwningPackageName.computeIfAbsent(
++                    owningPackageName, k -> new PackageDexUse());
+             SecondaryDexUse secondaryDexUse =
+-                    mDexUse.mPackageDexUseByOwningPackageName
+-                            .computeIfAbsent(owningPackageName, k -> new PackageDexUse())
+-                            .mSecondaryDexUseByDexFile.computeIfAbsent(
+-                                    dexPath, k -> new SecondaryDexUse());
++                    packageDexUse.mSecondaryDexUseByDexFile.computeIfAbsent(dexPath, k -> {
++                        if (packageDexUse.mSecondaryDexUseByDexFile.size()
++                                >= mInjector.getMaxSecondaryDexFilesPerOwner()) {
++                            Log.w(TAG, "Not recording too many secondary dex use entries for "
++                                    + owningPackageName);
++                            return null;
++                        }
++                        return new SecondaryDexUse();
++                    });
++            if (secondaryDexUse == null) {
++                return;
++            }
+             secondaryDexUse.mUserHandle = Binder.getCallingUserHandle();
+-            SecondaryDexUseRecord record = secondaryDexUse.mRecordByLoader.computeIfAbsent(
+-                    DexLoader.create(loadingPackageName, isolatedProcess),
+-                    k -> new SecondaryDexUseRecord());
++            SecondaryDexUseRecord record =
++                    secondaryDexUse.mRecordByLoader.computeIfAbsent(
++                            loader, k -> new SecondaryDexUseRecord());
+             record.mClassLoaderContext = classLoaderContext;
+             record.mAbiName = abiName;
+             record.mLastUsedAtMs = lastUsedAtMs;
+@@ -595,12 +629,22 @@ public class DexUseManagerLocal {
+         }
+ 
+         for (var entry : classLoaderContextByDexContainerFile.entrySet()) {
+-            Utils.assertNonEmpty(entry.getKey());
+-            if (!Paths.get(entry.getKey()).isAbsolute()) {
++            String dexPath = entry.getKey();
++            String classLoaderContext = entry.getValue();
++            Utils.assertNonEmpty(dexPath);
++            if (dexPath.length() > MAX_PATH_LENGTH) {
++                throw new IllegalArgumentException(
++                        "Dex path too long - exceeds " + MAX_PATH_LENGTH + " chars");
++            }
++            if (!Paths.get(dexPath).isAbsolute()) {
+                 throw new IllegalArgumentException(String.format(
+-                        "Dex container file path must be absolute, got '%s'", entry.getKey()));
++                        "Dex container file path must be absolute, got '%s'", dexPath));
++            }
++            Utils.assertNonEmpty(classLoaderContext);
++            if (classLoaderContext.length() > MAX_CLASS_LOADER_CONTEXT_LENGTH) {
++                throw new IllegalArgumentException("Class loader context too long - exceeds "
++                        + MAX_CLASS_LOADER_CONTEXT_LENGTH + " chars");
+             }
+-            Utils.assertNonEmpty(entry.getValue());
+         }
+ 
+         // TODO(b/253570365): Make the validation more strict.
+@@ -1130,6 +1174,10 @@ public class DexUseManagerLocal {
+             return System.currentTimeMillis();
+         }
+ 
++        public boolean pathExists(String path) {
++            return new File(path).exists();
++        }
++
+         @NonNull
+         public String getFilename() {
+             return FILENAME;
+@@ -1158,5 +1206,9 @@ public class DexUseManagerLocal {
+             return Objects.requireNonNull(
+                     LocalManagerRegistry.getManager(PackageManagerLocal.class));
+         }
++
++        public int getMaxSecondaryDexFilesPerOwner() {
++            return MAX_SECONDARY_DEX_FILES_PER_OWNER;
++        }
+     }
+ }
+diff --git a/libartservice/service/javatests/com/android/server/art/DexUseManagerTest.java b/libartservice/service/javatests/com/android/server/art/DexUseManagerTest.java
+index 5850e617d8..ddca9c4b27 100644
+--- a/libartservice/service/javatests/com/android/server/art/DexUseManagerTest.java
++++ b/libartservice/service/javatests/com/android/server/art/DexUseManagerTest.java
+@@ -28,6 +28,8 @@ import static org.mockito.Mockito.argThat;
+ import static org.mockito.Mockito.eq;
+ import static org.mockito.Mockito.lenient;
+ import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+ import android.content.BroadcastReceiver;
+@@ -79,6 +81,9 @@ public class DexUseManagerTest {
+     private static final String BASE_APK = "/data/app/" + OWNING_PKG_NAME + "/base.apk";
+     private static final String SPLIT_APK = "/data/app/" + OWNING_PKG_NAME + "/split_0.apk";
+ 
++    // A reduced limit to make the test run faster.
++    private static final int MAX_SECONDARY_DEX_FILES_PER_OWNER_FOR_TESTING = 50;
++
+     @Rule
+     public StaticMockitoRule mockitoRule =
+             new StaticMockitoRule(SystemProperties.class, Constants.class, Process.class);
+@@ -149,12 +154,16 @@ public class DexUseManagerTest {
+ 
+         lenient().when(mInjector.getArtd()).thenReturn(mArtd);
+         lenient().when(mInjector.getCurrentTimeMillis()).thenReturn(0l);
++        lenient().when(mInjector.pathExists(any())).thenReturn(true);
+         lenient().when(mInjector.getFilename()).thenReturn(mTempFile.getPath());
+         lenient()
+                 .when(mInjector.createScheduledExecutor())
+                 .thenAnswer(invocation -> mMockClock.createScheduledExecutor());
+         lenient().when(mInjector.getContext()).thenReturn(mContext);
+         lenient().when(mInjector.getAllPackageNames()).thenReturn(mPackageStates.keySet());
++        lenient()
++                .when(mInjector.getMaxSecondaryDexFilesPerOwner())
++                .thenReturn(MAX_SECONDARY_DEX_FILES_PER_OWNER_FOR_TESTING);
+ 
+         mDexUseManager = new DexUseManagerLocal(mInjector);
+         mDexUseManager.systemReady();
+@@ -569,11 +578,11 @@ public class DexUseManagerTest {
+ 
+     @Test
+     public void testFilteredDetailedSecondaryDexFilteredDueToNotFound() throws Exception {
+-        when(mArtd.getDexFileVisibility(mCeDir + "/foo.apk")).thenReturn(FileVisibility.NOT_FOUND);
+-
+         mDexUseManager.notifyDexContainersLoaded(
+                 mSnapshot, OWNING_PKG_NAME, Map.of(mCeDir + "/foo.apk", "CLC"));
+ 
++        when(mArtd.getDexFileVisibility(mCeDir + "/foo.apk")).thenReturn(FileVisibility.NOT_FOUND);
++
+         assertThat(mDexUseManager.getFilteredDetailedSecondaryDexInfo(OWNING_PKG_NAME)).isEmpty();
+     }
+ 
+@@ -698,12 +707,38 @@ public class DexUseManagerTest {
+         mDexUseManager.notifyDexContainersLoaded(mSnapshot, OWNING_PKG_NAME, map);
+     }
+ 
++    @Test(expected = IllegalArgumentException.class)
++    public void testTooLongDexPath() throws Exception {
++        mDexUseManager.notifyDexContainersLoaded(mSnapshot, OWNING_PKG_NAME,
++                Map.of("/" + "X".repeat(DexUseManagerLocal.MAX_PATH_LENGTH), "CLC"));
++    }
++
++    @Test
++    public void testMaxLengthDexPath() throws Exception {
++        mDexUseManager.notifyDexContainersLoaded(mSnapshot, OWNING_PKG_NAME,
++                Map.of("/" + "X".repeat(DexUseManagerLocal.MAX_PATH_LENGTH - 1), "CLC"));
++    }
++
+     @Test(expected = IllegalArgumentException.class)
+     public void testNonAbsoluteKey() {
+         mDexUseManager.notifyDexContainersLoaded(
+                 mSnapshot, OWNING_PKG_NAME, Map.of("a/b.jar", "CLC"));
+     }
+ 
++    @Test(expected = IllegalArgumentException.class)
++    public void testTooLongClassLoaderContext() throws Exception {
++        mDexUseManager.notifyDexContainersLoaded(mSnapshot, OWNING_PKG_NAME,
++                Map.of(mCeDir + "/foo.apk",
++                        "X".repeat(DexUseManagerLocal.MAX_CLASS_LOADER_CONTEXT_LENGTH + 1)));
++    }
++
++    @Test
++    public void testMaxLengthClassLoaderContext() throws Exception {
++        mDexUseManager.notifyDexContainersLoaded(mSnapshot, OWNING_PKG_NAME,
++                Map.of(mCeDir + "/foo.apk",
++                        "X".repeat(DexUseManagerLocal.MAX_CLASS_LOADER_CONTEXT_LENGTH)));
++    }
++
+     @Test(expected = IllegalArgumentException.class)
+     public void testNullValue() {
+         var map = new HashMap<String, String>();
+@@ -728,6 +763,87 @@ public class DexUseManagerTest {
+                         true /* isUsedByOtherApps */, mDefaultIsDexFilePublic));
+     }
+ 
++    @Test
++    public void testExistingExternalSecondaryDexPath() throws Exception {
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        long oldFileSize = mTempFile.length();
++
++        String existingDexPath = mCeDir + "/foo.apk";
++        when(mInjector.pathExists(existingDexPath)).thenReturn(true);
++        mDexUseManager.notifyDexContainersLoaded(
++                mSnapshot, LOADING_PKG_NAME, Map.of(existingDexPath, "PCL[]"));
++
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        assertThat(mTempFile.length()).isGreaterThan(oldFileSize);
++    }
++
++    @Test
++    public void testNonexistingExternalSecondaryDexPath() throws Exception {
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        long oldFileSize = mTempFile.length();
++
++        String nonexistingDexPath = mCeDir + "/foo.apk";
++        when(mInjector.pathExists(nonexistingDexPath)).thenReturn(false);
++        mDexUseManager.notifyDexContainersLoaded(
++                mSnapshot, LOADING_PKG_NAME, Map.of(nonexistingDexPath, "PCL[]"));
++
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        assertThat(mTempFile.length()).isEqualTo(oldFileSize);
++    }
++
++    @Test
++    public void testInternalSecondaryDexPath() throws Exception {
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        long oldFileSize = mTempFile.length();
++
++        String nonexistingDexPath = mCeDir + "/foo.apk";
++        lenient().when(mInjector.pathExists(nonexistingDexPath)).thenReturn(false);
++        mDexUseManager.notifyDexContainersLoaded(
++                mSnapshot, OWNING_PKG_NAME, Map.of(nonexistingDexPath, "PCL[]"));
++        verify(mArtd, never()).getDexFileVisibility(nonexistingDexPath);
++
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        assertThat(mTempFile.length()).isGreaterThan(oldFileSize);
++    }
++
++    @Test
++    public void testLimitSecondaryDexFiles() throws Exception {
++        for (int n = 0; n < MAX_SECONDARY_DEX_FILES_PER_OWNER_FOR_TESTING - 1; ++n) {
++            mDexUseManager.notifyDexContainersLoaded(mSnapshot, LOADING_PKG_NAME,
++                    Map.of(String.format("%s/%04d/foo.apk", mCeDir, n), "CLC"));
++        }
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        long oldFileSize = mTempFile.length();
++
++        mDexUseManager.notifyDexContainersLoaded(
++                mSnapshot, LOADING_PKG_NAME, Map.of(mCeDir + "/9998/foo.apk", "CLC"));
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        assertThat(mTempFile.length()).isGreaterThan(oldFileSize);
++
++        oldFileSize = mTempFile.length();
++        mDexUseManager.notifyDexContainersLoaded(
++                mSnapshot, LOADING_PKG_NAME, Map.of(mCeDir + "/9999/foo.apk", "CLC"));
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        assertThat(mTempFile.length()).isEqualTo(oldFileSize);
++
++        // Can still add loading packages to existing entries after the limit is reached.
++        mDexUseManager.notifyDexContainersLoaded(
++                mSnapshot, OWNING_PKG_NAME, Map.of(mCeDir + "/9998/foo.apk", "CLC"));
++        mMockClock.advanceTime(DexUseManagerLocal.INTERVAL_MS); // Save.
++        assertThat(mTempFile.length()).isGreaterThan(oldFileSize);
++    }
++
++    @Test
++    public void testLimitSecondaryDexFilesSingleCall() throws Exception {
++        Map<String, String> clcByDexFile = new HashMap<>();
++        for (int n = 0; n < MAX_SECONDARY_DEX_FILES_PER_OWNER_FOR_TESTING + 1; ++n) {
++            clcByDexFile.put(String.format("%s/%04d/foo.apk", mCeDir, n), "CLC");
++        }
++        mDexUseManager.notifyDexContainersLoaded(mSnapshot, LOADING_PKG_NAME, clcByDexFile);
++        assertThat(mDexUseManager.getSecondaryDexInfo(OWNING_PKG_NAME))
++                .hasSize(MAX_SECONDARY_DEX_FILES_PER_OWNER_FOR_TESTING);
++    }
++
+     private AndroidPackage createPackage(String packageName) {
+         AndroidPackage pkg = mock(AndroidPackage.class);
+         lenient().when(pkg.getStorageUuid()).thenReturn(StorageManager.UUID_DEFAULT);
+diff --git a/libartservice/service/proto/dex_use.proto b/libartservice/service/proto/dex_use.proto
+index 1dd962dbf4..1960882ad5 100644
+--- a/libartservice/service/proto/dex_use.proto
++++ b/libartservice/service/proto/dex_use.proto
+@@ -29,31 +29,31 @@ message DexUseProto {
+ }
+ 
+ message PackageDexUseProto {
+-    string owning_package_name = 1;
++    string owning_package_name = 1;  // key
+     repeated PrimaryDexUseProto primary_dex_use = 2;
+     repeated SecondaryDexUseProto secondary_dex_use = 3;
+ }
+ 
+ message PrimaryDexUseProto {
+-    string dex_file = 1;
++    string dex_file = 1;  // key
+     repeated PrimaryDexUseRecordProto record = 2;
+ }
+ 
+ message PrimaryDexUseRecordProto {
+-    string loading_package_name = 1;
+-    bool isolated_process = 2;
++    string loading_package_name = 1;  // key
++    bool isolated_process = 2;        // key
+     int64 last_used_at_ms = 3;
+ }
+ 
+ message SecondaryDexUseProto {
+-    string dex_file = 1;
++    string dex_file = 1;     // key
+     Int32Value user_id = 2;  // Must be explicitly set.
+     repeated SecondaryDexUseRecordProto record = 3;
+ }
+ 
+ message SecondaryDexUseRecordProto {
+-    string loading_package_name = 1;
+-    bool isolated_process = 2;
++    string loading_package_name = 1;  // key
++    bool isolated_process = 2;        // key
+     string class_loader_context = 3;
+     string abi_name = 4;
+     int64 last_used_at_ms = 5;
+-- 
+2.49.0.1077.gc0e912fd4c-goog
+

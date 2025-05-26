@@ -1,0 +1,116 @@
+From f48bf9a2e7c728d7010f8c9ad047fa76a869d3d4 Mon Sep 17 00:00:00 2001
+From: Taran Singh <tarandeep@google.com>
+Date: Mon, 14 Oct 2024 21:59:07 +0000
+Subject: [PATCH] DO NOT MERGE: Verify KeyEvents in IME
+
+Malicious app can inject fabricated InputEvents into IME's FD which can
+do tinker with special shortcuts like switching IME.
+With this CL, all KeyEvents with modifiers OR indicated sensitive by IME will be
+verified before being dispatched to IME.
+
+For any events that are replayed, verify timestamp.
+
+Bug: 331730488
+Test: atest CtsInputMethodTestCases InputMethodServiceTest
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:8d730cf69b864336fd492c88049efc937fac6b61)
+Merged-In: I6589cc73839acb6b2c3f9256c664b5db7e1ade8a
+Change-Id: I6589cc73839acb6b2c3f9256c664b5db7e1ade8a
+---
+ .../IInputMethodSessionWrapper.java           | 35 +++++++++++++++++--
+ 1 file changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/core/java/android/inputmethodservice/IInputMethodSessionWrapper.java b/core/java/android/inputmethodservice/IInputMethodSessionWrapper.java
+index 62b131af74fe..6be976b16916 100644
+--- a/core/java/android/inputmethodservice/IInputMethodSessionWrapper.java
++++ b/core/java/android/inputmethodservice/IInputMethodSessionWrapper.java
+@@ -19,9 +19,11 @@ package android.inputmethodservice;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.Context;
+ import android.graphics.Rect;
++import android.hardware.input.InputManager;
+ import android.os.Bundle;
+ import android.os.Looper;
+ import android.os.Message;
++import android.os.SystemClock;
+ import android.util.Log;
+ import android.util.SparseArray;
+ import android.view.InputChannel;
+@@ -41,6 +43,8 @@ import com.android.internal.inputmethod.IRemoteInputConnection;
+ import com.android.internal.os.HandlerCaller;
+ import com.android.internal.os.SomeArgs;
+ 
++import java.util.Objects;
++
+ class IInputMethodSessionWrapper extends IInputMethodSession.Stub
+         implements HandlerCaller.Callback {
+     private static final String TAG = "InputMethodWrapper";
+@@ -56,6 +60,7 @@ class IInputMethodSessionWrapper extends IInputMethodSession.Stub
+     private static final int DO_REMOVE_IME_SURFACE = 130;
+     private static final int DO_FINISH_INPUT = 140;
+     private static final int DO_INVALIDATE_INPUT = 150;
++    private final Context mContext;
+ 
+ 
+     @UnsupportedAppUsage
+@@ -66,6 +71,7 @@ class IInputMethodSessionWrapper extends IInputMethodSession.Stub
+ 
+     public IInputMethodSessionWrapper(Context context,
+             InputMethodSession inputMethodSession, InputChannel channel) {
++        mContext = context;
+         mCaller = new HandlerCaller(context, null,
+                 this, true /*asyncHandler*/);
+         mInputMethodSession = inputMethodSession;
+@@ -233,6 +239,8 @@ class IInputMethodSessionWrapper extends IInputMethodSession.Stub
+     }
+     private final class ImeInputEventReceiver extends InputEventReceiver
+             implements InputMethodSession.EventCallback {
++        // Time after which a KeyEvent is invalid
++        private static final long KEY_EVENT_ALLOW_PERIOD_MS = 100L;
+         private final SparseArray<InputEvent> mPendingEvents = new SparseArray<InputEvent>();
+ 
+         public ImeInputEventReceiver(InputChannel inputChannel, Looper looper) {
+@@ -247,10 +255,23 @@ class IInputMethodSessionWrapper extends IInputMethodSession.Stub
+                 return;
+             }
+ 
++            if (event instanceof KeyEvent keyEvent && hasKeyModifiers(keyEvent)) {
++                // any KeyEvent with modifiers (e.g. Ctrl/Alt/Fn) must be verified that
++                // they originated from system.
++                InputManager im = mContext.getSystemService(InputManager.class);
++                Objects.requireNonNull(im);
++                final long age = SystemClock.uptimeMillis() - keyEvent.getEventTime();
++                if (age >= KEY_EVENT_ALLOW_PERIOD_MS || im.verifyInputEvent(keyEvent) == null) {
++                    Log.w(TAG, "Unverified or Invalid KeyEvent injected into IME. Dropping "
++                            + keyEvent);
++                    finishInputEvent(event, false /* handled */);
++                    return;
++                }
++            }
++
+             final int seq = event.getSequenceNumber();
+             mPendingEvents.put(seq, event);
+-            if (event instanceof KeyEvent) {
+-                KeyEvent keyEvent = (KeyEvent)event;
++            if (event instanceof KeyEvent keyEvent) {
+                 mInputMethodSession.dispatchKeyEvent(seq, keyEvent, this);
+             } else {
+                 MotionEvent motionEvent = (MotionEvent)event;
+@@ -271,5 +292,15 @@ class IInputMethodSessionWrapper extends IInputMethodSession.Stub
+                 finishInputEvent(event, handled);
+             }
+         }
++
++        private boolean hasKeyModifiers(KeyEvent event) {
++            if (event.hasNoModifiers()) {
++                return false;
++            }
++            return event.isCtrlPressed()
++                    || event.isAltPressed()
++                    || event.isFunctionPressed()
++                    || event.isMetaPressed();
++        }
+     }
+ }
+-- 
+2.49.0.1077.gc0e912fd4c-goog
+
