@@ -1,0 +1,282 @@
+From 3743d1dad4c13bee46542df6c3dd454c991de7ca Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mat=C3=ADas=20Hern=C3=A1ndez?= <matiashe@google.com>
+Date: Mon, 10 Mar 2025 18:55:51 +0100
+Subject: [PATCH] Use ParceledListSlice for ZenModeConfig and AutomaticZenRules
+
+Also, use writeString8 for Zen-related parceling.
+
+Bug: 387498139
+Test: atest NotificationManagerZenTest ZenModeConfigTest
+(cherry picked from commit 3965123f440345017facfe9f767b22d79e55aeab)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:b633b92249a80c4502da12ba66d73bc322bd46b4)
+Merged-In: I9925c9bcc542781832d111660e22181151526127
+Change-Id: I9925c9bcc542781832d111660e22181151526127
+---
+ core/java/android/app/AutomaticZenRule.java   |  8 ++--
+ .../android/app/INotificationManager.aidl     |  2 +-
+ .../java/android/app/NotificationManager.java |  4 +-
+ .../service/notification/ZenModeConfig.java   | 42 +++++++++++--------
+ .../NotificationManagerService.java           |  4 +-
+ .../notification/ZenModeConfigTest.java       | 35 ++++++++++++++++
+ 6 files changed, 69 insertions(+), 26 deletions(-)
+
+diff --git a/core/java/android/app/AutomaticZenRule.java b/core/java/android/app/AutomaticZenRule.java
+index 7bfb1b5c1ba6..f5a33630e6c5 100644
+--- a/core/java/android/app/AutomaticZenRule.java
++++ b/core/java/android/app/AutomaticZenRule.java
+@@ -122,7 +122,7 @@ public final class AutomaticZenRule implements Parcelable {
+     public AutomaticZenRule(Parcel source) {
+         enabled = source.readInt() == ENABLED;
+         if (source.readInt() == ENABLED) {
+-            name = getTrimmedString(source.readString());
++            name = getTrimmedString(source.readString8());
+         }
+         interruptionFilter = source.readInt();
+         conditionId = getTrimmedUri(source.readParcelable(null, android.net.Uri.class));
+@@ -133,7 +133,7 @@ public final class AutomaticZenRule implements Parcelable {
+         creationTime = source.readLong();
+         mZenPolicy = source.readParcelable(null, android.service.notification.ZenPolicy.class);
+         mModified = source.readInt() == ENABLED;
+-        mPkg = source.readString();
++        mPkg = source.readString8();
+     }
+ 
+     /**
+@@ -279,7 +279,7 @@ public final class AutomaticZenRule implements Parcelable {
+         dest.writeInt(enabled ? ENABLED : DISABLED);
+         if (name != null) {
+             dest.writeInt(1);
+-            dest.writeString(name);
++            dest.writeString8(name);
+         } else {
+             dest.writeInt(0);
+         }
+@@ -290,7 +290,7 @@ public final class AutomaticZenRule implements Parcelable {
+         dest.writeLong(creationTime);
+         dest.writeParcelable(mZenPolicy, 0);
+         dest.writeInt(mModified ? ENABLED : DISABLED);
+-        dest.writeString(mPkg);
++        dest.writeString8(mPkg);
+     }
+ 
+     @Override
+diff --git a/core/java/android/app/INotificationManager.aidl b/core/java/android/app/INotificationManager.aidl
+index da6a551175e3..0783e50daf1f 100644
+--- a/core/java/android/app/INotificationManager.aidl
++++ b/core/java/android/app/INotificationManager.aidl
+@@ -209,7 +209,7 @@ interface INotificationManager
+     void setNotificationPolicyAccessGranted(String pkg, boolean granted);
+     void setNotificationPolicyAccessGrantedForUser(String pkg, int userId, boolean granted);
+     AutomaticZenRule getAutomaticZenRule(String id);
+-    List<ZenModeConfig.ZenRule> getZenRules();
++    ParceledListSlice<ZenModeConfig.ZenRule> getZenRules();
+     String addAutomaticZenRule(in AutomaticZenRule automaticZenRule, String pkg);
+     boolean updateAutomaticZenRule(String id, in AutomaticZenRule automaticZenRule);
+     boolean removeAutomaticZenRule(String id);
+diff --git a/core/java/android/app/NotificationManager.java b/core/java/android/app/NotificationManager.java
+index 26bdb3ed4056..eed30ea859f0 100644
+--- a/core/java/android/app/NotificationManager.java
++++ b/core/java/android/app/NotificationManager.java
+@@ -1198,9 +1198,9 @@ public class NotificationManager {
+     public Map<String, AutomaticZenRule> getAutomaticZenRules() {
+         INotificationManager service = getService();
+         try {
+-            List<ZenModeConfig.ZenRule> rules = service.getZenRules();
++            ParceledListSlice<ZenModeConfig.ZenRule> rules = service.getZenRules();
+             Map<String, AutomaticZenRule> ruleMap = new HashMap<>();
+-            for (ZenModeConfig.ZenRule rule : rules) {
++            for (ZenModeConfig.ZenRule rule : rules.getList()) {
+                 AutomaticZenRule azr = new AutomaticZenRule(rule.name, rule.component,
+                         rule.configurationActivity, rule.conditionId, rule.zenPolicy,
+                         zenModeToInterruptionFilter(rule.zenMode), rule.enabled,
+diff --git a/core/java/android/service/notification/ZenModeConfig.java b/core/java/android/service/notification/ZenModeConfig.java
+index e285b1c77122..1161be16151c 100644
+--- a/core/java/android/service/notification/ZenModeConfig.java
++++ b/core/java/android/service/notification/ZenModeConfig.java
+@@ -35,6 +35,7 @@ import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.pm.ApplicationInfo;
+ import android.content.pm.PackageManager;
++import android.content.pm.ParceledListSlice;
+ import android.content.res.Resources;
+ import android.net.Uri;
+ import android.os.Build;
+@@ -215,14 +216,21 @@ public class ZenModeConfig implements Parcelable {
+         allowMessagesFrom = source.readInt();
+         user = source.readInt();
+         manualRule = source.readParcelable(null, android.service.notification.ZenModeConfig.ZenRule.class);
+-        final int len = source.readInt();
++        int len = source.readInt();
+         if (len > 0) {
+             final String[] ids = new String[len];
+-            final ZenRule[] rules = new ZenRule[len];
+-            source.readStringArray(ids);
+-            source.readTypedArray(rules, ZenRule.CREATOR);
++            source.readString8Array(ids);
++            ParceledListSlice<?> parceledRules = source.readParcelable(
++                    ZenRule.class.getClassLoader(), ParceledListSlice.class);
++            List<?> rules = parceledRules != null ? parceledRules.getList() : new ArrayList<>();
++            if (rules.size() != len) {
++                Slog.wtf(TAG, String.format(
++                        "Unexpected parceled rules count (%s != %s), throwing them out",
++                        rules.size(), len));
++                len = 0;
++            }
+             for (int i = 0; i < len; i++) {
+-                automaticRules.put(ids[i], rules[i]);
++                automaticRules.put(ids[i], (ZenRule) rules.get(i));
+             }
+         }
+         allowAlarms = source.readInt() == 1;
+@@ -248,14 +256,14 @@ public class ZenModeConfig implements Parcelable {
+         if (!automaticRules.isEmpty()) {
+             final int len = automaticRules.size();
+             final String[] ids = new String[len];
+-            final ZenRule[] rules = new ZenRule[len];
++            final ArrayList<ZenRule> rules = new ArrayList<>();
+             for (int i = 0; i < len; i++) {
+                 ids[i] = automaticRules.keyAt(i);
+-                rules[i] = automaticRules.valueAt(i);
++                rules.add(automaticRules.valueAt(i));
+             }
+             dest.writeInt(len);
+-            dest.writeStringArray(ids);
+-            dest.writeTypedArray(rules, 0);
++            dest.writeString8Array(ids);
++            dest.writeParcelable(new ParceledListSlice<>(rules), flags);
+         } else {
+             dest.writeInt(0);
+         }
+@@ -1816,7 +1824,7 @@ public class ZenModeConfig implements Parcelable {
+             enabled = source.readInt() == 1;
+             snoozing = source.readInt() == 1;
+             if (source.readInt() == 1) {
+-                name = source.readString();
++                name = source.readString8();
+             }
+             zenMode = source.readInt();
+             conditionId = source.readParcelable(null, android.net.Uri.class);
+@@ -1824,15 +1832,15 @@ public class ZenModeConfig implements Parcelable {
+             component = source.readParcelable(null, android.content.ComponentName.class);
+             configurationActivity = source.readParcelable(null, android.content.ComponentName.class);
+             if (source.readInt() == 1) {
+-                id = source.readString();
++                id = source.readString8();
+             }
+             creationTime = source.readLong();
+             if (source.readInt() == 1) {
+-                enabler = source.readString();
++                enabler = source.readString8();
+             }
+             zenPolicy = source.readParcelable(null, android.service.notification.ZenPolicy.class);
+             modified = source.readInt() == 1;
+-            pkg = source.readString();
++            pkg = source.readString8();
+         }
+ 
+         @Override
+@@ -1846,7 +1854,7 @@ public class ZenModeConfig implements Parcelable {
+             dest.writeInt(snoozing ? 1 : 0);
+             if (name != null) {
+                 dest.writeInt(1);
+-                dest.writeString(name);
++                dest.writeString8(name);
+             } else {
+                 dest.writeInt(0);
+             }
+@@ -1857,20 +1865,20 @@ public class ZenModeConfig implements Parcelable {
+             dest.writeParcelable(configurationActivity, 0);
+             if (id != null) {
+                 dest.writeInt(1);
+-                dest.writeString(id);
++                dest.writeString8(id);
+             } else {
+                 dest.writeInt(0);
+             }
+             dest.writeLong(creationTime);
+             if (enabler != null) {
+                 dest.writeInt(1);
+-                dest.writeString(enabler);
++                dest.writeString8(enabler);
+             } else {
+                 dest.writeInt(0);
+             }
+             dest.writeParcelable(zenPolicy, 0);
+             dest.writeInt(modified ? 1 : 0);
+-            dest.writeString(pkg);
++            dest.writeString8(pkg);
+         }
+ 
+         @Override
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index fd751ad33927..e09c9ac62143 100644
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -4933,9 +4933,9 @@ public class NotificationManagerService extends SystemService {
+         }
+ 
+         @Override
+-        public List<ZenModeConfig.ZenRule> getZenRules() throws RemoteException {
++        public ParceledListSlice<ZenModeConfig.ZenRule> getZenRules() throws RemoteException {
+             enforcePolicyAccess(Binder.getCallingUid(), "getAutomaticZenRules");
+-            return mZenModeHelper.getZenRules();
++            return new ParceledListSlice<ZenModeConfig.ZenRule>(mZenModeHelper.getZenRules());
+         }
+ 
+         @Override
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java
+index 949455a18570..c475f0747892 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConfigTest.java
+@@ -27,6 +27,7 @@ import static junit.framework.TestCase.assertTrue;
+ import android.app.NotificationManager.Policy;
+ import android.content.ComponentName;
+ import android.net.Uri;
++import android.os.Parcel;
+ import android.provider.Settings;
+ import android.service.notification.Condition;
+ import android.service.notification.ZenModeConfig;
+@@ -53,6 +54,40 @@ import java.io.ByteArrayOutputStream;
+ @RunWith(AndroidJUnit4.class)
+ public class ZenModeConfigTest extends UiServiceTestCase {
+ 
++    @Test
++    public void testWriteConfigToParcel() {
++        ZenModeConfig config = new ZenModeConfig();
++        config.allowAlarms = false;
++        config.allowMedia = true;
++        ZenModeConfig.ZenRule rule1 = new ZenModeConfig.ZenRule();
++        rule1.id = "id1";
++        rule1.name = "rule1";
++        rule1.configurationActivity = new ComponentName("pkg", "activity");
++        rule1.component = new ComponentName("pkg", "cps");
++        rule1.conditionId = Uri.parse("condition1");
++        rule1.enabled = true;
++        rule1.zenMode = Settings.Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS;
++        rule1.pkg = "pkg";
++        config.automaticRules.put(rule1.id, rule1);
++        ZenModeConfig.ZenRule rule2 = new ZenModeConfig.ZenRule();
++        rule2.id = "id2";
++        rule2.name = "rule2";
++        rule2.configurationActivity = new ComponentName("pkg2", "activity2");
++        rule2.component = new ComponentName("pkg2", "cps2");
++        rule2.conditionId = Uri.parse("condition2");
++        rule2.enabled = false;
++        rule2.zenMode = Settings.Global.ZEN_MODE_ALARMS;
++        rule2.pkg = "pkg2";
++        config.automaticRules.put(rule2.id, rule2);
++
++        Parcel parcel = Parcel.obtain();
++        config.writeToParcel(parcel, 0);
++        parcel.setDataPosition(0);
++        ZenModeConfig parceled = new ZenModeConfig(parcel);
++
++        assertEquals(config, parceled);
++    }
++
+     @Test
+     public void testPriorityOnlyMutingAllNotifications() {
+         ZenModeConfig config = getMutedRingerConfig();
+-- 
+2.49.0.1077.gc0e912fd4c-goog
+
