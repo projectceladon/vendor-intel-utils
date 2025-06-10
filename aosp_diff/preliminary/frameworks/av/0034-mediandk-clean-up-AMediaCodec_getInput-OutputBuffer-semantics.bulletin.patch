@@ -1,0 +1,138 @@
+From 011c760e4b28a5f0156f9d5de037062e1460feb0 Mon Sep 17 00:00:00 2001
+From: Lajos Molnar <lajos@google.com>
+Date: Wed, 26 Feb 2025 18:16:50 -0800
+Subject: [PATCH] mediandk: clean up AMediaCodec_getInput/OutputBuffer
+ semantics
+
+AMediaCodec_getInputBuffer erroneously considered the
+offset, which could result in a smaller input buffer being
+returned and client confusion. In practice, input
+buffer offset is rarely used.
+
+Similarly, the buffer size returned from
+AMediaCodec_getOutputBuffer included padding after the
+output buffer leading to potential confusion.
+Now the size returned from both AMediaCodec_getOutputBuffer
+and AMediaCodec_dequeueOutputBuffer is correct.
+
+Also removed mentions of non-existing NDK methods
+AMediaCodec_getOutputBuffers and AMediaCodec_getInputBuffers.
+
+Bug: 301470262
+Flag: EXEMPT bugfix
+(cherry picked from commit d69fe7b73a0ed14c2b5bc237f1a42314140c9458)
+Merged-in: I6bbd9b85023aef56a608362afde0662d3df7284a
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:cf09e478bf05fd398a3d1146a501eb42d9d71d8b)
+Merged-In: I6bbd9b85023aef56a608362afde0662d3df7284a
+Change-Id: I6bbd9b85023aef56a608362afde0662d3df7284a
+---
+ media/ndk/NdkMediaCodec.cpp             | 21 ++++++++++++++++-----
+ media/ndk/include/media/NdkMediaCodec.h | 15 +++++++++++++--
+ 2 files changed, 29 insertions(+), 7 deletions(-)
+
+diff --git a/media/ndk/NdkMediaCodec.cpp b/media/ndk/NdkMediaCodec.cpp
+index 38e422df3c..2f9a7697aa 100644
+--- a/media/ndk/NdkMediaCodec.cpp
++++ b/media/ndk/NdkMediaCodec.cpp
+@@ -626,7 +626,13 @@ uint8_t* AMediaCodec_getInputBuffer(AMediaCodec *mData, size_t idx, size_t *out_
+         if (out_size != NULL) {
+             *out_size = abuf->capacity();
+         }
+-        return abuf->data();
++
++        // When an input buffer is provided to the application, it is essentially
++        // empty. Ignore its offset as we will set it upon queueInputBuffer.
++        // This actually works as expected as we do not provide visibility of
++        // a potential internal offset to the client, so it is equivalent to
++        // setting the offset to 0 prior to returning the buffer to the client.
++        return abuf->base();
+     }
+ 
+     android::Vector<android::sp<android::MediaCodecBuffer> > abufs;
+@@ -643,7 +649,7 @@ uint8_t* AMediaCodec_getInputBuffer(AMediaCodec *mData, size_t idx, size_t *out_
+         if (out_size != NULL) {
+             *out_size = abufs[idx]->capacity();
+         }
+-        return abufs[idx]->data();
++        return abufs[idx]->base();
+     }
+     ALOGE("couldn't get input buffers");
+     return NULL;
+@@ -658,8 +664,12 @@ uint8_t* AMediaCodec_getOutputBuffer(AMediaCodec *mData, size_t idx, size_t *out
+             return NULL;
+         }
+ 
++        // Note that we do not provide visibility of the internal offset to the
++        // client, but it also does not make sense to provide visibility of the
++        // buffer capacity vs the actual size.
++
+         if (out_size != NULL) {
+-            *out_size = abuf->capacity();
++            *out_size = abuf->size();
+         }
+         return abuf->data();
+     }
+@@ -672,7 +682,7 @@ uint8_t* AMediaCodec_getOutputBuffer(AMediaCodec *mData, size_t idx, size_t *out
+             return NULL;
+         }
+         if (out_size != NULL) {
+-            *out_size = abufs[idx]->capacity();
++            *out_size = abufs[idx]->size();
+         }
+         return abufs[idx]->data();
+     }
+@@ -702,7 +712,8 @@ ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec *mData,
+     requestActivityNotification(mData);
+     switch (ret) {
+         case OK:
+-            info->offset = offset;
++            // the output buffer address is already offset in AMediaCodec_getOutputBuffer()
++            info->offset = 0;
+             info->size = size;
+             info->flags = flags;
+             info->presentationTimeUs = presentationTimeUs;
+diff --git a/media/ndk/include/media/NdkMediaCodec.h b/media/ndk/include/media/NdkMediaCodec.h
+index 4938f7668d..fd5232b117 100644
+--- a/media/ndk/include/media/NdkMediaCodec.h
++++ b/media/ndk/include/media/NdkMediaCodec.h
+@@ -221,6 +221,11 @@ uint8_t* AMediaCodec_getInputBuffer(AMediaCodec*, size_t idx, size_t *out_size)
+  * dequeueOutputBuffer, and not yet queued.
+  *
+  * Available since API level 21.
++ * <p>
++ * At or before API level 35, the out_size returned was invalid, and instead the
++ * size returned in the AMediaCodecBufferInfo struct from
++ * AMediaCodec_dequeueOutputBuffer() should be used. After API
++ * level 35, this API returns the correct output buffer size as well.
+  */
+ uint8_t* AMediaCodec_getOutputBuffer(AMediaCodec*, size_t idx, size_t *out_size) __INTRODUCED_IN(21);
+ 
+@@ -279,9 +284,16 @@ media_status_t AMediaCodec_queueSecureInputBuffer(AMediaCodec*, size_t idx,
+ #undef _off_t_compat
+ 
+ /**
+- * Get the index of the next available buffer of processed data.
++ * Get the index of the next available buffer of processed data along with the
++ * metadata associated with it.
+  *
+  * Available since API level 21.
++ * <p>
++ * At or before API level 35, the offset in the AMediaCodecBufferInfo struct
++ * was invalid and should be ignored; however, at the same time
++ * the buffer size could only be obtained from this struct. After API
++ * level 35, the offset returned in the struct is always set to 0, and the
++ * buffer size can also be obtained from the AMediaCodec_getOutputBuffer() call.
+  */
+ ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo *info,
+         int64_t timeoutUs) __INTRODUCED_IN(21);
+@@ -438,7 +450,6 @@ void AMediaCodec_releaseName(AMediaCodec*, char* name) __INTRODUCED_IN(28);
+ /**
+  * Set an asynchronous callback for actionable AMediaCodec events.
+  * When asynchronous callback is enabled, it is an error for the client to call
+- * AMediaCodec_getInputBuffers(), AMediaCodec_getOutputBuffers(),
+  * AMediaCodec_dequeueInputBuffer() or AMediaCodec_dequeueOutputBuffer().
+  *
+  * AMediaCodec_flush() behaves differently in asynchronous mode.
+-- 
+2.49.0.1077.gc0e912fd4c-goog
+
