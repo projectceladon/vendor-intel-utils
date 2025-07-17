@@ -1,0 +1,152 @@
+From f1eb8e719dfbe15a38d40af0a73ead207eba9389 Mon Sep 17 00:00:00 2001
+From: Wen Zhang <zhangwen8@xiaomi.corp-partner.google.com>
+Date: Fri, 2 Feb 2024 12:01:12 +0000
+Subject: [PATCH] [Bugfix]migrate user restrictions to DevicePolicyEngine
+
+Migrate user restrictions to DevicePolicyEngine, otherwise user restrictions will not be able to be queried when upgrading from Android 13 OTA to Android 14.
+
+Bug: 323452689
+Bug: 318497672
+Test: case 1:Android 13 upgrade to Android 14
+1.install TestDPC on Android 13
+2.set TestDPC as Device Owner
+3.set disallow factory reset
+4.update Android 14 via OTA
+5.The reset to factory settings in the settings app is still unavailable.
+
+case 2:Android 14(bad version) upgrade to Android 14(new version)
+1.install TestDPC on Android 13
+2.set TestDPC as Device Owner
+3.set disallow factory reset
+4.update Android 14(bad version) via OTA
+5.The reset to factory settings in the settings app is still available.
+6.update Android 14(new version) via OTA
+7.The reset to factory settings in the settings app is unavailable.
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:93ba63a2bfdda47fb9376efaad792bc96a106947)
+Merged-In: I7c63d52300a1c5aa0678f29c2e4b15195411517c
+Change-Id: I7c63d52300a1c5aa0678f29c2e4b15195411517c
+---
+ .../DevicePolicyManagerService.java           | 87 +++++++++++++++----
+ 1 file changed, 72 insertions(+), 15 deletions(-)
+
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+index 5e67708b1adb..1549677fdbb2 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+@@ -13497,27 +13497,47 @@ public class DevicePolicyManagerService extends IDevicePolicyManager.Stub {
+             CallerIdentity caller, EnforcingAdmin admin, String key, boolean enabled,
+             boolean parent) {
+         synchronized (getLockObject()) {
++
++            int ownerType;
+             if (isDeviceOwner(caller)) {
+-                if (UserRestrictionsUtils.isGlobal(OWNER_TYPE_DEVICE_OWNER, key)) {
+-                    setGlobalUserRestrictionInternal(admin, key, enabled);
+-                } else {
+-                    setLocalUserRestrictionInternal(admin, key, enabled, caller.getUserId());
+-                }
++                ownerType = OWNER_TYPE_DEVICE_OWNER;
++            } else if (isProfileOwnerOfOrganizationOwnedDevice(caller)) {
++                ownerType = OWNER_TYPE_PROFILE_OWNER_OF_ORGANIZATION_OWNED_DEVICE;
+             } else if (isProfileOwner(caller)) {
+-                if (UserRestrictionsUtils.isGlobal(OWNER_TYPE_PROFILE_OWNER, key)
+-                        || (parent && isProfileOwnerOfOrganizationOwnedDevice(caller)
+-                        && UserRestrictionsUtils.isGlobal(
+-                                OWNER_TYPE_PROFILE_OWNER_OF_ORGANIZATION_OWNED_DEVICE, key))) {
+-                    setGlobalUserRestrictionInternal(admin, key, enabled);
+-                } else {
+-                    int affectedUserId = parent
+-                            ? getProfileParentId(caller.getUserId()) : caller.getUserId();
+-                    setLocalUserRestrictionInternal(admin, key, enabled, affectedUserId);
+-                }
++                ownerType = OWNER_TYPE_PROFILE_OWNER;
+             } else {
+                 throw new IllegalStateException("Non-DO/Non-PO cannot set restriction " + key
+                         + " while targetSdkVersion is less than UPSIDE_DOWN_CAKE");
+             }
++            setBackwardCompatibleUserRestrictionLocked(ownerType, admin, caller.getUserId(), key,
++                    enabled, parent);
++        }
++    }
++
++    private void setBackwardCompatibleUserRestrictionLocked(
++            int ownerType, EnforcingAdmin admin, int userId, String key, boolean enabled,
++            boolean parent) {
++        if (ownerType == OWNER_TYPE_DEVICE_OWNER) {
++            if (UserRestrictionsUtils.isGlobal(OWNER_TYPE_DEVICE_OWNER, key)) {
++                setGlobalUserRestrictionInternal(admin, key, enabled);
++            } else {
++                setLocalUserRestrictionInternal(admin, key, enabled, userId);
++            }
++        } else if (ownerType == OWNER_TYPE_PROFILE_OWNER
++                || ownerType == OWNER_TYPE_PROFILE_OWNER_OF_ORGANIZATION_OWNED_DEVICE) {
++            if (UserRestrictionsUtils.isGlobal(OWNER_TYPE_PROFILE_OWNER, key)
++                    || (parent && ownerType == OWNER_TYPE_PROFILE_OWNER_OF_ORGANIZATION_OWNED_DEVICE
++                    && UserRestrictionsUtils.isGlobal(
++                    OWNER_TYPE_PROFILE_OWNER_OF_ORGANIZATION_OWNED_DEVICE, key))) {
++                setGlobalUserRestrictionInternal(admin, key, enabled);
++            } else {
++                int affectedUserId = parent
++                        ? getProfileParentId(userId) : userId;
++                setLocalUserRestrictionInternal(admin, key, enabled, affectedUserId);
++            }
++        } else {
++            throw new IllegalStateException("Non-DO/Non-PO cannot set restriction " + key
++                    + " while targetSdkVersion is less than UPSIDE_DOWN_CAKE");
+         }
+     }
+ 
+@@ -24206,6 +24226,7 @@ public class DevicePolicyManagerService extends IDevicePolicyManager.Stub {
+         try {
+             migrateScreenCapturePolicyLocked();
+             migrateLockTaskPolicyLocked();
++            migrateUserRestrictionsLocked();
+             return true;
+         } catch (Exception e) {
+             Slogf.e(LOG_TAG, e, "Error occurred during post upgrade migration to the device "
+@@ -24467,6 +24488,42 @@ public class DevicePolicyManagerService extends IDevicePolicyManager.Stub {
+         });
+     }
+ 
++    private void migrateUserRestrictionsLocked() {
++        Binder.withCleanCallingIdentity(() -> {
++            List<UserInfo> users = mUserManager.getUsers();
++            for (UserInfo userInfo : users) {
++                ActiveAdmin admin = getProfileOwnerOrDeviceOwnerLocked(userInfo.id);
++                if (admin == null) continue;
++                ComponentName adminComponent = admin.info.getComponent();
++                int userId = userInfo.id;
++                EnforcingAdmin enforcingAdmin = EnforcingAdmin.createEnterpriseEnforcingAdmin(
++                        adminComponent,
++                        userId,
++                        admin);
++                int ownerType;
++                if (isDeviceOwner(admin)) {
++                    ownerType = OWNER_TYPE_DEVICE_OWNER;
++                } else if (isProfileOwnerOfOrganizationOwnedDevice(adminComponent, userId)) {
++                    ownerType = OWNER_TYPE_PROFILE_OWNER_OF_ORGANIZATION_OWNED_DEVICE;
++                } else if (isProfileOwner(adminComponent, userId)) {
++                    ownerType = OWNER_TYPE_PROFILE_OWNER;
++                } else {
++                    throw new IllegalStateException("Invalid DO/PO state");
++                }
++
++                for (final String restriction : admin.ensureUserRestrictions().keySet()) {
++                    setBackwardCompatibleUserRestrictionLocked(ownerType, enforcingAdmin, userId,
++                            restriction, /* enabled */ true, /* parent */ false);
++                }
++                for (final String restriction : admin.getParentActiveAdmin()
++                        .ensureUserRestrictions().keySet()) {
++                    setBackwardCompatibleUserRestrictionLocked(ownerType, enforcingAdmin, userId,
++                            restriction, /* enabled */ true, /* parent */ true);
++                }
++            }
++        });
++    }
++
+     private List<PackageInfo> getInstalledPackagesOnUser(int userId) {
+         return mInjector.binderWithCleanCallingIdentity(() ->
+                 mContext.getPackageManager().getInstalledPackagesAsUser(
+-- 
+2.44.0.396.g6e790dbe36-goog
+

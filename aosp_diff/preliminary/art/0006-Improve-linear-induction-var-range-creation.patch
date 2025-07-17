@@ -1,0 +1,575 @@
+From fdb807737f56d8de64a827a2e858066d793366f2 Mon Sep 17 00:00:00 2001
+From: Santiago Aboy Solanes <solanes@google.com>
+Date: Wed, 25 Oct 2023 14:10:13 +0100
+Subject: [PATCH] Improve linear induction var range creation
+
+We can now detect and remove loops that require an is_taken test e.g.
+
+int a = 0;
+for (int i = 0; i < n; i++) {
+  a += 1;
+}
+
+can be turned into `if (n < 0) then 0 else n`.
+
+Part of this logic can be reused in the future to help eliminate
+BoundsCheck instructions.
+
+Bug: 304967775
+Fixes: 304967775
+Test: art/test/testrunner/testrunner.py --host --64 -b --optimizing
+Change-Id: I944f3408e623a0652977d4c3f72d29caf9c1f908
+---
+ compiler/optimizing/induction_var_range.cc |  82 +++++++---
+ compiler/optimizing/induction_var_range.h  |  17 +-
+ test/449-checker-bce/src/Main.java         |  87 ++++++++++-
+ test/618-checker-induction/src/Main.java   | 173 +++++++++++++++++++--
+ 4 files changed, 323 insertions(+), 36 deletions(-)
+
+diff --git a/compiler/optimizing/induction_var_range.cc b/compiler/optimizing/induction_var_range.cc
+index 764b1459f4..b1f33abdf8 100644
+--- a/compiler/optimizing/induction_var_range.cc
++++ b/compiler/optimizing/induction_var_range.cc
+@@ -1066,11 +1066,11 @@ bool InductionVarRange::GenerateRangeOrLastValue(const HBasicBlock* context,
+         if (*stride_value > 0) {
+           lower = nullptr;
+           return GenerateLastValueLinear(
+-              context, loop, info, trip, graph, block, /*is_min=*/false, upper);
++              context, loop, info, trip, graph, block, /*is_min=*/false, upper, needs_taken_test);
+         } else {
+           upper = nullptr;
+           return GenerateLastValueLinear(
+-              context, loop, info, trip, graph, block, /*is_min=*/true, lower);
++              context, loop, info, trip, graph, block, /*is_min=*/true, lower, needs_taken_test);
+         }
+       case HInductionVarAnalysis::kPolynomial:
+         return GenerateLastValuePolynomial(context, loop, info, trip, graph, block, lower);
+@@ -1124,7 +1124,8 @@ bool InductionVarRange::GenerateLastValueLinear(const HBasicBlock* context,
+                                                 HGraph* graph,
+                                                 HBasicBlock* block,
+                                                 bool is_min,
+-                                                /*out*/ HInstruction** result) const {
++                                                /*out*/ HInstruction** result,
++                                                /*inout*/ bool* needs_taken_test) const {
+   DataType::Type type = info->type;
+   // Avoid any narrowing linear induction or any type mismatch between the linear induction and the
+   // trip count expression.
+@@ -1172,6 +1173,15 @@ bool InductionVarRange::GenerateLastValueLinear(const HBasicBlock* context,
+     }
+     *result = Insert(block, oper);
+   }
++
++  if (*needs_taken_test) {
++    if (TryGenerateTakenTest(context, loop, trip->op_b, graph, block, result, opb)) {
++      *needs_taken_test = false;  // taken care of
++    } else {
++      return false;
++    }
++  }
++
+   return true;
+ }
+ 
+@@ -1308,8 +1318,8 @@ bool InductionVarRange::GenerateLastValuePeriodic(const HBasicBlock* context,
+                                                   HInductionVarAnalysis::InductionInfo* trip,
+                                                   HGraph* graph,
+                                                   HBasicBlock* block,
+-                                                  /*out*/HInstruction** result,
+-                                                  /*out*/bool* needs_taken_test) const {
++                                                  /*out*/ HInstruction** result,
++                                                  /*inout*/ bool* needs_taken_test) const {
+   DCHECK(info != nullptr);
+   DCHECK_EQ(info->induction_class, HInductionVarAnalysis::kPeriodic);
+   // Count period and detect all-invariants.
+@@ -1384,21 +1394,9 @@ bool InductionVarRange::GenerateLastValuePeriodic(const HBasicBlock* context,
+           Insert(block, new (allocator) HEqual(msk, graph->GetConstant(type, 0), kNoDexPc));
+       *result = Insert(block, new (graph->GetAllocator()) HSelect(is_even, x, y, kNoDexPc));
+     }
+-    // Guard select with taken test if needed.
++
+     if (*needs_taken_test) {
+-      HInstruction* is_taken = nullptr;
+-      if (GenerateCode(context,
+-                       loop,
+-                       trip->op_b,
+-                       /*trip=*/ nullptr,
+-                       graph,
+-                       block,
+-                       /*is_min=*/ false,
+-                       graph ? &is_taken : nullptr)) {
+-        if (graph != nullptr) {
+-          ArenaAllocator* allocator = graph->GetAllocator();
+-          *result = Insert(block, new (allocator) HSelect(is_taken, *result, x, kNoDexPc));
+-        }
++      if (TryGenerateTakenTest(context, loop, trip->op_b, graph, block, result, x)) {
+         *needs_taken_test = false;  // taken care of
+       } else {
+         return false;
+@@ -1551,7 +1549,8 @@ bool InductionVarRange::GenerateCode(const HBasicBlock* context,
+                 *result = graph->GetConstant(type, 0);
+               }
+               return true;
+-            } else if (IsContextInBody(context, loop)) {
++            } else if (IsContextInBody(context, loop) ||
++                       (context == loop->GetHeader() && !allow_potential_overflow)) {
+               if (GenerateCode(context,
+                                loop,
+                                info->op_a,
+@@ -1562,9 +1561,19 @@ bool InductionVarRange::GenerateCode(const HBasicBlock* context,
+                                &opb,
+                                allow_potential_overflow)) {
+                 if (graph != nullptr) {
+-                  ArenaAllocator* allocator = graph->GetAllocator();
+-                  *result =
+-                      Insert(block, new (allocator) HSub(type, opb, graph->GetConstant(type, 1)));
++                  if (IsContextInBody(context, loop)) {
++                    ArenaAllocator* allocator = graph->GetAllocator();
++                    *result =
++                        Insert(block, new (allocator) HSub(type, opb, graph->GetConstant(type, 1)));
++                  } else {
++                    // We want to generate the full trip count since we want the last value. This
++                    // will be combined with an `is_taken` test so we don't want to subtract one.
++                    DCHECK(context == loop->GetHeader());
++                    // TODO(solanes): Remove the !allow_potential_overflow restriction and allow
++                    // other parts e.g. BCE to take advantage of this.
++                    DCHECK(!allow_potential_overflow);
++                    *result = opb;
++                  }
+                 }
+                 return true;
+               }
+@@ -1731,6 +1740,33 @@ bool InductionVarRange::TryGenerateSubWithoutOverflow(const HBasicBlock* context
+   return false;
+ }
+ 
++bool InductionVarRange::TryGenerateTakenTest(const HBasicBlock* context,
++                                             const HLoopInformation* loop,
++                                             HInductionVarAnalysis::InductionInfo* info,
++                                             HGraph* graph,
++                                             HBasicBlock* block,
++                                             /*inout*/ HInstruction** result,
++                                             /*inout*/ HInstruction* not_taken_result) const {
++  HInstruction* is_taken = nullptr;
++  if (GenerateCode(context,
++                   loop,
++                   info,
++                   /*trip=*/nullptr,
++                   graph,
++                   block,
++                   /*is_min=*/false,
++                   graph != nullptr ? &is_taken : nullptr)) {
++    if (graph != nullptr) {
++      ArenaAllocator* allocator = graph->GetAllocator();
++      *result =
++          Insert(block, new (allocator) HSelect(is_taken, *result, not_taken_result, kNoDexPc));
++    }
++    return true;
++  } else {
++    return false;
++  }
++}
++
+ void InductionVarRange::ReplaceInduction(HInductionVarAnalysis::InductionInfo* info,
+                                          HInstruction* fetch,
+                                          HInstruction* replacement) {
+diff --git a/compiler/optimizing/induction_var_range.h b/compiler/optimizing/induction_var_range.h
+index f908b92282..a81227b41b 100644
+--- a/compiler/optimizing/induction_var_range.h
++++ b/compiler/optimizing/induction_var_range.h
+@@ -325,7 +325,8 @@ class InductionVarRange {
+                                HGraph* graph,
+                                HBasicBlock* block,
+                                bool is_min,
+-                               /*out*/ HInstruction** result) const;
++                               /*out*/ HInstruction** result,
++                               /*inout*/ bool* needs_taken_test) const;
+ 
+   bool GenerateLastValuePolynomial(const HBasicBlock* context,
+                                    const HLoopInformation* loop,
+@@ -357,8 +358,8 @@ class InductionVarRange {
+                                  HInductionVarAnalysis::InductionInfo* trip,
+                                  HGraph* graph,
+                                  HBasicBlock* block,
+-                                 /*out*/HInstruction** result,
+-                                 /*out*/ bool* needs_taken_test) const;
++                                 /*out*/ HInstruction** result,
++                                 /*inout*/ bool* needs_taken_test) const;
+ 
+   bool GenerateCode(const HBasicBlock* context,
+                     const HLoopInformation* loop,
+@@ -386,6 +387,16 @@ class InductionVarRange {
+                                      /*in*/ HInstruction* opa,
+                                      /*out*/ HInstruction** result) const;
+ 
++  // Try to guard the taken test with an HSelect instruction. Returns true if it can generate the
++  // code, or false otherwise. The caller is responsible of updating `needs_taken_test`.
++  bool TryGenerateTakenTest(const HBasicBlock* context,
++                            const HLoopInformation* loop,
++                            HInductionVarAnalysis::InductionInfo* info,
++                            HGraph* graph,
++                            HBasicBlock* block,
++                            /*inout*/ HInstruction** result,
++                            /*inout*/ HInstruction* not_taken_result) const;
++
+   void ReplaceInduction(HInductionVarAnalysis::InductionInfo* info,
+                         HInstruction* fetch,
+                         HInstruction* replacement);
+diff --git a/test/449-checker-bce/src/Main.java b/test/449-checker-bce/src/Main.java
+index 3e414103ba..f23896728e 100644
+--- a/test/449-checker-bce/src/Main.java
++++ b/test/449-checker-bce/src/Main.java
+@@ -14,6 +14,8 @@
+  * limitations under the License.
+  */
+ 
++import java.util.Arrays;
++
+ public class Main {
+ 
+   /// CHECK-START: int Main.sieve(int) BCE (before)
+@@ -1773,6 +1775,87 @@ public class Main {
+     }
+   }
+ 
++  // Tests `setZeroToRange` with a range of values. Checks for exceptions as well as the correctness
++  // of setting the right values to zero.
++  static void $noinline$testSetZeroToRange() {
++    for (int start = -2; start < 7; ++start) {
++      for (int len = -2; len < 7; ++len) {
++        int[] array = {1, 2, 3, 4, 5};
++        final int lower = start;
++        final int upper = start + len - 1;
++        // We expect an exception if:
++        //  * The first value is out of range, or
++        //  * The last value is more than the length of the array.
++        // Note that if `upper < 0` it means that we will only do one iteration of the do while in
++        // `setZeroToRange` so we have the exception covered with the `lower` checks.
++        final boolean expected_exception =
++                (lower < 0) || (lower >= array.length) || (upper >= array.length);
++        try {
++          $noinline$setZeroToRange(array, start, len);
++          if (expected_exception) {
++              System.out.println("Missing ArrayIndexOutOfBoundsException for start " + start
++                      + " and len " + len);
++          }
++          $noinline$checkZerosForSetZeroToRange(array, start, len);
++        } catch (ArrayIndexOutOfBoundsException e) {
++          if (!expected_exception) {
++              System.out.println("Unexpected ArrayIndexOutOfBoundsException for start " + start
++                      + " and len " + len);
++          }
++        }
++      }
++    }
++  }
++
++  // TODO(solanes): Improve the code to replace the following BoundsCheck with HDeoptimize
++  // instructions. See b/304967775 and aosp/2804075.
++
++  /// CHECK-START: void Main.$noinline$setZeroToRange(int[], int, int) BCE (before)
++  /// CHECK:     BoundsCheck
++
++  /// CHECK-START: void Main.$noinline$setZeroToRange(int[], int, int) BCE (after)
++  /// CHECK:     BoundsCheck
++
++  // Sets to `0` the values of `arr` in the range `[start, len)`.
++  static void $noinline$setZeroToRange(int[] arr, int start, int len) {
++    int charPos = start;
++    do {
++      arr[charPos++] = 0;
++    } while (charPos < start + len);
++  }
++
++  static void $noinline$checkZerosForSetZeroToRange(int[] arr, int start, int len) {
++    // Non-zeroes before zeroes.
++    int i = 0;
++    for (; i < Math.min(start, arr.length); ++i) {
++      if (arr[i] == 0) {
++        System.out.println("Expected non-zero for arr " + Arrays.toString(arr) + " before zeroes i "
++                + i + " start " + start + " and len " + len);
++      }
++    }
++
++    int bound = start + len;
++    if (bound < 1 || len < 1) {
++      // We always set one zero since it is a do-while.
++      bound = i + 1;
++    }
++
++    for (; i < Math.min(bound, arr.length); ++i) {
++      if (arr[i] != 0) {
++        System.out.println("Expected zero for arr " + Arrays.toString(arr) + " i " + i + " start "
++                + start + " and len " + len);
++      }
++    }
++
++    // Then zeroes until the end.
++    for (; i < arr.length; ++i) {
++      if (arr[i] == 0) {
++        System.out.println("Expected non-zero after zeroes for arr " + Arrays.toString(arr) + " i "
++                + i + " start " + start + " and len " + len);
++      }
++    }
++  }
++
+   // Make sure this method is compiled with optimizing.
+   /// CHECK-START: void Main.main(java.lang.String[]) register (after)
+   /// CHECK: ParallelMove
+@@ -1909,10 +1992,12 @@ public class Main {
+     int i = 1;
+     if (foo() + i != 100) {
+       System.out.println("foo failed!");
+-    };
++    }
+ 
+     testUnknownBounds();
+     new Main().testExceptionMessage();
++
++    $noinline$testSetZeroToRange();
+   }
+ 
+   public static native boolean compiledWithOptimizing();
+diff --git a/test/618-checker-induction/src/Main.java b/test/618-checker-induction/src/Main.java
+index 5dc8e9884a..21cca22dd3 100644
+--- a/test/618-checker-induction/src/Main.java
++++ b/test/618-checker-induction/src/Main.java
+@@ -331,7 +331,26 @@ public class Main {
+         return closed;  // only needs last-value
+     }
+ 
+-    // TODO: taken test around closed form?
++    // closedFormInductionUpN turns into `if n < 0 then 12345 else 12345 + n * 5`.
++
++    /// CHECK-START: int Main.closedFormInductionUpN(int) loop_optimization (before)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormInductionUpN(int) loop_optimization (after)
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormInductionUpN(int) loop_optimization (after)
++    /// CHECK-DAG: <<N:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<Int5:i\d+>>     IntConstant 5
++    /// CHECK-DAG: <<Int12345:i\d+>> IntConstant 12345
++    /// CHECK-DAG: <<Int0:i\d+>>     IntConstant 0
++    /// CHECK-DAG: <<Mul:i\d+>>      Mul [<<Int5>>,<<N>>]
++    /// CHECK-DAG: <<Add:i\d+>>      Add [<<Mul>>,<<Int12345>>]
++    /// CHECK-DAG: <<LT:z\d+>>       LessThan [<<Int0>>,<<N>>]
++    /// CHECK-DAG: <<Sel:i\d+>>      Select [<<Int12345>>,<<Add>>,<<LT>>]
++    /// CHECK-DAG:                   Return [<<Sel>>]
+     static int closedFormInductionUpN(int n) {
+         int closed = 12345;
+         for (int i = 0; i < n; i++) {
+@@ -340,7 +359,26 @@ public class Main {
+         return closed;  // only needs last value
+     }
+ 
+-    // TODO: taken test around closed form?
++    // closedFormInductionInAndDownN turns into `if n < 0 then closed else closed - n * 5`.
++
++    /// CHECK-START: int Main.closedFormInductionInAndDownN(int, int) loop_optimization (before)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormInductionInAndDownN(int, int) loop_optimization (after)
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormInductionInAndDownN(int, int) loop_optimization (after)
++    /// CHECK-DAG: <<Closed:i\d+>>   ParameterValue
++    /// CHECK-DAG: <<N:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<IntNeg5:i\d+>>  IntConstant -5
++    /// CHECK-DAG: <<Int0:i\d+>>     IntConstant 0
++    /// CHECK-DAG: <<Mul:i\d+>>      Mul [<<IntNeg5>>,<<N>>]
++    /// CHECK-DAG: <<Add:i\d+>>      Add [<<Mul>>,<<Closed>>]
++    /// CHECK-DAG: <<LT:z\d+>>       LessThan [<<Int0>>,<<N>>]
++    /// CHECK-DAG: <<Sel:i\d+>>      Select [<<Closed>>,<<Add>>,<<LT>>]
++    /// CHECK-DAG:                   Return [<<Sel>>]
+     static int closedFormInductionInAndDownN(int closed, int n) {
+         for (int i = 0; i < n; i++) {
+             closed -= 5;
+@@ -348,7 +386,27 @@ public class Main {
+         return closed;  // only needs last value
+     }
+ 
+-    // TODO: move closed form even further out?
++    // closedFormNestedN turns into `if (n < 0) then 0 else n * 10`
++
++    /// CHECK-START: int Main.closedFormNestedN(int) loop_optimization (before)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormNestedN(int) loop_optimization (after)
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormNestedN(int) loop_optimization (after)
++    /// CHECK-DAG: <<N:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<Int10:i\d+>>    IntConstant 10
++    /// CHECK-DAG: <<Int0:i\d+>>     IntConstant 0
++    /// CHECK-DAG: <<Mul:i\d+>>      Mul [<<Int10>>,<<N>>]
++    /// CHECK-DAG: <<Add:i\d+>>      Add [<<Mul>>,<<Int0>>]
++    /// CHECK-DAG: <<LT:z\d+>>       LessThan [<<Int0>>,<<N>>]
++    /// CHECK-DAG: <<Sel:i\d+>>      Select [<<Int0>>,<<Add>>,<<LT>>]
++    /// CHECK-DAG:                   Return [<<Sel>>]
+     static int closedFormNestedN(int n) {
+         int closed = 0;
+         for (int i = 0; i < n; i++) {
+@@ -359,7 +417,28 @@ public class Main {
+         return closed;  // only needs last-value
+     }
+ 
+-    // TODO: move closed form even further out?
++    // closedFormNestedNAlt turns into `if (n < 0) then 12345 else 12345 + n * 161`
++
++    /// CHECK-START: int Main.closedFormNestedNAlt(int) loop_optimization (before)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormNestedNAlt(int) loop_optimization (after)
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormNestedNAlt(int) loop_optimization (after)
++    /// CHECK-DAG: <<N:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<Int161:i\d+>>   IntConstant 161
++    /// CHECK-DAG: <<Int12345:i\d+>> IntConstant 12345
++    /// CHECK-DAG: <<Int0:i\d+>>     IntConstant 0
++    /// CHECK-DAG: <<Mul:i\d+>>      Mul [<<Int161>>,<<N>>]
++    /// CHECK-DAG: <<Add:i\d+>>      Add [<<Mul>>,<<Int12345>>]
++    /// CHECK-DAG: <<LT:z\d+>>       LessThan [<<Int0>>,<<N>>]
++    /// CHECK-DAG: <<Sel:i\d+>>      Select [<<Int12345>>,<<Add>>,<<LT>>]
++    /// CHECK-DAG:                   Return [<<Sel>>]
+     static int closedFormNestedNAlt(int n) {
+         int closed = 12345;
+         for (int i = 0; i < n; i++) {
+@@ -370,7 +449,30 @@ public class Main {
+         return closed;  // only needs last-value
+     }
+ 
+-    // TODO: move closed form even further out?
++    // We optimize only the inner loop. It turns into `if (n < 0) then closed else closed + n`.
++    // Potentially we can also update the outer loop turning into if (m < 0) then 0 else if (n < 0)
++    // then 0 else m * n`.
++    /// CHECK-START: int Main.closedFormNestedMN(int, int) loop_optimization (before)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormNestedMN(int, int) loop_optimization (after)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    // Inner loop optimization
++    /// CHECK-START: int Main.closedFormNestedMN(int, int) loop_optimization (after)
++    /// CHECK-DAG: <<M:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<N:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<Int0:i\d+>>     IntConstant 0
++    /// CHECK-DAG: <<Phi:i\d+>>      Phi
++    /// CHECK-DAG: <<Add:i\d+>>      Add [<<N>>,<<Phi>>]
++    /// CHECK-DAG: <<LT:z\d+>>       LessThan [<<Int0>>,<<N>>]
++    /// CHECK-DAG: <<Sel:i\d+>>      Select [<<Phi>>,<<Add>>,<<LT>>]
+     static int closedFormNestedMN(int m, int n) {
+         int closed = 0;
+         for (int i = 0; i < m; i++) {
+@@ -381,10 +483,36 @@ public class Main {
+         return closed;  // only needs last-value
+     }
+ 
+-    // TODO: move closed form even further out?
++    // We optimize only the inner loop. It turns into `if (n < 0) then closed else closed + n * 7`.
++    // Potentially we can also update the outer loop turning into if (m < 0) then 0 else if (n < 0)
++    // then 1245 else 12345 + m * n * 7`.
++    /// CHECK-START: int Main.closedFormNestedMNAlt(int, int) loop_optimization (before)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    /// CHECK-START: int Main.closedFormNestedMNAlt(int, int) loop_optimization (after)
++    /// CHECK:                       Phi
++    /// CHECK:                       Phi
++    /// CHECK-NOT:                   Phi
++    //
++    // Inner loop optimization
++    /// CHECK-START: int Main.closedFormNestedMNAlt(int, int) loop_optimization (after)
++    /// CHECK-DAG: <<M:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<N:i\d+>>        ParameterValue
++    /// CHECK-DAG: <<Int7:i\d+>>     IntConstant 7
++    /// CHECK-DAG: <<Int0:i\d+>>     IntConstant 0
++    /// CHECK-DAG: <<Phi:i\d+>>      Phi
++    /// CHECK-DAG: <<Mul:i\d+>>      Mul [<<Int7>>,<<N>>]
++    /// CHECK-DAG: <<Add:i\d+>>      Add [<<Mul>>,<<Phi>>]
++    /// CHECK-DAG: <<LT:z\d+>>       LessThan [<<Int0>>,<<N>>]
++    /// CHECK-DAG: <<Sel:i\d+>>      Select [<<Phi>>,<<Add>>,<<LT>>]
+     static int closedFormNestedMNAlt(int m, int n) {
+         int closed = 12345;
+         for (int i = 0; i < m; i++) {
++            // if n < 0 then closed else closed + n * 7
+             for (int j = 0; j < n; j++) {
+                 closed += 7;
+             }
+@@ -481,21 +609,48 @@ public class Main {
+         return sum;
+     }
+ 
+-    // TODO: handle as closed/empty eventually?
++    // We can generate a select, which then DCE detects it is redundant. Therefore, we eliminate
++    // these loops.
++
++    /// CHECK-START: int Main.mainIndexReturnedN(int) loop_optimization (before)
++    /// CHECK:     Phi
++    /// CHECK-NOT: Phi
++    //
++    /// CHECK-START: int Main.mainIndexReturnedN(int) loop_optimization (after)
++    /// CHECK-NOT: Phi
++    //
++    /// CHECK-START: int Main.mainIndexReturnedN(int) loop_optimization (after)
++    /// CHECK: Select
+     static int mainIndexReturnedN(int n) {
+         int i;
+         for (i = 0; i < n; i++);
+         return i;
+     }
+ 
+-    // TODO: handle as closed/empty eventually?
++    /// CHECK-START: int Main.mainIndexShort1(short) loop_optimization (before)
++    /// CHECK:     Phi
++    /// CHECK-NOT: Phi
++    //
++    /// CHECK-START: int Main.mainIndexShort1(short) loop_optimization (after)
++    /// CHECK-NOT: Phi
++    //
++    /// CHECK-START: int Main.mainIndexShort1(short) loop_optimization (after)
++    /// CHECK: Select
+     static int mainIndexShort1(short s) {
+         int i = 0;
+         for (i = 0; i < s; i++) { }
+         return i;
+     }
+ 
+-    // TODO: handle as closed/empty eventually?
++    /// CHECK-START: int Main.mainIndexShort2(short) loop_optimization (before)
++    /// CHECK:     Phi
++    /// CHECK-NOT: Phi
++    //
++    /// CHECK-START: int Main.mainIndexShort2(short) loop_optimization (after)
++    /// CHECK-NOT: Phi
++    //
++    /// CHECK-START: int Main.mainIndexShort2(short) loop_optimization (after)
++    /// CHECK: Select
+     static int mainIndexShort2(short s) {
+         int i = 0;
+         for (i = 0; s > i; i++) { }
+-- 
+2.17.1
+

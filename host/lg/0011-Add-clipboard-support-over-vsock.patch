@@ -1,0 +1,675 @@
+From 31c98ac8b79f219ff1574798006af8a2bc6ab26a Mon Sep 17 00:00:00 2001
+From: Vinay Kompella <vinay.kompella@intel.com>
+Date: Mon, 12 Jul 2021 12:02:34 +0530
+Subject: [PATCH 11/14] Add clipboard support over vsock
+
+vdagent cannot work when multiple spice clients
+are connected. So provide an alternate arrangement
+for clipboard via vsock.
+
+A new option "guestClipboard:enable" is provided.
+When using this option client will run in non-UI mode
+with spice communication disabled.
+
+Tracked-On: OAM-96949
+Signed-off-by: Vinay Kompella <vinay.kompella@intel.com>
+---
+ client/CMakeLists.txt            |   2 +
+ client/include/vsock_clipboard.h |  32 ++++
+ client/src/config.c              |  19 ++
+ client/src/main.c                | 117 +++++++++---
+ client/src/main.h                |   2 +
+ client/src/vsock_clipboard.c     | 294 +++++++++++++++++++++++++++++++
+ 6 files changed, 444 insertions(+), 22 deletions(-)
+ create mode 100644 client/include/vsock_clipboard.h
+ create mode 100644 client/src/vsock_clipboard.c
+
+diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
+index 6505cc7..d40c737 100644
+--- a/client/CMakeLists.txt
++++ b/client/CMakeLists.txt
+@@ -59,6 +59,7 @@ find_package(GMP)
+ add_definitions(-D BUILD_VERSION='"${BUILD_VERSION}"')
+ add_definitions(-D ATOMIC_LOCKING)
+ add_definitions(-D GL_GLEXT_PROTOTYPES)
++add_definitions(-D GUEST_ANDROID)
+ get_filename_component(PROJECT_TOP "${PROJECT_SOURCE_DIR}/.." ABSOLUTE)
+ 
+ include_directories(
+@@ -83,6 +84,7 @@ set(SOURCES
+ 	src/ll.c
+ 	src/utils.c
+ 	src/vInputClient.c
++	src/vsock_clipboard.c
+ )
+ 
+ add_subdirectory("${PROJECT_TOP}/common" "${CMAKE_BINARY_DIR}/common")
+diff --git a/client/include/vsock_clipboard.h b/client/include/vsock_clipboard.h
+new file mode 100644
+index 0000000..d0869dd
+--- /dev/null
++++ b/client/include/vsock_clipboard.h
+@@ -0,0 +1,32 @@
++#ifndef __GUEST_CLIPBOARD_H_
++#define __GUEST_CLIPBOARD_H_
++
++typedef void (*GuestClipboardNotice )(const SpiceDataType type);
++typedef void (*GuestClipboardData   )(const SpiceDataType type, uint8_t * buffer, uint32_t size);
++typedef void (*GuestClipboardRelease)();
++typedef void (*GuestClipboardRequest)(const SpiceDataType type);
++
++bool guest_clipboard_prcess();
++
++bool guest_set_clipboard_cb(
++    GuestClipboardNotice  cbNoticeFn,
++    GuestClipboardData    cbDataFn,
++    GuestClipboardRelease cbReleaseFn,
++    GuestClipboardRequest cbRequestFn);
++
++bool guest_clipboard_request(SpiceDataType type);
++bool guest_clipboard_grab(SpiceDataType type);
++bool guest_clipboard_data(SpiceDataType type, uint8_t* data, size_t size);
++bool guest_clipboard_release();
++
++bool vsock_process();
++
++bool vsock_connect();
++bool vsock_read();
++bool vsock_write();
++bool vsock_disconnect();
++bool vsock_disconnect_client();
++bool vsock_connected();
++
++void vsock_clear_buffers();
++#endif
+diff --git a/client/src/config.c b/client/src/config.c
+index 359124b..782b6f7 100644
+--- a/client/src/config.c
++++ b/client/src/config.c
+@@ -320,6 +320,13 @@ static struct Option options[] =
+     .type           = OPTION_TYPE_BOOL,
+     .value.x_bool   = true
+   },
++  {
++    .module         = "guestClipboard",
++    .name           = "enable",
++    .description    = "Enable the built in guest clipboard support",
++    .type           = OPTION_TYPE_BOOL,
++    .value.x_bool   = false
++  },
+   {0}
+ };
+ 
+@@ -427,6 +434,18 @@ bool config_load(int argc, char * argv[])
+     params.scaleMouseInput = option_get_bool("spice", "scaleCursor");
+   }
+ 
++  // By default we should use UI
++  params.useUI = true;
++  params.useGuestClipboard = option_get_bool("guestClipboard", "enable");
++  // Cannot use SpiceClipboard when using GuestClipboard
++  if (params.useGuestClipboard) {
++    params.useSpiceClipboard = false;
++    params.useSpiceInput = false;
++    params.useUI = false;
++    params.clipboardToVM    = option_get_bool("spice", "clipboardToVM"   );
++    params.clipboardToLocal = option_get_bool("spice", "clipboardToLocal");
++  }
++
+   return true;
+ }
+ 
+diff --git a/client/src/main.c b/client/src/main.c
+index d321932..c9fd25f 100644
+--- a/client/src/main.c
++++ b/client/src/main.c
+@@ -42,7 +42,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
+ #include "utils.h"
+ #include "kb.h"
+ #include "ll.h"
+-
++#include "vsock_clipboard.h"
+ #ifdef USE_INTELVTOUCH
+ #include "vInputClient.h"
+ #endif
+@@ -442,6 +442,30 @@ int spiceThread(void * arg)
+   return 0;
+ }
+ 
++int guestClipboardThread(void * arg)
++{
++  vsock_connect();
++  while(state.running)
++    if (!vsock_process())
++    {
++      if (state.running)
++      {
++        if (vsock_connected()) {
++          DEBUG_ERROR("Failed to process guest messages.");
++	} else {
++	  sleep(1);
++	}
++	vsock_connect();
++        continue;
++      }
++      break;
++    }
++
++  state.running = false;
++  vsock_disconnect();
++  return 0;
++}
++
+ static inline const uint32_t mapScancode(SDL_Scancode scancode)
+ {
+   uint32_t ps2;
+@@ -488,7 +512,11 @@ void clipboardRelease()
+   if (!params.clipboardToVM)
+     return;
+ 
+-  spice_clipboard_release();
++  if (params.useGuestClipboard) {
++    guest_clipboard_release();
++  } else {
++    spice_clipboard_release();
++  }
+ }
+ 
+ void clipboardNotify(const LG_ClipboardData type)
+@@ -498,11 +526,19 @@ void clipboardNotify(const LG_ClipboardData type)
+ 
+   if (type == LG_CLIPBOARD_DATA_NONE)
+   {
+-    spice_clipboard_release();
++    if (params.useGuestClipboard) {
++      guest_clipboard_release();
++    } else {
++      spice_clipboard_release();
++    }
+     return;
+   }
+ 
+-  spice_clipboard_grab(clipboard_type_to_spice_type(type));
++  if (params.useGuestClipboard) {
++    guest_clipboard_grab(clipboard_type_to_spice_type(type));
++  } else {
++    spice_clipboard_grab(clipboard_type_to_spice_type(type));
++  }
+ }
+ 
+ void clipboardData(const LG_ClipboardData type, uint8_t * data, size_t size)
+@@ -512,6 +548,7 @@ void clipboardData(const LG_ClipboardData type, uint8_t * data, size_t size)
+ 
+   uint8_t * buffer = data;
+ 
++#ifndef GUEST_ANDROID
+   // unix2dos
+   if (type == LG_CLIPBOARD_DATA_TEXT)
+   {
+@@ -532,8 +569,13 @@ void clipboardData(const LG_ClipboardData type, uint8_t * data, size_t size)
+     }
+     size = newSize;
+   }
++#endif
+ 
+-  spice_clipboard_data(clipboard_type_to_spice_type(type), buffer, (uint32_t)size);
++  if(params.useGuestClipboard) {
++    guest_clipboard_data(clipboard_type_to_spice_type(type), buffer, (uint32_t)size);
++  } else {
++    spice_clipboard_data(clipboard_type_to_spice_type(type), buffer, (uint32_t)size);
++  }
+   if (buffer != data)
+     free(buffer);
+ }
+@@ -550,7 +592,11 @@ void clipboardRequest(const LG_ClipboardReplyFn replyFn, void * opaque)
+   cbr->opaque  = opaque;
+   ll_push(state.cbRequestList, cbr);
+ 
+-  spice_clipboard_request(state.cbType);
++  if (params.useGuestClipboard) {
++    guest_clipboard_request(state.cbType);
++  } else {
++    spice_clipboard_request(state.cbType);
++  }
+ }
+ 
+ void spiceClipboardNotice(const SpiceDataType type)
+@@ -652,7 +698,8 @@ int eventFilter(void * userdata, SDL_Event * event)
+ 
+     case SDL_SYSWMEVENT:
+     {
+-      if (params.useSpiceClipboard && state.lgc && state.lgc->wmevent)
++      if ((params.useSpiceClipboard || params.useGuestClipboard) &&
++          state.lgc && state.lgc->wmevent)
+         state.lgc->wmevent(event->syswm.msg);
+       return 0;
+     }
+@@ -1165,7 +1212,7 @@ int run()
+   LG_RendererParams lgrParams;
+   lgrParams.showFPS = params.showFPS;
+   Uint32 sdlFlags;
+-
++  if (params.useUI) {
+   if (params.forceRenderer)
+   {
+     DEBUG_INFO("Trying forced renderer");
+@@ -1196,7 +1243,7 @@ int run()
+     DEBUG_INFO("Unable to find a suitable renderer");
+     return -1;
+   }
+-
++  }
+   state.window = SDL_CreateWindow(
+     params.windowTitle,
+     params.center ? SDL_WINDOWPOS_CENTERED : params.x,
+@@ -1204,7 +1251,7 @@ int run()
+     params.w,
+     params.h,
+     (
+-      SDL_WINDOW_SHOWN |
++      (params.useUI ? SDL_WINDOW_SHOWN : SDL_WINDOW_HIDDEN) |
+       (params.fullscreen  ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) |
+       (params.allowResize ? SDL_WINDOW_RESIZABLE  : 0) |
+       (params.borderless  ? SDL_WINDOW_BORDERLESS : 0) |
+@@ -1319,27 +1366,32 @@ int run()
+   }
+ 
+   SDL_Thread *t_spice  = NULL;
++  SDL_Thread *t_guest  = NULL;
+   SDL_Thread *t_frame  = NULL;
+   SDL_Thread *t_render = NULL;
+ 
+ #ifdef USE_INTELVTOUCH
+-  initvInputClient(params.shmFile);
++  if (params.useUI) {
++    initvInputClient(params.shmFile);
++  }
+ #endif
+ 
+   while(1)
+   {
+-    state.shm = (struct KVMFRHeader *)map_memory();
+-    if (!state.shm)
+-    {
+-      DEBUG_ERROR("Failed to map memory");
+-      break;
+-    }
++    if (params.useUI) {
++      state.shm = (struct KVMFRHeader *)map_memory();
++      if (!state.shm)
++      {
++        DEBUG_ERROR("Failed to map memory");
++        break;
++      }
+ 
+-    // start the renderThread so we don't just display junk
+-    if (!(t_render = SDL_CreateThread(renderThread, "renderThread", NULL)))
+-    {
+-      DEBUG_ERROR("render create thread failed");
+-      break;
++      // start the renderThread so we don't just display junk
++      if (!(t_render = SDL_CreateThread(renderThread, "renderThread", NULL)))
++      {
++        DEBUG_ERROR("render create thread failed");
++        break;
++      }
+     }
+ 
+     if (params.useSpiceInput || params.useSpiceClipboard)
+@@ -1369,12 +1421,29 @@ int run()
+         DEBUG_ERROR("spice create thread failed");
+         break;
+       }
++    } else if (params.useGuestClipboard) {
++      DEBUG_ERROR("Using guest clipboard");
++      guest_set_clipboard_cb(
++          spiceClipboardNotice,
++	  spiceClipboardData,
++	  spiceClipboardRelease,
++	  spiceClipboardRequest);
++      if (!(t_guest = SDL_CreateThread(guestClipboardThread, "guestClipboardThread", NULL))) {
++        DEBUG_ERROR("Guest clipboard thread failed");
++	break;
++      }
+     }
+ 
+     // ensure mouse acceleration is identical in server mode
+     SDL_SetHintWithPriority(SDL_HINT_MOUSE_RELATIVE_MODE_WARP, "1", SDL_HINT_OVERRIDE);
+     SDL_SetEventFilter(eventFilter, NULL);
+ 
++    if (!params.useUI) {
++      while(state.running) {
++        SDL_WaitEventTimeout(NULL, 1000);
++      }
++      break;
++    }
+     // flag the host that we are starting up this is important so that
+     // the host wakes up if it is waiting on an interrupt, the host will
+     // also send us the current mouse shape since we won't know it yet
+@@ -1480,6 +1549,10 @@ int run()
+     spice_disconnect();
+   }
+ 
++  if (t_guest) {
++    SDL_WaitThread(t_guest, NULL);
++  }
++
+   if (state.lgr)
+     state.lgr->deinitialize(state.lgrData);
+ 
+diff --git a/client/src/main.h b/client/src/main.h
+index 8f26620..9767579 100644
+--- a/client/src/main.h
++++ b/client/src/main.h
+@@ -94,6 +94,8 @@ struct AppParams
+   bool         showFPS;
+   bool         useSpiceInput;
+   bool         useSpiceClipboard;
++  bool         useGuestClipboard;
++  bool         useUI;
+   const char * spiceHost;
+   unsigned int spicePort;
+   bool         clipboardToVM;
+diff --git a/client/src/vsock_clipboard.c b/client/src/vsock_clipboard.c
+new file mode 100644
+index 0000000..6e624fe
+--- /dev/null
++++ b/client/src/vsock_clipboard.c
+@@ -0,0 +1,294 @@
++#include <stdio.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/ioctl.h>
++#include <linux/vm_sockets.h>
++#include <fcntl.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++#include <errno.h>
++#include <malloc.h>
++
++#include "spice/spice.h"
++#include "common/debug.h"
++#include "vsock_clipboard.h"
++
++#define VMADDR_CID_HOST 2
++#define VSOCK_PORT 77777
++#define DATA_SIZE_LENGTH 4
++#define MAX_CHUNK_LENGTH 4096
++#define MAX_DATA_LENGTH 64*1024
++
++struct VSock {
++  int  _fd;
++  int  _client_fd;
++  bool _bind_success;
++  size_t  _clipSize;
++  uint8_t _clipBuffer[MAX_DATA_LENGTH];
++  GuestClipboardNotice  cbNoticeFn;
++  GuestClipboardData    cbDataFn;
++  GuestClipboardRelease cbReleaseFn;
++  GuestClipboardRequest cbRequestFn;
++};
++
++struct VSock vsock =
++{
++  ._fd = 0,
++  ._client_fd = 0,
++  ._bind_success = false,
++  ._clipSize = 0,
++  ._clipBuffer[0] = 0,
++};
++
++bool guest_set_clipboard_cb(
++    GuestClipboardNotice  cbNoticeFn,
++    GuestClipboardData    cbDataFn,
++    GuestClipboardRelease cbReleaseFn,
++    GuestClipboardRequest cbRequestFn) {
++  if((cbNoticeFn && !cbDataFn) || (cbDataFn && !cbNoticeFn)) {
++    DEBUG_ERROR("clipboard callback notice and data callbacks must be specified");
++    return false;
++  }
++
++  vsock.cbNoticeFn  = cbNoticeFn;
++  vsock.cbDataFn    = cbDataFn;
++  vsock.cbReleaseFn = cbReleaseFn;
++  vsock.cbRequestFn = cbRequestFn;
++
++  return true;
++}
++
++bool vsock_connect() {
++  if (vsock._fd <= 0) {
++    vsock._fd = socket(AF_VSOCK, SOCK_STREAM, 0);
++    if (vsock._fd <= 0) {
++      DEBUG_ERROR("failed to create socket");
++      return false;
++    }
++  }
++
++  struct sockaddr_vm sock_addr;
++  memset(&sock_addr, 0, sizeof(struct sockaddr_vm));
++  sock_addr.svm_family = AF_VSOCK;
++  sock_addr.svm_port = VSOCK_PORT;
++  sock_addr.svm_cid = VMADDR_CID_HOST;
++
++  if (!vsock._bind_success && bind(vsock._fd, (struct sockaddr*)&sock_addr, sizeof(sock_addr)) < 0) {
++    DEBUG_ERROR("failed to bind to socket:%d", errno);
++    return false;
++  }
++  vsock._bind_success = true;
++  if (listen(vsock._fd, 1) < 0) {
++    DEBUG_ERROR("failed to listen");
++    return false;
++  }
++
++  if (!vsock_connected())
++  {
++    int flags = fcntl(vsock._fd, F_GETFL);
++    fcntl(vsock._fd, F_SETFL, flags | O_NONBLOCK);
++    size_t sock_addr_len = sizeof(sock_addr);
++    if((vsock._client_fd = accept(vsock._fd, (struct sockaddr*)&sock_addr, (socklen_t*)&sock_addr_len)) < 0) {
++      if (errno == EAGAIN || errno == EWOULDBLOCK) {
++        sleep(1);
++      } else {
++        DEBUG_ERROR("failed to accept connection");
++      }
++      return false;
++    }
++    fcntl(vsock._fd, F_SETFL, flags);
++    if (vsock_connected()) {
++      DEBUG_ERROR("Connected to client");
++    }
++  }
++  return true;
++}
++
++bool guest_clipboard_request(SpiceDataType type) {
++  if (type == SPICE_DATA_TEXT && vsock.cbDataFn && vsock._clipSize > 0) {
++    vsock.cbDataFn(type, vsock._clipBuffer, vsock._clipSize);
++    return true;
++  }
++  return false;
++}
++
++bool guest_clipboard_grab(SpiceDataType type) {
++  if (type == SPICE_DATA_TEXT && vsock.cbRequestFn) {
++    vsock_clear_buffers();
++    vsock.cbRequestFn(type);
++    return true; 
++  }
++  return false;
++}
++
++bool guest_clipboard_data(SpiceDataType type, uint8_t* data, size_t size) {
++  if (type == SPICE_DATA_TEXT) {
++    return vsock_write(data, size);
++  }
++  return false;
++}
++
++bool guest_clipboard_release() {
++  return true;
++}
++
++bool vsock_process() {
++  if (!vsock_connected()) {
++    return false;
++  }
++  fd_set readSet;
++  FD_ZERO(&readSet);
++  FD_SET(vsock._client_fd, &readSet);
++
++  struct timeval timeout;
++  timeout.tv_sec  = 1;
++  timeout.tv_usec = 0;
++
++  int rc = select(FD_SETSIZE, &readSet, NULL, NULL, &timeout);
++  if (rc < 0)
++  {
++    DEBUG_ERROR("select failure");
++    return false;
++  }
++
++  if (rc  > 0) {
++    return vsock_read();
++  }
++  return true;
++}
++
++bool read_from_vsock(uint8_t* data, uint32_t size) {
++  if (!vsock_connected()) {
++    return false;
++  }
++
++  int nread = recv(vsock._client_fd, data, size, 0);
++  if (nread <= 0) {
++    if (nread == 0 || errno == ECONNRESET) {
++      DEBUG_ERROR("Client connection reset");
++    } else {
++      DEBUG_ERROR("Failed to recieve message. error-%d", errno);
++    }
++    // On any errors its better to reset the connection so as to not violate our protocol
++    // of sending the size followed by chunks of content 
++    vsock_disconnect_client();
++    return false;
++  }
++
++  // We precisely know how much to read
++  // This is a failure, which can lead to more problems later
++  // This cannot happend and we cannot tolerate this
++  if (nread != size) {
++    DEBUG_ERROR("Unexpected size of data");
++    vsock_disconnect_client();
++    return false;
++  }
++  return true;
++}
++
++bool vsock_read() {
++  // Read a complete message and notify
++  // First read the length of the data to recieve
++  uint8_t data[DATA_SIZE_LENGTH];
++
++  if (!read_from_vsock(data, DATA_SIZE_LENGTH)) {
++    return false; 
++  }
++
++  uint32_t *size = (uint32_t*)data;
++  uint32_t len = ntohl(*size);
++  *size = len;
++  DEBUG_INFO("Reading data of size=%d", *size);
++
++  if (*size > MAX_DATA_LENGTH) {
++    DEBUG_ERROR("Data too long");
++    // This cannot be tolerated
++    vsock_disconnect_client();
++    return false;
++  }
++
++  vsock_clear_buffers();
++
++  uint8_t* bytes = vsock._clipBuffer;
++  int remaining = *size;
++  uint8_t* new_bytes = bytes;
++ 
++  while (remaining > 0) {
++    int to_read = ((remaining > MAX_CHUNK_LENGTH) ? MAX_CHUNK_LENGTH : remaining);
++    if (!read_from_vsock(new_bytes, to_read)) {
++      return false;
++    }
++    remaining -= to_read;
++    new_bytes += to_read;
++  }
++
++  bytes[*size] = 0;
++  vsock._clipSize = *size;
++
++  if (vsock.cbNoticeFn) {
++    vsock.cbNoticeFn(SPICE_DATA_TEXT);
++  }
++  return true;
++}
++
++bool vsock_disconnect() {
++  vsock_disconnect_client();
++  vsock_clear_buffers();
++  close(vsock._fd);
++  vsock._fd = 0; 
++  return true;
++}
++
++bool vsock_disconnect_client() {
++  if (vsock._client_fd) {
++    close(vsock._client_fd);
++    vsock._client_fd = 0;
++  }
++  return true;
++}
++
++bool write_to_vsock(uint8_t* bytes, uint32_t size) {
++  if (!vsock_connected()) {
++    return false;
++  }
++
++  if (send(vsock._client_fd, bytes, size, 0) != size) {
++    DEBUG_ERROR("Failed to write complete data to client");
++    // Cannot tolerate this
++    vsock_disconnect_client();
++    return false;
++  }
++  return true;
++}
++
++bool vsock_write(uint8_t *bytes, uint32_t size) {
++  DEBUG_INFO("Writing data size=%d", size);
++  int32_t conv_size = htonl(size);
++  uint8_t* data = (uint8_t*)&conv_size;
++  if (!write_to_vsock(data, DATA_SIZE_LENGTH)) {
++    DEBUG_ERROR("Failed to write to server");
++    return false;
++  }
++
++  while (size > 0) {
++    uint32_t size_to_send = (size > MAX_CHUNK_LENGTH) ? MAX_CHUNK_LENGTH : size;
++    if (!write_to_vsock(bytes, size)) {
++      DEBUG_ERROR("Failed to write to server");
++      return false;
++    }
++    size -= size_to_send;
++    bytes += size_to_send;
++  }
++
++  return true;
++}
++
++void vsock_clear_buffers() {
++  vsock._clipSize = 0;
++  vsock._clipBuffer[0] = 0;
++}
++
++bool vsock_connected() {
++  return vsock._client_fd > 0;
++}
++
+-- 
+2.25.1
+

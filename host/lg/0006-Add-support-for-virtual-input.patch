@@ -1,0 +1,249 @@
+From 42f52c973937c64ff1ee50ba6b0f199ddf1a6f5d Mon Sep 17 00:00:00 2001
+From: Jaikrishna Nemallapudi <nemallapudi.jaikrishna@intel.com>
+Date: Thu, 10 Jun 2021 20:33:29 +0530
+Subject: [PATCH 06/14] Add support for virtual input
+
+Sending input events via spice protocal is disabled.
+All the input events are sent to lg-input manager.
+
+Signed-off-by: Jaikrishna Nemallapudi <nemallapudi.jaikrishna@intel.com>
+Signed-off-by: Mallikarjun Chegaraddi, Raju <raju.mallikarjun.chegaraddi@intel.com>
+Signed-off-by: RAJANI RANJAN <rajaniranjan@intel.com>
+---
+ client/CMakeLists.txt         |   2 +
+ client/include/vInputClient.h |   6 ++
+ client/src/main.c             |  22 +++++++
+ client/src/vInputClient.c     | 110 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 140 insertions(+)
+ create mode 100644 client/include/vInputClient.h
+ create mode 100644 client/src/vInputClient.c
+
+diff --git a/client/CMakeLists.txt b/client/CMakeLists.txt
+index 4c1ba29..6505cc7 100644
+--- a/client/CMakeLists.txt
++++ b/client/CMakeLists.txt
+@@ -35,6 +35,7 @@ add_compile_options(
+   "-fdata-sections"
+   "-ffunction-sections"
+   "$<$<CONFIG:DEBUG>:-O0;-g3;-ggdb>"
++  "-DUSE_INTELVTOUCH"
+ )
+ 
+ set(EXE_FLAGS "-Wl,--gc-sections")
+@@ -81,6 +82,7 @@ set(SOURCES
+ 	src/lg-renderer.c
+ 	src/ll.c
+ 	src/utils.c
++	src/vInputClient.c
+ )
+ 
+ add_subdirectory("${PROJECT_TOP}/common" "${CMAKE_BINARY_DIR}/common")
+diff --git a/client/include/vInputClient.h b/client/include/vInputClient.h
+new file mode 100644
+index 0000000..e7ca6d6
+--- /dev/null
++++ b/client/include/vInputClient.h
+@@ -0,0 +1,6 @@
++int initvInputClient(const char []);
++void send_sync_event();
++void send_event(int32_t type, int32_t code, int32_t value);
++bool vinput_mouse_position(uint32_t x, uint32_t y);
++bool vinput_touch_release(u_int32_t x, u_int32_t y);
++bool vinput_touch_press(u_int32_t x, u_int32_t y);
+diff --git a/client/src/main.c b/client/src/main.c
+index 7b86914..e635fc2 100644
+--- a/client/src/main.c
++++ b/client/src/main.c
+@@ -43,6 +43,10 @@ Place, Suite 330, Boston, MA 02111-1307 USA
+ #include "kb.h"
+ #include "ll.h"
+ 
++#ifdef USE_INTELVTOUCH
++#include "vInputClient.h"
++#endif
++
+ static bool spice_running = true;
+ 
+ // forwards
+@@ -623,6 +627,11 @@ int eventFilter(void * userdata, SDL_Event * event)
+ 
+     case SDL_MOUSEMOTION:
+     {
++#ifdef USE_INTELVTOUCH
++      vinput_mouse_position(event->motion.x, event->motion.y);
++      realignGuest = false;
++      DEBUG_INFO("realignGuest = %d", realignGuest);
++#else
+       if (!spice_running)
+       {
+         if(params.useSpiceInput && !spice_ready())
+@@ -704,6 +713,7 @@ int eventFilter(void * userdata, SDL_Event * event)
+         }
+       }
+ 
++#endif
+       break;
+     }
+ 
+@@ -844,6 +854,9 @@ int eventFilter(void * userdata, SDL_Event * event)
+       break;
+ 
+     case SDL_MOUSEBUTTONDOWN:
++#ifdef USE_INTELVTOUCH
++      vinput_touch_press(event->button.x, event->button.y);
++#else
+       if (!spice_running)
+       {
+         if(params.useSpiceInput && !spice_ready())
+@@ -868,9 +881,13 @@ int eventFilter(void * userdata, SDL_Event * event)
+         DEBUG_ERROR("SDL_MOUSEBUTTONDOWN: failed to send message");
+         break;
+       }
++#endif
+       break;
+ 
+     case SDL_MOUSEBUTTONUP:
++#ifdef USE_INTELVTOUCH
++      vinput_touch_release(event->button.x, event->button.y);
++#else
+       if (!spice_running)
+       {
+         if(params.useSpiceInput && !spice_ready())
+@@ -895,6 +912,7 @@ int eventFilter(void * userdata, SDL_Event * event)
+         DEBUG_ERROR("SDL_MOUSEBUTTONUP: failed to send message");
+         break;
+       }
++#endif
+       break;
+   }
+ 
+@@ -1270,6 +1288,10 @@ int run()
+   SDL_Thread *t_frame  = NULL;
+   SDL_Thread *t_render = NULL;
+ 
++#ifdef USE_INTELVTOUCH
++  initvInputClient(params.shmFile);
++#endif
++
+   while(1)
+   {
+     state.shm = (struct KVMFRHeader *)map_memory();
+diff --git a/client/src/vInputClient.c b/client/src/vInputClient.c
+new file mode 100644
+index 0000000..0080acf
+--- /dev/null
++++ b/client/src/vInputClient.c
+@@ -0,0 +1,110 @@
++#include <linux/input-event-codes.h>
++#include <linux/input.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <stdint.h>
++#include <stdbool.h>
++#include <sys/types.h>
++#include <sys/ipc.h>
++#include <sys/msg.h>
++
++#define MSGQ_FILE_PATH "/tmp/input-lg"
++
++static unsigned int tracking_id = 0;
++static int mqId = -1;
++
++struct mQData {
++    long type;
++    struct input_event ev;
++};
++
++int initvInputClient(const char file[])
++{
++    char path[100];
++    key_t key = 0;
++    int id = 0;
++
++    if (!strcmp(file, "/dev/shm/looking-glass0"))
++	    id = 0;
++    else if (!strcmp(file, "/dev/shm/looking-glass1"))
++	    id = 1;
++    else if (!strcmp(file, "/dev/shm/looking-glass2"))
++	    id = 2;
++    else if (!strcmp(file, "/dev/shm/looking-glass3"))
++	    id = 3;
++    else {
++        printf("Error: %s is not mapped to virtual input device", file);
++        exit(0);
++    }
++
++    sprintf(path, "%s%d", MSGQ_FILE_PATH, id);
++
++    if ((key = ftok(path, 99)) < 0) {
++        printf("Failed to get msgq key\n");
++        return -1;
++    }
++
++    if ((mqId = msgget(key, 0666)) < 0) {
++        printf("Failed to get msgq id\n");
++        return -1;
++    }
++
++    return 0;
++}
++
++// ============================================================================
++void send_sync_event()
++{
++  struct mQData mD = {1};
++  mD.ev.type = EV_SYN; mD.ev.code = SYN_REPORT; mD.ev.value= 0;
++  msgsnd(mqId, &mD, sizeof(struct mQData), 0);
++}
++
++void send_event(int32_t type, int32_t code, int32_t value) {
++  struct mQData mD = {1};
++  mD.ev.type = type; mD.ev.code = code; mD.ev.value= value;
++  msgsnd(mqId, &mD, sizeof(struct mQData), 0);
++}
++
++
++bool vinput_touch_press(u_int32_t x, u_int32_t y)
++{
++	send_event(EV_ABS, ABS_MT_SLOT, 0);
++	send_event(EV_ABS, ABS_MT_TRACKING_ID, tracking_id++);
++	send_event(EV_ABS, ABS_PRESSURE, 50);
++	send_event(EV_ABS, ABS_MT_PRESSURE, 50);
++	send_event(EV_ABS, ABS_MT_POSITION_X, x);
++	send_event(EV_ABS, ABS_MT_POSITION_Y, y);
++	send_event(EV_KEY, BTN_TOUCH, 1);
++	send_event(EV_SYN, SYN_REPORT, 0);
++	return true;
++}
++
++bool vinput_touch_release(u_int32_t x, u_int32_t y)
++{
++	send_event(EV_ABS, ABS_MT_SLOT, 0);
++	send_event(EV_ABS, ABS_PRESSURE, 0);
++	send_event(EV_ABS, ABS_MT_PRESSURE, 0);
++	send_event(EV_ABS, ABS_MT_TRACKING_ID, -1);
++	send_event(EV_KEY, BTN_TOUCH, 0);
++	send_event(EV_SYN, SYN_REPORT, 0);
++	return true;
++}
++bool vinput_mouse_position(u_int32_t x, u_int32_t y)
++{
++  if (mqId == -1)
++  {
++    return false;
++  }
++
++  if (x)
++     send_event(EV_ABS, ABS_MT_POSITION_X, x);
++
++  if (y)
++     send_event(EV_ABS, ABS_MT_POSITION_Y, y);
++	
++  send_event(EV_SYN, SYN_REPORT, 0);
++  return true;
++}
+-- 
+2.25.1
+

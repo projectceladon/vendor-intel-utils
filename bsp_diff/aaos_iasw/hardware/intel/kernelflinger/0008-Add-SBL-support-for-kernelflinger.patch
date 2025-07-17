@@ -1,0 +1,438 @@
+From 5cbbe5a36e82cd3d6746601c2374abf5eef104a6 Mon Sep 17 00:00:00 2001
+From: "Chen, Gang G" <gang.g.chen@intel.com>
+Date: Mon, 29 May 2023 15:36:41 +0800
+Subject: [PATCH 08/54] Add SBL support for kernelflinger
+
+1. Add efiwrapper and libpayload library to support SBL
+2. Reuse kerneflinger.c for SBL entry
+3. Solve compile issues
+
+Tracked-On: OAM-110183
+Signed-off-by: Chen, Gang G <gang.g.chen@intel.com>
+---
+ Android.mk                      |  48 ++++++++-----
+ include/log.h                   |   1 +
+ include/storage.h               |   3 +-
+ kernelflinger.c                 |  17 ++++-
+ libkernelflinger/android.c      | 118 ++++++++++++++++++++++++++++++--
+ libkernelflinger/security_sbl.c |   3 +-
+ libsslsupport/wrapper.c         |   2 +-
+ 7 files changed, 164 insertions(+), 28 deletions(-)
+
+diff --git a/Android.mk b/Android.mk
+index cfe1bdc..2af453f 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -26,6 +26,10 @@ ifeq ($(TARGET_UEFI_ARCH),x86_64)
+     KERNELFLINGER_CFLAGS += -DARCH_X86_64=1
+ endif
+ 
++ifeq ($(TARGET_USE_SBL),true)
++    KERNELFLINGER_CFLAGS += -DUSE_SBL
++endif
++
+ ifeq ($(TARGET_USE_TRUSTY),true)
+     KERNELFLINGER_CFLAGS += -DUSE_TRUSTY
+ endif
+@@ -280,6 +284,7 @@ LOCAL_STATIC_LIBRARIES := \
+ 	libfastboot-for-installer-$(TARGET_BUILD_VARIANT) \
+ 	libxbc-$(TARGET_BUILD_VARIANT)
+ 
++
+ ifeq ($(TARGET_USE_TPM),true)
+ 	SHARED_STATIC_LIBRARIES += libedk2_tpm
+ endif
+@@ -354,13 +359,11 @@ include $(BUILD_EFI_EXECUTABLE) # For installer-$(TARGET_BUILD_VARIANT)
+ endif # BOARD_SLOT_AB_ENABLE
+ endif # BOOTLOADER_SLOT
+ 
+-
+-
+ ifeq ($(KERNELFLINGER_SUPPORT_NON_EFI_BOOT),true)
+ 
+ include $(CLEAR_VARS)
+-LOCAL_MODULE := kf4abl-$(TARGET_BUILD_VARIANT)
+-LOCAL_MODULE_STEM := kf4abl
++LOCAL_MODULE := kf4sbl-$(TARGET_BUILD_VARIANT)
++LOCAL_MODULE_STEM := kf4sbl
+ LOCAL_CFLAGS := $(SHARED_CFLAGS)
+ 
+ ifeq ($(KERNELFLINGER_DISABLE_DEBUG_PRINT),true)
+@@ -378,7 +381,8 @@ LOCAL_STATIC_LIBRARIES += \
+ 	libefiwrapper-$(TARGET_BUILD_VARIANT) \
+ 	libefiwrapper_drivers-$(TARGET_BUILD_VARIANT) \
+ 	efiwrapper-$(TARGET_BUILD_VARIANT) \
+-	libelfloader-$(TARGET_BUILD_VARIANT)
++	libelfloader-$(TARGET_BUILD_VARIANT) \
++	libxbc-$(TARGET_BUILD_VARIANT)
+ 
+ ifeq ($(TARGET_USE_TRUSTY),true)
+     LOCAL_STATIC_LIBRARIES += libqltipc-$(TARGET_BUILD_VARIANT)
+@@ -389,8 +393,13 @@ LOCAL_STATIC_LIBRARIES += libavb_kernelflinger-$(TARGET_BUILD_VARIANT)
+ ifneq ($(TARGET_BUILD_VARIANT),user)
+     LOCAL_STATIC_LIBRARIES += libadb-$(TARGET_BUILD_VARIANT)
+ endif
++#Replace kf4sbl.c by kernelflinger.c
+ LOCAL_SRC_FILES := \
+-	kf4abl.c
++	kernelflinger.c
++
++ifneq ($(TARGET_BUILD_VARIANT),user)
++    LOCAL_SRC_FILES += unittest.c
++endif
+ 
+ ifneq ($(strip $(KERNELFLINGER_USE_UI)),false)
+     LOCAL_SRC_FILES += \
+@@ -462,16 +471,15 @@ $(ABL_AVB_PK_OBJ): $(ABL_PADDED_AVB_PK)
+ LOCAL_GENERATED_SOURCES += $(ABL_AVB_PK_OBJ)
+ LOCAL_C_INCLUDES := \
+ 	$(addprefix $(LOCAL_PATH)/,avb)
+-
+-LOCAL_C_INCLUDES := \
++LOCAL_C_INCLUDES += \
+ 	$(addprefix $(LOCAL_PATH)/,libkernelflinger)
+-LOCAL_C_INCLUDES := \
++LOCAL_C_INCLUDES += \
+ 	$(addprefix $(LOCAL_PATH)/,libsslsupport)
+-include $(BUILD_ABL_EXECUTABLE)
++include $(BUILD_SBL_EXECUTABLE)
+ 
+ include $(CLEAR_VARS)
+-LOCAL_MODULE := fb4abl-$(TARGET_BUILD_VARIANT)
+-LOCAL_MODULE_STEM := fb4abl
++LOCAL_MODULE := fb4sbl-$(TARGET_BUILD_VARIANT)
++LOCAL_MODULE_STEM := fb4sbl
+ LOCAL_CFLAGS := $(SHARED_CFLAGS)
+ 
+ LOCAL_CFLAGS += -D__FORCE_FASTBOOT
+@@ -487,7 +495,8 @@ LOCAL_STATIC_LIBRARIES += \
+ 	libefiwrapper-$(TARGET_BUILD_VARIANT) \
+ 	libefiwrapper_drivers-$(TARGET_BUILD_VARIANT) \
+ 	efiwrapper-$(TARGET_BUILD_VARIANT) \
+-	libelfloader-$(TARGET_BUILD_VARIANT)
++	libelfloader-$(TARGET_BUILD_VARIANT) \
++	libxbc-$(TARGET_BUILD_VARIANT)
+ 
+ ifeq ($(TARGET_USE_TRUSTY),true)
+     LOCAL_STATIC_LIBRARIES += libqltipc-$(TARGET_BUILD_VARIANT)
+@@ -497,14 +506,19 @@ ifneq ($(TARGET_BUILD_VARIANT),user)
+     LOCAL_STATIC_LIBRARIES += libadb-$(TARGET_BUILD_VARIANT)
+ endif
+ LOCAL_STATIC_LIBRARIES += libavb_kernelflinger-$(TARGET_BUILD_VARIANT)
++#reuse kernelflinger.c
+ LOCAL_SRC_FILES := \
+-	kf4abl.c
++	kernelflinger.c
+ 
+ ifneq ($(strip $(KERNELFLINGER_USE_UI)),false)
+     LOCAL_SRC_FILES += \
+         ux.c
+ endif
+ 
++ifneq ($(TARGET_BUILD_VARIANT),user)
++    LOCAL_SRC_FILES += unittest.c
++endif
++
+ ifeq ($(PRODUCT_SUPPORTS_VERITY),true)
+ LOCAL_GENERATED_SOURCES := $(ABL_OEMCERT_OBJ)
+ endif
+@@ -512,11 +526,11 @@ endif
+ LOCAL_GENERATED_SOURCES += $(ABL_AVB_PK_OBJ)
+ LOCAL_C_INCLUDES := \
+ 	$(addprefix $(LOCAL_PATH)/,avb)
+-LOCAL_C_INCLUDES := \
++LOCAL_C_INCLUDES += \
+ 	$(addprefix $(LOCAL_PATH)/,libkernelflinger)
+-LOCAL_C_INCLUDES := \
++LOCAL_C_INCLUDES += \
+ 	$(addprefix $(LOCAL_PATH)/,libsslsupport)
+-include $(BUILD_ABL_EXECUTABLE)
++include $(BUILD_SBL_EXECUTABLE)
+ 
+ endif  #KERNELFLINGER_SUPPORT_NON_EFI_BOOT
+ 
+diff --git a/include/log.h b/include/log.h
+index 974e5b5..360ce46 100644
+--- a/include/log.h
++++ b/include/log.h
+@@ -55,6 +55,7 @@ void vlog(const CHAR16 *fmt, va_list args);
+ #if DEBUG_MESSAGES
+ #define debug(fmt, ...) do { \
+     log(fmt "\n", ##__VA_ARGS__); \
++    log_flush_to_var(TRUE); \
+ } while(0)
+ 
+ #ifdef USE_UI
+diff --git a/include/storage.h b/include/storage.h
+index 7ee5e25..51260d9 100644
+--- a/include/storage.h
++++ b/include/storage.h
+@@ -74,7 +74,7 @@ struct storage {
+ #define STORAGE(X) storage_##X
+ 
+ BOOLEAN is_same_device(EFI_DEVICE_PATH *p, EFI_DEVICE_PATH *e);
+-EFI_STATUS identify_boot_device(enum storage_type type);
++EFI_STATUS identify_boot_device(enum storage_type filter);
+ PCI_DEVICE_PATH *get_boot_device(void);
+ const char* get_boot_device_var(void);
+ EFI_HANDLE get_boot_device_handle(void);
+@@ -94,5 +94,6 @@ EFI_STATUS set_logical_unit(UINT64 user_lun, UINT64 factory_lun);
+ void print_progress(EFI_LBA done, EFI_LBA total, uint32_t sec, uint32_t *prev_sec, uint32_t *prev);
+ void set_exclude_device(EFI_HANDLE device);
+ EFI_DEVICE_PATH *get_exclude_device(void);
++uint32_t get_diskbus();
+ 
+ #endif	/* _STORAGE_H_ */
+diff --git a/kernelflinger.c b/kernelflinger.c
+index 8e26cb2..5e57c57 100644
+--- a/kernelflinger.c
++++ b/kernelflinger.c
+@@ -1039,7 +1039,10 @@ static VOID enter_fastboot_mode(UINT8 boot_state)
+ 			&boot_state, FALSE, TRUE);
+ 	set_oemvars_update(TRUE);
+ 	//stop bootloader seed protocol when entering fastboot mode
++#ifndef USE_SBL
++	//WA, to remove
+ 	stop_bls_proto();
++#endif
+ 	for (;;) {
+ 		target = UNKNOWN_TARGET;
+ 
+@@ -1109,10 +1112,13 @@ static VOID enter_fastboot_mode(UINT8 boot_state)
+ 
+ 	die();
+ }
+-static void bootloader_recover_mode(UINT8 boot_state __unused)
++
++static void bootloader_recover_mode(UINT8 boot_state)
+ {
+ 	enum boot_target target;
+ 
++	(VOID)boot_state;
++
+ 	if (is_running_on_kvm()) {
+ 		/*
+ 		 * When running on kvm, OVMF will not connect network driver and other
+@@ -1136,12 +1142,17 @@ static void bootloader_recover_mode(UINT8 boot_state __unused)
+ 	die();
+ }
+ 
+-static VOID boot_error(enum ux_error_code error_code __unused, UINT8 boot_state,
+-			UINT8 *hash __unused, UINTN hash_size __unused)
++static VOID boot_error(enum ux_error_code error_code , UINT8 boot_state,
++			UINT8 *hash , UINTN hash_size )
+ {
+ 	BOOLEAN power_off = FALSE;
+ 	enum boot_target bt;
+ 
++	(VOID)error_code;
++	(VOID)boot_state;
++	(VOID)hash;
++	(VOID)hash_size;
++
+ 	if (boot_state > min_boot_state()) {
+ 		power_off = TRUE;
+ 
+diff --git a/libkernelflinger/android.c b/libkernelflinger/android.c
+index 2777f6f..6993d20 100644
+--- a/libkernelflinger/android.c
++++ b/libkernelflinger/android.c
+@@ -1163,6 +1163,94 @@ static EFI_STATUS classify_cmd_parameters(
+ 	return EFI_SUCCESS;
+ }
+ 
++#ifdef USE_SBL
++typedef union {
++	UINT16 bdf;
++	struct {
++		UINT8 function : 3;
++		UINT8 device : 5;
++		UINT8 bus : 8;
++	};
++} pci_dev_t;
++
++typedef struct {
++	UINT16 vendor;
++	UINT16 device;
++	UINT16 command;
++	UINT16 status;
++	UINT8 revision;
++	struct {
++		UINT8 interface;
++		UINT8 sub;
++		UINT8 base;
++	} class;
++} __attribute__((packed)) pci_header_t;
++
++static inline void outl(UINT32 val, UINT32 port)
++{
++	__asm__ __volatile__("outl %0, %w1" : : "a"(val), "Nd"(port));
++}
++
++static inline UINT32 inl(UINT32 port)
++{
++	UINT32 val;
++
++	__asm__ __volatile__("inl %w1, %0" : "=a"(val) : "Nd"(port));
++	return val;
++}
++
++static UINT32 pci_read_config32(pci_dev_t dev, UINT16 reg)
++{
++	outl(0x80000000 | dev.bdf << 8 | (reg & ~3), 0xcf8);
++	return inl(0xcfc + (reg & 3));
++}
++
++static void pci_read_config(pci_dev_t dev, void *buf, UINT16 count)
++{
++	UINTN i;
++
++	for (i = 0; i < count; i += sizeof(UINT32))
++		*(UINT32 *)&buf[i] = pci_read_config32(dev, i);
++}
++
++static INT32 bridge_diskbus(UINT32 bus_num)
++{
++	UINTN i;
++	pci_dev_t dev;
++	pci_header_t header;
++	UINT32 dev_bus;
++
++	for (i = 0, dev.bdf = 0; i <= ((bus_num<<8)|0xff); i++, dev.bdf = i) {
++		UINT32 val = pci_read_config32(dev, 0);
++
++		if (val == 0xffffffff || val == 0x00000000 ||
++		    val == 0x0000ffff || val == 0xffff0000)
++			continue;
++
++		pci_read_config(dev, &header, sizeof(header));
++
++		//PCI BRIDGE
++		if (header.class.base == 0x6 && header.class.sub == 0x4) {
++			debug(L"%02x:%02x.%d \n", dev.bus, dev.device, dev.function);
++
++			dev_bus = pci_read_config32(dev, 0x18);
++			debug(L"Pci bridge: primary_bus = %x second_bus = %x\n", dev_bus&0xff, (dev_bus>>8)&0xff);
++
++			if (bus_num == ((dev_bus>>8)&0xff))
++				return i;
++		}
++	}
++
++	return -1;
++}
++
++UINT32 __attribute__((weak)) get_diskbus()
++{
++	return 0;
++
++}
++#endif
++
+ /* when we call setup_command_line in EFI, parameter is EFI_GUID *swap_guid.
+  * when we call setup_command_line in NON EFI, parameter is const CHAR8 *abl_cmd_line.
+  * */
+@@ -1179,8 +1267,10 @@ static EFI_STATUS setup_command_line(
+         CHAR16 *cmdline16 = NULL;
+         char   *serialno = NULL;
+         CHAR16 *serialport = NULL;
++#ifndef USE_SBL
++	//todo: support boot reason
+         CHAR16 *bootreason = NULL;
+-
++#endif
+         EFI_PHYSICAL_ADDRESS cmdline_addr;
+         CHAR8 *cmdline;
+         CHAR8 *cmd_conf= NULL;
+@@ -1235,7 +1325,8 @@ static EFI_STATUS setup_command_line(
+                 if (EFI_ERROR(ret))
+                         goto out;
+         }
+-
++#ifndef USE_SBL
++	//todo: support boot reason
+         if (is_uefi)
+                 bootreason = get_boot_reason();
+         else
+@@ -1249,7 +1340,7 @@ static EFI_STATUS setup_command_line(
+         ret = prepend_command_line(&cmdline16, L"androidboot.bootreason=%s", bootreason);
+         if (EFI_ERROR(ret))
+                 goto out;
+-
++#endif
+         ret = prepend_command_line(&cmdline16, L"androidboot.verifiedbootstate=%s",
+                                    boot_state_to_string(boot_state));
+         if (EFI_ERROR(ret))
+@@ -1281,7 +1372,26 @@ static EFI_STATUS setup_command_line(
+         if (boot_device) {
+                 CHAR16 *diskbus = NULL;
+ #ifdef AUTO_DISKBUS
++#ifdef USE_SBL
++		INT32 bdf;
++		UINT32 disk_bus_num, storage_bus_num;
++
++		disk_bus_num = get_diskbus();
++		debug(L"nvme controller diskbus = %x\n", disk_bus_num);
++
++		storage_bus_num = disk_bus_num>>16;
++
++		bdf = bridge_diskbus(storage_bus_num);
++		if (bdf < 0) {
++			error(L"No pci bridge found, assue bus is 0");
++			bdf = 0;
++		}
++
++                diskbus = PoolPrint(L"%02x.%x", (bdf>>3)&0x1f, bdf&0x7);
++#else
+                 diskbus = PoolPrint(L"%02x.%x", boot_device->Device, boot_device->Function);
++                debug(L"pci bridge: device = %x func = %x \n", boot_device->Device, boot_device->Function);
++#endif
+ #else
+                 diskbus = PoolPrint(L"%a", (CHAR8 *)PREDEF_DISK_BUS);
+ #endif
+@@ -1289,7 +1399,7 @@ static EFI_STATUS setup_command_line(
+                 ret = prepend_command_line(&cmdline16,
+                                            (aosp_header->header_version < 2)
+                                            ? L"androidboot.diskbus=%s"
+-                                           : L"androidboot.boot_devices=pci0000:00/0000:00:%s",
++                                           : L"androidboot.boot_devices=pci0000:00/0000:00:%s pci=noaer",
+                                            diskbus);
+                 FreePool(diskbus);
+                 if (EFI_ERROR(ret))
+diff --git a/libkernelflinger/security_sbl.c b/libkernelflinger/security_sbl.c
+index 1f83817..da33dec 100644
+--- a/libkernelflinger/security_sbl.c
++++ b/libkernelflinger/security_sbl.c
+@@ -32,7 +32,6 @@
+ #include <efiapi.h>
+ #include <efilib.h>
+ #include "security_interface.h"
+-#include "rpmb_storage.h"
+ #include "life_cycle.h"
+ #include "security.h"
+ 
+@@ -162,7 +161,7 @@ EFI_STATUS set_device_security_info(IN VOID * sbl_cmdline_seed_rpmb)
+ 
+ EFI_STATUS set_device_security_info(__attribute__((unused)) IN VOID * security_data)
+ {
+-	return EFI_UNSUPPORTED;
++	return EFI_SUCCESS;
+ }
+ #endif
+ 
+diff --git a/libsslsupport/wrapper.c b/libsslsupport/wrapper.c
+index 7a22ad3..a2cfb8b 100644
+--- a/libsslsupport/wrapper.c
++++ b/libsslsupport/wrapper.c
+@@ -830,7 +830,7 @@ void *memchr(const void *s, int c, size_t n)
+ }
+ 
+ 
+-void perror ( const char * str )
++void __attribute__((weak)) perror ( const char * str )
+ {
+ 	error(L"%a: errno=%d", str, errno);
+ }
+-- 
+2.25.1
+
