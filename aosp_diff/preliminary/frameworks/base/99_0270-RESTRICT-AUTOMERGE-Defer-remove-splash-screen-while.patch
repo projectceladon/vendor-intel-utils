@@ -1,0 +1,152 @@
+From b8ae9adacc8c28298cd39ea30f5d10e132bc8920 Mon Sep 17 00:00:00 2001
+From: wilsonshih <wilsonshih@google.com>
+Date: Wed, 4 Jun 2025 04:34:09 +0000
+Subject: [PATCH] RESTRICT AUTOMERGE Defer remove splash screen while device is
+ locked
+
+...and activity does not request showWhenLocked.
+The splash screen won't contains secure information, so it's safe to
+declared as showWhenLocked. But before remove starting window, if the
+activity does not request showWhenLocked and device is locked, try to
+trigger unoccluding animation, and keep app window hide until transition
+animation finish.
+
+Bug: 378088391
+Bug: 383131643
+Test: run simulate app repeatly, verify the app content won't be visible
+during transition animation.
+
+Merged-In: Ia2ddece125521eefb15d67e22ea863dfae6af112
+Change-Id: Ia2ddece125521eefb15d67e22ea863dfae6af112
+---
+ .../com/android/server/wm/ActivityRecord.java | 32 +++++++++++++++++--
+ .../com/android/server/wm/StartingData.java   |  1 +
+ .../com/android/server/wm/WindowState.java    | 13 ++++++++
+ 3 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wm/ActivityRecord.java b/services/core/java/com/android/server/wm/ActivityRecord.java
+index f5e3b85270da..5edd440fe42a 100644
+--- a/services/core/java/com/android/server/wm/ActivityRecord.java
++++ b/services/core/java/com/android/server/wm/ActivityRecord.java
+@@ -2729,6 +2729,19 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+         attachStartingSurfaceToAssociatedTask();
+     }
+ 
++    /**
++     * If the device is locked and the app does not request showWhenLocked,
++     * defer removing the starting window until the transition is complete.
++     * This prevents briefly appearing the app context and causing secure concern.
++     */
++    void deferStartingWindowRemovalForKeyguardUnoccluding() {
++        if (mStartingData != null && !mStartingData.mRemoveAfterTransition
++                && isKeyguardLocked() && !canShowWhenLockedInner(this) && !isVisibleRequested()
++                && isAnimating(PARENTS | CHILDREN, ANIMATION_TYPE_APP_TRANSITION)) {
++            mStartingData.mRemoveAfterTransition = true;
++        }
++    }
++
+     void removeStartingWindow() {
+         boolean prevEligibleForLetterboxEducation = isEligibleForLetterboxEducation();
+ 
+@@ -2767,6 +2780,9 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+         final StartingData startingData = mStartingData;
+         final WindowState startingWindow = mStartingWindow;
+         if (mStartingData != null) {
++            if (mStartingData.mRemoveAfterTransition) {
++                return;
++            }
+             surface = mStartingSurface;
+             mStartingData = null;
+             mStartingSurface = null;
+@@ -4380,6 +4396,7 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+                 tStartingWindow.mToken = this;
+                 tStartingWindow.mActivityRecord = this;
+ 
++                mStartingData.mRemoveAfterTransition = false;
+                 ProtoLog.v(WM_DEBUG_ADD_REMOVE,
+                         "Removing starting %s from %s", tStartingWindow, fromActivity);
+                 mTransitionController.collect(tStartingWindow);
+@@ -4534,17 +4551,22 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+         if (r == null || r.getTaskFragment() == null) {
+             return false;
+         }
+-        if (!r.inPinnedWindowingMode() && (r.mShowWhenLocked || r.containsShowWhenLockedWindow())) {
++        if (canShowWhenLockedInner(r)) {
+             return true;
+         } else if (r.mInheritShownWhenLocked) {
+             final ActivityRecord activity = r.getTaskFragment().getActivityBelow(r);
+-            return activity != null && !activity.inPinnedWindowingMode()
+-                    && (activity.mShowWhenLocked || activity.containsShowWhenLockedWindow());
++            return activity != null && canShowWhenLockedInner(activity);
+         } else {
+             return false;
+         }
+     }
+ 
++    /** @see #canShowWhenLocked(ActivityRecord) */
++    private static boolean canShowWhenLockedInner(@NonNull ActivityRecord r) {
++        return !r.inPinnedWindowingMode() &&
++                (r.mShowWhenLocked || r.containsShowWhenLockedWindow());
++    }
++
+     /**
+      *  Determines if the activity can show while lock-screen is displayed. System displays
+      *  activities while lock-screen is displayed only if all activities
+@@ -7610,6 +7632,10 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+             mThumbnail = null;
+         }
+ 
++        if (mStartingData != null && mStartingData.mRemoveAfterTransition) {
++            mStartingData.mRemoveAfterTransition = false;
++            removeStartingWindowAnimation(false /* prepareAnimation */);
++        }
+         // WindowState.onExitAnimationDone might modify the children list, so make a copy and then
+         // traverse the copy.
+         final ArrayList<WindowState> children = new ArrayList<>(mChildren);
+diff --git a/services/core/java/com/android/server/wm/StartingData.java b/services/core/java/com/android/server/wm/StartingData.java
+index 300a894d15c9..be3be6b9ae85 100644
+--- a/services/core/java/com/android/server/wm/StartingData.java
++++ b/services/core/java/com/android/server/wm/StartingData.java
+@@ -37,6 +37,7 @@ public abstract class StartingData {
+      * when the parent activity of starting window may be put in a partial area of the task.
+      */
+     Task mAssociatedTask;
++    boolean mRemoveAfterTransition;
+ 
+     /** Whether the starting window is drawn. */
+     boolean mIsDisplayed;
+diff --git a/services/core/java/com/android/server/wm/WindowState.java b/services/core/java/com/android/server/wm/WindowState.java
+index 812ccd69b203..08d26608866f 100644
+--- a/services/core/java/com/android/server/wm/WindowState.java
++++ b/services/core/java/com/android/server/wm/WindowState.java
+@@ -2008,6 +2008,12 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
+         }
+         final ActivityRecord atoken = mActivityRecord;
+         if (atoken != null) {
++            if (atoken.mStartingData != null && mAttrs.type != TYPE_APPLICATION_STARTING
++                    && atoken.mStartingData.mRemoveAfterTransition) {
++                // Preventing app window from visible during un-occluding animation playing due to
++                // alpha blending.
++                return false;
++            }
+             return ((!isParentWindowHidden() && atoken.isVisible())
+                     || isAnimating(TRANSITION | PARENTS));
+         }
+@@ -3096,7 +3102,14 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
+             final int mask = FLAG_SHOW_WHEN_LOCKED | FLAG_DISMISS_KEYGUARD
+                     | FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
+             WindowManager.LayoutParams sa = mActivityRecord.mStartingWindow.mAttrs;
++            final boolean wasShowWhenLocked = (sa.flags & FLAG_SHOW_WHEN_LOCKED) != 0;
++            final boolean removeShowWhenLocked = (mAttrs.flags & FLAG_SHOW_WHEN_LOCKED) == 0;
+             sa.flags = (sa.flags & ~mask) | (mAttrs.flags & mask);
++            if (wasShowWhenLocked && removeShowWhenLocked) {
++                // Trigger unoccluding animation if needed.
++                mActivityRecord.checkKeyguardFlagsChanged();
++                mActivityRecord.deferStartingWindowRemovalForKeyguardUnoccluding();
++            }
+         }
+     }
+ 
+-- 
+2.34.1
+
