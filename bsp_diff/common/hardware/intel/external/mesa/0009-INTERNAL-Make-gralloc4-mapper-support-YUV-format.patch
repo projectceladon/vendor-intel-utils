@@ -1,0 +1,164 @@
+From 3a0d9259a28f7d137bb68b42095ec8852dd64da1 Mon Sep 17 00:00:00 2001
+From: chenyanxzhu <chenyanx.zhu@intel.com>
+Date: Thu, 23 Feb 2023 17:03:18 +0800
+Subject: [PATCH] INTERNAL: Make gralloc4 mapper support YUV format
+
+Previously buffer info getting for YUV format by gralloc4 is
+not complete for egl image creation. Need calculate extra chroma
+information from layout info.
+
+Tracked-On: OAM-106557
+Signed-off-by: chenyanxzhu <chenyanx.zhu@intel.com>
+---
+ src/egl/drivers/dri2/platform_android.c       |  9 +---
+ src/egl/drivers/dri2/platform_android.h       | 10 ++++
+ .../drivers/dri2/platform_android_mapper.cpp  | 54 +++++++++++++++++++
+ 3 files changed, 66 insertions(+), 7 deletions(-)
+
+diff --git a/src/egl/drivers/dri2/platform_android.c b/src/egl/drivers/dri2/platform_android.c
+index 41efa05cf63..2d494717f55 100644
+--- a/src/egl/drivers/dri2/platform_android.c
++++ b/src/egl/drivers/dri2/platform_android.c
+@@ -54,11 +54,6 @@
+ 
+ #define ALIGN(val, align)	(((val) + (align) - 1) & ~((align) - 1))
+ 
+-enum chroma_order {
+-   YCbCr,
+-   YCrCb,
+-};
+-
+ struct droid_yuv_format {
+    /* Lookup keys */
+    int native; /* HAL_PIXEL_FORMAT_ */
+@@ -98,7 +93,7 @@ static const struct droid_yuv_format droid_yuv_formats[] = {
+    { HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, YCrCb, 1, DRM_FORMAT_XYUV8888 },
+ };
+ 
+-static int
++int
+ get_fourcc_yuv(int native, enum chroma_order chroma_order, int chroma_step)
+ {
+    for (int i = 0; i < ARRAY_SIZE(droid_yuv_formats); ++i)
+@@ -110,7 +105,7 @@ get_fourcc_yuv(int native, enum chroma_order chroma_order, int chroma_step)
+    return -1;
+ }
+ 
+-static bool
++bool
+ is_yuv(int native)
+ {
+    for (int i = 0; i < ARRAY_SIZE(droid_yuv_formats); ++i)
+diff --git a/src/egl/drivers/dri2/platform_android.h b/src/egl/drivers/dri2/platform_android.h
+index a2015df228a..90f526f2001 100644
+--- a/src/egl/drivers/dri2/platform_android.h
++++ b/src/egl/drivers/dri2/platform_android.h
+@@ -136,10 +136,20 @@ struct buffer_info {
+    enum __DRIChromaSiting vertical_siting;
+ };
+ 
++enum chroma_order {
++   YCbCr,
++   YCrCb,
++};
++
++
+ #ifdef USE_IMAPPER4_METADATA_API
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
++extern bool
++is_yuv(int native);
++extern int
++get_fourcc_yuv(int native, enum chroma_order chroma_order, int chroma_step);
+ extern int
+ mapper_metadata_get_buffer_info(struct ANativeWindowBuffer *buf,
+                                 struct buffer_info *out_buf_info);
+diff --git a/src/egl/drivers/dri2/platform_android_mapper.cpp b/src/egl/drivers/dri2/platform_android_mapper.cpp
+index 2a5d1d95006..2abd9974e6b 100644
+--- a/src/egl/drivers/dri2/platform_android_mapper.cpp
++++ b/src/egl/drivers/dri2/platform_android_mapper.cpp
+@@ -40,6 +40,7 @@ using aidl::android::hardware::graphics::common::PlaneLayout;
+ using aidl::android::hardware::graphics::common::PlaneLayoutComponent;
+ using aidl::android::hardware::graphics::common::PlaneLayoutComponentType;
+ using android::hardware::graphics::common::V1_2::BufferUsage;
++using android::hardware::graphics::common::V1_2::PixelFormat;
+ using android::hardware::graphics::mapper::V4_0::Error;
+ using android::hardware::graphics::mapper::V4_0::IMapper;
+ using android::hardware::hidl_handle;
+@@ -92,12 +93,39 @@ std::optional<std::vector<PlaneLayout>> GetPlaneLayouts(
+ extern "C"
+ {
+ 
++int
++mapper_resolve_format(struct ANativeWindowBuffer *buf, int32_t *format)
++{
++   static android::sp<IMapper> mapper = IMapper::getService();
++   hidl_vec<uint8_t> encoded_data;
++   PixelFormat pix_format;
++
++   Error error = GetMetadata(mapper, buf->handle,
++                            android::gralloc4::MetadataType_PixelFormatRequested,
++                            &encoded_data);
++
++   if (error != Error::NONE)
++      return -EINVAL;
++
++   auto status = android::gralloc4::decodePixelFormatRequested(encoded_data, &pix_format);
++   if (status != android::OK)
++      return -EINVAL;
++
++   *format = static_cast<std::underlying_type_t<PixelFormat>>(pix_format);
++   return 0;
++}
++
+ int
+ mapper_metadata_get_buffer_info(struct ANativeWindowBuffer *buf,
+                                 struct buffer_info *out_buf_info)
+ {
+    static android::sp<IMapper> mapper = IMapper::getService();
+    struct buffer_info buf_info = *out_buf_info;
++
++   int droid_format, resolve_format;
++   enum chroma_order chroma_order;
++   int chroma_step;
++
+    if (mapper == nullptr)
+       return -EINVAL;
+ 
+@@ -142,6 +170,32 @@ mapper_metadata_get_buffer_info(struct ANativeWindowBuffer *buf,
+       buf_info.offsets[i] = layouts[i].offsetInBytes;
+    }
+ 
++   if (mapper_resolve_format(buf, &droid_format))
++      return -EINVAL;
++
++   if (is_yuv(droid_format)) {
++      if (layouts[1].components[0].type == android::gralloc4::PlaneLayoutComponentType_CB)
++         chroma_order = YCbCr;
++      else
++         chroma_order = YCrCb;
++      chroma_step = layouts[1].sampleIncrementInBits / 8;
++      resolve_format = get_fourcc_yuv(droid_format, chroma_order, chroma_step);
++
++      buf_info.drm_fourcc = resolve_format;
++      if (layouts.size() == 2) {
++         buf_info.pitches[2] = buf_info.pitches[1];
++         buf_info.offsets[2] = buf_info.offsets[1] + (chroma_step/2);
++      }
++
++      buf_info.yuv_color_space = static_cast<enum __DRIYUVColorSpace>(EGL_ITU_REC601_EXT);
++      buf_info.sample_range = static_cast<enum __DRISampleRange>(EGL_YUV_NARROW_RANGE_EXT);
++      buf_info.horizontal_siting = static_cast<enum __DRIChromaSiting>(EGL_YUV_CHROMA_SITING_0_EXT);
++      buf_info.vertical_siting = static_cast<enum __DRIChromaSiting>(EGL_YUV_CHROMA_SITING_0_EXT);
++
++      *out_buf_info = buf_info;
++      return 0;
++   }
++
+    /* optional attributes */
+    hidl_vec<uint8_t> encoded_chroma_siting;
+    err = GetMetadata(mapper, buf->handle, android::gralloc4::MetadataType_ChromaSiting, &encoded_chroma_siting);
+-- 
+2.40.1
+
