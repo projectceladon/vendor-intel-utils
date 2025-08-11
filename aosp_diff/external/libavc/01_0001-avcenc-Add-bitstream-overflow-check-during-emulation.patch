@@ -1,0 +1,428 @@
+From f39cae906457eb6bcc63d67febc1675e4d84bc43 Mon Sep 17 00:00:00 2001
+From: Neelkamal Semwal <neelkamal.semwal@ittiam.com>
+Date: Wed, 10 Mar 2021 10:03:39 +0530
+Subject: [PATCH] avcenc: Add bitstream overflow check during emulation
+ prevention
+
+Bug: 176533109
+
+Test: poc in the bug description
+
+Change-Id: Ia83383f9b65cbde8d7a50a1af8a054936daa4d78
+(cherry picked from commit b59de5a25f28f0fe411526b2e50bb8052957c517)
+(cherry picked from commit 10910bf9106eff724390255faa48f9f61dcfc744)
+---
+ encoder/ih264e_bitstream.c | 51 ++++-----------------------
+ encoder/ih264e_bitstream.h | 72 ++++++++++++++++++++++++++------------
+ encoder/ih264e_cabac.c     | 61 ++++++++++++++------------------
+ encoder/ih264e_cabac.h     |  4 +--
+ encoder/ih264e_process.c   |  4 +--
+ 5 files changed, 86 insertions(+), 106 deletions(-)
+
+diff --git a/encoder/ih264e_bitstream.c b/encoder/ih264e_bitstream.c
+index d79f637..9f73f69 100644
+--- a/encoder/ih264e_bitstream.c
++++ b/encoder/ih264e_bitstream.c
+@@ -182,27 +182,9 @@ IH264E_ERROR_T ih264e_put_bits(bitstrm_t *ps_bitstrm,
+         /* 4. insert remaining bits of code starting from msb of cur word   */
+         /* 5. update bitsleft in current word and stream buffer offset      */
+         /********************************************************************/
+-        UWORD32 u4_strm_buf_offset  = ps_bitstrm->u4_strm_buf_offset;
+-
+-        UWORD32 u4_max_strm_size    = ps_bitstrm->u4_max_strm_size;
+-
+-        WORD32  zero_run            = ps_bitstrm->i4_zero_bytes_run;
+-
+-        UWORD8* pu1_strm_buf        = ps_bitstrm->pu1_strm_buffer;
+-
++        IH264E_ERROR_T status = IH264E_SUCCESS;
+         WORD32  i, rem_bits = (code_len - bits_left_in_cw);
+
+-
+-        /*********************************************************************/
+-        /* Bitstream overflow check                                          */
+-        /* NOTE: corner case of epb bytes (max 2 for 32bit word) not handled */
+-        /*********************************************************************/
+-        if((u4_strm_buf_offset + (WORD_SIZE>>3)) >= u4_max_strm_size)
+-        {
+-            /* return without corrupting the buffer beyond its size */
+-            return(IH264E_BITSTREAM_BUFFER_OVERFLOW);
+-        }
+-
+         /* insert parital code corresponding to bits left in cur word */
+         u4_cur_word |= u4_code_val >> rem_bits;
+
+@@ -211,7 +193,7 @@ IH264E_ERROR_T ih264e_put_bits(bitstrm_t *ps_bitstrm,
+             /* flush the bits in cur word byte by byte and copy to stream */
+             UWORD8   u1_next_byte = (u4_cur_word >> (i-8)) & 0xFF;
+
+-            PUTBYTE_EPB(pu1_strm_buf, u4_strm_buf_offset, u1_next_byte, zero_run);
++            status |= ih264e_put_byte_epb(ps_bitstrm, u1_next_byte);
+         }
+
+         /* insert the remaining bits from code val into current word */
+@@ -220,9 +202,8 @@ IH264E_ERROR_T ih264e_put_bits(bitstrm_t *ps_bitstrm,
+         /* update the state variables and return success */
+         ps_bitstrm->u4_cur_word         = u4_cur_word;
+         ps_bitstrm->i4_bits_left_in_cw  = WORD_SIZE - rem_bits;
+-        ps_bitstrm->i4_zero_bytes_run   = zero_run;
+-        ps_bitstrm->u4_strm_buf_offset  = u4_strm_buf_offset;
+-        return (IH264E_SUCCESS);
++        return (status);
++
+     }
+ }
+
+@@ -281,22 +262,7 @@ IH264E_ERROR_T ih264e_put_rbsp_trailing_bits(bitstrm_t *ps_bitstrm)
+     UWORD32 u4_cur_word = ps_bitstrm->u4_cur_word;
+     WORD32  bits_left_in_cw = ps_bitstrm->i4_bits_left_in_cw;
+     WORD32  bytes_left_in_cw = (bits_left_in_cw - 1) >> 3;
+-
+-    UWORD32 u4_strm_buf_offset  = ps_bitstrm->u4_strm_buf_offset;
+-    UWORD32 u4_max_strm_size    = ps_bitstrm->u4_max_strm_size;
+-    WORD32  zero_run            = ps_bitstrm->i4_zero_bytes_run;
+-    UWORD8* pu1_strm_buf        = ps_bitstrm->pu1_strm_buffer;
+-
+-    /*********************************************************************/
+-    /* Bitstream overflow check                                          */
+-    /* NOTE: corner case of epb bytes (max 2 for 32bit word) not handled */
+-    /*********************************************************************/
+-    if((u4_strm_buf_offset + (WORD_SIZE>>3) - bytes_left_in_cw) >=
+-        u4_max_strm_size)
+-    {
+-        /* return without corrupting the buffer beyond its size */
+-        return(IH264E_BITSTREAM_BUFFER_OVERFLOW);
+-    }
++    IH264E_ERROR_T status = IH264E_SUCCESS;
+
+     /* insert a 1 at the end of current word and flush all the bits */
+     u4_cur_word |= (1 << (bits_left_in_cw - 1));
+@@ -309,18 +275,15 @@ IH264E_ERROR_T ih264e_put_rbsp_trailing_bits(bitstrm_t *ps_bitstrm)
+         /* flush the bits in cur word byte by byte  and copy to stream */
+         UWORD8   u1_next_byte = (u4_cur_word >> (i-8)) & 0xFF;
+
+-        PUTBYTE_EPB(pu1_strm_buf, u4_strm_buf_offset, u1_next_byte, zero_run);
++        status |= ih264e_put_byte_epb(ps_bitstrm, u1_next_byte);
+     }
+
+-    /* update the stream offset */
+-    ps_bitstrm->u4_strm_buf_offset  = u4_strm_buf_offset;
+-
+     /* Default init values for scratch variables of bitstream context */
+     ps_bitstrm->u4_cur_word         = 0;
+     ps_bitstrm->i4_bits_left_in_cw  = WORD_SIZE;
+     ps_bitstrm->i4_zero_bytes_run   = 0;
+
+-    return (IH264E_SUCCESS);
++    return (status);
+ }
+
+ /**
+diff --git a/encoder/ih264e_bitstream.h b/encoder/ih264e_bitstream.h
+index 9cd2b81..5b5c700 100644
+--- a/encoder/ih264e_bitstream.h
++++ b/encoder/ih264e_bitstream.h
+@@ -169,29 +169,7 @@
+    {                                                                        \
+        const WORD32 len = (WORD32)((ps_bitstrm->i4_bits_left_in_cw) & 0x07);\
+        ih264e_put_bits(ps_bitstrm, (UWORD32)((1 << len) - 1), len);         \
+-   }
+-
+-
+-/**
+-******************************************************************************
+-* flush the bits in cur word byte by byte  and copy to stream                *
+-* (current word is assumed to be byte aligned)                               *
+-******************************************************************************
+-*/
+-#define  BITSTREAM_FLUSH(ps_bitstrm)                                           \
+-{                                                                              \
+-    WORD32 i;                                                                  \
+-    for (i = WORD_SIZE; i > ps_bitstrm->i4_bits_left_in_cw; i -= 8)            \
+-    {                                                                          \
+-       UWORD8 u1_next_byte = (ps_bitstrm->u4_cur_word >> (i - 8)) & 0xFF;      \
+-       PUTBYTE_EPB(ps_bitstrm->pu1_strm_buffer, ps_bitstrm->u4_strm_buf_offset,\
+-                   u1_next_byte, ps_bitstrm->i4_zero_bytes_run);               \
+-    }                                                                          \
+-    ps_bitstrm->u4_cur_word = 0;                                               \
+-    ps_bitstrm->i4_bits_left_in_cw = WORD_SIZE;                                \
+-}                                                                              \
+-
+-
++   }                                                                        \
+
+
+ /*****************************************************************************/
+@@ -245,6 +223,54 @@ typedef struct bitstrm
+ } bitstrm_t;
+
+
++/**
++******************************************************************************
++*  @brief  Inserts 1 byte and Emulation Prevention Byte(if any) into bitstream
++*          Increments the stream offset and zero run correspondingly
++******************************************************************************
++*/
++static inline IH264E_ERROR_T ih264e_put_byte_epb(bitstrm_t *ps_bitstrm, UWORD8 byte)
++{
++    if (INSERT_EPB(ps_bitstrm->i4_zero_bytes_run, byte))
++    {
++        if ((ps_bitstrm->u4_strm_buf_offset + 1) >= ps_bitstrm->u4_max_strm_size)
++        {
++            return IH264E_BITSTREAM_BUFFER_OVERFLOW;
++        }
++        ps_bitstrm->pu1_strm_buffer[ps_bitstrm->u4_strm_buf_offset++] = EPB_BYTE;
++        ps_bitstrm->i4_zero_bytes_run = 0;
++    }
++
++    if ((ps_bitstrm->u4_strm_buf_offset + 1) >= ps_bitstrm->u4_max_strm_size)
++    {
++        return IH264E_BITSTREAM_BUFFER_OVERFLOW;
++    }
++    ps_bitstrm->pu1_strm_buffer[ps_bitstrm->u4_strm_buf_offset++] = byte;
++    ps_bitstrm->i4_zero_bytes_run = byte ? 0 : ps_bitstrm->i4_zero_bytes_run + 1;
++
++    return IH264E_SUCCESS;
++}
++
++/**
++******************************************************************************
++* flush the bits in cur word byte by byte  and copy to stream                *
++* (current word is assumed to be byte aligned)                               *
++******************************************************************************
++*/
++#define  BITSTREAM_FLUSH(ps_bitstrm, err)                                      \
++{                                                                              \
++    WORD32 i;                                                                  \
++    for (i = WORD_SIZE; i > ps_bitstrm->i4_bits_left_in_cw; i -= 8)            \
++    {                                                                          \
++       UWORD8 u1_next_byte = (ps_bitstrm->u4_cur_word >> (i - 8)) & 0xFF;      \
++       err |= ih264e_put_byte_epb(ps_bitstrm, u1_next_byte);                   \
++    }                                                                          \
++    ps_bitstrm->u4_cur_word = 0;                                               \
++    ps_bitstrm->i4_bits_left_in_cw = WORD_SIZE;                                \
++}                                                                              \
++
++
++
+ /*****************************************************************************/
+ /* Extern Function Declarations                                              */
+ /*****************************************************************************/
+diff --git a/encoder/ih264e_cabac.c b/encoder/ih264e_cabac.c
+index 26ded4d..2d91058 100644
+--- a/encoder/ih264e_cabac.c
++++ b/encoder/ih264e_cabac.c
+@@ -242,18 +242,16 @@ void ih264e_get_cabac_context(entropy_ctxt_t *ps_ent_ctxt, WORD32 u4_mb_type)
+  *
+  *******************************************************************************
+  */
+-void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt)
++IH264E_ERROR_T ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt)
+ {
+-
+     /* bit stream ptr */
+     bitstrm_t *ps_stream = ps_cabac_ctxt->ps_bitstrm;
+     encoding_envirnoment_t *ps_cab_enc_env = &(ps_cabac_ctxt->s_cab_enc_env);
+     UWORD32 u4_low = ps_cab_enc_env->u4_code_int_low;
+     UWORD32 u4_bits_gen = ps_cab_enc_env->u4_bits_gen;
+     UWORD8 *pu1_strm_buf = ps_stream->pu1_strm_buffer;
+-    UWORD32 u4_strm_buf_offset = ps_stream->u4_strm_buf_offset;
+-    WORD32 zero_run = ps_stream->i4_zero_bytes_run;
+     UWORD32 u4_out_standing_bytes = ps_cab_enc_env->u4_out_standing_bytes;
++    IH264E_ERROR_T status = IH264E_SUCCESS;
+
+     /************************************************************************/
+     /* Insert the carry (propogated in previous byte) along with            */
+@@ -274,17 +272,17 @@ void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt)
+              as per standard */
+             /* so check for previous four bytes and if it is equal to 0x00000303
+              then subtract u4_strm_buf_offset by 1 */
+-            if (pu1_strm_buf[u4_strm_buf_offset - 1] == 0x03
+-                            && pu1_strm_buf[u4_strm_buf_offset - 2] == 0x03
+-                            && pu1_strm_buf[u4_strm_buf_offset - 3] == 0x00
+-                            && pu1_strm_buf[u4_strm_buf_offset - 4] == 0x00)
++            if (pu1_strm_buf[ps_stream->u4_strm_buf_offset - 1] == 0x03
++                            && pu1_strm_buf[ps_stream->u4_strm_buf_offset - 2] == 0x03
++                            && pu1_strm_buf[ps_stream->u4_strm_buf_offset - 3] == 0x00
++                            && pu1_strm_buf[ps_stream->u4_strm_buf_offset - 4] == 0x00)
+             {
+-                u4_strm_buf_offset -= 1;
++                ps_stream->u4_strm_buf_offset -= 1;
+             }
+             /* previous byte carry add will not result in overflow to        */
+             /* u4_strm_buf_offset - 2 as we track 0xff as outstanding bytes  */
+-            pu1_strm_buf[u4_strm_buf_offset - 1] += carry;
+-            zero_run = 0;
++            pu1_strm_buf[ps_stream->u4_strm_buf_offset - 1] += carry;
++            ps_stream->i4_zero_bytes_run = 0;
+         }
+
+         /*        Insert outstanding bytes (if any)         */
+@@ -292,7 +290,7 @@ void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt)
+         {
+             UWORD8 u1_0_or_ff = carry ? 0 : 0xFF;
+
+-            PUTBYTE_EPB(pu1_strm_buf, u4_strm_buf_offset, u1_0_or_ff, zero_run);
++            status |= ih264e_put_byte_epb(ps_stream, u1_0_or_ff);
+             u4_out_standing_bytes--;
+         }
+
+@@ -307,7 +305,7 @@ void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt)
+         if (bits_left >= 8)
+         {
+             last_byte = (rem_bits >> (bits_left - 8)) & 0xFF;
+-            PUTBYTE_EPB(pu1_strm_buf, u4_strm_buf_offset, last_byte, zero_run);
++            status |= ih264e_put_byte_epb(ps_stream, last_byte);
+             bits_left -= 8;
+         }
+
+@@ -315,16 +313,16 @@ void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt)
+         last_byte = (rem_bits << (8 - bits_left))
+                         | (1 << (7 - bits_left) | (1 << (7 - bits_left - 1)));
+         last_byte &= 0xFF;
+-        PUTBYTE_EPB(pu1_strm_buf, u4_strm_buf_offset, last_byte, zero_run);
++        status |= ih264e_put_byte_epb(ps_stream, last_byte);
+
+         /* update the state variables and return success */
+-        ps_stream->u4_strm_buf_offset = u4_strm_buf_offset;
+         ps_stream->i4_zero_bytes_run = 0;
+         /* Default init values for scratch variables of bitstream context */
+         ps_stream->u4_cur_word = 0;
+         ps_stream->i4_bits_left_in_cw = WORD_SIZE;
+
+     }
++    return status;
+ }
+
+ /**
+@@ -349,15 +347,16 @@ void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt)
+  *
+  ******************************************************************************
+  */
+-void ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt)
++IH264E_ERROR_T ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt)
+ {
+-
+     /* bit stream ptr */
+     bitstrm_t *ps_stream = ps_cabac_ctxt->ps_bitstrm;
+     encoding_envirnoment_t *ps_cab_enc_env = &(ps_cabac_ctxt->s_cab_enc_env);
+     UWORD32 u4_low = ps_cab_enc_env->u4_code_int_low;
+     UWORD32 u4_bits_gen = ps_cab_enc_env->u4_bits_gen;
++    UWORD8 *pu1_strm_buf = ps_stream->pu1_strm_buffer;
+     WORD32 lead_byte = u4_low >> (u4_bits_gen + CABAC_BITS - 8);
++    IH264E_ERROR_T status = IH264E_SUCCESS;
+
+     /* Sanity checks */
+     ASSERT((ps_cab_enc_env->u4_code_int_range >= 256)
+@@ -381,15 +380,11 @@ void ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt)
+     {
+         /* actual bits depend on carry propogration     */
+         ps_cab_enc_env->u4_out_standing_bytes++;
+-        return ;
+     }
+     else
+     {
+         /* carry = 1 => putbit(1); carry propogated due to L renorm */
+         WORD32 carry = (lead_byte >> 8) & 0x1;
+-        UWORD8 *pu1_strm_buf = ps_stream->pu1_strm_buffer;
+-        UWORD32 u4_strm_buf_offset = ps_stream->u4_strm_buf_offset;
+-        WORD32 zero_run = ps_stream->i4_zero_bytes_run;
+         UWORD32 u4_out_standing_bytes = ps_cab_enc_env->u4_out_standing_bytes;
+
+
+@@ -407,17 +402,17 @@ void ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt)
+              as per standard */
+             /* so check for previous four bytes and if it is equal to 0x00000303
+              then subtract u4_strm_buf_offset by 1 */
+-            if (pu1_strm_buf[u4_strm_buf_offset - 1] == 0x03
+-                            && pu1_strm_buf[u4_strm_buf_offset - 2] == 0x03
+-                            && pu1_strm_buf[u4_strm_buf_offset - 3] == 0x00
+-                            && pu1_strm_buf[u4_strm_buf_offset - 4] == 0x00)
++            if (pu1_strm_buf[ps_stream->u4_strm_buf_offset - 1] == 0x03
++                            && pu1_strm_buf[ps_stream->u4_strm_buf_offset - 2] == 0x03
++                            && pu1_strm_buf[ps_stream->u4_strm_buf_offset - 3] == 0x00
++                            && pu1_strm_buf[ps_stream->u4_strm_buf_offset - 4] == 0x00)
+             {
+-                u4_strm_buf_offset -= 1;
++                ps_stream->u4_strm_buf_offset -= 1;
+             }
+             /* previous byte carry add will not result in overflow to        */
+             /* u4_strm_buf_offset - 2 as we track 0xff as outstanding bytes  */
+-            pu1_strm_buf[u4_strm_buf_offset - 1] += carry;
+-            zero_run = 0;
++            pu1_strm_buf[ps_stream->u4_strm_buf_offset - 1] += carry;
++            ps_stream->i4_zero_bytes_run = 0;
+         }
+
+         /*        Insert outstanding bytes (if any)         */
+@@ -425,7 +420,7 @@ void ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt)
+         {
+             UWORD8 u1_0_or_ff = carry ? 0 : 0xFF;
+
+-            PUTBYTE_EPB(pu1_strm_buf, u4_strm_buf_offset, u1_0_or_ff, zero_run);
++            status |= ih264e_put_byte_epb(ps_stream, u1_0_or_ff);
+
+             u4_out_standing_bytes--;
+         }
+@@ -433,13 +428,9 @@ void ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt)
+
+         /*        Insert the leading byte                   */
+         lead_byte &= 0xFF;
+-        PUTBYTE_EPB(pu1_strm_buf, u4_strm_buf_offset, lead_byte, zero_run);
+-
+-        /* update the state variables and return success */
+-        ps_stream->u4_strm_buf_offset = u4_strm_buf_offset;
+-        ps_stream->i4_zero_bytes_run = zero_run;
+-
++        status |= ih264e_put_byte_epb(ps_stream, lead_byte);
+     }
++    return status;
+ }
+
+
+diff --git a/encoder/ih264e_cabac.h b/encoder/ih264e_cabac.h
+index e4722fa..bc4b07c 100644
+--- a/encoder/ih264e_cabac.h
++++ b/encoder/ih264e_cabac.h
+@@ -190,7 +190,7 @@ void ih264e_get_cabac_context(entropy_ctxt_t *ps_ent_ctxt, WORD32 u4_mb_type);
+  *
+  *******************************************************************************
+  */
+-void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt);
++IH264E_ERROR_T ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt);
+
+
+ /**
+@@ -215,7 +215,7 @@ void ih264e_cabac_flush(cabac_ctxt_t *ps_cabac_ctxt);
+  *
+  ******************************************************************************
+  */
+-void ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt);
++IH264E_ERROR_T ih264e_cabac_put_byte(cabac_ctxt_t *ps_cabac_ctxt);
+
+
+ /**
+diff --git a/encoder/ih264e_process.c b/encoder/ih264e_process.c
+index 490c6d8..289053f 100644
+--- a/encoder/ih264e_process.c
++++ b/encoder/ih264e_process.c
+@@ -444,7 +444,7 @@ IH264E_ERROR_T ih264e_entropy(process_ctxt_t *ps_proc)
+         if (CABAC == ps_entropy->u1_entropy_coding_mode_flag)
+         {
+             BITSTREAM_BYTE_ALIGN(ps_bitstrm);
+-            BITSTREAM_FLUSH(ps_bitstrm);
++            BITSTREAM_FLUSH(ps_bitstrm, ps_entropy->i4_error_code);
+             ih264e_init_cabac_ctxt(ps_entropy);
+         }
+     }
+@@ -571,7 +571,7 @@ IH264E_ERROR_T ih264e_entropy(process_ctxt_t *ps_proc)
+                     if (CABAC == ps_entropy->u1_entropy_coding_mode_flag)
+                     {
+                         BITSTREAM_BYTE_ALIGN(ps_bitstrm);
+-                        BITSTREAM_FLUSH(ps_bitstrm);
++                        BITSTREAM_FLUSH(ps_bitstrm, ps_entropy->i4_error_code);
+                         ih264e_init_cabac_ctxt(ps_entropy);
+                     }
+                 }
+--
+2.29.0
