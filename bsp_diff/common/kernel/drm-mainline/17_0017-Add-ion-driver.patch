@@ -1,0 +1,3017 @@
+From 6fb53a47eae7607888c6d48687f346278f60b672 Mon Sep 17 00:00:00 2001
+From: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+Date: Thu, 1 Jul 2021 01:22:30 +0530
+Subject: [PATCH] Add ion driver
+
+Signed-off-by: Jeevaka Prabu Badrappan <jeevaka.badrappan@intel.com>
+---
+ drivers/staging/android/Kconfig               |   2 +
+ drivers/staging/android/Makefile              |   1 +
+ drivers/staging/android/ion/Kconfig           |  14 +
+ drivers/staging/android/ion/Makefile          |   4 +
+ drivers/staging/android/ion/heaps/Kconfig     |  15 +
+ drivers/staging/android/ion/heaps/Makefile    |   5 +
+ .../staging/android/ion/heaps/ion_cma_heap.c  | 151 +++++
+ .../staging/android/ion/heaps/ion_page_pool.c | 172 ++++++
+ .../staging/android/ion/heaps/ion_page_pool.h |  67 +++
+ .../android/ion/heaps/ion_system_heap.c       | 290 ++++++++++
+ drivers/staging/android/ion/ion.c             | 519 ++++++++++++++++++
+ drivers/staging/android/ion/ion_buffer.c      | 278 ++++++++++
+ drivers/staging/android/ion/ion_dma_buf.c     | 363 ++++++++++++
+ drivers/staging/android/ion/ion_heap.c        | 291 ++++++++++
+ drivers/staging/android/ion/ion_private.h     |  58 ++
+ drivers/staging/android/ion/ion_trace.h       |  55 ++
+ include/linux/ion.h                           | 419 ++++++++++++++
+ include/uapi/linux/ion.h                      | 150 +++++
+ 18 files changed, 2854 insertions(+)
+ create mode 100644 drivers/staging/android/ion/Kconfig
+ create mode 100644 drivers/staging/android/ion/Makefile
+ create mode 100644 drivers/staging/android/ion/heaps/Kconfig
+ create mode 100644 drivers/staging/android/ion/heaps/Makefile
+ create mode 100644 drivers/staging/android/ion/heaps/ion_cma_heap.c
+ create mode 100644 drivers/staging/android/ion/heaps/ion_page_pool.c
+ create mode 100644 drivers/staging/android/ion/heaps/ion_page_pool.h
+ create mode 100644 drivers/staging/android/ion/heaps/ion_system_heap.c
+ create mode 100644 drivers/staging/android/ion/ion.c
+ create mode 100644 drivers/staging/android/ion/ion_buffer.c
+ create mode 100644 drivers/staging/android/ion/ion_dma_buf.c
+ create mode 100644 drivers/staging/android/ion/ion_heap.c
+ create mode 100644 drivers/staging/android/ion/ion_private.h
+ create mode 100644 drivers/staging/android/ion/ion_trace.h
+ create mode 100644 include/linux/ion.h
+ create mode 100644 include/uapi/linux/ion.h
+
+diff --git a/drivers/staging/android/Kconfig b/drivers/staging/android/Kconfig
+index 9aca9ce10f8a..549120c5da21 100644
+--- a/drivers/staging/android/Kconfig
++++ b/drivers/staging/android/Kconfig
+@@ -25,6 +25,8 @@ config DEBUG_KINFO
+ 	   - UTS_RELEASE
+ 	   - BUILD_INFO(ro.build.fingerprint)
+ 
++source "drivers/staging/android/ion/Kconfig"
++
+ endif # if ANDROID
+ 
+ endmenu
+diff --git a/drivers/staging/android/Makefile b/drivers/staging/android/Makefile
+index b92c5fe69bad..fb56586e6663 100644
+--- a/drivers/staging/android/Makefile
++++ b/drivers/staging/android/Makefile
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0
+ ccflags-y += -I$(src)			# needed for trace events
+ 
++obj-y                                   += ion/
+ obj-$(CONFIG_ASHMEM)			+= ashmem.o
+ obj-$(CONFIG_DEBUG_KINFO)	+= debug_kinfo.o
+diff --git a/drivers/staging/android/ion/Kconfig b/drivers/staging/android/ion/Kconfig
+new file mode 100644
+index 000000000000..7b7da979991e
+--- /dev/null
++++ b/drivers/staging/android/ion/Kconfig
+@@ -0,0 +1,14 @@
++# SPDX-License-Identifier: GPL-2.0
++menuconfig ION
++	bool "Ion Memory Manager"
++	depends on HAS_DMA && MMU
++	select GENERIC_ALLOCATOR
++	select DMA_SHARED_BUFFER
++	help
++	  Choose this option to enable the ION Memory Manager,
++	  used by Android to efficiently allocate buffers
++	  from userspace that can be shared between drivers.
++	  If you're not using Android its probably safe to
++	  say N here.
++
++source "drivers/staging/android/ion/heaps/Kconfig"
+diff --git a/drivers/staging/android/ion/Makefile b/drivers/staging/android/ion/Makefile
+new file mode 100644
+index 000000000000..7f8fd0f537b4
+--- /dev/null
++++ b/drivers/staging/android/ion/Makefile
+@@ -0,0 +1,4 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_ION)	+= ion.o ion_buffer.o ion_dma_buf.o ion_heap.o
++CFLAGS_ion_buffer.o 	= -I$(src)
++obj-y			+= heaps/
+diff --git a/drivers/staging/android/ion/heaps/Kconfig b/drivers/staging/android/ion/heaps/Kconfig
+new file mode 100644
+index 000000000000..5034c45a397d
+--- /dev/null
++++ b/drivers/staging/android/ion/heaps/Kconfig
+@@ -0,0 +1,15 @@
++# SPDX-License-Identifier: GPL-2.0
++config ION_SYSTEM_HEAP
++	tristate "Ion system heap"
++	depends on ION
++	help
++	  Choose this option to enable the Ion system heap. The system heap
++	  is backed by pages from the buddy allocator. If in doubt, say Y.
++
++config ION_CMA_HEAP
++	tristate "Ion CMA heap support"
++	depends on ION && DMA_CMA
++	help
++	  Choose this option to enable CMA heaps with Ion. This heap is backed
++	  by the Contiguous Memory Allocator (CMA). If your system has these
++	  regions, you should say Y here.
+diff --git a/drivers/staging/android/ion/heaps/Makefile b/drivers/staging/android/ion/heaps/Makefile
+new file mode 100644
+index 000000000000..82e36e89e978
+--- /dev/null
++++ b/drivers/staging/android/ion/heaps/Makefile
+@@ -0,0 +1,5 @@
++# SPDX-License-Identifier: GPL-2.0
++obj-$(CONFIG_ION_SYSTEM_HEAP) += ion_sys_heap.o
++ion_sys_heap-y := ion_system_heap.o ion_page_pool.o
++
++obj-$(CONFIG_ION_CMA_HEAP) += ion_cma_heap.o
+diff --git a/drivers/staging/android/ion/heaps/ion_cma_heap.c b/drivers/staging/android/ion/heaps/ion_cma_heap.c
+new file mode 100644
+index 000000000000..6ba7fd84c9ee
+--- /dev/null
++++ b/drivers/staging/android/ion/heaps/ion_cma_heap.c
+@@ -0,0 +1,151 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ION Memory Allocator CMA heap exporter
++ *
++ * Copyright (C) Linaro 2012
++ * Author: <benjamin.gaignard@linaro.org> for ST-Ericsson.
++ */
++
++#include <linux/device.h>
++#include <linux/ion.h>
++#include <linux/slab.h>
++#include <linux/errno.h>
++#include <linux/err.h>
++#include <linux/cma.h>
++#include <linux/scatterlist.h>
++#include <linux/highmem.h>
++
++struct ion_cma_heap {
++	struct ion_heap heap;
++	struct cma *cma;
++} cma_heaps[MAX_CMA_AREAS];
++
++#define to_cma_heap(x) container_of(x, struct ion_cma_heap, heap)
++
++/* ION CMA heap operations functions */
++static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
++			    unsigned long len,
++			    unsigned long flags)
++{
++	struct ion_cma_heap *cma_heap = to_cma_heap(heap);
++	struct sg_table *table;
++	struct page *pages;
++	unsigned long size = PAGE_ALIGN(len);
++	unsigned long nr_pages = size >> PAGE_SHIFT;
++	unsigned long align = get_order(size);
++	int ret;
++
++	if (align > CONFIG_CMA_ALIGNMENT)
++		align = CONFIG_CMA_ALIGNMENT;
++
++	pages = cma_alloc(cma_heap->cma, nr_pages, align, false);
++	if (!pages)
++		return -ENOMEM;
++
++	if (PageHighMem(pages)) {
++		unsigned long nr_clear_pages = nr_pages;
++		struct page *page = pages;
++
++		while (nr_clear_pages > 0) {
++			void *vaddr = kmap_atomic(page);
++
++			memset(vaddr, 0, PAGE_SIZE);
++			kunmap_atomic(vaddr);
++			page++;
++			nr_clear_pages--;
++		}
++	} else {
++		memset(page_address(pages), 0, size);
++	}
++
++	table = kmalloc(sizeof(*table), GFP_KERNEL);
++	if (!table)
++		goto err;
++
++	ret = sg_alloc_table(table, 1, GFP_KERNEL);
++	if (ret)
++		goto free_mem;
++
++	sg_set_page(table->sgl, pages, size, 0);
++
++	buffer->priv_virt = pages;
++	buffer->sg_table = table;
++
++	ion_buffer_prep_noncached(buffer);
++
++	return 0;
++
++free_mem:
++	kfree(table);
++err:
++	cma_release(cma_heap->cma, pages, nr_pages);
++	return -ENOMEM;
++}
++
++static void ion_cma_free(struct ion_buffer *buffer)
++{
++	struct ion_cma_heap *cma_heap = to_cma_heap(buffer->heap);
++	struct page *pages = buffer->priv_virt;
++	unsigned long nr_pages = PAGE_ALIGN(buffer->size) >> PAGE_SHIFT;
++
++	/* release memory */
++	cma_release(cma_heap->cma, pages, nr_pages);
++	/* release sg table */
++	sg_free_table(buffer->sg_table);
++	kfree(buffer->sg_table);
++}
++
++static struct ion_heap_ops ion_cma_ops = {
++	.allocate = ion_cma_allocate,
++	.free = ion_cma_free,
++};
++
++static int __ion_add_cma_heap(struct cma *cma, void *data)
++{
++	int *cma_nr = data;
++	struct ion_cma_heap *cma_heap;
++	int ret;
++
++	if (*cma_nr >= MAX_CMA_AREAS)
++		return -EINVAL;
++
++	cma_heap = &cma_heaps[*cma_nr];
++	cma_heap->heap.ops = &ion_cma_ops;
++	cma_heap->heap.type = ION_HEAP_TYPE_DMA;
++	cma_heap->heap.name = cma_get_name(cma);
++
++	ret = ion_device_add_heap(&cma_heap->heap);
++	if (ret)
++		goto out;
++
++	cma_heap->cma = cma;
++	*cma_nr += 1;
++out:
++	return 0;
++}
++
++static int __init ion_cma_heap_init(void)
++{
++	int ret;
++	int nr = 0;
++
++	ret = cma_for_each_area(__ion_add_cma_heap, &nr);
++	if (ret) {
++		for (nr = 0; nr < MAX_CMA_AREAS && cma_heaps[nr].cma; nr++)
++			ion_device_remove_heap(&cma_heaps[nr].heap);
++	}
++
++	return ret;
++}
++
++static void __exit ion_cma_heap_exit(void)
++{
++	int nr;
++
++	for (nr = 0; nr < MAX_CMA_AREAS && cma_heaps[nr].cma; nr++)
++		ion_device_remove_heap(&cma_heaps[nr].heap);
++}
++
++module_init(ion_cma_heap_init);
++module_exit(ion_cma_heap_exit);
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/staging/android/ion/heaps/ion_page_pool.c b/drivers/staging/android/ion/heaps/ion_page_pool.c
+new file mode 100644
+index 000000000000..efd6ce4cc0ad
+--- /dev/null
++++ b/drivers/staging/android/ion/heaps/ion_page_pool.c
+@@ -0,0 +1,172 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ION Memory Allocator page pool helpers
++ *
++ * Copyright (C) 2011 Google, Inc.
++ */
++
++#include <linux/list.h>
++#include <linux/slab.h>
++#include <linux/swap.h>
++#include <linux/sched/signal.h>
++
++#include "ion_page_pool.h"
++
++static inline struct page *ion_page_pool_alloc_pages(struct ion_page_pool *pool)
++{
++	if (fatal_signal_pending(current))
++		return NULL;
++	return alloc_pages(pool->gfp_mask, pool->order);
++}
++
++static void ion_page_pool_free_pages(struct ion_page_pool *pool,
++				     struct page *page)
++{
++	__free_pages(page, pool->order);
++}
++
++static void ion_page_pool_add(struct ion_page_pool *pool, struct page *page)
++{
++	mutex_lock(&pool->mutex);
++	if (PageHighMem(page)) {
++		list_add_tail(&page->lru, &pool->high_items);
++		pool->high_count++;
++	} else {
++		list_add_tail(&page->lru, &pool->low_items);
++		pool->low_count++;
++	}
++
++	mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
++			    1 << pool->order);
++	mutex_unlock(&pool->mutex);
++}
++
++static struct page *ion_page_pool_remove(struct ion_page_pool *pool, bool high)
++{
++	struct page *page;
++
++	if (high) {
++		BUG_ON(!pool->high_count);
++		page = list_first_entry(&pool->high_items, struct page, lru);
++		pool->high_count--;
++	} else {
++		BUG_ON(!pool->low_count);
++		page = list_first_entry(&pool->low_items, struct page, lru);
++		pool->low_count--;
++	}
++
++	list_del(&page->lru);
++	mod_node_page_state(page_pgdat(page), NR_KERNEL_MISC_RECLAIMABLE,
++			    -(1 << pool->order));
++	return page;
++}
++
++struct page *ion_page_pool_alloc(struct ion_page_pool *pool)
++{
++	struct page *page = NULL;
++
++	BUG_ON(!pool);
++
++	mutex_lock(&pool->mutex);
++	if (pool->high_count)
++		page = ion_page_pool_remove(pool, true);
++	else if (pool->low_count)
++		page = ion_page_pool_remove(pool, false);
++	mutex_unlock(&pool->mutex);
++
++	if (!page)
++		page = ion_page_pool_alloc_pages(pool);
++
++	return page;
++}
++EXPORT_SYMBOL_GPL(ion_page_pool_alloc);
++
++void ion_page_pool_free(struct ion_page_pool *pool, struct page *page)
++{
++	BUG_ON(pool->order != compound_order(page));
++
++	ion_page_pool_add(pool, page);
++}
++EXPORT_SYMBOL_GPL(ion_page_pool_free);
++
++static int ion_page_pool_total(struct ion_page_pool *pool, bool high)
++{
++	int count = pool->low_count;
++
++	if (high)
++		count += pool->high_count;
++
++	return count << pool->order;
++}
++
++int ion_page_pool_nr_pages(struct ion_page_pool *pool)
++{
++	int nr_total_pages;
++
++	mutex_lock(&pool->mutex);
++	nr_total_pages = ion_page_pool_total(pool, true);
++	mutex_unlock(&pool->mutex);
++
++	return nr_total_pages;
++}
++EXPORT_SYMBOL_GPL(ion_page_pool_nr_pages);
++
++int ion_page_pool_shrink(struct ion_page_pool *pool, gfp_t gfp_mask,
++			 int nr_to_scan)
++{
++	int freed = 0;
++	bool high;
++
++	if (current_is_kswapd())
++		high = true;
++	else
++		high = !!(gfp_mask & __GFP_HIGHMEM);
++
++	if (nr_to_scan == 0)
++		return ion_page_pool_total(pool, high);
++
++	while (freed < nr_to_scan) {
++		struct page *page;
++
++		mutex_lock(&pool->mutex);
++		if (pool->low_count) {
++			page = ion_page_pool_remove(pool, false);
++		} else if (high && pool->high_count) {
++			page = ion_page_pool_remove(pool, true);
++		} else {
++			mutex_unlock(&pool->mutex);
++			break;
++		}
++		mutex_unlock(&pool->mutex);
++		ion_page_pool_free_pages(pool, page);
++		freed += (1 << pool->order);
++	}
++
++	return freed;
++}
++EXPORT_SYMBOL_GPL(ion_page_pool_shrink);
++
++struct ion_page_pool *ion_page_pool_create(gfp_t gfp_mask, unsigned int order)
++{
++	struct ion_page_pool *pool = kmalloc(sizeof(*pool), GFP_KERNEL);
++
++	if (!pool)
++		return NULL;
++	pool->high_count = 0;
++	pool->low_count = 0;
++	INIT_LIST_HEAD(&pool->low_items);
++	INIT_LIST_HEAD(&pool->high_items);
++	pool->gfp_mask = gfp_mask | __GFP_COMP;
++	pool->order = order;
++	mutex_init(&pool->mutex);
++	plist_node_init(&pool->list, order);
++
++	return pool;
++}
++EXPORT_SYMBOL_GPL(ion_page_pool_create);
++
++void ion_page_pool_destroy(struct ion_page_pool *pool)
++{
++	kfree(pool);
++}
++EXPORT_SYMBOL_GPL(ion_page_pool_destroy);
+diff --git a/drivers/staging/android/ion/heaps/ion_page_pool.h b/drivers/staging/android/ion/heaps/ion_page_pool.h
+new file mode 100644
+index 000000000000..10c79090c7a0
+--- /dev/null
++++ b/drivers/staging/android/ion/heaps/ion_page_pool.h
+@@ -0,0 +1,67 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * ION Page Pool kernel interface header
++ *
++ * Copyright (C) 2011 Google, Inc.
++ */
++
++#ifndef _ION_PAGE_POOL_H
++#define _ION_PAGE_POOL_H
++
++#include <linux/mm_types.h>
++#include <linux/mutex.h>
++#include <linux/shrinker.h>
++#include <linux/types.h>
++
++/**
++ * functions for creating and destroying a heap pool -- allows you
++ * to keep a pool of pre allocated memory to use from your heap.  Keeping
++ * a pool of memory that is ready for dma, ie any cached mapping have been
++ * invalidated from the cache, provides a significant performance benefit on
++ * many systems
++ */
++
++/**
++ * struct ion_page_pool - pagepool struct
++ * @high_count:		number of highmem items in the pool
++ * @low_count:		number of lowmem items in the pool
++ * @high_items:		list of highmem items
++ * @low_items:		list of lowmem items
++ * @mutex:		lock protecting this struct and especially the count
++ *			item list
++ * @gfp_mask:		gfp_mask to use from alloc
++ * @order:		order of pages in the pool
++ * @list:		plist node for list of pools
++ *
++ * Allows you to keep a pool of pre allocated pages to use from your heap.
++ * Keeping a pool of pages that is ready for dma, ie any cached mapping have
++ * been invalidated from the cache, provides a significant performance benefit
++ * on many systems
++ */
++struct ion_page_pool {
++	int high_count;
++	int low_count;
++	struct list_head high_items;
++	struct list_head low_items;
++	struct mutex mutex;
++	gfp_t gfp_mask;
++	unsigned int order;
++	struct plist_node list;
++};
++
++struct ion_page_pool *ion_page_pool_create(gfp_t gfp_mask, unsigned int order);
++void ion_page_pool_destroy(struct ion_page_pool *pool);
++struct page *ion_page_pool_alloc(struct ion_page_pool *pool);
++void ion_page_pool_free(struct ion_page_pool *pool, struct page *page);
++int ion_page_pool_nr_pages(struct ion_page_pool *pool);
++
++/** ion_page_pool_shrink - shrinks the size of the memory cached in the pool
++ * @pool:		the pool
++ * @gfp_mask:		the memory type to reclaim
++ * @nr_to_scan:		number of items to shrink in pages
++ *
++ * returns the number of items freed in pages
++ */
++int ion_page_pool_shrink(struct ion_page_pool *pool, gfp_t gfp_mask,
++			 int nr_to_scan);
++#endif /* _ION_PAGE_POOL_H */
+diff --git a/drivers/staging/android/ion/heaps/ion_system_heap.c b/drivers/staging/android/ion/heaps/ion_system_heap.c
+new file mode 100644
+index 000000000000..fc630492996f
+--- /dev/null
++++ b/drivers/staging/android/ion/heaps/ion_system_heap.c
+@@ -0,0 +1,290 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ION Memory Allocator system heap exporter
++ *
++ * Copyright (C) 2011 Google, Inc.
++ */
++
++#include <asm/page.h>
++#include <linux/dma-mapping.h>
++#include <linux/err.h>
++#include <linux/highmem.h>
++#include <linux/ion.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/scatterlist.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++
++#include "ion_page_pool.h"
++
++#define NUM_ORDERS ARRAY_SIZE(orders)
++
++static gfp_t high_order_gfp_flags = (GFP_HIGHUSER | __GFP_ZERO | __GFP_NOWARN |
++				     __GFP_NORETRY) & ~__GFP_RECLAIM;
++static gfp_t low_order_gfp_flags  = GFP_HIGHUSER | __GFP_ZERO;
++static const unsigned int orders[] = {8, 4, 0};
++
++static int order_to_index(unsigned int order)
++{
++	int i;
++
++	for (i = 0; i < NUM_ORDERS; i++)
++		if (order == orders[i])
++			return i;
++	BUG();
++	return -1;
++}
++
++static inline unsigned int order_to_size(int order)
++{
++	return PAGE_SIZE << order;
++}
++
++struct ion_system_heap {
++	struct ion_heap heap;
++	struct ion_page_pool *pools[NUM_ORDERS];
++};
++
++static struct page *alloc_buffer_page(struct ion_system_heap *heap,
++				      struct ion_buffer *buffer,
++				      unsigned long order)
++{
++	struct ion_page_pool *pool = heap->pools[order_to_index(order)];
++
++	return ion_page_pool_alloc(pool);
++}
++
++static void free_buffer_page(struct ion_system_heap *heap,
++			     struct ion_buffer *buffer, struct page *page)
++{
++	struct ion_page_pool *pool;
++	unsigned int order = compound_order(page);
++
++	/* go to system */
++	if (buffer->private_flags & ION_PRIV_FLAG_SHRINKER_FREE) {
++		__free_pages(page, order);
++		return;
++	}
++
++	pool = heap->pools[order_to_index(order)];
++
++	ion_page_pool_free(pool, page);
++}
++
++static struct page *alloc_largest_available(struct ion_system_heap *heap,
++					    struct ion_buffer *buffer,
++					    unsigned long size,
++					    unsigned int max_order)
++{
++	struct page *page;
++	int i;
++
++	for (i = 0; i < NUM_ORDERS; i++) {
++		if (size < order_to_size(orders[i]))
++			continue;
++		if (max_order < orders[i])
++			continue;
++
++		page = alloc_buffer_page(heap, buffer, orders[i]);
++		if (!page)
++			continue;
++
++		return page;
++	}
++
++	return NULL;
++}
++
++static int ion_system_heap_allocate(struct ion_heap *heap,
++				    struct ion_buffer *buffer,
++				    unsigned long size,
++				    unsigned long flags)
++{
++	struct ion_system_heap *sys_heap = container_of(heap,
++							struct ion_system_heap,
++							heap);
++	struct sg_table *table;
++	struct scatterlist *sg;
++	struct list_head pages;
++	struct page *page, *tmp_page;
++	int i = 0;
++	unsigned long size_remaining = PAGE_ALIGN(size);
++	unsigned int max_order = orders[0];
++
++	if (size / PAGE_SIZE > totalram_pages() / 2)
++		return -ENOMEM;
++
++	INIT_LIST_HEAD(&pages);
++	while (size_remaining > 0) {
++		page = alloc_largest_available(sys_heap, buffer, size_remaining,
++					       max_order);
++		if (!page)
++			goto free_pages;
++		list_add_tail(&page->lru, &pages);
++		size_remaining -= page_size(page);
++		max_order = compound_order(page);
++		i++;
++	}
++	table = kmalloc(sizeof(*table), GFP_KERNEL);
++	if (!table)
++		goto free_pages;
++
++	if (sg_alloc_table(table, i, GFP_KERNEL))
++		goto free_table;
++
++	sg = table->sgl;
++	list_for_each_entry_safe(page, tmp_page, &pages, lru) {
++		sg_set_page(sg, page, page_size(page), 0);
++		sg = sg_next(sg);
++		list_del(&page->lru);
++	}
++
++	buffer->sg_table = table;
++
++	ion_buffer_prep_noncached(buffer);
++
++	return 0;
++
++free_table:
++	kfree(table);
++free_pages:
++	list_for_each_entry_safe(page, tmp_page, &pages, lru)
++		free_buffer_page(sys_heap, buffer, page);
++	return -ENOMEM;
++}
++
++static void ion_system_heap_free(struct ion_buffer *buffer)
++{
++	struct ion_system_heap *sys_heap = container_of(buffer->heap,
++							struct ion_system_heap,
++							heap);
++	struct sg_table *table = buffer->sg_table;
++	struct scatterlist *sg;
++	int i;
++
++	/* zero the buffer before goto page pool */
++	if (!(buffer->private_flags & ION_PRIV_FLAG_SHRINKER_FREE))
++		ion_buffer_zero(buffer);
++
++	for_each_sgtable_sg(table, sg, i)
++		free_buffer_page(sys_heap, buffer, sg_page(sg));
++	sg_free_table(table);
++	kfree(table);
++}
++
++static int ion_system_heap_shrink(struct ion_heap *heap, gfp_t gfp_mask,
++				  int nr_to_scan)
++{
++	struct ion_page_pool *pool;
++	struct ion_system_heap *sys_heap;
++	int nr_total = 0;
++	int i, nr_freed;
++	int only_scan = 0;
++
++	sys_heap = container_of(heap, struct ion_system_heap, heap);
++
++	if (!nr_to_scan)
++		only_scan = 1;
++
++	for (i = 0; i < NUM_ORDERS; i++) {
++		pool = sys_heap->pools[i];
++
++		if (only_scan) {
++			nr_total += ion_page_pool_shrink(pool,
++							 gfp_mask,
++							 nr_to_scan);
++
++		} else {
++			nr_freed = ion_page_pool_shrink(pool,
++							gfp_mask,
++							nr_to_scan);
++			nr_to_scan -= nr_freed;
++			nr_total += nr_freed;
++			if (nr_to_scan <= 0)
++				break;
++		}
++	}
++	return nr_total;
++}
++
++static long ion_system_get_pool_size(struct ion_heap *heap)
++{
++	struct ion_system_heap *sys_heap;
++	long total_pages = 0;
++	int i;
++
++	sys_heap = container_of(heap, struct ion_system_heap, heap);
++	for (i = 0; i < NUM_ORDERS; i++)
++		total_pages += ion_page_pool_nr_pages(sys_heap->pools[i]);
++
++	return total_pages;
++}
++
++static void ion_system_heap_destroy_pools(struct ion_page_pool **pools)
++{
++	int i;
++
++	for (i = 0; i < NUM_ORDERS; i++)
++		if (pools[i])
++			ion_page_pool_destroy(pools[i]);
++}
++
++static int ion_system_heap_create_pools(struct ion_page_pool **pools)
++{
++	int i;
++
++	for (i = 0; i < NUM_ORDERS; i++) {
++		struct ion_page_pool *pool;
++		gfp_t gfp_flags = low_order_gfp_flags;
++
++		if (orders[i] > 4)
++			gfp_flags = high_order_gfp_flags;
++
++		pool = ion_page_pool_create(gfp_flags, orders[i]);
++		if (!pool)
++			goto err_create_pool;
++		pools[i] = pool;
++	}
++
++	return 0;
++
++err_create_pool:
++	ion_system_heap_destroy_pools(pools);
++	return -ENOMEM;
++}
++
++static struct ion_heap_ops system_heap_ops = {
++	.allocate = ion_system_heap_allocate,
++	.free = ion_system_heap_free,
++	.shrink = ion_system_heap_shrink,
++	.get_pool_size = ion_system_get_pool_size,
++};
++
++static struct ion_system_heap system_heap = {
++	.heap = {
++		.ops = &system_heap_ops,
++		.type = ION_HEAP_TYPE_SYSTEM,
++		.flags = ION_HEAP_FLAG_DEFER_FREE,
++		.name = "ion_system_heap",
++	}
++};
++
++static int __init ion_system_heap_init(void)
++{
++	int ret = ion_system_heap_create_pools(system_heap.pools);
++	if (ret)
++		return ret;
++
++	return ion_device_add_heap(&system_heap.heap);
++}
++
++static void __exit ion_system_heap_exit(void)
++{
++	ion_device_remove_heap(&system_heap.heap);
++	ion_system_heap_destroy_pools(system_heap.pools);
++}
++
++module_init(ion_system_heap_init);
++module_exit(ion_system_heap_exit);
++MODULE_LICENSE("GPL v2");
+diff --git a/drivers/staging/android/ion/ion.c b/drivers/staging/android/ion/ion.c
+new file mode 100644
+index 000000000000..268c4610c25a
+--- /dev/null
++++ b/drivers/staging/android/ion/ion.c
+@@ -0,0 +1,519 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ION Memory Allocator
++ *
++ * Copyright (C) 2011 Google, Inc.
++ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
++ *
++ */
++
++#include <linux/bitmap.h>
++#include <linux/debugfs.h>
++#include <linux/device.h>
++#include <linux/dma-buf.h>
++#include <linux/err.h>
++#include <linux/export.h>
++#include <linux/file.h>
++#include <linux/freezer.h>
++#include <linux/fs.h>
++#include <linux/kthread.h>
++#include <linux/list.h>
++#include <linux/mm.h>
++#include <linux/mm_types.h>
++#include <linux/rbtree.h>
++#include <linux/sched/task.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++
++#include "ion_private.h"
++
++#define ION_CURRENT_ABI_VERSION  2
++
++static struct ion_device *internal_dev;
++
++/* Entry into ION allocator for rest of the kernel */
++struct dma_buf *ion_alloc(size_t len, unsigned int heap_id_mask,
++			  unsigned int flags)
++{
++	return ion_dmabuf_alloc(internal_dev, len, heap_id_mask, flags);
++}
++EXPORT_SYMBOL_GPL(ion_alloc);
++
++int ion_free(struct ion_buffer *buffer)
++{
++	return ion_buffer_destroy(internal_dev, buffer);
++}
++EXPORT_SYMBOL_GPL(ion_free);
++
++static int ion_alloc_fd(size_t len, unsigned int heap_id_mask,
++			unsigned int flags)
++{
++	int fd;
++	struct dma_buf *dmabuf;
++
++	dmabuf = ion_dmabuf_alloc(internal_dev, len, heap_id_mask, flags);
++	if (IS_ERR(dmabuf))
++		return PTR_ERR(dmabuf);
++
++	fd = dma_buf_fd(dmabuf, O_CLOEXEC);
++	if (fd < 0)
++		dma_buf_put(dmabuf);
++
++	return fd;
++}
++
++size_t ion_query_heaps_kernel(struct ion_heap_data *hdata, size_t size)
++{
++	struct ion_device *dev = internal_dev;
++	size_t i = 0, num_heaps = 0;
++	struct ion_heap *heap;
++
++	down_read(&dev->lock);
++
++	// If size is 0, return without updating hdata.
++	if (size == 0) {
++		num_heaps = dev->heap_cnt;
++		goto out;
++	}
++
++	plist_for_each_entry(heap, &dev->heaps, node) {
++		strncpy(hdata[i].name, heap->name, MAX_HEAP_NAME);
++		hdata[i].name[MAX_HEAP_NAME - 1] = '\0';
++		hdata[i].type = heap->type;
++		hdata[i].heap_id = heap->id;
++
++		i++;
++		if (i >= size)
++			break;
++	}
++
++	num_heaps = i;
++out:
++	up_read(&dev->lock);
++	return num_heaps;
++}
++EXPORT_SYMBOL_GPL(ion_query_heaps_kernel);
++
++static int ion_query_heaps(struct ion_heap_query *query)
++{
++	struct ion_device *dev = internal_dev;
++	struct ion_heap_data __user *buffer = u64_to_user_ptr(query->heaps);
++	int ret = -EINVAL, cnt = 0, max_cnt;
++	struct ion_heap *heap;
++	struct ion_heap_data hdata;
++
++	memset(&hdata, 0, sizeof(hdata));
++
++	down_read(&dev->lock);
++	if (!buffer) {
++		query->cnt = dev->heap_cnt;
++		ret = 0;
++		goto out;
++	}
++
++	if (query->cnt <= 0)
++		goto out;
++
++	max_cnt = query->cnt;
++
++	plist_for_each_entry(heap, &dev->heaps, node) {
++		strncpy(hdata.name, heap->name, MAX_HEAP_NAME);
++		hdata.name[sizeof(hdata.name) - 1] = '\0';
++		hdata.type = heap->type;
++		hdata.heap_id = heap->id;
++
++		if (copy_to_user(&buffer[cnt], &hdata, sizeof(hdata))) {
++			ret = -EFAULT;
++			goto out;
++		}
++
++		cnt++;
++		if (cnt >= max_cnt)
++			break;
++	}
++
++	query->cnt = cnt;
++	ret = 0;
++out:
++	up_read(&dev->lock);
++	return ret;
++}
++
++union ion_ioctl_arg {
++	struct ion_allocation_data allocation;
++	struct ion_heap_query query;
++	u32 ion_abi_version;
++};
++
++static int validate_ioctl_arg(unsigned int cmd, union ion_ioctl_arg *arg)
++{
++	switch (cmd) {
++	case ION_IOC_HEAP_QUERY:
++		if (arg->query.reserved0 ||
++		    arg->query.reserved1 ||
++		    arg->query.reserved2)
++			return -EINVAL;
++		break;
++	default:
++		break;
++	}
++
++	return 0;
++}
++
++static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
++{
++	int ret = 0;
++	union ion_ioctl_arg data;
++
++	if (_IOC_SIZE(cmd) > sizeof(data))
++		return -EINVAL;
++
++	/*
++	 * The copy_from_user is unconditional here for both read and write
++	 * to do the validate. If there is no write for the ioctl, the
++	 * buffer is cleared
++	 */
++	if (copy_from_user(&data, (void __user *)arg, _IOC_SIZE(cmd)))
++		return -EFAULT;
++
++	ret = validate_ioctl_arg(cmd, &data);
++	if (ret) {
++		pr_warn_once("%s: ioctl validate failed\n", __func__);
++		return ret;
++	}
++
++	if (!(_IOC_DIR(cmd) & _IOC_WRITE))
++		memset(&data, 0, sizeof(data));
++
++	switch (cmd) {
++	case ION_IOC_ALLOC:
++	{
++		int fd;
++
++		fd = ion_alloc_fd(data.allocation.len,
++				  data.allocation.heap_id_mask,
++				  data.allocation.flags);
++		if (fd < 0)
++			return fd;
++
++		data.allocation.fd = fd;
++
++		break;
++	}
++	case ION_IOC_HEAP_QUERY:
++		ret = ion_query_heaps(&data.query);
++		break;
++	case ION_IOC_ABI_VERSION:
++		data.ion_abi_version = ION_CURRENT_ABI_VERSION;
++		break;
++	default:
++		return -ENOTTY;
++	}
++
++	if (_IOC_DIR(cmd) & _IOC_READ) {
++		if (copy_to_user((void __user *)arg, &data, _IOC_SIZE(cmd)))
++			return -EFAULT;
++	}
++	return ret;
++}
++
++static const struct file_operations ion_fops = {
++	.owner          = THIS_MODULE,
++	.unlocked_ioctl = ion_ioctl,
++	.compat_ioctl	= compat_ptr_ioctl,
++};
++
++static int debug_shrink_set(void *data, u64 val)
++{
++	struct ion_heap *heap = data;
++	struct shrink_control sc;
++	int objs;
++
++	sc.gfp_mask = GFP_HIGHUSER;
++	sc.nr_to_scan = val;
++
++	if (!val) {
++		objs = heap->shrinker.count_objects(&heap->shrinker, &sc);
++		sc.nr_to_scan = objs;
++	}
++
++	heap->shrinker.scan_objects(&heap->shrinker, &sc);
++	return 0;
++}
++
++static int debug_shrink_get(void *data, u64 *val)
++{
++	struct ion_heap *heap = data;
++	struct shrink_control sc;
++	int objs;
++
++	sc.gfp_mask = GFP_HIGHUSER;
++	sc.nr_to_scan = 0;
++
++	objs = heap->shrinker.count_objects(&heap->shrinker, &sc);
++	*val = objs;
++	return 0;
++}
++
++DEFINE_SIMPLE_ATTRIBUTE(debug_shrink_fops, debug_shrink_get,
++			debug_shrink_set, "%llu\n");
++
++static int ion_assign_heap_id(struct ion_heap *heap, struct ion_device *dev)
++{
++	int id_bit = -EINVAL;
++	int start_bit = -1, end_bit = -1;
++
++	switch (heap->type) {
++	case ION_HEAP_TYPE_SYSTEM:
++		id_bit = __ffs(ION_HEAP_SYSTEM);
++		break;
++	case ION_HEAP_TYPE_DMA:
++		start_bit = __ffs(ION_HEAP_DMA_START);
++		end_bit = __ffs(ION_HEAP_DMA_END);
++		break;
++	case ION_HEAP_TYPE_CUSTOM ... ION_HEAP_TYPE_MAX:
++		start_bit = __ffs(ION_HEAP_CUSTOM_START);
++		end_bit = __ffs(ION_HEAP_CUSTOM_END);
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	/* For carveout, dma & custom heaps, we first let the heaps choose their
++	 * own IDs. This allows the old behaviour of knowing the heap ids
++	 * of these type of heaps  in advance in user space. If a heap with
++	 * that ID already exists, it is an error.
++	 *
++	 * If the heap hasn't picked an id by itself, then we assign it
++	 * one.
++	 */
++	if (id_bit < 0) {
++		if (heap->id) {
++			id_bit = __ffs(heap->id);
++			if (id_bit < start_bit || id_bit > end_bit)
++				return -EINVAL;
++		} else {
++			id_bit = find_next_zero_bit(dev->heap_ids, end_bit + 1,
++						    start_bit);
++			if (id_bit > end_bit)
++				return -ENOSPC;
++		}
++	}
++
++	if (test_and_set_bit(id_bit, dev->heap_ids))
++		return -EEXIST;
++	heap->id = id_bit;
++	dev->heap_cnt++;
++
++	return 0;
++}
++
++int __ion_device_add_heap(struct ion_heap *heap, struct module *owner)
++{
++	struct ion_device *dev = internal_dev;
++	int ret;
++	struct dentry *heap_root;
++	char debug_name[64];
++
++	if (!heap || !heap->ops || !heap->ops->allocate || !heap->ops->free) {
++		pr_err("%s: invalid heap or heap_ops\n", __func__);
++		ret = -EINVAL;
++		goto out;
++	}
++
++	heap->owner = owner;
++	spin_lock_init(&heap->free_lock);
++	spin_lock_init(&heap->stat_lock);
++	heap->free_list_size = 0;
++
++	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE) {
++		ret = ion_heap_init_deferred_free(heap);
++		if (ret)
++			goto out_heap_cleanup;
++	}
++
++	if ((heap->flags & ION_HEAP_FLAG_DEFER_FREE) || heap->ops->shrink) {
++		ret = ion_heap_init_shrinker(heap);
++		if (ret) {
++			pr_err("%s: Failed to register shrinker\n", __func__);
++			goto out_heap_cleanup;
++		}
++	}
++
++	heap->num_of_buffers = 0;
++	heap->num_of_alloc_bytes = 0;
++	heap->alloc_bytes_wm = 0;
++
++	heap_root = debugfs_create_dir(heap->name, dev->debug_root);
++	debugfs_create_u64("num_of_buffers",
++			   0444, heap_root,
++			   &heap->num_of_buffers);
++	debugfs_create_u64("num_of_alloc_bytes",
++			   0444,
++			   heap_root,
++			   &heap->num_of_alloc_bytes);
++	debugfs_create_u64("alloc_bytes_wm",
++			   0444,
++			   heap_root,
++			   &heap->alloc_bytes_wm);
++
++	if (heap->shrinker.count_objects &&
++	    heap->shrinker.scan_objects) {
++		snprintf(debug_name, 64, "%s_shrink", heap->name);
++		debugfs_create_file(debug_name,
++				    0644,
++				    heap_root,
++				    heap,
++				    &debug_shrink_fops);
++	}
++
++	heap->debugfs_dir = heap_root;
++	down_write(&dev->lock);
++	ret = ion_assign_heap_id(heap, dev);
++	if (ret) {
++		pr_err("%s: Failed to assign heap id for heap type %x\n",
++		       __func__, heap->type);
++		up_write(&dev->lock);
++		goto out_debugfs_cleanup;
++	}
++
++	/*
++	 * use negative heap->id to reverse the priority -- when traversing
++	 * the list later attempt higher id numbers first
++	 */
++	plist_node_init(&heap->node, -heap->id);
++	plist_add(&heap->node, &dev->heaps);
++
++	up_write(&dev->lock);
++
++	return 0;
++
++out_debugfs_cleanup:
++	debugfs_remove_recursive(heap->debugfs_dir);
++out_heap_cleanup:
++	ion_heap_cleanup(heap);
++out:
++	return ret;
++}
++EXPORT_SYMBOL_GPL(__ion_device_add_heap);
++
++void ion_device_remove_heap(struct ion_heap *heap)
++{
++	struct ion_device *dev = internal_dev;
++
++	if (!heap) {
++		pr_err("%s: Invalid argument\n", __func__);
++		return;
++	}
++
++	// take semaphore and remove the heap from dev->heap list
++	down_write(&dev->lock);
++	/* So no new allocations can happen from this heap */
++	plist_del(&heap->node, &dev->heaps);
++	if (ion_heap_cleanup(heap) != 0) {
++		pr_warn("%s: failed to cleanup heap (%s)\n",
++			__func__, heap->name);
++	}
++	debugfs_remove_recursive(heap->debugfs_dir);
++	clear_bit(heap->id, dev->heap_ids);
++	dev->heap_cnt--;
++	up_write(&dev->lock);
++}
++EXPORT_SYMBOL_GPL(ion_device_remove_heap);
++
++static ssize_t
++total_heaps_kb_show(struct kobject *kobj, struct kobj_attribute *attr,
++		    char *buf)
++{
++	return sprintf(buf, "%llu\n",
++		       div_u64(ion_get_total_heap_bytes(), 1024));
++}
++
++static ssize_t
++total_pools_kb_show(struct kobject *kobj, struct kobj_attribute *attr,
++		    char *buf)
++{
++	struct ion_device *dev = internal_dev;
++	struct ion_heap *heap;
++	u64 total_pages = 0;
++
++	down_read(&dev->lock);
++	plist_for_each_entry(heap, &dev->heaps, node)
++		if (heap->ops->get_pool_size)
++			total_pages += heap->ops->get_pool_size(heap);
++	up_read(&dev->lock);
++
++	return sprintf(buf, "%llu\n", total_pages * (PAGE_SIZE / 1024));
++}
++
++static struct kobj_attribute total_heaps_kb_attr =
++	__ATTR_RO(total_heaps_kb);
++
++static struct kobj_attribute total_pools_kb_attr =
++	__ATTR_RO(total_pools_kb);
++
++static struct attribute *ion_device_attrs[] = {
++	&total_heaps_kb_attr.attr,
++	&total_pools_kb_attr.attr,
++	NULL,
++};
++
++ATTRIBUTE_GROUPS(ion_device);
++
++static int ion_init_sysfs(void)
++{
++	struct kobject *ion_kobj;
++	int ret;
++
++	ion_kobj = kobject_create_and_add("ion", kernel_kobj);
++	if (!ion_kobj)
++		return -ENOMEM;
++
++	ret = sysfs_create_groups(ion_kobj, ion_device_groups);
++	if (ret) {
++		kobject_put(ion_kobj);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int ion_device_create(void)
++{
++	struct ion_device *idev;
++	int ret;
++
++	idev = kzalloc(sizeof(*idev), GFP_KERNEL);
++	if (!idev)
++		return -ENOMEM;
++
++	idev->dev.minor = MISC_DYNAMIC_MINOR;
++	idev->dev.name = "ion";
++	idev->dev.fops = &ion_fops;
++	idev->dev.parent = NULL;
++	ret = misc_register(&idev->dev);
++	if (ret) {
++		pr_err("ion: failed to register misc device.\n");
++		goto err_reg;
++	}
++
++	ret = ion_init_sysfs();
++	if (ret) {
++		pr_err("ion: failed to add sysfs attributes.\n");
++		goto err_sysfs;
++	}
++
++	idev->debug_root = debugfs_create_dir("ion", NULL);
++	init_rwsem(&idev->lock);
++	plist_head_init(&idev->heaps);
++	internal_dev = idev;
++	return 0;
++
++err_sysfs:
++	misc_deregister(&idev->dev);
++err_reg:
++	kfree(idev);
++	return ret;
++}
++subsys_initcall(ion_device_create);
+diff --git a/drivers/staging/android/ion/ion_buffer.c b/drivers/staging/android/ion/ion_buffer.c
+new file mode 100644
+index 000000000000..9baca1a472b6
+--- /dev/null
++++ b/drivers/staging/android/ion/ion_buffer.c
+@@ -0,0 +1,278 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ION Memory Allocator - buffer interface
++ *
++ * Copyright (c) 2019, Google, Inc.
++ */
++
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++#include <linux/dma-map-ops.h>
++
++#define CREATE_TRACE_POINTS
++#include "ion_trace.h"
++#include "ion_private.h"
++
++static atomic_long_t total_heap_bytes;
++
++static void track_buffer_created(struct ion_buffer *buffer)
++{
++	long total = atomic_long_add_return(buffer->size, &total_heap_bytes);
++
++	trace_ion_stat(buffer->sg_table, buffer->size, total);
++}
++
++static void track_buffer_destroyed(struct ion_buffer *buffer)
++{
++	long total = atomic_long_sub_return(buffer->size, &total_heap_bytes);
++
++	trace_ion_stat(buffer->sg_table, -buffer->size, total);
++}
++
++/* this function should only be called while dev->lock is held */
++static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
++					    struct ion_device *dev,
++					    unsigned long len,
++					    unsigned long flags)
++{
++	struct ion_buffer *buffer;
++	int ret;
++
++	buffer = kzalloc(sizeof(*buffer), GFP_KERNEL);
++	if (!buffer)
++		return ERR_PTR(-ENOMEM);
++
++	buffer->heap = heap;
++	buffer->flags = flags;
++	buffer->size = len;
++
++	ret = heap->ops->allocate(heap, buffer, len, flags);
++
++	if (ret) {
++		if (!(heap->flags & ION_HEAP_FLAG_DEFER_FREE))
++			goto err2;
++
++		ion_heap_freelist_drain(heap, 0);
++		ret = heap->ops->allocate(heap, buffer, len, flags);
++		if (ret)
++			goto err2;
++	}
++
++	if (!buffer->sg_table) {
++		WARN_ONCE(1, "This heap needs to set the sgtable");
++		ret = -EINVAL;
++		goto err1;
++	}
++
++	spin_lock(&heap->stat_lock);
++	heap->num_of_buffers++;
++	heap->num_of_alloc_bytes += len;
++	if (heap->num_of_alloc_bytes > heap->alloc_bytes_wm)
++		heap->alloc_bytes_wm = heap->num_of_alloc_bytes;
++	if (heap->num_of_buffers == 1) {
++		/* This module reference lasts as long as at least one
++		 * buffer is allocated from the heap. We are protected
++		 * against ion_device_remove_heap() with dev->lock, so we can
++		 * safely assume the module reference is going to* succeed.
++		 */
++		__module_get(heap->owner);
++	}
++	spin_unlock(&heap->stat_lock);
++
++	INIT_LIST_HEAD(&buffer->attachments);
++	mutex_init(&buffer->lock);
++	track_buffer_created(buffer);
++	return buffer;
++
++err1:
++	heap->ops->free(buffer);
++err2:
++	kfree(buffer);
++	return ERR_PTR(ret);
++}
++
++static int ion_clear_pages(struct page **pages, int num, pgprot_t pgprot)
++{
++	void *addr = vmap(pages, num, VM_MAP, pgprot);
++
++	if (!addr)
++		return -ENOMEM;
++	memset(addr, 0, PAGE_SIZE * num);
++	vunmap(addr);
++
++	return 0;
++}
++
++static int ion_sglist_zero(struct scatterlist *sgl, unsigned int nents,
++			   pgprot_t pgprot)
++{
++	int p = 0;
++	int ret = 0;
++	struct sg_page_iter piter;
++	struct page *pages[32];
++
++	for_each_sg_page(sgl, &piter, nents, 0) {
++		pages[p++] = sg_page_iter_page(&piter);
++		if (p == ARRAY_SIZE(pages)) {
++			ret = ion_clear_pages(pages, p, pgprot);
++			if (ret)
++				return ret;
++			p = 0;
++		}
++	}
++	if (p)
++		ret = ion_clear_pages(pages, p, pgprot);
++
++	return ret;
++}
++
++struct ion_buffer *ion_buffer_alloc(struct ion_device *dev, size_t len,
++				    unsigned int heap_id_mask,
++				    unsigned int flags)
++{
++	struct ion_buffer *buffer = NULL;
++	struct ion_heap *heap;
++
++	if (!dev || !len) {
++		return ERR_PTR(-EINVAL);
++	}
++
++	/*
++	 * traverse the list of heaps available in this system in priority
++	 * order.  If the heap type is supported by the client, and matches the
++	 * request of the caller allocate from it.  Repeat until allocate has
++	 * succeeded or all heaps have been tried
++	 */
++	len = PAGE_ALIGN(len);
++	if (!len)
++		return ERR_PTR(-EINVAL);
++
++	down_read(&dev->lock);
++	plist_for_each_entry(heap, &dev->heaps, node) {
++		/* if the caller didn't specify this heap id */
++		if (!((1 << heap->id) & heap_id_mask))
++			continue;
++		buffer = ion_buffer_create(heap, dev, len, flags);
++		if (!IS_ERR(buffer))
++			break;
++	}
++	up_read(&dev->lock);
++
++	if (!buffer)
++		return ERR_PTR(-ENODEV);
++
++	if (IS_ERR(buffer))
++		return ERR_CAST(buffer);
++
++	return buffer;
++}
++
++int ion_buffer_zero(struct ion_buffer *buffer)
++{
++	struct sg_table *table;
++	pgprot_t pgprot;
++
++	if (!buffer)
++		return -EINVAL;
++
++	table = buffer->sg_table;
++	if (buffer->flags & ION_FLAG_CACHED)
++		pgprot = PAGE_KERNEL;
++	else
++		pgprot = pgprot_writecombine(PAGE_KERNEL);
++
++	return ion_sglist_zero(table->sgl, table->nents, pgprot);
++}
++EXPORT_SYMBOL_GPL(ion_buffer_zero);
++
++void ion_buffer_prep_noncached(struct ion_buffer *buffer)
++{
++	struct scatterlist *sg;
++	struct sg_table *table;
++	int i;
++
++	if (WARN_ONCE(!buffer || !buffer->sg_table,
++		      "%s needs a buffer and a sg_table", __func__) ||
++	    buffer->flags & ION_FLAG_CACHED)
++		return;
++
++	table = buffer->sg_table;
++
++	for_each_sg(table->sgl, sg, table->orig_nents, i)
++		arch_dma_prep_coherent(sg_page(sg), sg->length);
++}
++EXPORT_SYMBOL_GPL(ion_buffer_prep_noncached);
++
++void ion_buffer_release(struct ion_buffer *buffer)
++{
++	if (buffer->kmap_cnt > 0) {
++		pr_warn_once("%s: buffer still mapped in the kernel\n",
++			     __func__);
++		ion_heap_unmap_kernel(buffer->heap, buffer);
++	}
++	buffer->heap->ops->free(buffer);
++	spin_lock(&buffer->heap->stat_lock);
++	buffer->heap->num_of_buffers--;
++	buffer->heap->num_of_alloc_bytes -= buffer->size;
++	if (buffer->heap->num_of_buffers == 0)
++		module_put(buffer->heap->owner);
++	spin_unlock(&buffer->heap->stat_lock);
++	/* drop reference to the heap module */
++
++	kfree(buffer);
++}
++
++int ion_buffer_destroy(struct ion_device *dev, struct ion_buffer *buffer)
++{
++	struct ion_heap *heap;
++
++	if (!dev || !buffer) {
++		pr_warn("%s: invalid argument\n", __func__);
++		return -EINVAL;
++	}
++
++	heap = buffer->heap;
++	track_buffer_destroyed(buffer);
++
++	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE)
++		ion_heap_freelist_add(heap, buffer);
++	else
++		ion_buffer_release(buffer);
++
++	return 0;
++}
++
++void *ion_buffer_kmap_get(struct ion_buffer *buffer)
++{
++	void *vaddr;
++
++	if (buffer->kmap_cnt) {
++		buffer->kmap_cnt++;
++		return buffer->vaddr;
++	}
++	vaddr = ion_heap_map_kernel(buffer->heap, buffer);
++	if (WARN_ONCE(!vaddr,
++		      "heap->ops->map_kernel should return ERR_PTR on error"))
++		return ERR_PTR(-EINVAL);
++	if (IS_ERR(vaddr))
++		return vaddr;
++	buffer->vaddr = vaddr;
++	buffer->kmap_cnt++;
++	return vaddr;
++}
++
++void ion_buffer_kmap_put(struct ion_buffer *buffer)
++{
++	buffer->kmap_cnt--;
++	if (!buffer->kmap_cnt) {
++		ion_heap_unmap_kernel(buffer->heap, buffer);
++		buffer->vaddr = NULL;
++	}
++}
++
++u64 ion_get_total_heap_bytes(void)
++{
++	return atomic_long_read(&total_heap_bytes);
++}
+diff --git a/drivers/staging/android/ion/ion_dma_buf.c b/drivers/staging/android/ion/ion_dma_buf.c
+new file mode 100644
+index 000000000000..0c82b406ed56
+--- /dev/null
++++ b/drivers/staging/android/ion/ion_dma_buf.c
+@@ -0,0 +1,363 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ION Memory Allocator - dmabuf interface
++ *
++ * Copyright (c) 2019, Google, Inc.
++ */
++
++#include <linux/device.h>
++#include <linux/mm.h>
++#include <linux/scatterlist.h>
++#include <linux/slab.h>
++#include <linux/vmalloc.h>
++
++#include "ion_private.h"
++
++static struct sg_table *dup_sg_table(struct sg_table *table)
++{
++	struct sg_table *new_table;
++	int ret, i;
++	struct scatterlist *sg, *new_sg;
++
++	new_table = kzalloc(sizeof(*new_table), GFP_KERNEL);
++	if (!new_table)
++		return ERR_PTR(-ENOMEM);
++
++	ret = sg_alloc_table(new_table, table->nents, GFP_KERNEL);
++	if (ret) {
++		kfree(new_table);
++		return ERR_PTR(-ENOMEM);
++	}
++
++	new_sg = new_table->sgl;
++	for_each_sg(table->sgl, sg, table->nents, i) {
++		memcpy(new_sg, sg, sizeof(*sg));
++		new_sg->dma_address = 0;
++		new_sg = sg_next(new_sg);
++	}
++
++	return new_table;
++}
++
++static void free_duped_table(struct sg_table *table)
++{
++	sg_free_table(table);
++	kfree(table);
++}
++
++static int ion_dma_buf_attach(struct dma_buf *dmabuf,
++			      struct dma_buf_attachment *attachment)
++{
++	struct ion_dma_buf_attachment *a;
++	struct sg_table *table;
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++
++	if (heap->buf_ops.attach)
++		return heap->buf_ops.attach(dmabuf, attachment);
++
++	a = kzalloc(sizeof(*a), GFP_KERNEL);
++	if (!a)
++		return -ENOMEM;
++
++	table = dup_sg_table(buffer->sg_table);
++	if (IS_ERR(table)) {
++		kfree(a);
++		return -ENOMEM;
++	}
++
++	a->table = table;
++	a->dev = attachment->dev;
++	INIT_LIST_HEAD(&a->list);
++	a->mapped = false;
++
++	attachment->priv = a;
++
++	mutex_lock(&buffer->lock);
++	list_add(&a->list, &buffer->attachments);
++	mutex_unlock(&buffer->lock);
++
++	return 0;
++}
++
++static void ion_dma_buf_detatch(struct dma_buf *dmabuf,
++				struct dma_buf_attachment *attachment)
++{
++	struct ion_dma_buf_attachment *a = attachment->priv;
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++
++	if (heap->buf_ops.detach)
++		return heap->buf_ops.detach(dmabuf, attachment);
++
++	mutex_lock(&buffer->lock);
++	list_del(&a->list);
++	mutex_unlock(&buffer->lock);
++	free_duped_table(a->table);
++
++	kfree(a);
++}
++
++static struct sg_table *ion_map_dma_buf(struct dma_buf_attachment *attachment,
++					enum dma_data_direction direction)
++{
++	struct ion_buffer *buffer = attachment->dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++	struct ion_dma_buf_attachment *a;
++	struct sg_table *table;
++	unsigned long attrs = attachment->dma_map_attrs;
++
++	if (heap->buf_ops.map_dma_buf)
++		return heap->buf_ops.map_dma_buf(attachment, direction);
++
++	a = attachment->priv;
++	table = a->table;
++
++	if (!(buffer->flags & ION_FLAG_CACHED))
++		attrs |= DMA_ATTR_SKIP_CPU_SYNC;
++
++	if (!dma_map_sg_attrs(attachment->dev, table->sgl, table->nents,
++			      direction, attrs))
++		return ERR_PTR(-ENOMEM);
++
++	a->mapped = true;
++
++	return table;
++}
++
++static void ion_unmap_dma_buf(struct dma_buf_attachment *attachment,
++			      struct sg_table *table,
++			      enum dma_data_direction direction)
++{
++	struct ion_buffer *buffer = attachment->dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++	struct ion_dma_buf_attachment *a = attachment->priv;
++	unsigned long attrs = attachment->dma_map_attrs;
++
++	if (heap->buf_ops.unmap_dma_buf)
++		return heap->buf_ops.unmap_dma_buf(attachment, table,
++						   direction);
++
++	a->mapped = false;
++
++	if (!(buffer->flags & ION_FLAG_CACHED))
++		attrs |= DMA_ATTR_SKIP_CPU_SYNC;
++
++	dma_unmap_sg_attrs(attachment->dev, table->sgl, table->nents,
++			   direction, attrs);
++}
++
++static void ion_dma_buf_release(struct dma_buf *dmabuf)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++
++	if (heap->buf_ops.release)
++		return heap->buf_ops.release(dmabuf);
++
++	ion_free(buffer);
++}
++
++static int ion_dma_buf_begin_cpu_access(struct dma_buf *dmabuf,
++					enum dma_data_direction direction)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++	struct ion_dma_buf_attachment *a;
++
++	if (heap->buf_ops.begin_cpu_access)
++		return heap->buf_ops.begin_cpu_access(dmabuf, direction);
++
++	mutex_lock(&buffer->lock);
++	if (!(buffer->flags & ION_FLAG_CACHED))
++		goto unlock;
++
++	list_for_each_entry(a, &buffer->attachments, list) {
++		if (!a->mapped)
++			continue;
++		dma_sync_sg_for_cpu(a->dev, a->table->sgl, a->table->nents,
++				    direction);
++	}
++
++unlock:
++	mutex_unlock(&buffer->lock);
++	return 0;
++}
++
++static int
++ion_dma_buf_begin_cpu_access_partial(struct dma_buf *dmabuf,
++				     enum dma_data_direction direction,
++				     unsigned int offset, unsigned int len)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++
++	/* This is done to make sure partial buffer cache flush / invalidate is
++	 * allowed. The implementation may be vendor specific in this case, so
++	 * ion core does not provide a default implementation
++	 */
++	if (!heap->buf_ops.begin_cpu_access_partial)
++		return -EOPNOTSUPP;
++
++	return heap->buf_ops.begin_cpu_access_partial(dmabuf, direction, offset,
++						      len);
++}
++
++static int ion_dma_buf_end_cpu_access(struct dma_buf *dmabuf,
++				      enum dma_data_direction direction)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++	struct ion_dma_buf_attachment *a;
++
++	if (heap->buf_ops.end_cpu_access)
++		return heap->buf_ops.end_cpu_access(dmabuf, direction);
++
++	mutex_lock(&buffer->lock);
++	if (!(buffer->flags & ION_FLAG_CACHED))
++		goto unlock;
++
++	list_for_each_entry(a, &buffer->attachments, list) {
++		if (!a->mapped)
++			continue;
++		dma_sync_sg_for_device(a->dev, a->table->sgl, a->table->nents,
++				       direction);
++	}
++unlock:
++	mutex_unlock(&buffer->lock);
++
++	return 0;
++}
++
++static int ion_dma_buf_end_cpu_access_partial(struct dma_buf *dmabuf,
++					      enum dma_data_direction direction,
++					      unsigned int offset,
++					      unsigned int len)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++
++	/* This is done to make sure partial buffer cache flush / invalidate is
++	 * allowed. The implementation may be vendor specific in this case, so
++	 * ion core does not provide a default implementation
++	 */
++	if (!heap->buf_ops.end_cpu_access_partial)
++		return -EOPNOTSUPP;
++
++	return heap->buf_ops.end_cpu_access_partial(dmabuf, direction, offset,
++						    len);
++}
++
++static int ion_dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++	int ret;
++
++	/* now map it to userspace */
++	if (heap->buf_ops.mmap) {
++		ret = heap->buf_ops.mmap(dmabuf, vma);
++	} else {
++		mutex_lock(&buffer->lock);
++		if (!(buffer->flags & ION_FLAG_CACHED))
++			vma->vm_page_prot =
++				pgprot_writecombine(vma->vm_page_prot);
++
++		ret = ion_heap_map_user(heap, buffer, vma);
++		mutex_unlock(&buffer->lock);
++	}
++
++	if (ret)
++		pr_err("%s: failure mapping buffer to userspace\n", __func__);
++
++	return ret;
++}
++
++static int ion_dma_buf_vmap(struct dma_buf *dmabuf, struct dma_buf_map *map)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++	void *vaddr;
++
++	if (heap->buf_ops.vmap)
++		return heap->buf_ops.vmap(dmabuf, map);
++
++	mutex_lock(&buffer->lock);
++	vaddr = ion_buffer_kmap_get(buffer);
++	mutex_unlock(&buffer->lock);
++
++        if (!vaddr)
++                return -ENOMEM;
++        dma_buf_map_set_vaddr(map, vaddr);
++
++	return 0;
++}
++
++static void ion_dma_buf_vunmap(struct dma_buf *dmabuf, struct dma_buf_map *map)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++
++	if (heap->buf_ops.vunmap) {
++		heap->buf_ops.vunmap(dmabuf, map);
++		return;
++	}
++
++	mutex_lock(&buffer->lock);
++	ion_buffer_kmap_put(buffer);
++	mutex_unlock(&buffer->lock);
++}
++
++static int ion_dma_buf_get_flags(struct dma_buf *dmabuf, unsigned long *flags)
++{
++	struct ion_buffer *buffer = dmabuf->priv;
++	struct ion_heap *heap = buffer->heap;
++
++	if (!heap->buf_ops.get_flags)
++		return -EOPNOTSUPP;
++
++	return heap->buf_ops.get_flags(dmabuf, flags);
++}
++
++static const struct dma_buf_ops dma_buf_ops = {
++	.attach = ion_dma_buf_attach,
++	.detach = ion_dma_buf_detatch,
++	.map_dma_buf = ion_map_dma_buf,
++	.unmap_dma_buf = ion_unmap_dma_buf,
++	.release = ion_dma_buf_release,
++	.begin_cpu_access = ion_dma_buf_begin_cpu_access,
++	.begin_cpu_access_partial = ion_dma_buf_begin_cpu_access_partial,
++	.end_cpu_access = ion_dma_buf_end_cpu_access,
++	.end_cpu_access_partial = ion_dma_buf_end_cpu_access_partial,
++	.mmap = ion_dma_buf_mmap,
++	.vmap = ion_dma_buf_vmap,
++	.vunmap = ion_dma_buf_vunmap,
++	.get_flags = ion_dma_buf_get_flags,
++};
++
++struct dma_buf *ion_dmabuf_alloc(struct ion_device *dev, size_t len,
++				 unsigned int heap_id_mask,
++				 unsigned int flags)
++{
++	struct ion_buffer *buffer;
++	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
++	struct dma_buf *dmabuf;
++
++	pr_debug("%s: len %zu heap_id_mask %u flags %x\n", __func__,
++		 len, heap_id_mask, flags);
++
++	buffer = ion_buffer_alloc(dev, len, heap_id_mask, flags);
++	if (IS_ERR(buffer))
++		return ERR_CAST(buffer);
++
++	exp_info.ops = &dma_buf_ops;
++	exp_info.size = buffer->size;
++	exp_info.flags = O_RDWR;
++	exp_info.priv = buffer;
++
++	dmabuf = dma_buf_export(&exp_info);
++	if (IS_ERR(dmabuf))
++		ion_buffer_destroy(dev, buffer);
++
++	return dmabuf;
++}
+diff --git a/drivers/staging/android/ion/ion_heap.c b/drivers/staging/android/ion/ion_heap.c
+new file mode 100644
+index 000000000000..aa29a4ee48a3
+--- /dev/null
++++ b/drivers/staging/android/ion/ion_heap.c
+@@ -0,0 +1,291 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * ION Memory Allocator generic heap helpers
++ *
++ * Copyright (C) 2011 Google, Inc.
++ */
++
++#include <linux/err.h>
++#include <linux/freezer.h>
++#include <linux/kthread.h>
++#include <linux/mm.h>
++#include <linux/rtmutex.h>
++#include <linux/sched.h>
++#include <uapi/linux/sched/types.h>
++#include <linux/scatterlist.h>
++#include <linux/vmalloc.h>
++
++#include "ion_private.h"
++
++static unsigned long ion_heap_shrink_count(struct shrinker *shrinker,
++					   struct shrink_control *sc)
++{
++	struct ion_heap *heap = container_of(shrinker, struct ion_heap,
++					     shrinker);
++	int total = 0;
++
++	total = ion_heap_freelist_size(heap) / PAGE_SIZE;
++
++	if (heap->ops->shrink)
++		total += heap->ops->shrink(heap, sc->gfp_mask, 0);
++
++	return total;
++}
++
++static unsigned long ion_heap_shrink_scan(struct shrinker *shrinker,
++					  struct shrink_control *sc)
++{
++	struct ion_heap *heap = container_of(shrinker, struct ion_heap,
++					     shrinker);
++	int freed = 0;
++	int to_scan = sc->nr_to_scan;
++
++	if (to_scan == 0)
++		return 0;
++
++	/*
++	 * shrink the free list first, no point in zeroing the memory if we're
++	 * just going to reclaim it. Also, skip any possible page pooling.
++	 */
++	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE)
++		freed = ion_heap_freelist_shrink(heap, to_scan * PAGE_SIZE) /
++				PAGE_SIZE;
++
++	to_scan -= freed;
++	if (to_scan <= 0)
++		return freed;
++
++	if (heap->ops->shrink)
++		freed += heap->ops->shrink(heap, sc->gfp_mask, to_scan);
++
++	return freed;
++}
++
++static size_t _ion_heap_freelist_drain(struct ion_heap *heap, size_t size,
++				       bool skip_pools)
++{
++	struct ion_buffer *buffer;
++	size_t total_drained = 0;
++
++	if (ion_heap_freelist_size(heap) == 0)
++		return 0;
++
++	spin_lock(&heap->free_lock);
++	if (size == 0)
++		size = heap->free_list_size;
++
++	while (!list_empty(&heap->free_list)) {
++		if (total_drained >= size)
++			break;
++		buffer = list_first_entry(&heap->free_list, struct ion_buffer,
++					  list);
++		list_del(&buffer->list);
++		heap->free_list_size -= buffer->size;
++		if (skip_pools)
++			buffer->private_flags |= ION_PRIV_FLAG_SHRINKER_FREE;
++		total_drained += buffer->size;
++		spin_unlock(&heap->free_lock);
++		ion_buffer_release(buffer);
++		spin_lock(&heap->free_lock);
++	}
++	spin_unlock(&heap->free_lock);
++
++	return total_drained;
++}
++
++static int ion_heap_deferred_free(void *data)
++{
++	struct ion_heap *heap = data;
++
++	while (true) {
++		struct ion_buffer *buffer;
++
++		wait_event_freezable(heap->waitqueue,
++				     (ion_heap_freelist_size(heap) > 0 ||
++				      kthread_should_stop()));
++
++		spin_lock(&heap->free_lock);
++		if (list_empty(&heap->free_list)) {
++			spin_unlock(&heap->free_lock);
++			if (!kthread_should_stop())
++				continue;
++			break;
++		}
++		buffer = list_first_entry(&heap->free_list, struct ion_buffer,
++					  list);
++		list_del(&buffer->list);
++		heap->free_list_size -= buffer->size;
++		spin_unlock(&heap->free_lock);
++		ion_buffer_release(buffer);
++	}
++
++	return 0;
++}
++
++void *ion_heap_map_kernel(struct ion_heap *heap,
++			  struct ion_buffer *buffer)
++{
++	struct scatterlist *sg;
++	int i, j;
++	void *vaddr;
++	pgprot_t pgprot;
++	struct sg_table *table = buffer->sg_table;
++	int npages = PAGE_ALIGN(buffer->size) / PAGE_SIZE;
++	struct page **pages = vmalloc(array_size(npages,
++						 sizeof(struct page *)));
++	struct page **tmp = pages;
++
++	if (!pages)
++		return ERR_PTR(-ENOMEM);
++
++	if (buffer->flags & ION_FLAG_CACHED)
++		pgprot = PAGE_KERNEL;
++	else
++		pgprot = pgprot_writecombine(PAGE_KERNEL);
++
++	for_each_sg(table->sgl, sg, table->nents, i) {
++		int npages_this_entry = PAGE_ALIGN(sg->length) / PAGE_SIZE;
++		struct page *page = sg_page(sg);
++
++		BUG_ON(i >= npages);
++		for (j = 0; j < npages_this_entry; j++)
++			*(tmp++) = page++;
++	}
++	vaddr = vmap(pages, npages, VM_MAP, pgprot);
++	vfree(pages);
++
++	if (!vaddr)
++		return ERR_PTR(-ENOMEM);
++
++	return vaddr;
++}
++EXPORT_SYMBOL_GPL(ion_heap_map_kernel);
++
++void ion_heap_unmap_kernel(struct ion_heap *heap,
++			   struct ion_buffer *buffer)
++{
++	vunmap(buffer->vaddr);
++}
++EXPORT_SYMBOL_GPL(ion_heap_unmap_kernel);
++
++int ion_heap_map_user(struct ion_heap *heap, struct ion_buffer *buffer,
++		      struct vm_area_struct *vma)
++{
++	struct sg_table *table = buffer->sg_table;
++	unsigned long addr = vma->vm_start;
++	unsigned long offset = vma->vm_pgoff * PAGE_SIZE;
++	struct scatterlist *sg;
++	int i;
++	int ret;
++
++	for_each_sg(table->sgl, sg, table->nents, i) {
++		struct page *page = sg_page(sg);
++		unsigned long remainder = vma->vm_end - addr;
++		unsigned long len = sg->length;
++
++		if (offset >= sg->length) {
++			offset -= sg->length;
++			continue;
++		} else if (offset) {
++			page += offset / PAGE_SIZE;
++			len = sg->length - offset;
++			offset = 0;
++		}
++		len = min(len, remainder);
++		ret = remap_pfn_range(vma, addr, page_to_pfn(page), len,
++				      vma->vm_page_prot);
++		if (ret)
++			return ret;
++		addr += len;
++		if (addr >= vma->vm_end)
++			return 0;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(ion_heap_map_user);
++
++void ion_heap_freelist_add(struct ion_heap *heap, struct ion_buffer *buffer)
++{
++	spin_lock(&heap->free_lock);
++	list_add(&buffer->list, &heap->free_list);
++	heap->free_list_size += buffer->size;
++	spin_unlock(&heap->free_lock);
++	wake_up(&heap->waitqueue);
++}
++
++size_t ion_heap_freelist_size(struct ion_heap *heap)
++{
++	size_t size;
++
++	spin_lock(&heap->free_lock);
++	size = heap->free_list_size;
++	spin_unlock(&heap->free_lock);
++
++	return size;
++}
++
++size_t ion_heap_freelist_drain(struct ion_heap *heap, size_t size)
++{
++	return _ion_heap_freelist_drain(heap, size, false);
++}
++
++size_t ion_heap_freelist_shrink(struct ion_heap *heap, size_t size)
++{
++	return _ion_heap_freelist_drain(heap, size, true);
++}
++
++int ion_heap_init_deferred_free(struct ion_heap *heap)
++{
++	INIT_LIST_HEAD(&heap->free_list);
++	init_waitqueue_head(&heap->waitqueue);
++	heap->task = kthread_run(ion_heap_deferred_free, heap,
++				 "%s", heap->name);
++	if (IS_ERR(heap->task)) {
++		pr_err("%s: creating thread for deferred free failed\n",
++		       __func__);
++		return PTR_ERR_OR_ZERO(heap->task);
++	}
++	sched_set_normal(heap->task, 19);
++
++	return 0;
++}
++
++int ion_heap_init_shrinker(struct ion_heap *heap)
++{
++	heap->shrinker.count_objects = ion_heap_shrink_count;
++	heap->shrinker.scan_objects = ion_heap_shrink_scan;
++	heap->shrinker.seeks = DEFAULT_SEEKS;
++	heap->shrinker.batch = 0;
++
++	return register_shrinker(&heap->shrinker);
++}
++
++int ion_heap_cleanup(struct ion_heap *heap)
++{
++	int ret;
++
++	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE &&
++	    !IS_ERR_OR_NULL(heap->task)) {
++		size_t free_list_size = ion_heap_freelist_size(heap);
++		size_t total_drained = ion_heap_freelist_drain(heap, 0);
++
++		if (total_drained != free_list_size) {
++			pr_err("%s: %s heap drained %zu bytes, requested %zu\n",
++			       __func__, heap->name, free_list_size,
++			       total_drained);
++			return -EBUSY;
++		}
++		ret = kthread_stop(heap->task);
++		if (ret < 0) {
++			pr_err("%s: failed to stop heap free thread\n",
++			       __func__);
++			return ret;
++		}
++	}
++
++	if ((heap->flags & ION_HEAP_FLAG_DEFER_FREE) || heap->ops->shrink)
++		unregister_shrinker(&heap->shrinker);
++
++	return 0;
++}
+diff --git a/drivers/staging/android/ion/ion_private.h b/drivers/staging/android/ion/ion_private.h
+new file mode 100644
+index 000000000000..db4e90683f4c
+--- /dev/null
++++ b/drivers/staging/android/ion/ion_private.h
+@@ -0,0 +1,58 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * ION Memory Allocator - Internal header
++ *
++ * Copyright (C) 2019 Google, Inc.
++ */
++
++#ifndef _ION_PRIVATE_H
++#define _ION_PRIVATE_H
++
++#include <linux/dcache.h>
++#include <linux/dma-buf.h>
++#include <linux/ion.h>
++#include <linux/miscdevice.h>
++#include <linux/mutex.h>
++#include <linux/plist.h>
++#include <linux/rbtree.h>
++#include <linux/rwsem.h>
++#include <linux/types.h>
++
++/**
++ * struct ion_device - the metadata of the ion device node
++ * @dev:		the actual misc device
++ * @lock:		rwsem protecting the tree of heaps, heap_bitmap and
++ *			clients
++ * @heap_ids:		bitmap of register heap ids
++ */
++struct ion_device {
++	struct miscdevice dev;
++	struct rw_semaphore lock;
++	DECLARE_BITMAP(heap_ids, ION_NUM_MAX_HEAPS);
++	struct plist_head heaps;
++	struct dentry *debug_root;
++	int heap_cnt;
++};
++
++/* ion_buffer manipulators */
++extern struct ion_buffer *ion_buffer_alloc(struct ion_device *dev, size_t len,
++					   unsigned int heap_id_mask,
++					   unsigned int flags);
++extern void ion_buffer_release(struct ion_buffer *buffer);
++extern int ion_buffer_destroy(struct ion_device *dev,
++			      struct ion_buffer *buffer);
++extern void *ion_buffer_kmap_get(struct ion_buffer *buffer);
++extern void ion_buffer_kmap_put(struct ion_buffer *buffer);
++
++/* ion dmabuf allocator */
++extern struct dma_buf *ion_dmabuf_alloc(struct ion_device *dev, size_t len,
++					unsigned int heap_id_mask,
++					unsigned int flags);
++extern int ion_free(struct ion_buffer *buffer);
++
++/* ion heap helpers */
++extern int ion_heap_cleanup(struct ion_heap *heap);
++
++u64 ion_get_total_heap_bytes(void);
++
++#endif /* _ION_PRIVATE_H */
+diff --git a/drivers/staging/android/ion/ion_trace.h b/drivers/staging/android/ion/ion_trace.h
+new file mode 100644
+index 000000000000..eacb47d4f135
+--- /dev/null
++++ b/drivers/staging/android/ion/ion_trace.h
+@@ -0,0 +1,55 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * drivers/staging/android/ion/ion-trace.h
++ *
++ * Copyright (C) 2020 Google, Inc.
++ */
++
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM ion
++
++#if !defined(_ION_TRACE_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _ION_TRACE_H
++
++#include <linux/tracepoint.h>
++
++#ifndef __ION_PTR_TO_HASHVAL
++static unsigned int __maybe_unused __ion_ptr_to_hash(const void *ptr)
++{
++	unsigned long hashval;
++
++	if (ptr_to_hashval(ptr, &hashval))
++		return 0;
++
++	/* The hashed value is only 32-bit */
++	return (unsigned int)hashval;
++}
++
++#define __ION_PTR_TO_HASHVAL
++#endif
++
++TRACE_EVENT(ion_stat,
++	    TP_PROTO(const void *addr, long len,
++		     unsigned long total_allocated),
++	    TP_ARGS(addr, len, total_allocated),
++	    TP_STRUCT__entry(__field(unsigned int, buffer_id)
++		__field(long, len)
++		__field(unsigned long, total_allocated)
++	    ),
++	    TP_fast_assign(__entry->buffer_id = __ion_ptr_to_hash(addr);
++		__entry->len = len;
++		__entry->total_allocated = total_allocated;
++	    ),
++	    TP_printk("buffer_id=%u len=%ldB total_allocated=%ldB",
++		      __entry->buffer_id,
++		      __entry->len,
++		      __entry->total_allocated)
++	    );
++
++#endif /* _ION_TRACE_H */
++
++/* This part must be outside protection */
++#undef TRACE_INCLUDE_PATH
++#define TRACE_INCLUDE_PATH .
++#define TRACE_INCLUDE_FILE ion_trace
++#include <trace/define_trace.h>
+diff --git a/include/linux/ion.h b/include/linux/ion.h
+new file mode 100644
+index 000000000000..80c6fdeb4822
+--- /dev/null
++++ b/include/linux/ion.h
+@@ -0,0 +1,419 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Copyright (c) 2019, The Linux Foundation. All rights reserved.
++ */
++
++#ifndef _ION_KERNEL_H
++#define _ION_KERNEL_H
++
++#include <linux/dma-buf.h>
++#include <linux/err.h>
++#include <linux/device.h>
++#include <linux/dma-direction.h>
++#include <linux/kref.h>
++#include <linux/mm_types.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/rbtree.h>
++#include <linux/sched.h>
++#include <linux/shrinker.h>
++#include <linux/types.h>
++#include <uapi/linux/ion.h>
++
++/**
++ * struct ion_buffer - metadata for a particular buffer
++ * @list:		element in list of deferred freeable buffers
++ * @heap:		back pointer to the heap the buffer came from
++ * @flags:		buffer specific flags
++ * @private_flags:	internal buffer specific flags
++ * @size:		size of the buffer
++ * @priv_virt:		private data to the buffer representable as
++ *			a void *
++ * @lock:		protects the buffers cnt fields
++ * @kmap_cnt:		number of times the buffer is mapped to the kernel
++ * @vaddr:		the kernel mapping if kmap_cnt is not zero
++ * @sg_table:		the sg table for the buffer
++ * @attachments:	list of devices attached to this buffer
++ */
++struct ion_buffer {
++	struct list_head list;
++	struct ion_heap *heap;
++	unsigned long flags;
++	unsigned long private_flags;
++	size_t size;
++	void *priv_virt;
++	struct mutex lock;
++	int kmap_cnt;
++	void *vaddr;
++	struct sg_table *sg_table;
++	struct list_head attachments;
++};
++
++/**
++ * struct ion_heap_ops - ops to operate on a given heap
++ * @allocate:		allocate memory
++ * @free:		free memory
++ * @get_pool_size:	get pool size in pages
++ *
++ * allocate returns 0 on success, -errno on error.
++ * map_dma and map_kernel return pointer on success, ERR_PTR on
++ * error. @free will be called with ION_PRIV_FLAG_SHRINKER_FREE set in
++ * the buffer's private_flags when called from a shrinker. In that
++ * case, the pages being free'd must be truly free'd back to the
++ * system, not put in a page pool or otherwise cached.
++ */
++struct ion_heap_ops {
++	int (*allocate)(struct ion_heap *heap,
++			struct ion_buffer *buffer, unsigned long len,
++			unsigned long flags);
++	void (*free)(struct ion_buffer *buffer);
++	int (*shrink)(struct ion_heap *heap, gfp_t gfp_mask, int nr_to_scan);
++	long (*get_pool_size)(struct ion_heap *heap);
++};
++
++/**
++ * heap flags - flags between the heaps and core ion code
++ */
++#define ION_HEAP_FLAG_DEFER_FREE BIT(0)
++
++/**
++ * private flags - flags internal to ion
++ */
++/*
++ * Buffer is being freed from a shrinker function. Skip any possible
++ * heap-specific caching mechanism (e.g. page pools). Guarantees that
++ * any buffer storage that came from the system allocator will be
++ * returned to the system allocator.
++ */
++#define ION_PRIV_FLAG_SHRINKER_FREE BIT(0)
++
++/**
++ * struct ion_heap - represents a heap in the system
++ * @node:		rb node to put the heap on the device's tree of heaps
++ * @type:		type of heap
++ * @ops:		ops struct as above
++ * @buf_ops:		dma_buf ops specific to the heap implementation.
++ * @flags:		flags
++ * @id:			id of heap, also indicates priority of this heap when
++ *			allocating.  These are specified by platform data and
++ *			MUST be unique
++ * @name:		used for debugging
++ * @owner:		kernel module that implements this heap
++ * @shrinker:		a shrinker for the heap
++ * @free_list:		free list head if deferred free is used
++ * @free_list_size	size of the deferred free list in bytes
++ * @lock:		protects the free list
++ * @waitqueue:		queue to wait on from deferred free thread
++ * @task:		task struct of deferred free thread
++ * @num_of_buffers	the number of currently allocated buffers
++ * @num_of_alloc_bytes	the number of allocated bytes
++ * @alloc_bytes_wm	the number of allocated bytes watermark
++ *
++ * Represents a pool of memory from which buffers can be made.  In some
++ * systems the only heap is regular system memory allocated via vmalloc.
++ * On others, some blocks might require large physically contiguous buffers
++ * that are allocated from a specially reserved heap.
++ */
++struct ion_heap {
++	struct plist_node node;
++	enum ion_heap_type type;
++	struct ion_heap_ops *ops;
++	struct dma_buf_ops buf_ops;
++	unsigned long flags;
++	unsigned int id;
++	const char *name;
++	struct module *owner;
++
++	/* deferred free support */
++	struct shrinker shrinker;
++	struct list_head free_list;
++	size_t free_list_size;
++	spinlock_t free_lock;
++	wait_queue_head_t waitqueue;
++	struct task_struct *task;
++
++	/* heap statistics */
++	u64 num_of_buffers;
++	u64 num_of_alloc_bytes;
++	u64 alloc_bytes_wm;
++
++	/* protect heap statistics */
++	spinlock_t stat_lock;
++
++	/* heap's debugfs root */
++	struct dentry *debugfs_dir;
++};
++
++#define ion_device_add_heap(heap) __ion_device_add_heap(heap, THIS_MODULE)
++
++/**
++ * struct ion_dma_buf_attachment - hold device-table attachment data for buffer
++ * @dev:	device attached to the buffer.
++ * @table:	cached mapping.
++ * @list:	list of ion_dma_buf_attachment.
++ */
++struct ion_dma_buf_attachment {
++	struct device *dev;
++	struct sg_table *table;
++	struct list_head list;
++	bool mapped:1;
++};
++
++#ifdef CONFIG_ION
++
++/**
++ * __ion_device_add_heap - adds a heap to the ion device
++ *
++ * @heap:               the heap to add
++ *
++ * Returns 0 on success, negative error otherwise.
++ */
++int __ion_device_add_heap(struct ion_heap *heap, struct module *owner);
++
++/**
++ * ion_device_remove_heap - removes a heap from ion device
++ *
++ * @heap:		pointer to the heap to be removed
++ */
++void ion_device_remove_heap(struct ion_heap *heap);
++
++/**
++ * ion_heap_init_shrinker
++ * @heap:		the heap
++ *
++ * If a heap sets the ION_HEAP_FLAG_DEFER_FREE flag or defines the shrink op
++ * this function will be called to setup a shrinker to shrink the freelists
++ * and call the heap's shrink op.
++ */
++int ion_heap_init_shrinker(struct ion_heap *heap);
++
++/**
++ * ion_heap_init_deferred_free -- initialize deferred free functionality
++ * @heap:		the heap
++ *
++ * If a heap sets the ION_HEAP_FLAG_DEFER_FREE flag this function will
++ * be called to setup deferred frees. Calls to free the buffer will
++ * return immediately and the actual free will occur some time later
++ */
++int ion_heap_init_deferred_free(struct ion_heap *heap);
++
++/**
++ * ion_heap_freelist_add - add a buffer to the deferred free list
++ * @heap:		the heap
++ * @buffer:		the buffer
++ *
++ * Adds an item to the deferred freelist.
++ */
++void ion_heap_freelist_add(struct ion_heap *heap, struct ion_buffer *buffer);
++
++/**
++ * ion_heap_freelist_drain - drain the deferred free list
++ * @heap:		the heap
++ * @size:		amount of memory to drain in bytes
++ *
++ * Drains the indicated amount of memory from the deferred freelist immediately.
++ * Returns the total amount freed.  The total freed may be higher depending
++ * on the size of the items in the list, or lower if there is insufficient
++ * total memory on the freelist.
++ */
++size_t ion_heap_freelist_drain(struct ion_heap *heap, size_t size);
++
++/**
++ * ion_heap_freelist_shrink - drain the deferred free
++ *				list, skipping any heap-specific
++ *				pooling or caching mechanisms
++ *
++ * @heap:		the heap
++ * @size:		amount of memory to drain in bytes
++ *
++ * Drains the indicated amount of memory from the deferred freelist immediately.
++ * Returns the total amount freed.  The total freed may be higher depending
++ * on the size of the items in the list, or lower if there is insufficient
++ * total memory on the freelist.
++ *
++ * Unlike with @ion_heap_freelist_drain, don't put any pages back into
++ * page pools or otherwise cache the pages. Everything must be
++ * genuinely free'd back to the system. If you're free'ing from a
++ * shrinker you probably want to use this. Note that this relies on
++ * the heap.ops.free callback honoring the ION_PRIV_FLAG_SHRINKER_FREE
++ * flag.
++ */
++size_t ion_heap_freelist_shrink(struct ion_heap *heap,
++				size_t size);
++
++/**
++ * ion_heap_freelist_size - returns the size of the freelist in bytes
++ * @heap:		the heap
++ */
++size_t ion_heap_freelist_size(struct ion_heap *heap);
++
++/**
++ * ion_heap_map_kernel - map the ion_buffer in kernel virtual address space.
++ *
++ * @heap:               the heap
++ * @buffer:             buffer to be mapped
++ *
++ * Maps the buffer using vmap(). The function respects cache flags for the
++ * buffer and creates the page table entries accordingly. Returns virtual
++ * address at the beginning of the buffer or ERR_PTR.
++ */
++void *ion_heap_map_kernel(struct ion_heap *heap, struct ion_buffer *buffer);
++
++/**
++ * ion_heap_unmap_kernel - unmap ion_buffer
++ *
++ * @buffer:             buffer to be unmapped
++ *
++ * ION wrapper for vunmap() of the ion buffer.
++ */
++void ion_heap_unmap_kernel(struct ion_heap *heap, struct ion_buffer *buffer);
++
++/**
++ * ion_heap_map_user - map given ion buffer in provided vma
++ *
++ * @heap:               the heap this buffer belongs to
++ * @buffer:             Ion buffer to be mapped
++ * @vma:                vma of the process where buffer should be mapped.
++ *
++ * Maps the buffer using remap_pfn_range() into specific process's vma starting
++ * with vma->vm_start. The vma size is expected to be >= ion buffer size.
++ * If not, a partial buffer mapping may be created. Returns 0 on success.
++ */
++int ion_heap_map_user(struct ion_heap *heap, struct ion_buffer *buffer,
++		      struct vm_area_struct *vma);
++
++/* ion_buffer_zero - zeroes out an ion buffer respecting the ION_FLAGs.
++ *
++ * @buffer:		ion_buffer to zero
++ *
++ * Returns 0 on success, negative error otherwise.
++ */
++int ion_buffer_zero(struct ion_buffer *buffer);
++
++/**
++ * ion_buffer_prep_noncached - flush cache before non-cached mapping
++ *
++ * @buffer:		ion_buffer to flush
++ *
++ * The memory allocated by the heap could be in the CPU cache. To map
++ * this memory as non-cached, we need to flush the associated cache
++ * first. Without the flush, it is possible for stale dirty cache lines
++ * to be evicted after the ION client started writing into this buffer,
++ * leading to data corruption.
++ */
++void ion_buffer_prep_noncached(struct ion_buffer *buffer);
++
++/**
++ * ion_alloc - Allocates an ion buffer of given size from given heap
++ *
++ * @len:               size of the buffer to be allocated.
++ * @heap_id_mask:      a bitwise maks of heap ids to allocate from
++ * @flags:             ION_BUFFER_XXXX flags for the new buffer.
++ *
++ * The function exports a dma_buf object for the new ion buffer internally
++ * and returns that to the caller. So, the buffer is ready to be used by other
++ * drivers immediately. Returns ERR_PTR in case of failure.
++ */
++struct dma_buf *ion_alloc(size_t len, unsigned int heap_id_mask,
++			  unsigned int flags);
++
++/**
++ * ion_free - Releases the ion buffer.
++ *
++ * @buffer:             ion buffer to be released
++ */
++int ion_free(struct ion_buffer *buffer);
++
++/**
++ * ion_query_heaps_kernel - Returns information about available heaps to
++ * in-kernel clients.
++ *
++ * @hdata:             pointer to array of struct ion_heap_data.
++ * @size:             size of @hdata array.
++ *
++ * Returns the number of available heaps and populates @hdata with information
++ * regarding the same. When invoked with @size as 0, the function with return
++ * the number of available heaps without modifying @hdata. When the number of
++ * available heaps is higher than @size, @size is returned instead of the
++ * actual number of available heaps.
++ */
++
++size_t ion_query_heaps_kernel(struct ion_heap_data *hdata, size_t size);
++#else
++
++static inline int __ion_device_add_heap(struct ion_heap *heap,
++				      struct module *owner)
++{
++	return -ENODEV;
++}
++
++static inline int ion_heap_init_shrinker(struct ion_heap *heap)
++{
++	return -ENODEV;
++}
++
++static inline int ion_heap_init_deferred_free(struct ion_heap *heap)
++{
++	return -ENODEV;
++}
++
++static inline void ion_heap_freelist_add(struct ion_heap *heap,
++					 struct ion_buffer *buffer) {}
++
++static inline size_t ion_heap_freelist_drain(struct ion_heap *heap, size_t size)
++{
++	return -ENODEV;
++}
++
++static inline size_t ion_heap_freelist_shrink(struct ion_heap *heap,
++					      size_t size)
++{
++	return -ENODEV;
++}
++
++static inline size_t ion_heap_freelist_size(struct ion_heap *heap)
++{
++	return -ENODEV;
++}
++
++static inline void *ion_heap_map_kernel(struct ion_heap *heap,
++					struct ion_buffer *buffer)
++{
++	return ERR_PTR(-ENODEV);
++}
++
++static inline void ion_heap_unmap_kernel(struct ion_heap *heap,
++					 struct ion_buffer *buffer) {}
++
++static inline int ion_heap_map_user(struct ion_heap *heap,
++				    struct ion_buffer *buffer,
++				    struct vm_area_struct *vma)
++{
++	return -ENODEV;
++}
++
++static inline int ion_buffer_zero(struct ion_buffer *buffer)
++{
++	return -EINVAL;
++}
++
++static inline void ion_buffer_prep_noncached(struct ion_buffer *buffer) {}
++
++static inline struct dma_buf *ion_alloc(size_t len, unsigned int heap_id_mask,
++					unsigned int flags)
++{
++	return ERR_PTR(-ENOMEM);
++}
++
++static inline int ion_free(struct ion_buffer *buffer)
++{
++	return 0;
++}
++
++static inline size_t ion_query_heaps_kernel(struct ion_heap_data *hdata,
++					 size_t size)
++{
++	return 0;
++}
++#endif /* CONFIG_ION */
++#endif /* _ION_KERNEL_H */
+diff --git a/include/uapi/linux/ion.h b/include/uapi/linux/ion.h
+new file mode 100644
+index 000000000000..371e44662755
+--- /dev/null
++++ b/include/uapi/linux/ion.h
+@@ -0,0 +1,150 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++/*
++ * drivers/staging/android/uapi/ion.h
++ *
++ * Copyright (C) 2011 Google, Inc.
++ */
++
++#ifndef _UAPI_LINUX_ION_H
++#define _UAPI_LINUX_ION_H
++
++#include <linux/ioctl.h>
++#include <linux/types.h>
++
++/**
++ * ion_heap_types - list of all possible types of heaps that Android can use
++ *
++ * @ION_HEAP_TYPE_SYSTEM:        Reserved heap id for ion heap that allocates
++ *				 memory using alloc_page(). Also, supports
++ *				 deferred free and allocation pools.
++* @ION_HEAP_TYPE_DMA:		 Reserved heap id for ion heap that manages
++ * 				 single CMA (contiguous memory allocator)
++ * 				 region. Uses standard DMA APIs for
++ *				 managing memory within the CMA region.
++ */
++enum ion_heap_type {
++	ION_HEAP_TYPE_SYSTEM = 0,
++	ION_HEAP_TYPE_DMA = 2,
++	/* reserved range for future standard heap types */
++	ION_HEAP_TYPE_CUSTOM = 16,
++	ION_HEAP_TYPE_MAX = 31,
++};
++
++/**
++ * ion_heap_id - list of standard heap ids that Android can use
++ *
++ * @ION_HEAP_SYSTEM		Id for the ION_HEAP_TYPE_SYSTEM
++ * @ION_HEAP_DMA_START 		Start of reserved id range for heaps of type
++ *				ION_HEAP_TYPE_DMA
++ * @ION_HEAP_DMA_END		End of reserved id range for heaps of type
++ *				ION_HEAP_TYPE_DMA
++ * @ION_HEAP_CUSTOM_START	Start of reserved id range for heaps of custom
++ *				type
++ * @ION_HEAP_CUSTOM_END		End of reserved id range for heaps of custom
++ *				type
++ */
++enum ion_heap_id {
++	ION_HEAP_SYSTEM = (1 << ION_HEAP_TYPE_SYSTEM),
++	ION_HEAP_DMA_START = (ION_HEAP_SYSTEM << 1),
++	ION_HEAP_DMA_END = (ION_HEAP_DMA_START << 7),
++	ION_HEAP_CUSTOM_START = (ION_HEAP_DMA_END << 1),
++	ION_HEAP_CUSTOM_END = (ION_HEAP_CUSTOM_START << 22),
++};
++
++#define ION_NUM_MAX_HEAPS	(32)
++
++/**
++ * allocation flags - the lower 16 bits are used by core ion, the upper 16
++ * bits are reserved for use by the heaps themselves.
++ */
++
++/*
++ * mappings of this buffer should be cached, ion will do cache maintenance
++ * when the buffer is mapped for dma
++ */
++#define ION_FLAG_CACHED		1
++
++/**
++ * DOC: Ion Userspace API
++ *
++ * create a client by opening /dev/ion
++ * most operations handled via following ioctls
++ *
++ */
++
++/**
++ * struct ion_allocation_data - metadata passed from userspace for allocations
++ * @len:		size of the allocation
++ * @heap_id_mask:	mask of heap ids to allocate from
++ * @flags:		flags passed to heap
++ * @handle:		pointer that will be populated with a cookie to use to
++ *			refer to this allocation
++ *
++ * Provided by userspace as an argument to the ioctl
++ */
++struct ion_allocation_data {
++	__u64 len;
++	__u32 heap_id_mask;
++	__u32 flags;
++	__u32 fd;
++	__u32 unused;
++};
++
++#define MAX_HEAP_NAME			32
++
++/**
++ * struct ion_heap_data - data about a heap
++ * @name - first 32 characters of the heap name
++ * @type - heap type
++ * @heap_id - heap id for the heap
++ */
++struct ion_heap_data {
++	char name[MAX_HEAP_NAME];
++	__u32 type;
++	__u32 heap_id;
++	__u32 reserved0;
++	__u32 reserved1;
++	__u32 reserved2;
++};
++
++/**
++ * struct ion_heap_query - collection of data about all heaps
++ * @cnt - total number of heaps to be copied
++ * @heaps - buffer to copy heap data
++ */
++struct ion_heap_query {
++	__u32 cnt; /* Total number of heaps to be copied */
++	__u32 reserved0; /* align to 64bits */
++	__u64 heaps; /* buffer to be populated */
++	__u32 reserved1;
++	__u32 reserved2;
++};
++
++#define ION_IOC_MAGIC		'I'
++
++/**
++ * DOC: ION_IOC_ALLOC - allocate memory
++ *
++ * Takes an ion_allocation_data struct and returns it with the handle field
++ * populated with the opaque handle for the allocation.
++ */
++#define ION_IOC_ALLOC		_IOWR(ION_IOC_MAGIC, 0, \
++				      struct ion_allocation_data)
++
++/**
++ * DOC: ION_IOC_HEAP_QUERY - information about available heaps
++ *
++ * Takes an ion_heap_query structure and populates information about
++ * available Ion heaps.
++ */
++#define ION_IOC_HEAP_QUERY     _IOWR(ION_IOC_MAGIC, 8, \
++					struct ion_heap_query)
++
++/**
++ * DOC: ION_IOC_HEAP_ABI_VERSION - return ABI version
++ *
++ * Returns ABI version for this driver
++ */
++#define ION_IOC_ABI_VERSION    _IOR(ION_IOC_MAGIC, 9, \
++					__u32)
++#endif /* _UAPI_LINUX_ION_H */
+-- 
+2.17.1
+
