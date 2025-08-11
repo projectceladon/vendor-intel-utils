@@ -1,0 +1,343 @@
+From d7d5104e6116dc3176c46a7bc3468c5f985420b5 Mon Sep 17 00:00:00 2001
+From: kaushlendra <kaushlendra.kumar@intel.com>
+Date: Fri, 26 Aug 2022 04:40:33 +0000
+Subject: [PATCH] bionic: AVX2 implementation for memset
+
+Signed-off-by: kaushlendra <kaushlendra.kumar@intel.com>
+---
+ libc/Android.bp                               |   8 +-
+ .../arch-x86_64/dynamic_function_dispatch.cpp |  50 +++++++
+ libc/arch-x86_64/static_function_dispatch.S   |  37 +++++
+ libc/arch-x86_64/string/avx2-memset-kbl.S     | 139 ++++++++++++++++++
+ libc/arch-x86_64/string/sse2-memset-slm.S     |  12 +-
+ 5 files changed, 241 insertions(+), 5 deletions(-)
+ create mode 100644 libc/arch-x86_64/dynamic_function_dispatch.cpp
+ create mode 100644 libc/arch-x86_64/static_function_dispatch.S
+ create mode 100644 libc/arch-x86_64/string/avx2-memset-kbl.S
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index 97146aa6f..73229bcc6 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -999,6 +999,7 @@ cc_library_static {
+                 "arch-x86_64/string/ssse3-strcmp-slm.S",
+                 "arch-x86_64/string/ssse3-strncmp-slm.S",
+                 "arch-x86_64/string/avx2-wmemset-kbl.S",
++                "arch-x86_64/string/avx2-memset-kbl.S",
+ 
+                 "arch-x86_64/bionic/__bionic_clone.S",
+                 "arch-x86_64/bionic/_exit_with_stack_teardown.S",
+@@ -1229,7 +1230,6 @@ cc_library_static {
+     generated_headers: ["generated_android_ids"],
+ }
+ 
+-// ========================================================
+ // libc_bionic_systrace.a
+ // ========================================================
+ 
+@@ -1514,6 +1514,9 @@ cc_library_static {
+         x86: {
+             srcs: ["arch-x86/static_function_dispatch.S"],
+         },
++        x86_64: {
++            srcs: ["arch-x86_64/static_function_dispatch.S"],
++        },
+         arm: {
+             srcs: ["arch-arm/static_function_dispatch.S"],
+         },
+@@ -1539,6 +1542,9 @@ cc_library_static {
+         x86: {
+             srcs: ["arch-x86/dynamic_function_dispatch.cpp"],
+         },
++        x86_64: {
++            srcs: ["arch-x86_64/dynamic_function_dispatch.cpp"],
++        },
+         arm: {
+             srcs: ["arch-arm/dynamic_function_dispatch.cpp"],
+         },
+diff --git a/libc/arch-x86_64/dynamic_function_dispatch.cpp b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+new file mode 100644
+index 000000000..8f96bc80e
+--- /dev/null
++++ b/libc/arch-x86_64/dynamic_function_dispatch.cpp
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (C) 2008 The Android Open Source Project
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include <stddef.h>
++
++#include <private/bionic_ifuncs.h>
++
++extern "C" {
++
++typedef int memset_func(void* __dst, int __ch, size_t __n);
++DEFINE_IFUNC_FOR(memset) {
++	  __builtin_cpu_init();
++	    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(memset_func, memset_avx2);
++	      RETURN_FUNC(memset_func, memset_generic);
++}
++
++typedef void* __memset_chk_func(void* s, int c, size_t n, size_t n2);
++DEFINE_IFUNC_FOR(__memset_chk) {
++	  __builtin_cpu_init();
++	    if (__builtin_cpu_supports("avx2")) RETURN_FUNC(__memset_chk_func, __memset_chk_avx2);
++	      RETURN_FUNC(__memset_chk_func, __memset_chk_generic);
++}
++
++
++}  // extern "C"
+diff --git a/libc/arch-x86_64/static_function_dispatch.S b/libc/arch-x86_64/static_function_dispatch.S
+new file mode 100644
+index 000000000..af5ca245b
+--- /dev/null
++++ b/libc/arch-x86_64/static_function_dispatch.S
+@@ -0,0 +1,37 @@
++/*
++ * Copyright (C) 2018 The Android Open Source Project
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *  * Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ *  * Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
++ * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include <private/bionic_asm.h>
++
++#define FUNCTION_DELEGATE(name, impl) \
++ENTRY(name); \
++    jmp impl; \
++END(name)
++
++FUNCTION_DELEGATE(memset, memset_generic)
++FUNCTION_DELEGATE(__memset_chk, __memset_chk_generic)
+diff --git a/libc/arch-x86_64/string/avx2-memset-kbl.S b/libc/arch-x86_64/string/avx2-memset-kbl.S
+new file mode 100644
+index 000000000..e8842f3ee
+--- /dev/null
++++ b/libc/arch-x86_64/string/avx2-memset-kbl.S
+@@ -0,0 +1,139 @@
++
++#include <private/bionic_asm.h>
++
++#include "cache.h"
++
++#ifndef memset
++# define memset        memset_avx2
++#endif
++
++#ifndef __memset_chk
++# define __memset_chk  __memset_chk_avx2
++#endif
++
++#ifndef L
++# define L(label)	.L##label
++#endif
++
++#ifndef ALIGN
++# define ALIGN(n)	.p2align n
++#endif
++
++	.section .text.avx2,"ax",@progbits
++
++ENTRY(__memset_chk_avx2)
++	# %rdi = dst, %rsi = byte, %rdx = n, %rcx = dst_len
++	cmp %rcx, %rdx
++	ja __memset_chk_fail
++	// Fall through to memset...
++END(__memset_chk_avx2)
++
++ENTRY(memset_avx2)
++	movq	%rdi, %rax
++	and	$0xff, %rsi
++	mov	$0x0101010101010101, %rcx
++	imul	%rsi, %rcx
++	cmpq	$16, %rdx
++	jae	L(16bytesormore)
++	testb	$8, %dl
++	jnz	L(8_15bytes)
++	testb	$4, %dl
++	jnz	L(4_7bytes)
++	testb	$2, %dl
++	jnz	L(2_3bytes)
++	testb	$1, %dl
++	jz	L(return)
++	movb	%cl, (%rdi)
++L(return):
++	ret
++
++L(8_15bytes):
++	movq	%rcx, (%rdi)
++	movq	%rcx, -8(%rdi, %rdx)
++	ret
++
++L(4_7bytes):
++	movl	%ecx, (%rdi)
++	movl	%ecx, -4(%rdi, %rdx)
++	ret
++
++L(2_3bytes):
++	movw	%cx, (%rdi)
++	movw	%cx, -2(%rdi, %rdx)
++	ret
++
++	ALIGN (4)
++L(16bytesormore):
++	movd	%rcx, %xmm0
++	pshufd	$0, %xmm0, %xmm0
++	movdqu	%xmm0, (%rdi)
++	movdqu	%xmm0, -16(%rdi, %rdx)
++	cmpq	$32, %rdx
++	jbe	L(32bytesless)
++	movdqu	%xmm0, 16(%rdi)
++	movdqu	%xmm0, -32(%rdi, %rdx)
++	cmpq	$64, %rdx
++	jbe	L(64bytesless)
++	movdqu	%xmm0, 32(%rdi)
++	movdqu	%xmm0, 48(%rdi)
++	movdqu	%xmm0, -64(%rdi, %rdx)
++	movdqu	%xmm0, -48(%rdi, %rdx)
++	cmpq	$128, %rdx
++	jbe	L(128bytesless)
++        vpbroadcastb %xmm0, %ymm0
++	vmovdqu	%ymm0, 64(%rdi)
++	vmovdqu	%ymm0, 96(%rdi)
++	vmovdqu	%ymm0, -128(%rdi, %rdx)
++	vmovdqu	%ymm0, -96(%rdi, %rdx)
++	cmpq	$256, %rdx
++        ja      L(256bytesmore)
++L(32bytesless):
++L(64bytesless):
++L(128bytesless):
++	ret
++
++	ALIGN (4)
++L(256bytesmore):
++	leaq	128(%rdi), %rcx
++	andq	$-128, %rcx
++	movq	%rdx, %r8
++	addq	%rdi, %rdx
++	andq	$-128, %rdx
++	cmpq	%rcx, %rdx
++	je	L(return)
++
++#ifdef SHARED_CACHE_SIZE
++	cmp	$SHARED_CACHE_SIZE, %r8
++#else
++	cmp	__x86_64_shared_cache_size(%rip), %r8
++#endif
++	ja	L(256bytesmore_nt)
++
++	ALIGN (4)
++L(256bytesmore_normal):
++	vmovdqa	%ymm0, (%rcx)
++	vmovdqa	%ymm0, 32(%rcx)
++	vmovdqa	%ymm0, 64(%rcx)
++	vmovdqa	%ymm0, 96(%rcx)
++	addq	$128, %rcx
++	cmpq	%rcx, %rdx
++	jne	L(256bytesmore_normal)
++	ret
++
++	ALIGN (4)
++L(256bytesmore_nt):
++	movntdq	 %xmm0, (%rcx)
++	movntdq	 %xmm0, 16(%rcx)
++	movntdq	 %xmm0, 32(%rcx)
++	movntdq	 %xmm0, 48(%rcx)
++	movntdq	 %xmm0, 64(%rcx)
++	movntdq	 %xmm0, 80(%rcx)
++	movntdq	 %xmm0, 96(%rcx)
++	movntdq	 %xmm0, 112(%rcx)
++	leaq	128(%rcx), %rcx
++	cmpq	%rcx, %rdx
++	jne	L(256bytesmore_nt)
++	sfence
++	ret
++
++END(memset_avx2)
+diff --git a/libc/arch-x86_64/string/sse2-memset-slm.S b/libc/arch-x86_64/string/sse2-memset-slm.S
+index fc502c021..c9c484e1d 100644
+--- a/libc/arch-x86_64/string/sse2-memset-slm.S
++++ b/libc/arch-x86_64/string/sse2-memset-slm.S
+@@ -36,21 +36,25 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ # define L(label)	.L##label
+ #endif
+ 
++#ifndef MEMSET
++# define MEMSET        memset
++#endif
++
+ #ifndef ALIGN
+ # define ALIGN(n)	.p2align n
+ #endif
+ 
+ 
+-ENTRY(__memset_chk)
++ENTRY(__memset_chk_generic)
+   # %rdi = dst, %rsi = byte, %rdx = n, %rcx = dst_len
+   cmp %rcx, %rdx
+   ja __memset_chk_fail
+   // Fall through to memset...
+-END(__memset_chk)
++END(__memset_chk_generic)
+ 
+ 
+ 	.section .text.sse2,"ax",@progbits
+-ENTRY(memset)
++ENTRY(memset_generic)
+ 	movq	%rdi, %rax
+ 	and	$0xff, %rsi
+ 	mov	$0x0101010101010101, %rcx
+@@ -146,4 +150,4 @@ L(128bytesmore_nt):
+ 	sfence
+ 	ret
+ 
+-END(memset)
++END(memset_generic)
+-- 
+2.37.1
+
