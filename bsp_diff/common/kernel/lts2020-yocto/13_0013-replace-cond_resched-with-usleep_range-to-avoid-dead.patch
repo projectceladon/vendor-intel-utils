@@ -1,0 +1,57 @@
+From b830931d95db3616fe2536d49be9b1d78c34da11 Mon Sep 17 00:00:00 2001
+From: feijiang1 <fei.jiang@intel.com>
+Date: Thu, 25 Mar 2021 00:09:15 +0800
+Subject: [PATCH] drm/i915: replace cond_resched with usleep_range to avoid
+ dead lock
+
+Found the deadlock issue most likely caused by thread scheduling, the
+problem is like:
+1, thread a call i915_active_acquire_barrier function, and will call
+take_preallocated_barriers which is used to delete all list nodes with
+llist_del_all
+2, hw irq is raised up, thread a is scheduled out
+3, thread b seems has higher priority and is scheduled in,
+i915_gem_do_execbuffer->i915_active_acquire_preallocate_barrier function
+is called, there is following code:
+while (!llist_empty(&ref->preallocated_barriers))
+    cond_resched();
+ref->preallocated_barriers is not empty, then will call cond_resched.
+While due to CONFIG_PREEMPT is defined, cond_resched is defined as
+"return 0;" It means thread b will busy wait and will not relinquish
+CPU. From log, we didn't see thread a get chance to be scheduled in.
+The result is thread b is busy waiting on ref->preallocated_barriers,
+dead-lock happened. At end, when rcu_cpu_stall_timeout is reached, rcu
+stall is detected and pop up the kernel error.
+Fix this issue by replacing cond_resched with usleep_range, to let
+thread b relinquished CPU on its own.
+
+Signed-off-by: feijiang1 <fei.jiang@intel.com>
+---
+ drivers/gpu/drm/i915/i915_active.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/i915/i915_active.c b/drivers/gpu/drm/i915/i915_active.c
+index b0a499753526..49112379b251 100644
+--- a/drivers/gpu/drm/i915/i915_active.c
++++ b/drivers/gpu/drm/i915/i915_active.c
+@@ -5,6 +5,7 @@
+  */
+ 
+ #include <linux/debugobjects.h>
++#include <linux/delay.h>
+ 
+ #include "gt/intel_context.h"
+ #include "gt/intel_engine_pm.h"
+@@ -615,7 +616,8 @@ int i915_active_acquire_preallocate_barrier(struct i915_active *ref,
+ 
+ 	/* Wait until the previous preallocation is completed */
+ 	while (!llist_empty(&ref->preallocated_barriers))
+-		cond_resched();
++		//cond_resched();
++		usleep_range(10, 50);
+ 
+ 	/*
+ 	 * Preallocate a node for each physical engine supporting the target
+-- 
+2.30.1
+
