@@ -1,0 +1,248 @@
+From 139d864c4b6d7b1418768c66ea455518491c09ce Mon Sep 17 00:00:00 2001
+From: Andrey Yepin <ayepin@google.com>
+Date: Thu, 22 May 2025 10:00:58 -0700
+Subject: [PATCH] Sanitize cross-profile intents.
+
+Remove package or component information from payload intents (and their
+selectors) for cross-profile sharing.
+
+Bug: 407764858
+Test: manual testing
+Test: atest IntentResolver-test-unit
+Test: ag/32976049 (checked out and ran locally)
+Flag: EXEMPT bugfix
+Change-Id: I1ebfd96b2aabba6665267722603c72cbe4aefe0f
+(cherry picked from commit d605b5448615815cb6a7630637b9c55349ffe36e)
+---
+ .../intentresolver/ChooserActivity.java       | 15 +++--
+ .../data/model/ChooserRequest.kt              | 13 ++++
+ .../intentresolver/shared/model/Profile.kt    |  6 +-
+ .../intentresolver/util/IntentUtils.kt        | 37 +++++++++++
+ .../intentresolver/util/IntentUtilsTest.kt    | 62 +++++++++++++++++++
+ 5 files changed, 121 insertions(+), 12 deletions(-)
+ create mode 100644 java/src/com/android/intentresolver/util/IntentUtils.kt
+ create mode 100644 tests/unit/src/com/android/intentresolver/util/IntentUtilsTest.kt
+
+diff --git a/java/src/com/android/intentresolver/ChooserActivity.java b/java/src/com/android/intentresolver/ChooserActivity.java
+index 54f575d7..6df9e948 100644
+--- a/java/src/com/android/intentresolver/ChooserActivity.java
++++ b/java/src/com/android/intentresolver/ChooserActivity.java
+@@ -522,7 +522,6 @@ public class ChooserActivity extends Hilt_ChooserActivity implements
+                 mProfiles,
+                 mProfileRecords.values(),
+                 mProfileAvailability,
+-                mRequest.getInitialIntents(),
+                 mMaxTargetsPerRow);
+ 
+         maybeDisableRecentsScreenshot(mProfiles, mProfileAvailability);
+@@ -793,7 +792,6 @@ public class ChooserActivity extends Hilt_ChooserActivity implements
+                 mProfiles,
+                 mProfileRecords.values(),
+                 mProfileAvailability,
+-                mRequest.getInitialIntents(),
+                 mMaxTargetsPerRow);
+         mChooserMultiProfilePagerAdapter.setCurrentPage(currentPage);
+         for (int i = 0, count = mChooserMultiProfilePagerAdapter.getItemCount(); i < count; i++) {
+@@ -1457,22 +1455,23 @@ public class ChooserActivity extends Hilt_ChooserActivity implements
+             ProfileHelper profileHelper,
+             Collection<ProfileRecord> profileRecords,
+             ProfileAvailability profileAvailability,
+-            List<Intent> initialIntents,
+             int maxTargetsPerRow) {
+         Log.d(TAG, "createMultiProfilePagerAdapter");
+ 
+         Profile launchedAs = profileHelper.getLaunchedAsProfile();
+ 
+-        Intent[] initialIntentArray = initialIntents.toArray(new Intent[0]);
+-        List<Intent> payloadIntents = request.getPayloadIntents();
++        Intent[] initialIntentArray = request.getInitialIntents().toArray(new Intent[0]);
+ 
+         List<TabConfig<ChooserGridAdapter>> tabs = new ArrayList<>();
+         for (ProfileRecord record : profileRecords) {
+             Profile profile = record.profile;
++	    boolean isCrossProfile = !profile.equals(launchedAs);
+             ChooserGridAdapter adapter = createChooserGridAdapter(
+-                    context,
+-                    payloadIntents,
+-                    profile.equals(launchedAs) ? initialIntentArray : null,
++			    context,
++			    isCrossProfile
++                            ? request.getCrossProfilePayloadIntents()
++                            : request.getPayloadIntents(),
++                    isCrossProfile ? null : initialIntentArray,
+                     profile.getPrimary().getHandle()
+             );
+             tabs.add(new TabConfig<>(
+diff --git a/java/src/com/android/intentresolver/data/model/ChooserRequest.kt b/java/src/com/android/intentresolver/data/model/ChooserRequest.kt
+index c4aa2b98..2f8155fe 100644
+--- a/java/src/com/android/intentresolver/data/model/ChooserRequest.kt
++++ b/java/src/com/android/intentresolver/data/model/ChooserRequest.kt
+@@ -29,6 +29,7 @@ import android.service.chooser.ChooserTarget
+ import androidx.annotation.StringRes
+ import com.android.intentresolver.ContentTypeHint
+ import com.android.intentresolver.ext.hasAction
++import com.android.intentresolver.util.sanitizePayloadIntents
+ 
+ const val ANDROID_APP_SCHEME = "android-app"
+ 
+@@ -194,4 +195,16 @@ data class ChooserRequest(
+     }
+ 
+     val payloadIntents = listOf(targetIntent) + additionalTargets
++
++    /**
++     * Payload intents that should be used for cross-profile sharing.
++     *
++     * These intents are a copy of `payloadIntents`. For security reasons, explicit targeting
++     * information is removed from each [Intent] in the list, as well as from its
++     * [selector][Intent.getSelector]. Specifically, the values that would be returned by
++     * [Intent.getPackage] and [Intent.getComponent] are cleared for both the main intent and its
++     * selector. This sanitization is performed because explicit intents could otherwise be used to
++     * bypass the device's cross-profile sharing policy settings.
++     */
++    val crossProfilePayloadIntents by lazy { sanitizePayloadIntents(payloadIntents) }
+ }
+diff --git a/java/src/com/android/intentresolver/shared/model/Profile.kt b/java/src/com/android/intentresolver/shared/model/Profile.kt
+index c557c151..ce705259 100644
+--- a/java/src/com/android/intentresolver/shared/model/Profile.kt
++++ b/java/src/com/android/intentresolver/shared/model/Profile.kt
+@@ -16,8 +16,6 @@
+ 
+ package com.android.intentresolver.shared.model
+ 
+-import com.android.intentresolver.shared.model.Profile.Type
+-
+ /**
+  * Associates [users][User] into a [Type] instance.
+  *
+@@ -32,7 +30,7 @@ data class Profile(
+      * An optional [User] of which contains second instances of some applications installed for the
+      * personal user. This value may only be supplied when creating the PERSONAL profile.
+      */
+-    val clone: User? = null
++    val clone: User? = null,
+ ) {
+ 
+     init {
+@@ -47,6 +45,6 @@ data class Profile(
+     enum class Type {
+         PERSONAL,
+         WORK,
+-        PRIVATE
++        PRIVATE,
+     }
+ }
+diff --git a/java/src/com/android/intentresolver/util/IntentUtils.kt b/java/src/com/android/intentresolver/util/IntentUtils.kt
+new file mode 100644
+index 00000000..c20479c8
+--- /dev/null
++++ b/java/src/com/android/intentresolver/util/IntentUtils.kt
+@@ -0,0 +1,37 @@
++/*
++ * Copyright 2025 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++@file:JvmName("IntentUtils")
++
++package com.android.intentresolver.util
++
++import android.content.Intent
++
++fun sanitizePayloadIntents(intents: List<Intent>): List<Intent> =
++    intents.map { intent ->
++        Intent(intent).also { sanitized ->
++            sanitized.setPackage(null)
++            sanitized.setComponent(null)
++            sanitized.selector?.let {
++                sanitized.setSelector(
++                    Intent(it).apply {
++                        setPackage(null)
++                        setComponent(null)
++                    }
++                )
++            }
++        }
++    }
+diff --git a/tests/unit/src/com/android/intentresolver/util/IntentUtilsTest.kt b/tests/unit/src/com/android/intentresolver/util/IntentUtilsTest.kt
+new file mode 100644
+index 00000000..8042b82e
+--- /dev/null
++++ b/tests/unit/src/com/android/intentresolver/util/IntentUtilsTest.kt
+@@ -0,0 +1,62 @@
++/*
++ * Copyright 2025 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      https://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.intentresolver.util
++
++import android.content.ComponentName
++import android.content.Intent
++import android.content.Intent.ACTION_SEND
++import com.google.common.truth.Truth.assertThat
++import org.junit.Test
++
++class IntentUtilsTest {
++    @Test
++    fun test_sanitizePayloadIntents() {
++        val intents =
++            listOf(
++                Intent(ACTION_SEND).apply { setPackage("org.test.example") },
++                Intent(ACTION_SEND).apply {
++                    setComponent(
++                        ComponentName.unflattenFromString("org.test.example/.TestActivity")
++                    )
++                },
++                Intent(ACTION_SEND).apply {
++                    setSelector(Intent(ACTION_SEND).apply { setPackage("org.test.example") })
++                },
++                Intent(ACTION_SEND).apply {
++                    setSelector(
++                        Intent(ACTION_SEND).apply {
++                            setComponent(
++                                ComponentName.unflattenFromString("org.test.example/.TestActivity")
++                            )
++                        }
++                    )
++                },
++            )
++
++        val sanitized = sanitizePayloadIntents(intents)
++
++        assertThat(sanitized).hasSize(intents.size)
++        for (i in sanitized) {
++            assertThat(i.getPackage()).isNull()
++            assertThat(i.getComponent()).isNull()
++            i.getSelector()?.let {
++                assertThat(it.getPackage()).isNull()
++                assertThat(it.getComponent()).isNull()
++            }
++        }
++    }
++}
+-- 
+2.34.1
+
