@@ -1,0 +1,94 @@
+From 0dab3a65ae31c16d10cfaaa2b13ed856c462248c Mon Sep 17 00:00:00 2001
+From: Rubin Xu <rubinxu@google.com>
+Date: Fri, 9 May 2025 16:36:34 +0100
+Subject: [PATCH] Check DPC package validity during package updates
+
+Bug: 384514657
+Bug: 414603411
+Test: manual
+Flag: EXEMPT bugfix
+Merged-In: I0c629c138059a71786e82b4653de9cef7e951aad
+Merged-In: I1743c111f8e8b5f4c1f878a61b88b8f1ed6b86a1
+Change-Id: I1743c111f8e8b5f4c1f878a61b88b8f1ed6b86a1
+---
+ .../android/app/admin/DeviceAdminInfo.java    |  2 +
+ .../DevicePolicyManagerService.java           | 41 +++++++++++++++----
+ 2 files changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/core/java/android/app/admin/DeviceAdminInfo.java b/core/java/android/app/admin/DeviceAdminInfo.java
+index cb2b8adae0f9..d76979ae76a6 100644
+--- a/core/java/android/app/admin/DeviceAdminInfo.java
++++ b/core/java/android/app/admin/DeviceAdminInfo.java
+@@ -409,6 +409,8 @@ public final class DeviceAdminInfo implements Parcelable {
+         } catch (NameNotFoundException e) {
+             throw new XmlPullParserException(
+                     "Unable to create context for: " + mActivityInfo.packageName);
++        } catch (OutOfMemoryError e) {
++            throw new XmlPullParserException("Out of memory when parsing", null, e);
+         } finally {
+             if (parser != null) parser.close();
+         }
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+index 1a66c0bc8d91..537f78bb0e54 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+@@ -1466,6 +1466,33 @@ public class DevicePolicyManagerService extends IDevicePolicyManager.Stub {
+         }
+     }
+ 
++    /**
++     * Check if the package hosting the given ActiveAdmin is still installed and well-formed.
++     */
++    @GuardedBy("getLockObject()")
++    private boolean isActiveAdminPackageValid(ActiveAdmin admin) throws RemoteException {
++        final String adminPackage = admin.info.getPackageName();
++        int userHandle = admin.getUserHandle().getIdentifier();
++        if (mIPackageManager.getPackageInfo(adminPackage, 0, userHandle) == null) {
++            Slogf.e(LOG_TAG, adminPackage + " no longer installed");
++            return false;
++        }
++        ActivityInfo ai = mIPackageManager.getReceiverInfo(admin.info.getComponent(),
++                GET_META_DATA | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE,
++                userHandle);
++        if (ai == null) {
++            Slogf.e(LOG_TAG, adminPackage + " no longer has the receiver");
++            return false;
++        }
++        try {
++            new DeviceAdminInfo(mContext, ai);
++        } catch (Exception e) {
++            Slogf.e(LOG_TAG, adminPackage + " contains malformed metadata", e);
++            return false;
++        }
++        return true;
++    }
++
+     private void handlePackagesChanged(@Nullable String packageName, int userHandle) {
+         boolean removedAdmin = false;
+         String removedAdminPackage = null;
+@@ -1479,17 +1506,13 @@ public class DevicePolicyManagerService extends IDevicePolicyManager.Stub {
+                 ActiveAdmin aa = policy.mAdminList.get(i);
+                 try {
+                     // If we're checking all packages or if the specific one we're checking matches,
+-                    // then check if the package and receiver still exist.
++		    // then check if the package is still valid.
+                     final String adminPackage = aa.info.getPackageName();
+                     if (packageName == null || packageName.equals(adminPackage)) {
+-                        if (mIPackageManager.getPackageInfo(adminPackage, 0, userHandle) == null
+-                                || mIPackageManager.getReceiverInfo(aa.info.getComponent(),
+-                                MATCH_DIRECT_BOOT_AWARE
+-                                        | MATCH_DIRECT_BOOT_UNAWARE,
+-                                userHandle) == null) {
+-                            Slogf.e(LOG_TAG, String.format(
+-                                    "Admin package %s not found for user %d, removing active admin",
+-                                    packageName, userHandle));
++                        if (!isActiveAdminPackageValid(aa)) {
++                            Slogf.e(LOG_TAG, "Admin package %s not found or invalid for user %d,"
++                                            + " removing active admin",
++                                    packageName, userHandle);
+                             removedAdmin = true;
+                             removedAdminPackage = adminPackage;
+                             policy.mAdminList.remove(i);
+-- 
+2.34.1
+

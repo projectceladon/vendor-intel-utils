@@ -1,0 +1,136 @@
+From 968f2767a504f1708e73c032978bcae4a7016886 Mon Sep 17 00:00:00 2001
+From: Nate Myren <ntmyren@google.com>
+Date: Thu, 26 Jun 2025 14:33:51 -0700
+Subject: [PATCH] Prevent root from getting unverified attributions from non
+ system apps
+
+Similar to shell, system server, and other packages, the root UID
+bypasses attribution tag registration requirements. This can be
+exploited by a malicious proxy app.
+
+Also fixes a bug which caused an unverified proxy app's attribution tag
+to be erroneously called "valid" if "finishProxyOp" was called for a
+non-system proxy app, and one of the special proxied apps
+
+Bug: 416491779
+Test: atest AppOpsMemoryUsageTest
+Flag: EXEMPT see bug
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:ab99cde450cf900767a641ddcf71f4a42e771334)
+Merged-In: I9b44465554e10b803bc9b4ab76130aaf9933f605
+Change-Id: I9b44465554e10b803bc9b4ab76130aaf9933f605
+---
+ .../android/server/appop/AppOpsService.java   | 55 ++++++++++++++-----
+ 1 file changed, 41 insertions(+), 14 deletions(-)
+
+diff --git a/services/core/java/com/android/server/appop/AppOpsService.java b/services/core/java/com/android/server/appop/AppOpsService.java
+index 250ae36c3285..101271ad86b4 100644
+--- a/services/core/java/com/android/server/appop/AppOpsService.java
++++ b/services/core/java/com/android/server/appop/AppOpsService.java
+@@ -4248,30 +4248,40 @@ public class AppOpsService extends IAppOpsService.Stub {
+             return null;
+         }
+ 
+-        finishOperationUnchecked(clientId, code, proxiedUid, resolvedProxiedPackageName,
+-                proxiedAttributionTag, proxyVirtualDeviceId);
++        finishOperationUnchecked(clientId, code, proxyUid, resolvedProxyPackageName,
++                proxiedUid, resolvedProxiedPackageName, proxiedAttributionTag,
++                proxyVirtualDeviceId);
+ 
+         return null;
+     }
++    private void finishOperationUnchecked(IBinder clientId, int code, int uid,
++            String packageName, String attributionTag, int virtualDeviceId) {
++        finishOperationUnchecked(clientId, code, -1, null, uid, packageName, attributionTag,
++                virtualDeviceId);
++    }
+ 
+-    private void finishOperationUnchecked(IBinder clientId, int code, int uid, String packageName,
+-            String attributionTag, int virtualDeviceId) {
++    private void finishOperationUnchecked(IBinder clientId, int code, int proxyUid,
++            String proxyPackageName, int proxiedUid,
++            String proxiedPackageName, String attributionTag,
++            int virtualDeviceId) {
+         PackageVerificationResult pvr;
+         try {
+-            pvr = verifyAndGetBypass(uid, packageName, attributionTag);
++            pvr = verifyAndGetBypass(proxiedUid, proxiedPackageName, attributionTag,
++                    proxyPackageName);
+             if (!pvr.isAttributionTagValid) {
+                 attributionTag = null;
+             }
+         } catch (SecurityException e) {
+-            logVerifyAndGetBypassFailure(uid, e, "finishOperation");
++            logVerifyAndGetBypassFailure(proxiedUid, e, "finishOperation");
+             return;
+         }
+ 
+         synchronized (this) {
+-            Op op = getOpLocked(code, uid, packageName, attributionTag, pvr.isAttributionTagValid,
+-                    pvr.bypass, /* edit */ true);
++            Op op = getOpLocked(code, proxiedUid, proxiedPackageName, attributionTag,
++                    pvr.isAttributionTagValid, pvr.bypass, /* edit */ true);
+             if (op == null) {
+-                Slog.e(TAG, "Operation not found: uid=" + uid + " pkg=" + packageName + "("
++                Slog.e(TAG, "Operation not found: uid=" + proxiedUid + " pkg=" + proxiedPackageName
++                        + "("
+                         + attributionTag + ") op=" + AppOpsManager.opToName(code));
+                 return;
+             }
+@@ -4279,7 +4289,8 @@ public class AppOpsService extends IAppOpsService.Stub {
+                     op.mDeviceAttributedOps.getOrDefault(getPersistentId(virtualDeviceId),
+                             new ArrayMap<>()).get(attributionTag);
+             if (attributedOp == null) {
+-                Slog.e(TAG, "Attribution not found: uid=" + uid + " pkg=" + packageName + "("
++                Slog.e(TAG, "Attribution not found: uid=" + proxiedUid
++                        + " pkg=" + proxiedPackageName + "("
+                         + attributionTag + ") op=" + AppOpsManager.opToName(code));
+                 return;
+             }
+@@ -4287,7 +4298,8 @@ public class AppOpsService extends IAppOpsService.Stub {
+             if (attributedOp.isRunning() || attributedOp.isPaused()) {
+                 attributedOp.finished(clientId);
+             } else {
+-                Slog.e(TAG, "Operation not started: uid=" + uid + " pkg=" + packageName + "("
++                Slog.e(TAG, "Operation not started: uid=" + proxiedUid
++                        + " pkg=" + proxiedPackageName + "("
+                         + attributionTag + ") op=" + AppOpsManager.opToName(code));
+             }
+         }
+@@ -4760,9 +4772,13 @@ public class AppOpsService extends IAppOpsService.Stub {
+             @Nullable String attributionTag, @Nullable String proxyPackageName,
+             boolean suppressErrorLogs) {
+         if (uid == Process.ROOT_UID) {
+-            // For backwards compatibility, don't check package name for root UID.
+-            return new PackageVerificationResult(null,
+-                    /* isAttributionTagValid */ true);
++            // For backwards compatibility, don't check package name for root UID, unless someone
++            // is claiming to be a proxy for root, which should never happen in normal usage.
++            // We only allow bypassing the attribution tag verification if the proxy is a
++            // system app (or is null), in order to prevent abusive apps clogging the appops
++            // system with unlimited attribution tags via proxy calls.
++            return new PackageVerificationResult(RestrictionBypass.UNRESTRICTED,
++                    /* isAttributionTagValid */ isPackageNullOrSystem(proxyPackageName, uid));
+         }
+         if (Process.isSdkSandboxUid(uid)) {
+             // SDK sandbox processes run in their own UID range, but their associated
+@@ -4886,6 +4902,17 @@ public class AppOpsService extends IAppOpsService.Stub {
+         return new PackageVerificationResult(bypass, isAttributionTagValid);
+     }
+ 
++    private boolean isPackageNullOrSystem(String packageName, int uid) {
++        if (packageName == null) {
++            return true;
++        }
++        int appId = UserHandle.getAppId(uid);
++        if (appId > 0 && appId < Process.FIRST_APPLICATION_UID) {
++            return true;
++        }
++        return mPackageManagerInternal.isSystemPackage(packageName);
++    }
++
+     private boolean isAttributionInPackage(@Nullable AndroidPackage pkg,
+             @Nullable String attributionTag) {
+         if (pkg == null) {
+-- 
+2.34.1
+
