@@ -1,0 +1,419 @@
+From 5c4b6e07334a19bbc236e08b56b4bf2c6e1acc30 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mat=C3=ADas=20Hern=C3=A1ndez?= <matiashe@google.com>
+Date: Tue, 27 May 2025 15:54:09 +0200
+Subject: [PATCH] Avoid mixups between different CPSes in ZenModeConditions
+
+A couple of places in ZenModeConditions assumed that condition id uniquely determines ConditionProviderService, which is not correct.
+
+Additionally, verify that only system zen rules can be handled by system CPSes (schedule, event, etc).
+
+Bug: 391894257
+Test: atest ZenModeConditionsTest
+Flag: EXEMPT Bug fix
+Change-Id: I7bff4b04674b5f247bd3b8b6920af029ef8098f5
+Merged-In: I7bff4b04674b5f247bd3b8b6920af029ef8098f5
+(cherry picked from commit 5cb0ae9c43e2262ad37f599de4c65bb31841f936)
+---
+ .../notification/ConditionProviders.java      |   9 +-
+ .../notification/ZenModeConditions.java       |  52 ++++--
+ .../notification/ZenModeConditionsTest.java   | 163 ++++++++++++++++++
+ .../notification/ZenModeHelperTest.java       |  43 +++--
+ 4 files changed, 235 insertions(+), 32 deletions(-)
+ create mode 100644 services/tests/uiservicestests/src/com/android/server/notification/ZenModeConditionsTest.java
+
+diff --git a/services/core/java/com/android/server/notification/ConditionProviders.java b/services/core/java/com/android/server/notification/ConditionProviders.java
+index 030c96e3dba6..35978ca3778a 100644
+--- a/services/core/java/com/android/server/notification/ConditionProviders.java
++++ b/services/core/java/com/android/server/notification/ConditionProviders.java
+@@ -286,6 +286,13 @@ public class ConditionProviders extends ManagedServices {
+         return rt;
+     }
+ 
++    @VisibleForTesting
++    ConditionRecord getRecord(Uri id, ComponentName component) {
++        synchronized (mMutex) {
++            return getRecordLocked(id, component, false);
++        }
++    }
++
+     private ConditionRecord getRecordLocked(Uri id, ComponentName component, boolean create) {
+         if (id == null || component == null) return null;
+         final int N = mRecords.size();
+@@ -436,7 +443,7 @@ public class ConditionProviders extends ManagedServices {
+         return info == null ? null : (IConditionProvider) info.service;
+     }
+ 
+-    private static class ConditionRecord {
++    static class ConditionRecord {
+         public final Uri id;
+         public final ComponentName component;
+         public Condition condition;
+diff --git a/services/core/java/com/android/server/notification/ZenModeConditions.java b/services/core/java/com/android/server/notification/ZenModeConditions.java
+index 6ecd799bf8e6..29b2594087aa 100644
+--- a/services/core/java/com/android/server/notification/ZenModeConditions.java
++++ b/services/core/java/com/android/server/notification/ZenModeConditions.java
+@@ -24,9 +24,10 @@ import android.service.notification.Condition;
+ import android.service.notification.IConditionProvider;
+ import android.service.notification.ZenModeConfig;
+ import android.service.notification.ZenModeConfig.ZenRule;
+-import android.util.ArrayMap;
+ import android.util.ArraySet;
+ import android.util.Log;
++import android.util.Pair;
++import android.util.Slog;
+ 
+ import com.android.internal.annotations.VisibleForTesting;
+ 
+@@ -44,7 +45,7 @@ public class ZenModeConditions implements ConditionProviders.Callback {
+     private final ConditionProviders mConditionProviders;
+ 
+     @VisibleForTesting
+-    protected final ArrayMap<Uri, ComponentName> mSubscriptions = new ArrayMap<>();
++    protected final ArraySet<Pair<Uri, ComponentName>> mSubscriptions = new ArraySet<>();
+ 
+     public ZenModeConditions(ZenModeHelper helper, ConditionProviders conditionProviders) {
+         mHelper = helper;
+@@ -73,11 +74,11 @@ public class ZenModeConditions implements ConditionProviders.Callback {
+             if (DEBUG) Log.d(TAG, "evaluateConfig: clearing manual rule");
+             config.manualRule = null;
+         }
+-        final ArraySet<Uri> current = new ArraySet<>();
+-        evaluateRule(config.manualRule, current, null, processSubscriptions);
++        final ArraySet<Pair<Uri, ComponentName>> current = new ArraySet<>();
++        evaluateRule(config.manualRule, current, null, processSubscriptions, true);
+         for (ZenRule automaticRule : config.automaticRules.values()) {
+             if (automaticRule.component != null) {
+-                evaluateRule(automaticRule, current, trigger, processSubscriptions);
++                evaluateRule(automaticRule, current, trigger, processSubscriptions, false);
+                 updateSnoozing(automaticRule);
+             }
+         }
+@@ -85,11 +86,11 @@ public class ZenModeConditions implements ConditionProviders.Callback {
+         synchronized (mSubscriptions) {
+             final int N = mSubscriptions.size();
+             for (int i = N - 1; i >= 0; i--) {
+-                final Uri id = mSubscriptions.keyAt(i);
+-                final ComponentName component = mSubscriptions.valueAt(i);
++                final Pair<Uri, ComponentName> subscription = mSubscriptions.valueAt(i);
+                 if (processSubscriptions) {
+-                    if (!current.contains(id)) {
+-                        mConditionProviders.unsubscribeIfNecessary(component, id);
++                    if (!current.contains(subscription)) {
++                        mConditionProviders.unsubscribeIfNecessary(subscription.second,
++                                subscription.first);
+                         mSubscriptions.removeAt(i);
+                     }
+                 }
+@@ -126,19 +127,32 @@ public class ZenModeConditions implements ConditionProviders.Callback {
+     }
+ 
+     // Only valid for CPS backed rules
+-    private void evaluateRule(ZenRule rule, ArraySet<Uri> current, ComponentName trigger,
+-            boolean processSubscriptions) {
++    private void evaluateRule(ZenRule rule, ArraySet<Pair<Uri, ComponentName>> current,
++            ComponentName trigger, boolean processSubscriptions, boolean isManual) {
+         if (rule == null || rule.conditionId == null) return;
+         if (rule.configurationActivity != null) return;
+         final Uri id = rule.conditionId;
++        boolean isSystemRule = isManual || ZenModeConfig.SYSTEM_AUTHORITY.equals(rule.getPkg());
++
++        if (!isSystemRule
++                && rule.component != null
++                && ZenModeConfig.SYSTEM_AUTHORITY.equals(rule.component.getPackageName())) {
++            Slog.w(TAG, "Rule " + rule.id + " belongs to package " + rule.getPkg()
++                    + " but has component=" + rule.component + " which is not allowed!");
++            return;
++        }
++
+         boolean isSystemCondition = false;
+-        for (SystemConditionProviderService sp : mConditionProviders.getSystemProviders()) {
+-            if (sp.isValidConditionId(id)) {
+-                mConditionProviders.ensureRecordExists(sp.getComponent(), id, sp.asInterface());
+-                rule.component = sp.getComponent();
+-                isSystemCondition = true;
++        if (isSystemRule) {
++            for (SystemConditionProviderService sp : mConditionProviders.getSystemProviders()) {
++                if (sp.isValidConditionId(id)) {
++                    mConditionProviders.ensureRecordExists(sp.getComponent(), id, sp.asInterface());
++                    rule.component = sp.getComponent();
++                    isSystemCondition = true;
++                }
+             }
+         }
++
+         // ensure that we have a record of the rule if it's backed by an currently alive CPS
+         if (!isSystemCondition) {
+             final IConditionProvider cp = mConditionProviders.findConditionProvider(rule.component);
+@@ -153,8 +167,10 @@ public class ZenModeConditions implements ConditionProviders.Callback {
+             rule.enabled = false;
+             return;
+         }
++
++        Pair<Uri, ComponentName> uriAndCps = new Pair<>(id, rule.component);
+         if (current != null) {
+-            current.add(id);
++            current.add(uriAndCps);
+         }
+ 
+         // If the rule is bound by a CPS and the CPS is alive, tell them about the rule
+@@ -163,7 +179,7 @@ public class ZenModeConditions implements ConditionProviders.Callback {
+             if (DEBUG) Log.d(TAG, "Subscribing to " + rule.component);
+             if (mConditionProviders.subscribeIfNecessary(rule.component, rule.conditionId)) {
+                 synchronized (mSubscriptions) {
+-                    mSubscriptions.put(rule.conditionId, rule.component);
++                    mSubscriptions.add(uriAndCps);
+                 }
+             } else {
+                 rule.condition = null;
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConditionsTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConditionsTest.java
+new file mode 100644
+index 000000000000..a53b7e011a80
+--- /dev/null
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeConditionsTest.java
+@@ -0,0 +1,163 @@
++/*
++ * Copyright (C) 2025 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.notification;
++
++import static com.google.common.truth.Truth.assertThat;
++
++import static org.mockito.Mockito.mock;
++
++import android.content.ComponentName;
++import android.content.ServiceConnection;
++import android.content.pm.IPackageManager;
++import android.net.Uri;
++import android.os.Build;
++import android.service.notification.ConditionProviderService;
++import android.service.notification.IConditionProvider;
++import android.service.notification.ZenModeConfig;
++import android.service.notification.ZenModeConfig.ZenRule;
++import android.testing.AndroidTestingRunner;
++import android.testing.TestableLooper;
++
++import androidx.test.filters.SmallTest;
++
++import com.android.server.UiServiceTestCase;
++import com.android.server.notification.ConditionProviders.ConditionRecord;
++
++import org.junit.Before;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++
++import java.util.Set;
++
++@SmallTest
++@RunWith(AndroidTestingRunner.class)
++@TestableLooper.RunWithLooper
++public class ZenModeConditionsTest extends UiServiceTestCase {
++
++    private static final ComponentName SCHEDULE_CPS = new ComponentName("android",
++            "com.android.server.notification.ScheduleConditionProvider");
++    private static final Uri SCHEDULE_CPS_CONDITION_ID = Uri.parse(
++            "condition://android/schedule?days=1.2.3&start=3.0&end=5.0&exitAtAlarm=true");
++
++    private static final String PACKAGE = "com.some.package";
++    private static final ComponentName PACKAGE_CPS = new ComponentName(PACKAGE,
++            PACKAGE + ".TheConditionProviderService");
++
++    private ZenModeConditions mZenModeConditions;
++    private ConditionProviders mConditionProviders;
++
++    @Before
++    public void setUp() {
++        mConditionProviders = new ConditionProviders(mContext, new ManagedServices.UserProfiles(),
++                mock(IPackageManager.class));
++        mZenModeConditions = new ZenModeConditions(mock(ZenModeHelper.class), mConditionProviders);
++        ((Set<?>) mConditionProviders.getSystemProviders()).clear(); // Hack, remove built-in CPSes
++
++        ScheduleConditionProvider scheduleConditionProvider = new ScheduleConditionProvider();
++        mConditionProviders.addSystemProvider(scheduleConditionProvider);
++
++        ConditionProviderService packageConditionProvider = new PackageConditionProviderService();
++        mConditionProviders.registerGuestService(mConditionProviders.new ManagedServiceInfo(
++                (IConditionProvider) packageConditionProvider.onBind(null), PACKAGE_CPS,
++                mContext.getUserId(), false, mock(ServiceConnection.class),
++                Build.VERSION_CODES.TIRAMISU, 44));
++    }
++
++    @Test
++    public void evaluateRule_systemRuleWithSystemConditionProvider_evaluates() {
++        ZenRule systemRule = newSystemZenRule("1", SCHEDULE_CPS, SCHEDULE_CPS_CONDITION_ID);
++        ZenModeConfig config = configWithRules(systemRule);
++
++        mZenModeConditions.evaluateConfig(config, null, /* processSubscriptions= */ true);
++
++        ConditionRecord conditionRecord = mConditionProviders.getRecord(SCHEDULE_CPS_CONDITION_ID,
++                SCHEDULE_CPS);
++        assertThat(conditionRecord).isNotNull();
++        assertThat(conditionRecord.subscribed).isTrue();
++    }
++
++    @Test
++    public void evaluateConfig_packageRuleWithSystemConditionProvider_ignored() {
++        ZenRule packageRule = newPackageZenRule(PACKAGE, SCHEDULE_CPS, SCHEDULE_CPS_CONDITION_ID);
++        ZenModeConfig config = configWithRules(packageRule);
++
++        mZenModeConditions.evaluateConfig(config, null, /* processSubscriptions= */ true);
++
++        assertThat(mConditionProviders.getRecord(SCHEDULE_CPS_CONDITION_ID, SCHEDULE_CPS))
++                .isNull();
++    }
++
++    @Test
++    public void evaluateConfig_packageRuleWithPackageCpsButSystemLikeConditionId_usesPackageCps() {
++        ZenRule packageRule = newPackageZenRule(PACKAGE, PACKAGE_CPS,
++                SCHEDULE_CPS_CONDITION_ID);
++        ZenModeConfig config = configWithRules(packageRule);
++
++        mZenModeConditions.evaluateConfig(config, /* trigger= */ PACKAGE_CPS,
++                /* processSubscriptions= */ true);
++
++        ConditionRecord packageCpsRecord = mConditionProviders.getRecord(SCHEDULE_CPS_CONDITION_ID,
++                PACKAGE_CPS);
++        assertThat(packageCpsRecord).isNotNull();
++        assertThat(packageCpsRecord.subscribed).isTrue();
++
++        ConditionRecord systemCpsRecord = mConditionProviders.getRecord(SCHEDULE_CPS_CONDITION_ID,
++                SCHEDULE_CPS);
++        assertThat(systemCpsRecord).isNull();
++    }
++
++    private static ZenModeConfig configWithRules(ZenRule... zenRules) {
++        ZenModeConfig config = new ZenModeConfig();
++        for (ZenRule zenRule : zenRules) {
++            config.automaticRules.put(zenRule.id, zenRule);
++        }
++        return config;
++    }
++
++    private static ZenRule newSystemZenRule(String id, ComponentName component, Uri conditionId) {
++        ZenRule systemRule = new ZenRule();
++        systemRule.id = id;
++        systemRule.name = "System Rule " + id;
++        systemRule.pkg = ZenModeConfig.SYSTEM_AUTHORITY;
++        systemRule.component = component;
++        systemRule.conditionId = conditionId;
++        return systemRule;
++    }
++
++    private static ZenRule newPackageZenRule(String packageName, ComponentName component,
++            Uri conditionId) {
++        ZenRule packageRule = new ZenRule();
++        packageRule.id = "id " + packageName;
++        packageRule.name = "Package Rule " + packageName;
++        packageRule.pkg = packageName;
++        packageRule.component = component;
++        packageRule.conditionId = conditionId;
++        return packageRule;
++    }
++
++    private static class PackageConditionProviderService extends ConditionProviderService {
++
++        @Override
++        public void onConnected() { }
++
++        @Override
++        public void onSubscribe(Uri conditionId) { }
++
++        @Override
++        public void onUnsubscribe(Uri conditionId) { }
++    }
++}
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+index dedb8f170ee0..891df8bd3799 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/ZenModeHelperTest.java
+@@ -80,6 +80,7 @@ import android.app.NotificationManager;
+ import android.app.NotificationManager.Policy;
+ import android.content.ComponentName;
+ import android.content.ContentResolver;
++import android.content.ServiceConnection;
+ import android.content.pm.ActivityInfo;
+ import android.content.pm.PackageManager;
+ import android.content.pm.ResolveInfo;
+@@ -91,11 +92,14 @@ import android.media.AudioManagerInternal;
+ import android.media.AudioSystem;
+ import android.media.VolumePolicy;
+ import android.net.Uri;
++import android.os.Build;
+ import android.os.Process;
+ import android.os.UserHandle;
+ import android.provider.Settings;
+ import android.provider.Settings.Global;
+ import android.service.notification.Condition;
++import android.service.notification.ConditionProviderService;
++import android.service.notification.IConditionProvider;
+ import android.service.notification.ZenModeConfig;
+ import android.service.notification.ZenModeConfig.ScheduleInfo;
+ import android.service.notification.ZenModeDiff;
+@@ -1881,21 +1885,22 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testRulesWithSameUri() {
+-        // needs to be a valid schedule info object for the subscription to happen properly
+-        ScheduleInfo scheduleInfo = new ScheduleInfo();
+-        scheduleInfo.days = new int[]{1, 2};
+-        scheduleInfo.endHour = 1;
+-        Uri sharedUri = ZenModeConfig.toScheduleConditionId(scheduleInfo);
+-        AutomaticZenRule zenRule = new AutomaticZenRule("name",
+-                new ComponentName("android", "ScheduleConditionProvider"),
+-                sharedUri,
+-                NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++        // Needs a "valid" CPS otherwise ZenModeConditions will balk and clear rule.condition
++        ComponentName packageCpsName = new ComponentName(mContext,
++                PackageConditionProviderService.class);
++        ConditionProviderService packageCps = new PackageConditionProviderService();
++        mConditionProviders.registerGuestService(mConditionProviders.new ManagedServiceInfo(
++                (IConditionProvider) packageCps.onBind(null), packageCpsName,
++                mContext.getUserId(), false, mock(ServiceConnection.class),
++                Build.VERSION_CODES.TIRAMISU, 44));
++        Uri sharedUri = Uri.parse("packageConditionId");
++
++        AutomaticZenRule zenRule = new AutomaticZenRule("name", packageCpsName,
++                sharedUri, NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
+         String id = mZenModeHelper.addAutomaticZenRule("android", zenRule, "test",
+                 Process.SYSTEM_UID, true);
+-        AutomaticZenRule zenRule2 = new AutomaticZenRule("name2",
+-                new ComponentName("android", "ScheduleConditionProvider"),
+-                sharedUri,
+-                NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
++        AutomaticZenRule zenRule2 = new AutomaticZenRule("name2", packageCpsName,
++                sharedUri, NotificationManager.INTERRUPTION_FILTER_PRIORITY, true);
+         String id2 = mZenModeHelper.addAutomaticZenRule("android", zenRule2, "test",
+                 Process.SYSTEM_UID, true);
+ 
+@@ -2778,4 +2783,16 @@ public class ZenModeHelperTest extends UiServiceTestCase {
+             return parser.nextTag();
+         }
+     }
++
++    private static class PackageConditionProviderService extends ConditionProviderService {
++
++        @Override
++        public void onConnected() { }
++
++        @Override
++        public void onSubscribe(Uri conditionId) { }
++
++        @Override
++        public void onUnsubscribe(Uri conditionId) { }
++    }
+ }
+-- 
+2.50.1.351.gcf940e82a1-goog
+

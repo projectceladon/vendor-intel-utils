@@ -1,0 +1,150 @@
+From ec1f955f6d59e33b769f0d0b0a3ee3e0f067d9f6 Mon Sep 17 00:00:00 2001
+From: mrulhania <mrulhania@google.com>
+Date: Mon, 9 Jun 2025 18:05:20 -0700
+Subject: [PATCH] Stop one-time sessions iff when no one-time permission is
+ granted
+
+Stoping the session on one of one-time  permission revoke termintes
+the only session running for all one time permission grants. We
+need to stop the session when no permission is granted as one time.
+
+Bug: 419105158
+Test: manual
+Flag: EXEMPT bug fix
+LOW_COVERAGE_REASON=NON_CODE_ONLY
+Relnote: security bug fix
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:2b7a2c80f69a80163d35f45b5300d400884945a0)
+Merged-In: I59d6f13e23e326b055e0221da52bb22bd54de5d7
+Change-Id: I59d6f13e23e326b055e0221da52bb22bd54de5d7
+---
+ .../permission/model/AppPermissionGroup.java  | 29 ++++++++++++++++++-
+ .../permission/utils/KotlinUtils.kt           | 28 ++++++++----------
+ 2 files changed, 40 insertions(+), 17 deletions(-)
+
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java b/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java
+index e096a1a7ec..a784043e1f 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java
++++ b/PermissionController/src/com/android/permissioncontroller/permission/model/AppPermissionGroup.java
+@@ -23,12 +23,15 @@ import static android.app.AppOpsManager.MODE_ALLOWED;
+ import static android.app.AppOpsManager.MODE_FOREGROUND;
+ import static android.app.AppOpsManager.MODE_IGNORED;
+ import static android.app.AppOpsManager.OPSTR_LEGACY_STORAGE;
++import static android.content.pm.PackageManager.FLAG_PERMISSION_ONE_TIME;
++import static android.content.pm.PackageManager.FLAG_PERMISSION_REVOKED_COMPAT;
+ import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+ import static android.health.connect.HealthPermissions.HEALTH_PERMISSION_GROUP;
+ 
+ import static com.android.permissioncontroller.permission.utils.Utils.isHealthPermissionUiEnabled;
+ 
+ import android.Manifest;
++import android.annotation.SuppressLint;
+ import android.app.ActivityManager;
+ import android.app.AppOpsManager;
+ import android.app.Application;
+@@ -1642,12 +1645,36 @@ public final class AppPermissionGroup implements Comparable<AppPermissionGroup>
+             } finally {
+                 Binder.restoreCallingIdentity(token);
+             }
+-        } else {
++        } else if (!anyPermsOfPackageOneTimeGranted(getApp())) {
++            // Stop the session only when no permission in the package is granted as one time.
+             mContext.getSystemService(PermissionManager.class)
+                     .stopOneTimePermissionSession(packageName);
+         }
+     }
+ 
++    @SuppressLint("MissingPermission")
++    private boolean anyPermsOfPackageOneTimeGranted(PackageInfo packageInfo) {
++        if (packageInfo.requestedPermissions == null
++                || packageInfo.requestedPermissionsFlags == null) {
++            return false;
++        }
++
++        for (int i = 0; i < packageInfo.requestedPermissions.length; i++) {
++            if ((packageInfo.requestedPermissionsFlags[i] &
++                    PackageInfo.REQUESTED_PERMISSION_GRANTED) == 0) {
++                continue;
++            }
++            int flags = mPackageManager.getPermissionFlags(
++                    packageInfo.requestedPermissions[i], packageInfo.packageName, getUser());
++            boolean isGrantedOneTime = (flags & FLAG_PERMISSION_REVOKED_COMPAT) == 0 &&
++                    (flags & FLAG_PERMISSION_ONE_TIME) != 0;
++            if (isGrantedOneTime) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     /**
+      * Check if permission group contains a runtime permission that split from an installed
+      * permission and the split happened in an Android version higher than app's targetSdk.
+diff --git a/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt b/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt
+index fb188fca12..1585f16944 100644
+--- a/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt
++++ b/PermissionController/src/com/android/permissioncontroller/permission/utils/KotlinUtils.kt
+@@ -38,6 +38,7 @@ import android.content.Intent
+ import android.content.Intent.ACTION_MAIN
+ import android.content.Intent.CATEGORY_INFO
+ import android.content.Intent.CATEGORY_LAUNCHER
++import android.content.pm.PackageInfo
+ import android.content.pm.PackageManager
+ import android.content.pm.PackageManager.FLAG_PERMISSION_AUTO_REVOKED
+ import android.content.pm.PackageManager.FLAG_PERMISSION_ONE_TIME
+@@ -1018,7 +1019,7 @@ object KotlinUtils {
+         val newGroup = LightAppPermGroup(group.packageInfo, group.permGroupInfo, newPerms,
+             group.hasInstallToRuntimeSplit, group.specialLocationGrant)
+ 
+-        if (wasOneTime && !anyPermsOfPackageOneTimeGranted(app, newGroup.packageInfo, newGroup)) {
++        if (wasOneTime && !anyPermsOfPackageOneTimeGranted(app, newGroup.packageInfo)) {
+             app.getSystemService(PermissionManager::class.java)!!.stopOneTimePermissionSession(
+                 group.packageName)
+         }
+@@ -1058,34 +1059,29 @@ object KotlinUtils {
+      *
+      * @param app The current application
+      * @param packageInfo The packageInfo we wish to examine
+-     * @param group Optional, the current app permission group we are examining
+-     *
+      * @return true if any permission in the package is granted for one time, false otherwise
+      */
+     private fun anyPermsOfPackageOneTimeGranted(
+         app: Application,
+         packageInfo: LightPackageInfo,
+-        group: LightAppPermGroup? = null
+     ): Boolean {
+-        val user = group?.userHandle ?: UserHandle.getUserHandleForUid(packageInfo.uid)
+-        if (group?.isOneTime == true) {
+-            return true
+-        }
+-        for ((idx, permName) in packageInfo.requestedPermissions.withIndex()) {
+-            if (permName in group?.permissions ?: emptyMap()) {
++        val user = UserHandle.getUserHandleForUid(packageInfo.uid)
++        for ((index, permName) in packageInfo.requestedPermissions.withIndex()) {
++            if ((packageInfo.requestedPermissionsFlags[index] and
++                        PackageInfo.REQUESTED_PERMISSION_GRANTED) == 0) {
+                 continue
+             }
+-            val flags = app.packageManager.getPermissionFlags(permName, packageInfo.packageName,
+-                user) and FLAG_PERMISSION_ONE_TIME
+-            val granted = packageInfo.requestedPermissionsFlags[idx] ==
+-                PackageManager.PERMISSION_GRANTED &&
+-                (flags and FLAG_PERMISSION_REVOKED_COMPAT) == 0
+-            if (granted && (flags and FLAG_PERMISSION_ONE_TIME) != 0) {
++            val flags =
++                app.packageManager.getPermissionFlags(permName, packageInfo.packageName, user)
++            val isGrantedOneTime = (flags and FLAG_PERMISSION_REVOKED_COMPAT) == 0 &&
++                    (flags and FLAG_PERMISSION_ONE_TIME) != 0
++            if (isGrantedOneTime) {
+                 return true
+             }
+         }
+         return false
+     }
++
+     /**
+      * Revokes a single runtime permission.
+      *
+-- 
+2.34.1
+

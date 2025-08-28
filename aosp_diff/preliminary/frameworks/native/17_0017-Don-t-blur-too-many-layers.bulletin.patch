@@ -1,0 +1,221 @@
+From 4f2bdefb7f0260809c665b559e46e07b5037690c Mon Sep 17 00:00:00 2001
+From: Alec Mouri <alecmouri@google.com>
+Date: Thu, 15 May 2025 16:39:49 +0000
+Subject: [PATCH] Don't blur too many layers
+
+An application requesting lots and lots of blurs:
+a. Enables pixel stealing by measuring how long it takes to perform a
+blur across windows
+b. Probably isn't very valid anyways.
+
+So, just arbitrarily pick an upper bound for blur requests that a
+display is allowed to manage (10), and disable everything else.
+Arbitrarily, pick the 10 "front-most" blurs to be respected.
+
+Bug: 399120953
+Flag: EXEMPT security
+Test: Security PoC no longer PoCs
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:acf65e7b90c8313b3cf939d14b8299818d77cc18)
+Merged-In: Ie7195eb852b52aff2f58da8bd095d8684baceef6
+Change-Id: Ie7195eb852b52aff2f58da8bd095d8684baceef6
+---
+ .../include/compositionengine/Output.h           |  1 +
+ .../include/compositionengine/impl/Output.h      |  1 +
+ .../impl/OutputLayerCompositionState.h           |  3 +++
+ .../compositionengine/impl/planner/CachedSet.h   |  1 +
+ .../compositionengine/impl/planner/LayerState.h  | 11 ++++++++---
+ .../CompositionEngine/src/Output.cpp             | 16 +++++++++++++---
+ .../CompositionEngine/src/planner/CachedSet.cpp  |  7 ++++++-
+ .../tests/planner/CachedSetTest.cpp              |  4 ++--
+ 8 files changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/Output.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/Output.h
+index a3d86398cf..c5421bcddb 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/Output.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/Output.h
+@@ -157,6 +157,7 @@ public:
+         // only has a value if there's something needing it, like when a TrustedPresentationListener
+         // is set
+         std::optional<Region> aboveCoveredLayersExcludingOverlays;
++        int32_t aboveBlurRequests = 0;
+     };
+ 
+     virtual ~Output();
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/Output.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/Output.h
+index 229a657236..f92fe04410 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/Output.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/Output.h
+@@ -160,6 +160,7 @@ private:
+     void dirtyEntireOutput();
+     void updateCompositionStateForBorder(const compositionengine::CompositionRefreshArgs&);
+     compositionengine::OutputLayer* findLayerRequestingBackgroundComposition() const;
++    void sanitizeOutputLayers() const;
+     void finishPrepareFrame();
+     ui::Dataspace getBestDataspace(ui::Dataspace*, bool*) const;
+     compositionengine::Output::ColorProfile pickColorProfile(
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputLayerCompositionState.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputLayerCompositionState.h
+index 7b0af3a248..5210ed92ef 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputLayerCompositionState.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputLayerCompositionState.h
+@@ -100,6 +100,9 @@ struct OutputLayerCompositionState {
+     // order to save power.
+     Region outputSpaceBlockingRegionHint;
+ 
++    // ignore blur requests if there's just too many on top of this layer
++    bool ignoreBlur{false};
++
+     // Overrides the buffer, acquire fence, and display frame stored in LayerFECompositionState
+     struct {
+         std::shared_ptr<renderengine::ExternalTexture> buffer = nullptr;
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/CachedSet.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/CachedSet.h
+index d26ca9dd00..a5a8b2a3f7 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/CachedSet.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/CachedSet.h
+@@ -42,6 +42,7 @@ public:
+         const std::string& getName() const { return mState->getName(); }
+         int32_t getBackgroundBlurRadius() const { return mState->getBackgroundBlurRadius(); }
+         Rect getDisplayFrame() const { return mState->getDisplayFrame(); }
++        bool hasBlurBehind() const { return mState->hasBlurBehind(); }
+         const Region& getVisibleRegion() const { return mState->getVisibleRegion(); }
+         const sp<GraphicBuffer>& getBuffer() const {
+             return mState->getOutputLayer()->getLayerFE().getCompositionState()->buffer;
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/LayerState.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/LayerState.h
+index ce2b96fc2b..e2f0ddfb20 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/LayerState.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/planner/LayerState.h
+@@ -74,6 +74,7 @@ enum class LayerStateField : uint32_t {
+     BlurRegions           = 1u << 18,
+     HasProtectedContent   = 1u << 19,
+     CachingHint           = 1u << 20,
++    BlursDisabled         = 1u << 21,
+ };
+ // clang-format on
+ 
+@@ -234,7 +235,8 @@ public:
+     Rect getDisplayFrame() const { return mDisplayFrame.get(); }
+     const Region& getVisibleRegion() const { return mVisibleRegion.get(); }
+     bool hasBlurBehind() const {
+-        return mBackgroundBlurRadius.get() > 0 || !mBlurRegions.get().empty();
++        return (mBackgroundBlurRadius.get() > 0 || !mBlurRegions.get().empty()) &&
++                !mIsBlursDisabled.get();
+     }
+     int32_t getBackgroundBlurRadius() const { return mBackgroundBlurRadius.get(); }
+     aidl::android::hardware::graphics::composer3::Composition getCompositionType() const {
+@@ -502,7 +504,10 @@ private:
+                              return std::vector<std::string>{toString(cachingHint)};
+                          }};
+ 
+-    static const constexpr size_t kNumNonUniqueFields = 19;
++    OutputLayerState<bool, LayerStateField::BlursDisabled> mIsBlursDisabled{
++            [](auto layer) { return layer->getState().ignoreBlur; }};
++
++    static const constexpr size_t kNumNonUniqueFields = 20;
+ 
+     std::array<StateInterface*, kNumNonUniqueFields> getNonUniqueFields() {
+         std::array<const StateInterface*, kNumNonUniqueFields> constFields =
+@@ -520,7 +525,7 @@ private:
+                 &mAlpha,        &mLayerMetadata,  &mVisibleRegion,        &mOutputDataspace,
+                 &mPixelFormat,  &mColorTransform, &mCompositionType,      &mSidebandStream,
+                 &mBuffer,       &mSolidColor,     &mBackgroundBlurRadius, &mBlurRegions,
+-                &mFrameNumber,  &mIsProtected,    &mCachingHint};
++                &mFrameNumber,  &mIsProtected,    &mCachingHint,          &mIsBlursDisabled};
+     }
+ };
+ 
+diff --git a/services/surfaceflinger/CompositionEngine/src/Output.cpp b/services/surfaceflinger/CompositionEngine/src/Output.cpp
+index 793959cea6..c5ff89025b 100644
+--- a/services/surfaceflinger/CompositionEngine/src/Output.cpp
++++ b/services/surfaceflinger/CompositionEngine/src/Output.cpp
+@@ -737,6 +737,9 @@ void Output::ensureOutputLayerIfVisible(sp<compositionengine::LayerFE>& layerFE,
+     // one, or create a new one if we do not.
+     auto result = ensureOutputLayer(prevOutputLayerIndex, layerFE);
+ 
++    coverage.aboveBlurRequests += static_cast<int32_t>(layerFEState->backgroundBlurRadius > 0 ||
++                                                       !layerFEState->blurRegions.empty());
++
+     // Store the layer coverage information into the layer state as some of it
+     // is useful later.
+     auto& outputLayerState = result->editState();
+@@ -751,6 +754,11 @@ void Output::ensureOutputLayerIfVisible(sp<compositionengine::LayerFE>& layerFE,
+             ? outputState.transform.transform(
+                       transparentRegion.intersect(outputState.layerStackSpace.getContent()))
+             : Region();
++
++    // See b/399120953: blurs are so expensive that they may be susceptible to compression side
++    // channel attacks
++    static constexpr auto kMaxBlurRequests = 10;
++    outputLayerState.ignoreBlur = coverage.aboveBlurRequests > kMaxBlurRequests;
+     if (CC_UNLIKELY(computeAboveCoveredExcludingOverlays)) {
+         outputLayerState.coveredRegionExcludingDisplayOverlays =
+                 std::move(coveredRegionExcludingDisplayOverlays);
+@@ -1403,7 +1411,7 @@ std::vector<LayerFE::LayerSettings> Output::generateClientCompositionRequests(
+     const Region viewportRegion(outputState.layerStackSpace.getContent());
+     bool firstLayer = true;
+ 
+-    bool disableBlurs = false;
++    bool disableBlursWholesale = false;
+     uint64_t previousOverrideBufferId = 0;
+ 
+     for (auto* layer : getOutputLayersOrderedByZ()) {
+@@ -1420,7 +1428,8 @@ std::vector<LayerFE::LayerSettings> Output::generateClientCompositionRequests(
+             continue;
+         }
+ 
+-        disableBlurs |= layerFEState->sidebandStream != nullptr;
++        disableBlursWholesale |= layerFEState->sidebandStream != nullptr;
++        bool disableBlurForLayer = layer->getState().ignoreBlur || disableBlursWholesale;
+ 
+         const bool clientComposition = layer->requiresClientComposition();
+ 
+@@ -1450,7 +1459,8 @@ std::vector<LayerFE::LayerSettings> Output::generateClientCompositionRequests(
+                           layer->getLayerFE().getDebugName());
+                 }
+             } else {
+-                LayerFE::ClientCompositionTargetSettings::BlurSetting blurSetting = disableBlurs
++                LayerFE::ClientCompositionTargetSettings::BlurSetting blurSetting =
++                        disableBlurForLayer
+                         ? LayerFE::ClientCompositionTargetSettings::BlurSetting::Disabled
+                         : (layer->getState().overrideInfo.disableBackgroundBlur
+                                    ? LayerFE::ClientCompositionTargetSettings::BlurSetting::
+diff --git a/services/surfaceflinger/CompositionEngine/src/planner/CachedSet.cpp b/services/surfaceflinger/CompositionEngine/src/planner/CachedSet.cpp
+index 8ced0aca36..9197b72bf4 100644
+--- a/services/surfaceflinger/CompositionEngine/src/planner/CachedSet.cpp
++++ b/services/surfaceflinger/CompositionEngine/src/planner/CachedSet.cpp
+@@ -193,9 +193,14 @@ void CachedSet::render(renderengine::RenderEngine& renderEngine, TexturePool& te
+     std::vector<renderengine::LayerSettings> layerSettings;
+     renderengine::LayerSettings highlight;
+     for (const auto& layer : mLayers) {
++        auto blurSettings = targetSettings;
++        if (!layer.hasBlurBehind()) {
++            blurSettings.blurSetting =
++                    LayerFE::ClientCompositionTargetSettings::BlurSetting::Disabled;
++        }
+         if (auto clientCompositionSettings =
+                     layer.getState()->getOutputLayer()->getLayerFE().prepareClientComposition(
+-                            targetSettings)) {
++                            blurSettings)) {
+             layerSettings.push_back(std::move(*clientCompositionSettings));
+         }
+     }
+diff --git a/services/surfaceflinger/CompositionEngine/tests/planner/CachedSetTest.cpp b/services/surfaceflinger/CompositionEngine/tests/planner/CachedSetTest.cpp
+index bd030d090f..a5aca8995d 100644
+--- a/services/surfaceflinger/CompositionEngine/tests/planner/CachedSetTest.cpp
++++ b/services/surfaceflinger/CompositionEngine/tests/planner/CachedSetTest.cpp
+@@ -1011,12 +1011,12 @@ TEST_F(CachedSetTest, addBlur) {
+     EXPECT_CALL(*layerFE1,
+                 prepareClientComposition(ClientCompositionTargetSettingsBlurSettingsEq(
+                         compositionengine::LayerFE::ClientCompositionTargetSettings::BlurSetting::
+-                                Enabled)))
++                                Disabled)))
+             .WillOnce(Return(clientComp1));
+     EXPECT_CALL(*layerFE2,
+                 prepareClientComposition(ClientCompositionTargetSettingsBlurSettingsEq(
+                         compositionengine::LayerFE::ClientCompositionTargetSettings::BlurSetting::
+-                                Enabled)))
++                                Disabled)))
+             .WillOnce(Return(clientComp2));
+     EXPECT_CALL(*layerFE3,
+                 prepareClientComposition(ClientCompositionTargetSettingsBlurSettingsEq(
+-- 
+2.50.1.351.gcf940e82a1-goog
+

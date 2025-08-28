@@ -1,0 +1,221 @@
+From 7a486ef252fbaf0420c61b8be407cef10f97eecf Mon Sep 17 00:00:00 2001
+From: Julia Reynolds <juliacr@google.com>
+Date: Mon, 12 May 2025 14:50:40 -0400
+Subject: [PATCH] Hide notification content in history
+
+- if the user is locked
+- and the user has chosen to hide sensistive content when locked
+
+Test: manual with a work profile with a different pin
+Bug: 378088320
+Flag: EXEMPT bug fix
+Change-Id: Ia70454d9859fb788ffa1f48f88760f88c354cdff
+(cherry picked from commit 9df37c3f8be2dedd2e44e52da4de45fba33c6a6e)
+---
+ .../history/NotificationHistoryActivity.java  | 28 ++++++++++++++++---
+ .../history/NotificationHistoryAdapter.java   | 21 +++++++++++---
+ .../history/NotificationSbnAdapter.java       | 14 ++++++++--
+ 3 files changed, 52 insertions(+), 11 deletions(-)
+
+diff --git a/src/com/android/settings/notification/history/NotificationHistoryActivity.java b/src/com/android/settings/notification/history/NotificationHistoryActivity.java
+index b71d295f7f..7070fbba3a 100644
+--- a/src/com/android/settings/notification/history/NotificationHistoryActivity.java
++++ b/src/com/android/settings/notification/history/NotificationHistoryActivity.java
+@@ -16,6 +16,7 @@
+ 
+ package com.android.settings.notification.history;
+ 
++import static android.provider.Settings.Secure.LOCK_SCREEN_ALLOW_PRIVATE_NOTIFICATIONS;
+ import static android.provider.Settings.Secure.NOTIFICATION_HISTORY_ENABLED;
+ 
+ import static androidx.core.view.accessibility.AccessibilityEventCompat.TYPE_VIEW_ACCESSIBILITY_FOCUSED;
+@@ -25,9 +26,11 @@ import android.annotation.ColorInt;
+ import android.app.ActionBar;
+ import android.app.ActivityManager;
+ import android.app.INotificationManager;
++import android.app.KeyguardManager;
+ import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.pm.PackageManager;
++import android.content.pm.UserInfo;
+ import android.content.res.Resources;
+ import android.content.res.TypedArray;
+ import android.graphics.Outline;
+@@ -56,6 +59,7 @@ import androidx.recyclerview.widget.RecyclerView;
+ import com.android.internal.logging.UiEvent;
+ import com.android.internal.logging.UiEventLogger;
+ import com.android.internal.logging.UiEventLoggerImpl;
++import com.android.internal.widget.LockPatternUtils;
+ import com.android.internal.widget.NotificationExpandButton;
+ import com.android.settings.R;
+ import com.android.settings.notification.NotificationBackend;
+@@ -67,6 +71,7 @@ import com.android.settingslib.widget.OnMainSwitchChangeListener;
+ 
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.List;
+ import java.util.concurrent.CountDownLatch;
+ import java.util.concurrent.Future;
+ import java.util.concurrent.TimeUnit;
+@@ -112,6 +117,8 @@ public class NotificationHistoryActivity extends CollapsingToolbarBaseActivity {
+     };
+     private UiEventLogger mUiEventLogger = new UiEventLoggerImpl();
+ 
++    private ArrayList<Integer> mContentRestrictedUsers = new ArrayList<>();
++
+     enum NotificationHistoryEvent implements UiEventLogger.UiEventEnum {
+         @UiEvent(doc = "User turned on notification history")
+         NOTIFICATION_HISTORY_ON(504),
+@@ -210,14 +217,14 @@ public class NotificationHistoryActivity extends CollapsingToolbarBaseActivity {
+ 
+             final NotificationHistoryRecyclerView rv =
+                     viewForPackage.findViewById(R.id.notification_list);
+-            rv.setAdapter(new NotificationHistoryAdapter(mNm, rv,
++            rv.setAdapter(new NotificationHistoryAdapter(NotificationHistoryActivity.this, mNm, rv,
+                     newCount -> {
+                         count.setText(StringUtil.getIcuPluralsString(this, newCount,
+                                 R.string.notification_history_count));
+                         if (newCount == 0) {
+                             viewForPackage.setVisibility(View.GONE);
+                         }
+-                    }, mUiEventLogger));
++                    }, mUiEventLogger, mContentRestrictedUsers));
+             ((NotificationHistoryAdapter) rv.getAdapter()).onRebuildComplete(
+                     new ArrayList<>(nhp.notifications));
+ 
+@@ -261,6 +268,19 @@ public class NotificationHistoryActivity extends CollapsingToolbarBaseActivity {
+ 
+         mPm = getPackageManager();
+         mUm = getSystemService(UserManager.class);
++
++        List<UserInfo> users = mUm.getProfiles(getUserId());
++        for (UserInfo user : users) {
++            if (Settings.Secure.getIntForUser(getContentResolver(),
++                    LOCK_SCREEN_ALLOW_PRIVATE_NOTIFICATIONS, 0, user.id) == 0) {
++                LockPatternUtils lpu = new LockPatternUtils(this);
++                KeyguardManager km = getSystemService(KeyguardManager.class);
++                if (lpu.isSecure(user.id) && km.isDeviceLocked(user.id)) {
++                    mContentRestrictedUsers.add(user.id);
++                }
++            }
++        }
++
+         // wait for history loading and recent/snooze loading
+         mCountdownLatch = new CountDownLatch(2);
+ 
+@@ -406,7 +426,7 @@ public class NotificationHistoryActivity extends CollapsingToolbarBaseActivity {
+             mSnoozedRv.setLayoutManager(lm);
+             mSnoozedRv.setAdapter(
+                     new NotificationSbnAdapter(NotificationHistoryActivity.this, mPm, mUm,
+-                            true, mUiEventLogger));
++                            true, mUiEventLogger, mContentRestrictedUsers));
+             mSnoozedRv.setNestedScrollingEnabled(false);
+ 
+             if (snoozed == null || snoozed.length == 0) {
+@@ -422,7 +442,7 @@ public class NotificationHistoryActivity extends CollapsingToolbarBaseActivity {
+             mDismissedRv.setLayoutManager(dismissLm);
+             mDismissedRv.setAdapter(
+                     new NotificationSbnAdapter(NotificationHistoryActivity.this, mPm, mUm,
+-                            false, mUiEventLogger));
++                            false, mUiEventLogger, mContentRestrictedUsers));
+             mDismissedRv.setNestedScrollingEnabled(false);
+ 
+             if (dismissed == null || dismissed.length == 0) {
+diff --git a/src/com/android/settings/notification/history/NotificationHistoryAdapter.java b/src/com/android/settings/notification/history/NotificationHistoryAdapter.java
+index 96bc14a6fb..275ff4e2c9 100644
+--- a/src/com/android/settings/notification/history/NotificationHistoryAdapter.java
++++ b/src/com/android/settings/notification/history/NotificationHistoryAdapter.java
+@@ -22,6 +22,7 @@ import static android.provider.Settings.EXTRA_CONVERSATION_ID;
+ 
+ import android.app.INotificationManager;
+ import android.app.NotificationHistory.HistoricalNotification;
++import android.content.Context;
+ import android.content.Intent;
+ import android.os.Bundle;
+ import android.os.RemoteException;
+@@ -52,16 +53,23 @@ public class NotificationHistoryAdapter extends
+     private List<HistoricalNotification> mValues;
+     private OnItemDeletedListener mListener;
+     private UiEventLogger mUiEventLogger;
+-    public NotificationHistoryAdapter(INotificationManager nm,
++    private ArrayList<Integer> mContentRestrictedUsers = new ArrayList<>();
++    Context mContext;
++
++    public NotificationHistoryAdapter(Context context,
++            INotificationManager nm,
+             NotificationHistoryRecyclerView listView,
+             OnItemDeletedListener listener,
+-            UiEventLogger uiEventLogger) {
++            UiEventLogger uiEventLogger,
++            ArrayList<Integer> contentRestrictedUsers) {
++        mContext = context;
+         mValues = new ArrayList<>();
+         setHasStableIds(true);
+         listView.setOnItemSwipeDeleteListener(this);
+         mNm = nm;
+         mListener = listener;
+         mUiEventLogger = uiEventLogger;
++        mContentRestrictedUsers = contentRestrictedUsers;
+     }
+ 
+     @Override
+@@ -80,8 +88,13 @@ public class NotificationHistoryAdapter extends
+     public void onBindViewHolder(final @NonNull NotificationHistoryViewHolder holder,
+             int position) {
+         final HistoricalNotification hn = mValues.get(position);
+-        holder.setTitle(hn.getTitle());
+-        holder.setSummary(hn.getText());
++        if (mContentRestrictedUsers.contains(hn.getUserId())) {
++            holder.setSummary(mContext.getString(
++                    com.android.internal.R.string.notification_hidden_text));
++        } else {
++            holder.setTitle(hn.getTitle());
++            holder.setSummary(hn.getText());
++        }
+         holder.setPostedTime(hn.getPostedTimeMs());
+         final View.OnClickListener onClick = v -> {
+             mUiEventLogger.logWithPosition(NotificationHistoryActivity.NotificationHistoryEvent
+diff --git a/src/com/android/settings/notification/history/NotificationSbnAdapter.java b/src/com/android/settings/notification/history/NotificationSbnAdapter.java
+index 1d61ae79cd..a2932ae5fa 100644
+--- a/src/com/android/settings/notification/history/NotificationSbnAdapter.java
++++ b/src/com/android/settings/notification/history/NotificationSbnAdapter.java
+@@ -74,9 +74,11 @@ public class NotificationSbnAdapter extends
+     private List<Integer> mEnabledProfiles = new ArrayList<>();
+     private boolean mIsSnoozed;
+     private UiEventLogger mUiEventLogger;
++    private ArrayList<Integer> mContentRestrictedUsers = new ArrayList<>();
+ 
+     public NotificationSbnAdapter(Context context, PackageManager pm, UserManager um,
+-            boolean isSnoozed, UiEventLogger uiEventLogger) {
++            boolean isSnoozed, UiEventLogger uiEventLogger,
++            ArrayList<Integer> contentRestrictedUsers) {
+         mContext = context;
+         mPm = pm;
+         mUserBadgeCache = new HashMap<>();
+@@ -97,6 +99,7 @@ public class NotificationSbnAdapter extends
+         // If true, this is the panel for snoozed notifs, otherwise the one for dismissed notifs.
+         mIsSnoozed = isSnoozed;
+         mUiEventLogger = uiEventLogger;
++        mContentRestrictedUsers = contentRestrictedUsers;
+     }
+ 
+     @Override
+@@ -114,8 +117,13 @@ public class NotificationSbnAdapter extends
+             holder.setIconBackground(loadBackground(sbn));
+             holder.setIcon(loadIcon(sbn));
+             holder.setPackageLabel(loadPackageLabel(sbn.getPackageName()).toString());
+-            holder.setTitle(getTitleString(sbn.getNotification()));
+-            holder.setSummary(getTextString(mContext, sbn.getNotification()));
++            if (mContentRestrictedUsers.contains(sbn.getNormalizedUserId())) {
++                holder.setSummary(mContext.getString(
++                        com.android.internal.R.string.notification_hidden_text));
++            } else {
++                holder.setTitle(getTitleString(sbn.getNotification()));
++                holder.setSummary(getTextString(mContext, sbn.getNotification()));
++            }
+             holder.setPostedTime(sbn.getPostTime());
+             holder.setDividerVisible(position < (mValues.size() -1));
+             int userId = normalizeUserId(sbn);
+-- 
+2.50.1.351.gcf940e82a1-goog
+
