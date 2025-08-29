@@ -1,0 +1,127 @@
+From 6a2a1db33a09d59be0b41611c3e125d46212ddcc Mon Sep 17 00:00:00 2001
+From: Devin Moore <devinmoore@google.com>
+Date: Mon, 17 Mar 2025 23:09:26 +0000
+Subject: [PATCH] Protect objects in Parcel::appendFrom
+
+* only aquire objects within the range supplied to appendFrom
+* don't append over existing objects
+* unset the mObjectsSorted flag a couple more cases
+* keep mObjectPositions sorted
+
+Flag: EXEMPT bug fix
+Ignore-AOSP-First: security fix
+Test: binder_parcel_fuzzer
+Bug: 402319736
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:517f23af4b4acd44d17394e16a6a42709ccb453c)
+Merged-In: I63715fdd81781aaf04f5fc0cb8bdb74c09d5d807
+Change-Id: I63715fdd81781aaf04f5fc0cb8bdb74c09d5d807
+---
+ libs/binder/Parcel.cpp                     | 32 ++++++++++++++--------
+ libs/binder/tests/binderParcelUnitTest.cpp | 11 ++++++++
+ 2 files changed, 32 insertions(+), 11 deletions(-)
+
+diff --git a/libs/binder/Parcel.cpp b/libs/binder/Parcel.cpp
+index acf262aa4a..2bc18d091c 100644
+--- a/libs/binder/Parcel.cpp
++++ b/libs/binder/Parcel.cpp
+@@ -424,7 +424,6 @@ status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
+     const binder_size_t *objects = parcel->mObjects;
+     size_t size = parcel->mObjectsSize;
+     int startPos = mDataPos;
+-    int firstIndex = -1, lastIndex = -2;
+ 
+     if (len == 0) {
+         return NO_ERROR;
+@@ -444,16 +443,18 @@ status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
+     }
+ 
+     // Count objects in range
+-    for (int i = 0; i < (int) size; i++) {
+-        size_t off = objects[i];
+-        if ((off >= offset) && (off + sizeof(flat_binder_object) <= offset + len)) {
+-            if (firstIndex == -1) {
+-                firstIndex = i;
+-            }
+-            lastIndex = i;
++    int numObjects = 0;
++    for (int i = 0; i < (int)size; i++) {
++        size_t pos = objects[i];
++        if ((pos >= offset) && (pos + sizeof(flat_binder_object) <= offset + len)) {
++            numObjects++;
+         }
+     }
+-    int numObjects = lastIndex - firstIndex + 1;
++
++    // Make sure we aren't appending over objects.
++    if (status_t status = validateReadData(mDataPos + len); status != OK) {
++        return status;
++    }
+ 
+     if ((mDataSize+len) > mDataCapacity) {
+         // grow data
+@@ -489,8 +490,12 @@ status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
+ 
+         // append and acquire objects
+         int idx = mObjectsSize;
+-        for (int i = firstIndex; i <= lastIndex; i++) {
+-            size_t off = objects[i] - offset + startPos;
++        for (int i = 0; i < (int)size; i++) {
++            size_t pos = objects[i];
++            if (!(pos >= offset) || !(pos + sizeof(flat_binder_object) <= offset + len)) {
++                continue;
++            }
++            size_t off = pos - offset + startPos;
+             mObjects[idx++] = off;
+             mObjectsSize++;
+ 
+@@ -510,6 +515,9 @@ status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
+                 }
+             }
+         }
++        // Always clear sorted flag. It is tricky to infer if the append
++        // result maintains the sort or not.
++        mObjectsSorted = false;
+     }
+ 
+     return err;
+@@ -1429,6 +1437,8 @@ restart_write:
+             mObjects[mObjectsSize] = mDataPos;
+             acquire_object(ProcessState::self(), val, this);
+             mObjectsSize++;
++            // Clear sorted flag if we aren't appending to the end.
++            mObjectsSorted &= mDataPos == mDataSize;
+         }
+ 
+         return finishWrite(sizeof(flat_binder_object));
+diff --git a/libs/binder/tests/binderParcelUnitTest.cpp b/libs/binder/tests/binderParcelUnitTest.cpp
+index 359c783de5..63689976d1 100644
+--- a/libs/binder/tests/binderParcelUnitTest.cpp
++++ b/libs/binder/tests/binderParcelUnitTest.cpp
+@@ -25,6 +25,7 @@ using android::IBinder;
+ using android::IPCThreadState;
+ using android::OK;
+ using android::Parcel;
++using android::PERMISSION_DENIED;
+ using android::sp;
+ using android::status_t;
+ using android::String16;
+@@ -112,6 +113,16 @@ TEST(Parcel, DebugReadAllFds) {
+     EXPECT_EQ(ret[1], STDIN_FILENO);
+ }
+ 
++TEST(Parcel, AppendOverObject) {
++    Parcel p1;
++    p1.writeDupFileDescriptor(0);
++    Parcel p2;
++    p2.writeInt32(2);
++
++    p1.setDataPosition(8);
++    ASSERT_EQ(PERMISSION_DENIED, p1.appendFrom(&p2, 0, p2.dataSize()));
++}
++
+ // Tests a second operation results in a parcel at the same location as it
+ // started.
+ void parcelOpSameLength(const std::function<void(Parcel*)>& a, const std::function<void(Parcel*)>& b) {
+-- 
+2.34.1
+

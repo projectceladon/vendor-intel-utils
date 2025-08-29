@@ -1,0 +1,99 @@
+From b2cf880629d327f1d960bdfcb2801b4b635fc10b Mon Sep 17 00:00:00 2001
+From: Rubin Xu <rubinxu@google.com>
+Date: Fri, 9 May 2025 16:36:34 +0100
+Subject: [PATCH] Check DPC package validity during package updates
+
+Bug: 384514657
+Bug: 414603411
+Test: manual
+Flag: EXEMPT bugfix
+Merged-In: I0c629c138059a71786e82b4653de9cef7e951aad
+Merged-In: I1743c111f8e8b5f4c1f878a61b88b8f1ed6b86a1
+Change-Id: I1743c111f8e8b5f4c1f878a61b88b8f1ed6b86a1
+---
+ .../android/app/admin/DeviceAdminInfo.java    |  2 +
+ .../DevicePolicyManagerService.java           | 39 ++++++++++++++++---
+ 2 files changed, 35 insertions(+), 6 deletions(-)
+
+diff --git a/core/java/android/app/admin/DeviceAdminInfo.java b/core/java/android/app/admin/DeviceAdminInfo.java
+index 41256d09d0ed..f9eab30c9330 100644
+--- a/core/java/android/app/admin/DeviceAdminInfo.java
++++ b/core/java/android/app/admin/DeviceAdminInfo.java
+@@ -345,6 +345,8 @@ public final class DeviceAdminInfo implements Parcelable {
+         } catch (NameNotFoundException e) {
+             throw new XmlPullParserException(
+                     "Unable to create context for: " + mActivityInfo.packageName);
++        } catch (OutOfMemoryError e) {
++            throw new XmlPullParserException("Out of memory when parsing", null, e);
+         } finally {
+             if (parser != null) parser.close();
+         }
+diff --git a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+index b745e28a1f97..cd07cf90e9f1 100644
+--- a/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
++++ b/services/devicepolicy/java/com/android/server/devicepolicy/DevicePolicyManagerService.java
+@@ -131,6 +131,7 @@ import static android.app.admin.ProvisioningException.ERROR_SETTING_PROFILE_OWNE
+ import static android.app.admin.ProvisioningException.ERROR_SET_DEVICE_OWNER_FAILED;
+ import static android.app.admin.ProvisioningException.ERROR_STARTING_PROFILE_FAILED;
+ import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
++import static android.content.pm.PackageManager.GET_META_DATA;
+ import static android.content.pm.PackageManager.MATCH_DIRECT_BOOT_AWARE;
+ import static android.content.pm.PackageManager.MATCH_DIRECT_BOOT_UNAWARE;
+ import static android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES;
+@@ -1150,6 +1151,33 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
+         }
+     }
+ 
++    /**
++     * Check if the package hosting the given ActiveAdmin is still installed and well-formed.
++     */
++    @GuardedBy("getLockObject()")
++    private boolean isActiveAdminPackageValid(ActiveAdmin admin) throws RemoteException {
++        final String adminPackage = admin.info.getPackageName();
++        int userHandle = admin.getUserHandle().getIdentifier();
++        if (mIPackageManager.getPackageInfo(adminPackage, 0, userHandle) == null) {
++            Slogf.e(LOG_TAG, adminPackage + " no longer installed");
++            return false;
++        }
++        ActivityInfo ai = mIPackageManager.getReceiverInfo(admin.info.getComponent(),
++                GET_META_DATA | MATCH_DIRECT_BOOT_AWARE | MATCH_DIRECT_BOOT_UNAWARE,
++                userHandle);
++        if (ai == null) {
++            Slogf.e(LOG_TAG, adminPackage + " no longer has the receiver");
++            return false;
++        }
++        try {
++            new DeviceAdminInfo(mContext, ai);
++        } catch (Exception e) {
++            Slogf.e(LOG_TAG, adminPackage + " contains malformed metadata", e);
++            return false;
++        }
++        return true;
++    }
++
+     private void handlePackagesChanged(@Nullable String packageName, int userHandle) {
+         boolean removedAdmin = false;
+         if (VERBOSE_LOG) {
+@@ -1162,14 +1190,13 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
+                 ActiveAdmin aa = policy.mAdminList.get(i);
+                 try {
+                     // If we're checking all packages or if the specific one we're checking matches,
+-                    // then check if the package and receiver still exist.
++                    // then check if the package is still valid.
+                     final String adminPackage = aa.info.getPackageName();
+                     if (packageName == null || packageName.equals(adminPackage)) {
+-                        if (mIPackageManager.getPackageInfo(adminPackage, 0, userHandle) == null
+-                                || mIPackageManager.getReceiverInfo(aa.info.getComponent(),
+-                                PackageManager.MATCH_DIRECT_BOOT_AWARE
+-                                        | PackageManager.MATCH_DIRECT_BOOT_UNAWARE,
+-                                userHandle) == null) {
++                        if (!isActiveAdminPackageValid(aa)) {
++                            Slogf.e(LOG_TAG, "Admin package %s not found or invalid for user %d,"
++                                            + " removing active admin",
++                                    packageName, userHandle);
+                             removedAdmin = true;
+                             policy.mAdminList.remove(i);
+                             policy.mAdminMap.remove(aa.info.getComponent());
+-- 
+2.50.1.351.gcf940e82a1-goog
+

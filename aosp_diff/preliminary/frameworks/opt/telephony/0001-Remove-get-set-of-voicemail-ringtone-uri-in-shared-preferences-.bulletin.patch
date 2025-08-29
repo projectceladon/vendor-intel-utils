@@ -1,0 +1,133 @@
+From 5057ee3badc307777a961daafe94471ffcaf577e Mon Sep 17 00:00:00 2001
+From: Tyler Gunn <tgunn@google.com>
+Date: Tue, 22 Apr 2025 22:01:54 +0000
+Subject: [PATCH] Remove get/set of voicemail ringtone uri in shared
+ preferences.
+
+Prior to Android P, TelephonyManager#setVoicemailRingtoneUri was used
+by the dialer app to set the voicemail notification sound played when
+the platform got a new voicemail notification.  Likewise,
+getVoicemailRingtoneUri was used to retrieve the set value.
+
+Prior to P this was just saved in the shared prefs, but after P a
+migration was done to move the shared preference to the
+NotificationChannel#getSound for the voicemail notification.  If, however,
+you called `setVoicemailRingtoneUri` it was still possible to change the
+shared preference and have that migrated to be set on the notification
+channel, causing a cross-profile exploit.
+
+In the current world, the notifications for voicemail are NOT posted in
+Telephony any more, and are instead associated with the notification
+channel for voicemail IN the dialer app.  On the off chance a dialer does
+not show the voicemail notification, Telephony can post it as well, but
+at this point the related sound is expected to be associated with the
+notification channel.
+
+To mitigate this cross-profile vulnerability:
+1. Ensure TelephonyManager#setVoicemailRingtoneUri does not save to shared
+preferences any more.
+2. Ensure the TelephonyManager#getVoicemailRingtoneUrigetRingtoneUri ONLY
+queries from the notification channel, and not from the shared
+preferences since that is not used.  This ensures we can never return a
+bad URI set via the setter.
+3. Remove the code in migrateVoicemailNotificationSettings which will take
+the shared preference and migrate it over to the channel; this is not
+needed as realistically ANY device from P would have updated LONG ago and
+had its notification setting migrated to the channel anyways.
+
+Test: Change the default voicemail notification channel sound on
+"phone services"; verify that Dialer can still get this value.
+Test: Changed the voicemail notification channel in the dialer app so that
+it has a different value; verify that voicemail notifications use the
+correct sound.
+Flag: EXEMPT security patch.
+Bug: 325030433
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:8e47af093625b997ffb8ca0379a4a56c02ddeb20)
+Merged-In: I7252c692eb2a5ff4b4fcbddba77425cb423539f3
+Change-Id: I7252c692eb2a5ff4b4fcbddba77425cb423539f3
+---
+ .../util/NotificationChannelController.java   |  6 -----
+ .../VoicemailNotificationSettingsUtil.java    | 22 ++++---------------
+ 2 files changed, 4 insertions(+), 24 deletions(-)
+
+diff --git a/src/java/com/android/internal/telephony/util/NotificationChannelController.java b/src/java/com/android/internal/telephony/util/NotificationChannelController.java
+index de1ddd3026..ac6a385fa4 100644
+--- a/src/java/com/android/internal/telephony/util/NotificationChannelController.java
++++ b/src/java/com/android/internal/telephony/util/NotificationChannelController.java
+@@ -23,7 +23,6 @@ import android.content.Context;
+ import android.content.Intent;
+ import android.content.IntentFilter;
+ import android.media.AudioAttributes;
+-import android.net.Uri;
+ import android.provider.Settings;
+ import android.telephony.SubscriptionManager;
+ 
+@@ -138,7 +137,6 @@ public class NotificationChannelController {
+ 
+     /**
+      * migrate deprecated voicemail notification settings to initial notification channel settings
+-     * {@link VoicemailNotificationSettingsUtil#getRingTonePreference(Context)}}
+      * {@link VoicemailNotificationSettingsUtil#getVibrationPreference(Context)}
+      * notification settings are based on subId, only migrate if sub id matches.
+      * otherwise fallback to predefined voicemail channel settings.
+@@ -151,10 +149,6 @@ public class NotificationChannelController {
+                 NotificationManager.IMPORTANCE_DEFAULT);
+         voiceMailChannel.enableVibration(
+                 VoicemailNotificationSettingsUtil.getVibrationPreference(context));
+-        Uri sound = VoicemailNotificationSettingsUtil.getRingTonePreference(context);
+-        voiceMailChannel.setSound(
+-                (sound == null) ? Settings.System.DEFAULT_NOTIFICATION_URI : sound,
+-                new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build());
+         context.getSystemService(NotificationManager.class)
+                 .createNotificationChannel(voiceMailChannel);
+     }
+diff --git a/src/java/com/android/internal/telephony/util/VoicemailNotificationSettingsUtil.java b/src/java/com/android/internal/telephony/util/VoicemailNotificationSettingsUtil.java
+index d8988e3230..3dd3d375c9 100644
+--- a/src/java/com/android/internal/telephony/util/VoicemailNotificationSettingsUtil.java
++++ b/src/java/com/android/internal/telephony/util/VoicemailNotificationSettingsUtil.java
+@@ -21,10 +21,8 @@ import android.content.Context;
+ import android.content.SharedPreferences;
+ import android.net.Uri;
+ import android.preference.PreferenceManager;
+-import android.provider.Settings;
+ import android.telephony.SubscriptionManager;
+ import android.telephony.TelephonyManager;
+-import android.text.TextUtils;
+ 
+ public class VoicemailNotificationSettingsUtil {
+     private static final String VOICEMAIL_NOTIFICATION_RINGTONE_SHARED_PREFS_KEY_PREFIX =
+@@ -64,27 +62,15 @@ public class VoicemailNotificationSettingsUtil {
+     }
+ 
+    public static void setRingtoneUri(Context context, Uri ringtoneUri) {
+-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+-        String ringtoneUriStr = ringtoneUri != null ? ringtoneUri.toString() : "";
+-
+-        SharedPreferences.Editor editor = prefs.edit();
+-        editor.putString(getVoicemailRingtoneSharedPrefsKey(), ringtoneUriStr);
+-        editor.commit();
++        // Do nothing; we don't use the shared preference any more.
+     }
+ 
+     public static Uri getRingtoneUri(Context context) {
+         final NotificationChannel channel = NotificationChannelController.getChannel(
+                 NotificationChannelController.CHANNEL_ID_VOICE_MAIL, context);
+-        return (channel != null) ? channel.getSound() : getRingTonePreference(context);
+-    }
+-
+-    public static Uri getRingTonePreference(Context context) {
+-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+-        migrateVoicemailRingtoneSettingsIfNeeded(context, prefs);
+-        String uriString = prefs.getString(
+-                getVoicemailRingtoneSharedPrefsKey(),
+-                Settings.System.DEFAULT_NOTIFICATION_URI.toString());
+-        return !TextUtils.isEmpty(uriString) ? Uri.parse(uriString) : null;
++        // Note: NEVER look at the shared preferences; this was migrated to the notification channel
++        // in Android P.
++        return (channel != null) ? channel.getSound() : null;
+     }
+ 
+     /**
+-- 
+2.50.1.351.gcf940e82a1-goog
+
