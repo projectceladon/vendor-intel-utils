@@ -1,0 +1,140 @@
+From 87a1032402cfcda99606312d205c1e518cf1b1c8 Mon Sep 17 00:00:00 2001
+From: Grant Menke <grantmenke@google.com>
+Date: Mon, 28 Oct 2024 16:42:25 -0700
+Subject: [PATCH] Unbind CS if connection is not created within 15 seconds.
+
+This CL adds a check to ensure that connection creation occurs within 15 seconds after binding to that ConnectionService. If the connection/conference is not created in that timespan, this CL adds logic to manually unbind the ConnectionService at that point in time. This prevents malicious apps from keeping a declared permission in forever even in the background. This updated CL includes a null check to avoid a NPE that occurred in the first iteration of this change.
+
+Bug: 293458004
+Test: manually using the provided apk + atest CallsManagerTest
+Flag: EXEMPT Security High/Critical Severity CVE
+(cherry picked from commit 48d6b0df91fb1c8c0b11891f878084c6d8f9fa8a)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:d729374b71266e9e9f5f855d18f2b1c202d322a7)
+Merged-In: If46cfa26278f09854c10266af6eaa73382f20296
+Change-Id: If46cfa26278f09854c10266af6eaa73382f20296
+---
+ src/com/android/server/telecom/LogUtils.java  |  2 +
+ .../server/telecom/tests/BasicCallTests.java  |  2 +
+ .../telecom/tests/CallsManagerTest.java       | 38 +++++++++++++++++++
+ 3 files changed, 42 insertions(+)
+
+diff --git a/src/com/android/server/telecom/LogUtils.java b/src/com/android/server/telecom/LogUtils.java
+index 0d6acd51d..d98ebfe6b 100644
+--- a/src/com/android/server/telecom/LogUtils.java
++++ b/src/com/android/server/telecom/LogUtils.java
+@@ -139,8 +139,10 @@ public class LogUtils {
+         public static final String STOP_CALL_WAITING_TONE = "STOP_CALL_WAITING_TONE";
+         public static final String START_CONNECTION = "START_CONNECTION";
+         public static final String CREATE_CONNECTION_FAILED = "CREATE_CONNECTION_FAILED";
++        public static final String CREATE_CONNECTION_TIMEOUT = "CREATE_CONNECTION_TIMEOUT";
+         public static final String START_CONFERENCE = "START_CONFERENCE";
+         public static final String CREATE_CONFERENCE_FAILED = "CREATE_CONFERENCE_FAILED";
++        public static final String CREATE_CONFERENCE_TIMEOUT = "CREATE_CONFERENCE_TIMEOUT";
+         public static final String BIND_CS = "BIND_CS";
+         public static final String CS_BOUND = "CS_BOUND";
+         public static final String CONFERENCE_WITH = "CONF_WITH";
+diff --git a/tests/src/com/android/server/telecom/tests/BasicCallTests.java b/tests/src/com/android/server/telecom/tests/BasicCallTests.java
+index 4bca30de1..7646c2d08 100644
+--- a/tests/src/com/android/server/telecom/tests/BasicCallTests.java
++++ b/tests/src/com/android/server/telecom/tests/BasicCallTests.java
+@@ -1036,6 +1036,7 @@ public class BasicCallTests extends TelecomSystemTest {
+         call.setTargetPhoneAccount(mPhoneAccountA1.getAccountHandle());
+         assert(call.isVideoCallingSupportedByPhoneAccount());
+         assertEquals(VideoProfile.STATE_BIDIRECTIONAL, call.getVideoState());
++        call.setIsCreateConnectionComplete(true);
+     }
+ 
+     /**
+@@ -1059,6 +1060,7 @@ public class BasicCallTests extends TelecomSystemTest {
+         call.setTargetPhoneAccount(mPhoneAccountA2.getAccountHandle());
+         assert(!call.isVideoCallingSupportedByPhoneAccount());
+         assertEquals(VideoProfile.STATE_AUDIO_ONLY, call.getVideoState());
++        call.setIsCreateConnectionComplete(true);
+     }
+ 
+     /**
+diff --git a/tests/src/com/android/server/telecom/tests/CallsManagerTest.java b/tests/src/com/android/server/telecom/tests/CallsManagerTest.java
+index 744a702b3..79fd3d501 100644
+--- a/tests/src/com/android/server/telecom/tests/CallsManagerTest.java
++++ b/tests/src/com/android/server/telecom/tests/CallsManagerTest.java
+@@ -59,6 +59,7 @@ import android.media.AudioManager;
+ import android.net.Uri;
+ import android.os.Bundle;
+ import android.os.Handler;
++import android.os.IBinder;
+ import android.os.Looper;
+ import android.os.OutcomeReceiver;
+ import android.os.Process;
+@@ -87,6 +88,7 @@ import android.widget.Toast;
+ import androidx.test.filters.MediumTest;
+ import androidx.test.filters.SmallTest;
+ 
++import com.android.internal.telecom.IConnectionService;
+ import com.android.server.telecom.AnomalyReporterAdapter;
+ import com.android.server.telecom.AsyncRingtonePlayer;
+ import com.android.server.telecom.Call;
+@@ -105,6 +107,7 @@ import com.android.server.telecom.ClockProxy;
+ import com.android.server.telecom.ConnectionServiceFocusManager;
+ import com.android.server.telecom.ConnectionServiceFocusManager.ConnectionServiceFocusManagerFactory;
+ import com.android.server.telecom.ConnectionServiceWrapper;
++import com.android.server.telecom.CreateConnectionResponse;
+ import com.android.server.telecom.DefaultDialerCache;
+ import com.android.server.telecom.EmergencyCallDiagnosticLogger;
+ import com.android.server.telecom.EmergencyCallHelper;
+@@ -417,11 +420,17 @@ public class CallsManagerTest extends TelecomTestCase {
+                 .thenReturn(mMockCreateContextAsUser);
+         when(mMockCreateContextAsUser.getSystemService(UserManager.class))
+                 .thenReturn(mMockCurrentUserManager);
++        when(mIConnectionService.asBinder()).thenReturn(mock(IBinder.class));
++
++        mComponentContextFixture.addConnectionService(
++                SIM_1_ACCOUNT.getAccountHandle().getComponentName(), mIConnectionService);
+     }
+ 
+     @Override
+     @After
+     public void tearDown() throws Exception {
++        mComponentContextFixture.removeConnectionService(
++                SIM_1_ACCOUNT.getAccountHandle().getComponentName(), mIConnectionService);
+         super.tearDown();
+     }
+ 
+@@ -3242,6 +3251,35 @@ public class CallsManagerTest extends TelecomTestCase {
+         assertTrue(result.contains("onReceiveResult"));
+     }
+ 
++    @Test
++    public void testConnectionServiceCreateConnectionTimeout() throws Exception {
++        ConnectionServiceWrapper service = new ConnectionServiceWrapper(
++                SIM_1_ACCOUNT.getAccountHandle().getComponentName(), null,
++                mPhoneAccountRegistrar, mCallsManager, mContext, mLock, null, mFeatureFlags);
++        TestScheduledExecutorService scheduledExecutorService = new TestScheduledExecutorService();
++        service.setScheduledExecutorService(scheduledExecutorService);
++        Call call = addSpyCall();
++        service.addCall(call);
++        when(call.isCreateConnectionComplete()).thenReturn(false);
++        CreateConnectionResponse response = mock(CreateConnectionResponse.class);
++
++        service.createConnection(call, response);
++        waitUntilConditionIsTrueOrTimeout(new Condition() {
++            @Override
++            public Object expected() {
++                return true;
++            }
++
++            @Override
++            public Object actual() {
++                return scheduledExecutorService.isRunnableScheduledAtTime(15000L);
++            }
++        }, 5000L, "Expected job failed to schedule");
++        scheduledExecutorService.advanceTime(15000L);
++        verify(response).handleCreateConnectionFailure(
++                eq(new DisconnectCause(DisconnectCause.ERROR)));
++    }
++
+     @SmallTest
+     @Test
+     public void testOnFailedOutgoingCallUnholdsCallAfterLocallyDisconnect() {
+-- 
+2.34.1
+
