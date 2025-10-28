@@ -1,0 +1,149 @@
+From ccba6717779fea0a86b6326f9925c36fc837738c Mon Sep 17 00:00:00 2001
+From: Achim Thesmann <achim@google.com>
+Date: Tue, 17 Dec 2024 19:13:58 +0000
+Subject: [PATCH] RESTRICT AUTOMERGE Clear the BAL allowlist duration
+
+Clearing BAL privileges of a PendingIntent only cleared the tokens,
+but kept the duration based entries. `clearAllowBgActivityStarts` is exclusively used by SystemUI (in NotificationManagerService) and fixing this is part of fixing a security vulnerability (therefore and because this is a low risk change it is not flag guarded).
+
+BYPASS_INCLUSIVE_LANGUAGE_REASON=Using an existing API
+
+Bug: 322159724
+Flag: EXEMPT bugfix
+Test: atest PendingIntentControllerTest
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:5782703d0f7c913477f1dd59b11e6e6e879199d9)
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:a71599c035472fe280132df64c5f5ee361ba0e92)
+Merged-In: I88e4df8fe4989fbc26aaa0e672626f3a1042678e
+Change-Id: I88e4df8fe4989fbc26aaa0e672626f3a1042678e
+---
+ .../server/am/PendingIntentRecord.java        | 15 ++++++-
+ .../am/PendingIntentControllerTest.java       | 40 +++++++++++++++++++
+ 2 files changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/services/core/java/com/android/server/am/PendingIntentRecord.java b/services/core/java/com/android/server/am/PendingIntentRecord.java
+index 8eef71e603b2..edd296f826d0 100644
+--- a/services/core/java/com/android/server/am/PendingIntentRecord.java
++++ b/services/core/java/com/android/server/am/PendingIntentRecord.java
+@@ -24,6 +24,8 @@ import static android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_DENIED;
+ import static android.app.ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_SYSTEM_DEFINED;
+ import static android.os.Process.ROOT_UID;
+ import static android.os.Process.SYSTEM_UID;
++import static android.os.PowerWhitelistManager.TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_ALLOWED;
++import static android.os.PowerWhitelistManager.TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_NOT_ALLOWED;
+ 
+ import static com.android.server.am.ActivityManagerDebugConfig.TAG_AM;
+ import static com.android.server.am.ActivityManagerDebugConfig.TAG_WITH_CLASS_NAME;
+@@ -303,6 +305,10 @@ public final class PendingIntentRecord extends IIntentSender.Stub {
+         this.stringName = null;
+     }
+ 
++    @VisibleForTesting TempAllowListDuration getAllowlistDurationLocked(IBinder allowlistToken) {
++        return mAllowlistDuration.get(allowlistToken);
++    }
++
+     void setAllowBgActivityStarts(IBinder token, int flags) {
+         if (token == null) return;
+         if ((flags & FLAG_ACTIVITY_SENDER) != 0) {
+@@ -321,6 +327,13 @@ public final class PendingIntentRecord extends IIntentSender.Stub {
+         mAllowBgActivityStartsForActivitySender.remove(token);
+         mAllowBgActivityStartsForBroadcastSender.remove(token);
+         mAllowBgActivityStartsForServiceSender.remove(token);
++        if (mAllowlistDuration != null) {
++            TempAllowListDuration duration = mAllowlistDuration.get(token);
++            if (duration != null
++                    && duration.type == TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_ALLOWED) {
++                duration.type = TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_NOT_ALLOWED;
++            }
++        }
+     }
+ 
+     public void registerCancelListenerLocked(IResultReceiver receiver) {
+@@ -700,7 +713,7 @@ public final class PendingIntentRecord extends IIntentSender.Stub {
+         return res;
+     }
+ 
+-    private BackgroundStartPrivileges getBackgroundStartPrivilegesForActivitySender(
++    @VisibleForTesting BackgroundStartPrivileges getBackgroundStartPrivilegesForActivitySender(
+             IBinder allowlistToken) {
+         return mAllowBgActivityStartsForActivitySender.contains(allowlistToken)
+                 ? BackgroundStartPrivileges.allowBackgroundActivityStarts(allowlistToken)
+diff --git a/services/tests/mockingservicestests/src/com/android/server/am/PendingIntentControllerTest.java b/services/tests/mockingservicestests/src/com/android/server/am/PendingIntentControllerTest.java
+index 89b48bad2358..f1f4dd523cb0 100644
+--- a/services/tests/mockingservicestests/src/com/android/server/am/PendingIntentControllerTest.java
++++ b/services/tests/mockingservicestests/src/com/android/server/am/PendingIntentControllerTest.java
+@@ -17,6 +17,9 @@
+ package com.android.server.am;
+ 
+ import static android.os.Process.INVALID_UID;
++import static android.os.PowerWhitelistManager.REASON_NOTIFICATION_SERVICE;
++import static android.os.PowerWhitelistManager.TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_ALLOWED;
++import static android.os.PowerWhitelistManager.TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_NOT_ALLOWED;
+ 
+ import static com.android.dx.mockito.inline.extended.ExtendedMockito.doReturn;
+ import static com.android.dx.mockito.inline.extended.ExtendedMockito.mockitoSession;
+@@ -28,8 +31,10 @@ import static com.android.server.am.PendingIntentRecord.CANCEL_REASON_OWNER_FORC
+ import static com.android.server.am.PendingIntentRecord.CANCEL_REASON_SUPERSEDED;
+ import static com.android.server.am.PendingIntentRecord.CANCEL_REASON_USER_STOPPED;
+ import static com.android.server.am.PendingIntentRecord.cancelReasonToString;
++import static com.android.server.am.PendingIntentRecord.FLAG_ACTIVITY_SENDER;
+ 
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
+ import static org.mockito.ArgumentMatchers.anyInt;
+ import static org.mockito.ArgumentMatchers.anyLong;
+ import static org.mockito.ArgumentMatchers.eq;
+@@ -39,9 +44,11 @@ import static org.mockito.Mockito.when;
+ import android.app.ActivityManager;
+ import android.app.ActivityManagerInternal;
+ import android.app.AppGlobals;
++import android.app.BackgroundStartPrivileges;
+ import android.app.PendingIntent;
+ import android.content.Intent;
+ import android.content.pm.IPackageManager;
++import android.os.Binder;
+ import android.os.Looper;
+ import android.os.UserHandle;
+ 
+@@ -179,6 +186,39 @@ public class PendingIntentControllerTest {
+         }
+     }
+ 
++    @Test
++    public void testClearAllowBgActivityStartsClearsToken() {
++        final PendingIntentRecord pir = createPendingIntentRecord(0);
++        Binder token = new Binder();
++        pir.setAllowBgActivityStarts(token, FLAG_ACTIVITY_SENDER);
++        assertEquals(BackgroundStartPrivileges.allowBackgroundActivityStarts(token),
++                pir.getBackgroundStartPrivilegesForActivitySender(token));
++        pir.clearAllowBgActivityStarts(token);
++        assertEquals(BackgroundStartPrivileges.NONE,
++                pir.getBackgroundStartPrivilegesForActivitySender(token));
++    }
++
++    @Test
++    public void testClearAllowBgActivityStartsClearsDuration() {
++        final PendingIntentRecord pir = createPendingIntentRecord(0);
++        Binder token = new Binder();
++        pir.setAllowlistDurationLocked(token, 1000,
++                TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_ALLOWED, REASON_NOTIFICATION_SERVICE,
++                "NotificationManagerService");
++        PendingIntentRecord.TempAllowListDuration allowlistDurationLocked =
++                pir.getAllowlistDurationLocked(token);
++        assertEquals(1000, allowlistDurationLocked.duration);
++        assertEquals(TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_ALLOWED,
++                allowlistDurationLocked.type);
++        pir.clearAllowBgActivityStarts(token);
++        PendingIntentRecord.TempAllowListDuration allowlistDurationLockedAfterClear =
++                pir.getAllowlistDurationLocked(token);
++        assertNotNull(allowlistDurationLockedAfterClear);
++        assertEquals(1000, allowlistDurationLockedAfterClear.duration);
++        assertEquals(TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_NOT_ALLOWED,
++                allowlistDurationLocked.type);
++    }
++
+     private void assertCancelReason(int expectedReason, int actualReason) {
+         final String errMsg = "Expected: " + cancelReasonToString(expectedReason)
+                 + "; Actual: " + cancelReasonToString(actualReason);
+-- 
+2.49.0.395.g12beb8f557-goog
+
