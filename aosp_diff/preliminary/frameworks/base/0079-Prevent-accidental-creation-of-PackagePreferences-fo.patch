@@ -1,0 +1,1215 @@
+From 38d28dcb0b6b8c924e9c0f9f33fc0aa836dcfb4b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mat=C3=ADas=20Hern=C3=A1ndez?= <matiashe@google.com>
+Date: Fri, 3 Oct 2025 04:22:42 -0700
+Subject: [PATCH] Prevent accidental creation of PackagePreferences for
+ non-existing packages
+
+This could be caused by (indirectly) invoking PreferencesHelper.getOrCreatePackagePreferences with an INVALID_UID (e.g. as the result of NMS passing along the result of getUidForPackageAndUser for a missing package). This was never intended -- API calls can result in the creation of PackagePreferences (since the structure is lazily initialized) but only for present packages. In most cases this was prevented by other checks (e.g. canNotifyAsPackage, which fails if missing) but specifically for the "fromPrivilegedListener" methods there was no similar enforcement.
+
+Switch the PreferencesHelper usage so that:
+* setters (e.g. create/updateChannel, groups) throw if supplied an invalid uid.
+* getters that should have PackagePreferences creation as a side effect (e.g. getChannel) early exit if supplied an invalid uid.
+* most getters don't actually create PackagePreferences and just return default values (e.g. canShowBadge) if they don't exist yet.
+
+(Also, unify constants for representing a missing package into Process.INVALID_UID, and fix several tests that were impropely set up).
+
+DISABLE_TOPIC_PROTECTOR
+
+Bug: 426207912
+Test: atest NotificationManagerServiceTest PreferencesHelperTest
+Change-Id: I4329ad4e7112804cc287e9d3ac0d389500fbad30
+---
+ .../NotificationManagerService.java           |  42 +++--
+ .../notification/PreferencesHelper.java       | 176 ++++++++++--------
+ .../NotificationManagerServiceTest.java       |  53 ++++++
+ .../notification/PreferencesHelperTest.java   | 135 +++++++-------
+ .../server/notification/RoleObserverTest.java |  33 +++-
+ 5 files changed, 273 insertions(+), 166 deletions(-)
+
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index 5a46c85a3650..3caca7be4bbb 100644
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -102,6 +102,7 @@ import static android.os.IServiceManager.DUMP_FLAG_PRIORITY_CRITICAL;
+ import static android.os.IServiceManager.DUMP_FLAG_PRIORITY_NORMAL;
+ import static android.os.PowerWhitelistManager.REASON_NOTIFICATION_SERVICE;
+ import static android.os.PowerWhitelistManager.TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_ALLOWED;
++import static android.os.Process.INVALID_UID;
+ import static android.os.UserHandle.USER_ALL;
+ import static android.os.UserHandle.USER_NULL;
+ import static android.os.UserHandle.USER_SYSTEM;
+@@ -458,7 +459,6 @@ public class NotificationManagerService extends SystemService {
+      */
+     private static final int NOTIFICATION_RAPID_CLEAR_THRESHOLD_MS = 5000;
+ 
+-    static final int INVALID_UID = -1;
+     static final String ROOT_PKG = "root";
+ 
+     static final String[] DEFAULT_ALLOWED_ADJUSTMENTS = new String[] {
+@@ -4567,7 +4567,7 @@ public class NotificationManagerService extends SystemService {
+                 String conversationId) {
+             if (canNotifyAsPackage(callingPkg, targetPkg, userId)
+                     || isCallerSystemOrSystemUiOrShell()) {
+-                int targetUid = -1;
++                int targetUid = INVALID_UID;
+                 try {
+                     targetUid = mPackageManagerClient.getPackageUidAsUser(targetPkg, userId);
+                 } catch (NameNotFoundException e) {
+@@ -4858,7 +4858,7 @@ public class NotificationManagerService extends SystemService {
+                 String callingPkg, String targetPkg, int userId) {
+             if (canNotifyAsPackage(callingPkg, targetPkg, userId)
+                 || isCallingUidSystem()) {
+-                int targetUid = -1;
++                int targetUid = INVALID_UID;
+                 try {
+                     targetUid = mPackageManagerClient.getPackageUidAsUser(targetPkg, userId);
+                 } catch (NameNotFoundException e) {
+@@ -6888,14 +6888,12 @@ public class NotificationManagerService extends SystemService {
+         }
+ 
+         private int getUidForPackageAndUser(String pkg, UserHandle user) throws RemoteException {
+-            int uid = INVALID_UID;
+             final long identity = Binder.clearCallingIdentity();
+             try {
+-                uid = mPackageManager.getPackageUid(pkg, 0, user.getIdentifier());
++                return mPackageManager.getPackageUid(pkg, 0, user.getIdentifier());
+             } finally {
+                 Binder.restoreCallingIdentity(identity);
+             }
+-            return uid;
+         }
+ 
+         @Override
+@@ -13778,15 +13776,22 @@ public class NotificationManagerService extends SystemService {
+             List<UserHandle> users = mUm.getUserHandles(/* excludeDying */ true);
+             mNonBlockableDefaultApps = new ArrayMap<>();
+             for (int i = 0; i < NON_BLOCKABLE_DEFAULT_ROLES.length; i++) {
++                String role = NON_BLOCKABLE_DEFAULT_ROLES[i];
+                 final ArrayMap<Integer, ArraySet<String>> userToApprovedList = new ArrayMap<>();
+-                mNonBlockableDefaultApps.put(NON_BLOCKABLE_DEFAULT_ROLES[i], userToApprovedList);
++                mNonBlockableDefaultApps.put(role, userToApprovedList);
+                 for (int j = 0; j < users.size(); j++) {
+-                    Integer userId = users.get(j).getIdentifier();
++                    int userId = users.get(j).getIdentifier();
+                     ArraySet<String> approvedForUserId = new ArraySet<>(mRm.getRoleHoldersAsUser(
+-                            NON_BLOCKABLE_DEFAULT_ROLES[i], UserHandle.of(userId)));
++                            role, UserHandle.of(userId)));
+                     ArraySet<Pair<String, Integer>> approvedAppUids = new ArraySet<>();
+                     for (String pkg : approvedForUserId) {
+-                        approvedAppUids.add(new Pair(pkg, getUidForPackage(pkg, userId)));
++                        int uid = getUidForPackage(pkg, userId);
++                        if (uid != INVALID_UID) {
++                            approvedAppUids.add(new Pair<>(pkg, uid));
++                        } else {
++                            Slog.e(TAG, "init: Invalid package for role " + role
++                                    + " (user " + userId + "): " + pkg);
++                        }
+                     }
+                     userToApprovedList.put(userId, approvedForUserId);
+                     mPreferencesHelper.updateDefaultApps(userId, null, approvedAppUids);
+@@ -13856,8 +13861,13 @@ public class NotificationManagerService extends SystemService {
+             }
+             for (String nowApproved : roleHolders) {
+                 if (!previouslyApproved.contains(nowApproved)) {
+-                    toAdd.add(new Pair(nowApproved,
+-                            getUidForPackage(nowApproved, user.getIdentifier())));
++                    int uid = getUidForPackage(nowApproved, user.getIdentifier());
++                    if (uid != INVALID_UID) {
++                        toAdd.add(new Pair<>(nowApproved, uid));
++                    } else {
++                        Slog.e(TAG, "onRoleHoldersChanged: Invalid package for role " + roleName
++                                + " (user " + user.getIdentifier() + "): " + nowApproved);
++                    }
+                 }
+             }
+ 
+@@ -13897,10 +13907,12 @@ public class NotificationManagerService extends SystemService {
+                 UserHandle user = users[i];
+                 for (String pkg : mRm.getRoleHoldersAsUser(RoleManager.ROLE_BROWSER, user)) {
+                     int uid = getUidForPackage(pkg, user.getIdentifier());
+-                    if (uid != -1) {
++                    if (uid != INVALID_UID) {
+                         newUids.add(uid);
+                     } else {
+-                        Slog.e(TAG, "Bad uid (-1) for browser package " + pkg);
++                        Slog.e(TAG, "updateTrampoline: Invalid package for role "
++                                + RoleManager.ROLE_BROWSER + " (user " + user.getIdentifier()
++                                + "): " + pkg);
+                     }
+                 }
+             }
+@@ -13913,7 +13925,7 @@ public class NotificationManagerService extends SystemService {
+             } catch (RemoteException e) {
+                 Slog.e(TAG, "role manager has bad default " + pkg + " " + userId);
+             }
+-            return -1;
++            return INVALID_UID;
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/notification/PreferencesHelper.java b/services/core/java/com/android/server/notification/PreferencesHelper.java
+index 15377d6b269a..341d3e4678e1 100644
+--- a/services/core/java/com/android/server/notification/PreferencesHelper.java
++++ b/services/core/java/com/android/server/notification/PreferencesHelper.java
+@@ -32,6 +32,7 @@ import static android.app.NotificationManager.IMPORTANCE_LOW;
+ import static android.app.NotificationManager.IMPORTANCE_MAX;
+ import static android.app.NotificationManager.IMPORTANCE_NONE;
+ import static android.app.NotificationManager.IMPORTANCE_UNSPECIFIED;
++import static android.os.Process.INVALID_UID;
+ import static android.os.UserHandle.USER_SYSTEM;
+ import static android.service.notification.Adjustment.TYPE_CONTENT_RECOMMENDATION;
+ import static android.service.notification.Adjustment.TYPE_NEWS;
+@@ -131,8 +132,6 @@ public class PreferencesHelper implements RankingConfig {
+     private static final int XML_VERSION_NOTIF_PERMISSION = 3;
+     /** The first xml version that notifies users to review their notification permissions */
+     private static final int XML_VERSION_REVIEW_PERMISSIONS_NOTIFICATION = 4;
+-    @VisibleForTesting
+-    static final int UNKNOWN_UID = UserHandle.USER_NULL;
+     // The amount of time pacakage preferences can exist without the app being installed.
+     private static final long PREF_GRACE_PERIOD_MS = Duration.ofDays(2).toMillis();
+ 
+@@ -321,7 +320,7 @@ public class PreferencesHelper implements RankingConfig {
+             @UserIdInt int userId, String name, boolean upgradeForBubbles,
+             boolean migrateToPermission) {
+         try {
+-            int uid = parser.getAttributeInt(null, ATT_UID, UNKNOWN_UID);
++            int uid = parser.getAttributeInt(null, ATT_UID, INVALID_UID);
+             if (forRestore) {
+                 try {
+                     uid = mPm.getPackageUidAsUser(name, userId);
+@@ -332,7 +331,7 @@ public class PreferencesHelper implements RankingConfig {
+             boolean skipWarningLogged = false;
+             boolean skipGroupWarningLogged = false;
+             boolean hasSAWPermission = false;
+-            if (upgradeForBubbles && uid != UNKNOWN_UID) {
++            if (upgradeForBubbles && uid != INVALID_UID) {
+                 hasSAWPermission = mAppOps.noteOpNoThrow(
+                         OP_SYSTEM_ALERT_WINDOW, uid, name, null,
+                         "check-notif-bubble") == AppOpsManager.MODE_ALLOWED;
+@@ -346,11 +345,11 @@ public class PreferencesHelper implements RankingConfig {
+             // is pending app install needs the user id that the data was restored to
+             int fixedUserId = userId;
+             if (Flags.persistIncompleteRestoreData()) {
+-                if (!forRestore && uid == UNKNOWN_UID) {
++                if (!forRestore && uid == INVALID_UID) {
+                     fixedUserId = parser.getAttributeInt(null, ATT_USERID, USER_SYSTEM);
+                 }
+             }
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(
++            PackagePreferences r = getOrCreatePackagePreferencesSupportingInvalidUidLocked(
+                     name, fixedUserId, uid,
+                     appImportance,
+                     parser.getAttributeInt(null, ATT_PRIORITY, DEFAULT_PRIORITY),
+@@ -416,12 +415,12 @@ public class PreferencesHelper implements RankingConfig {
+ 
+                 // Delegate
+                 if (TAG_DELEGATE.equals(tagName)) {
+-                    int delegateId = parser.getAttributeInt(null, ATT_UID, UNKNOWN_UID);
++                    int delegateId = parser.getAttributeInt(null, ATT_UID, INVALID_UID);
+                     String delegateName = XmlUtils.readStringAttribute(parser, ATT_NAME);
+                     boolean delegateEnabled = parser.getAttributeBoolean(
+                             null, ATT_ENABLED, Delegate.DEFAULT_ENABLED);
+                     Delegate d = null;
+-                    if (delegateId != UNKNOWN_UID && !TextUtils.isEmpty(delegateName)) {
++                    if (delegateId != INVALID_UID && !TextUtils.isEmpty(delegateName)) {
+                         d = new Delegate(delegateName, delegateId, delegateEnabled);
+                     }
+                     r.delegate = d;
+@@ -459,7 +458,7 @@ public class PreferencesHelper implements RankingConfig {
+                 NotificationChannel channel = new NotificationChannel(
+                         id, channelName, channelImportance);
+                 if (forRestore) {
+-                    final boolean pkgInstalled = r.uid != UNKNOWN_UID;
++                    final boolean pkgInstalled = r.uid != INVALID_UID;
+                     channel.populateFromXmlForRestore(parser, pkgInstalled, mContext);
+                 } else {
+                     channel.populateFromXml(parser);
+@@ -514,26 +513,55 @@ public class PreferencesHelper implements RankingConfig {
+         return true;
+     }
+ 
++    /**
++     * Returns the {@link PackagePreferences} object associated to the pkg/uid pair. If it doesn't
++     * exist, return {@code null}.
++     */
++    @GuardedBy("mLock")
++    @Nullable
+     private PackagePreferences getPackagePreferencesLocked(String pkg, int uid) {
+         final String key = packagePreferencesKey(pkg, uid);
+         return mPackagePreferences.get(key);
+     }
+ 
+-    private PackagePreferences getOrCreatePackagePreferencesLocked(String pkg,
+-            int uid) {
++    /**
++     * Returns the {@link PackagePreferences} object associated to the pkg/uid pair. If it doesn't
++     * exist, a new one is initialized (with appropriate defaults, e.g. default channel if pre-O)
++     * and stored in {@link #mPackagePreferences}.
++     *
++     * @throws IllegalArgumentException if the supplied uid is not valid (i.e. {@code INVALID_UID}).
++     */
++    @GuardedBy("mLock")
++    @NonNull
++    private PackagePreferences getOrCreatePackagePreferencesLocked(String pkg, int uid) {
++        Objects.requireNonNull(pkg);
++        Preconditions.checkArgument(uid != INVALID_UID,
++                "Valid uid required to get settings of %s", pkg);
++
+         // TODO (b/194833441): use permissionhelper instead of DEFAULT_IMPORTANCE
+-        return getOrCreatePackagePreferencesLocked(pkg, UserHandle.getUserId(uid), uid,
+-                DEFAULT_IMPORTANCE, DEFAULT_PRIORITY, DEFAULT_VISIBILITY, DEFAULT_SHOW_BADGE,
+-                DEFAULT_BUBBLE_PREFERENCE, mClock.millis());
++        return getOrCreatePackagePreferencesSupportingInvalidUidLocked(pkg,
++                UserHandle.getUserId(uid), uid, DEFAULT_IMPORTANCE, DEFAULT_PRIORITY,
++                DEFAULT_VISIBILITY, DEFAULT_SHOW_BADGE, DEFAULT_BUBBLE_PREFERENCE, mClock.millis());
+     }
+ 
++    /**
++     * Returns the {@link PackagePreferences} object associated to the pkg/uid pair, and initializes
++     * a new one (with appropriate defaults, e.g. default channel if pre-O) if it doesn't exist.
++     *
++     * <p>This method accepts {@link android.os.Process#INVALID_UID} as the {@code uid}
++     * parameter, and in that case will create a (time-limited) entry in
++     * {@link #mRestoredWithoutUids} instead of {@link #mPackagePreferences}. As such, should only
++     * be used that way by the {@code readXml()} path, to support restoring NMS backups before all
++     * packages have been reinstalled -- for API calls, we shouldn't create entries for
++     * non-existing packages.
++     */
+     @GuardedBy("mLock")
+-    private PackagePreferences getOrCreatePackagePreferencesLocked(String pkg,
++    private PackagePreferences getOrCreatePackagePreferencesSupportingInvalidUidLocked(String pkg,
+             @UserIdInt int userId, int uid, int importance, int priority, int visibility,
+             boolean showBadge, int bubblePreference, long creationTime) {
+         final String key = packagePreferencesKey(pkg, uid);
+         PackagePreferences
+-                r = (uid == UNKNOWN_UID)
++                r = (uid == INVALID_UID)
+                 ? mRestoredWithoutUids.get(unrestoredPackageKey(pkg, userId))
+                 : mPackagePreferences.get(key);
+         if (r == null) {
+@@ -546,7 +574,7 @@ public class PreferencesHelper implements RankingConfig {
+             r.showBadge = showBadge;
+             r.bubblePreference = bubblePreference;
+             if (Flags.persistIncompleteRestoreData()) {
+-                if (r.uid == UNKNOWN_UID) {
++                if (r.uid == INVALID_UID) {
+                     r.creationTime = creationTime;
+                 }
+             }
+@@ -557,7 +585,7 @@ public class PreferencesHelper implements RankingConfig {
+                 Slog.e(TAG, "createDefaultChannelIfNeededLocked - Exception: " + e);
+             }
+ 
+-            if (r.uid == UNKNOWN_UID) {
++            if (r.uid == INVALID_UID) {
+                 if (Flags.persistIncompleteRestoreData()) {
+                     r.userIdWhenUidUnknown = userId;
+                 }
+@@ -566,7 +594,7 @@ public class PreferencesHelper implements RankingConfig {
+                 mPackagePreferences.put(key, r);
+             }
+         }
+-        if (r.uid == UNKNOWN_UID) {
++        if (r.uid == INVALID_UID) {
+             if (Flags.persistIncompleteRestoreData()
+                     && PREF_GRACE_PERIOD_MS < (mClock.millis() - r.creationTime)) {
+                 mRestoredWithoutUids.remove(unrestoredPackageKey(pkg, userId));
+@@ -609,7 +637,7 @@ public class PreferencesHelper implements RankingConfig {
+ 
+     private boolean createDefaultChannelIfNeededLocked(PackagePreferences r) throws
+             PackageManager.NameNotFoundException {
+-        if (r.uid == UNKNOWN_UID) {
++        if (r.uid == INVALID_UID) {
+             return false;
+         }
+ 
+@@ -754,7 +782,7 @@ public class PreferencesHelper implements RankingConfig {
+             }
+         }
+ 
+-        if (Flags.persistIncompleteRestoreData() && r.uid == UNKNOWN_UID) {
++        if (Flags.persistIncompleteRestoreData() && r.uid == INVALID_UID) {
+             out.attributeLong(null, ATT_CREATION_TIME, r.creationTime);
+             out.attributeInt(null, ATT_USERID, r.userIdWhenUidUnknown);
+         }
+@@ -821,20 +849,23 @@ public class PreferencesHelper implements RankingConfig {
+     @Override
+     public int getBubblePreference(String pkg, int uid) {
+         synchronized (mLock) {
+-            return getOrCreatePackagePreferencesLocked(pkg, uid).bubblePreference;
++            PackagePreferences p = getPackagePreferencesLocked(pkg, uid);
++            return p != null ? p.bubblePreference : DEFAULT_BUBBLE_PREFERENCE;
+         }
+     }
+ 
+     public int getAppLockedFields(String pkg, int uid) {
+         synchronized (mLock) {
+-            return getOrCreatePackagePreferencesLocked(pkg, uid).lockedAppFields;
++            PackagePreferences p = getPackagePreferencesLocked(pkg, uid);
++            return p != null ? p.lockedAppFields : DEFAULT_LOCKED_APP_FIELDS;
+         }
+     }
+ 
+     @Override
+     public boolean canShowBadge(String packageName, int uid) {
+         synchronized (mLock) {
+-            return getOrCreatePackagePreferencesLocked(packageName, uid).showBadge;
++            PackagePreferences p = getPackagePreferencesLocked(packageName, uid);
++            return p != null ? p.showBadge : DEFAULT_SHOW_BADGE;
+         }
+     }
+ 
+@@ -883,15 +914,15 @@ public class PreferencesHelper implements RankingConfig {
+ 
+     public boolean isInInvalidMsgState(String packageName, int uid) {
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(packageName, uid);
+-            return r.hasSentInvalidMessage && !r.hasSentValidMessage;
++            PackagePreferences r = getPackagePreferencesLocked(packageName, uid);
++            return r != null && r.hasSentInvalidMessage && !r.hasSentValidMessage;
+         }
+     }
+ 
+     public boolean hasUserDemotedInvalidMsgApp(String packageName, int uid) {
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(packageName, uid);
+-            return isInInvalidMsgState(packageName, uid) ? r.userDemotedMsgApp : false;
++            PackagePreferences r = getPackagePreferencesLocked(packageName, uid);
++            return r != null && isInInvalidMsgState(packageName, uid) && r.userDemotedMsgApp;
+         }
+     }
+ 
+@@ -925,24 +956,24 @@ public class PreferencesHelper implements RankingConfig {
+     @VisibleForTesting
+     boolean hasSentInvalidMsg(String packageName, int uid) {
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(packageName, uid);
+-            return r.hasSentInvalidMessage;
++            PackagePreferences r = getPackagePreferencesLocked(packageName, uid);
++            return r != null && r.hasSentInvalidMessage;
+         }
+     }
+ 
+     @VisibleForTesting
+     boolean hasSentValidMsg(String packageName, int uid) {
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(packageName, uid);
+-            return r.hasSentValidMessage;
++            PackagePreferences r = getPackagePreferencesLocked(packageName, uid);
++            return r != null && r.hasSentValidMessage;
+         }
+     }
+ 
+     @VisibleForTesting
+     boolean didUserEverDemoteInvalidMsgApp(String packageName, int uid) {
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(packageName, uid);
+-            return r.userDemotedMsgApp;
++            PackagePreferences p = getPackagePreferencesLocked(packageName, uid);
++            return p != null && p.userDemotedMsgApp;
+         }
+     }
+ 
+@@ -958,15 +989,17 @@ public class PreferencesHelper implements RankingConfig {
+ 
+     boolean hasSentValidBubble(String packageName, int uid) {
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(packageName, uid);
+-            return r.hasSentValidBubble;
++            PackagePreferences p = getPackagePreferencesLocked(packageName, uid);
++            return p != null && p.hasSentValidBubble;
+         }
+     }
+ 
+     boolean isImportanceLocked(String pkg, int uid) {
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+-            return r.fixedImportance || r.defaultAppLockedImportance;
++            PackagePreferences p = getPackagePreferencesLocked(pkg, uid);
++            return p != null
++                    ? p.fixedImportance || p.defaultAppLockedImportance
++                    : DEFAULT_APP_LOCKED_IMPORTANCE;
+         }
+     }
+ 
+@@ -976,7 +1009,10 @@ public class PreferencesHelper implements RankingConfig {
+             return false;
+         }
+         synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(packageName, uid);
++            PackagePreferences r = getPackagePreferencesLocked(packageName, uid);
++            if (r == null) {
++                return false;
++            }
+             NotificationChannelGroup group = r.groups.get(groupId);
+             if (group == null) {
+                 return false;
+@@ -987,13 +1023,15 @@ public class PreferencesHelper implements RankingConfig {
+ 
+     int getPackagePriority(String pkg, int uid) {
+         synchronized (mLock) {
+-            return getOrCreatePackagePreferencesLocked(pkg, uid).priority;
++            PackagePreferences p = getPackagePreferencesLocked(pkg, uid);
++            return p != null ? p.priority : DEFAULT_PRIORITY;
+         }
+     }
+ 
+     int getPackageVisibility(String pkg, int uid) {
+         synchronized (mLock) {
+-            return getOrCreatePackagePreferencesLocked(pkg, uid).visibility;
++            PackagePreferences p = getPackagePreferencesLocked(pkg, uid);
++            return p != null ? p.visibility : DEFAULT_VISIBILITY;
+         }
+     }
+ 
+@@ -1009,9 +1047,6 @@ public class PreferencesHelper implements RankingConfig {
+         boolean needsDndChange = false;
+         synchronized (mLock) {
+             PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+-            if (r == null) {
+-                throw new IllegalArgumentException("Invalid package");
+-            }
+             if (r.groups.size() >= NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT) {
+                 throw new IllegalStateException("Limit exceed; cannot create more groups");
+             }
+@@ -1063,9 +1098,6 @@ public class PreferencesHelper implements RankingConfig {
+         boolean needsPolicyFileChange = false, wasUndeleted = false, needsDndChange = false;
+         synchronized (mLock) {
+             PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+-            if (r == null) {
+-                throw new IllegalArgumentException("Invalid package");
+-            }
+             if (channel.getGroup() != null && !r.groups.containsKey(channel.getGroup())) {
+                 throw new IllegalArgumentException("NotificationChannelGroup doesn't exist");
+             }
+@@ -1219,10 +1251,6 @@ public class PreferencesHelper implements RankingConfig {
+         Objects.requireNonNull(updatedChannelId);
+         synchronized (mLock) {
+             PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+-            if (r == null) {
+-                throw new IllegalArgumentException("Invalid package");
+-            }
+-
+             NotificationChannel channel = r.channels.get(updatedChannelId);
+             if (channel == null || channel.isDeleted()) {
+                 throw new IllegalArgumentException("Channel does not exist");
+@@ -1241,9 +1269,6 @@ public class PreferencesHelper implements RankingConfig {
+         boolean needsDndChange = false;
+         synchronized (mLock) {
+             PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+-            if (r == null) {
+-                throw new IllegalArgumentException("Invalid package");
+-            }
+             NotificationChannel channel = r.channels.get(updatedChannel.getId());
+             if (channel == null || channel.isDeleted()) {
+                 throw new IllegalArgumentException("Channel does not exist");
+@@ -1454,6 +1479,9 @@ public class PreferencesHelper implements RankingConfig {
+     public NotificationChannel getNotificationChannel(String pkg, int uid, String channelId,
+             boolean includeDeleted) {
+         Objects.requireNonNull(pkg);
++        if (uid == INVALID_UID) {
++            return null;
++        }
+         return getConversationNotificationChannel(pkg, uid, channelId, null, true, includeDeleted);
+     }
+ 
+@@ -1462,11 +1490,11 @@ public class PreferencesHelper implements RankingConfig {
+             String channelId, String conversationId, boolean returnParentIfNoConversationChannel,
+             boolean includeDeleted) {
+         Preconditions.checkNotNull(pkg);
++        if (uid == INVALID_UID) {
++            return null;
++        }
+         synchronized (mLock) {
+             PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+-            if (r == null) {
+-                return null;
+-            }
+             if (channelId == null) {
+                 channelId = DEFAULT_CHANNEL_ID;
+             }
+@@ -1498,26 +1526,6 @@ public class PreferencesHelper implements RankingConfig {
+         return null;
+     }
+ 
+-    public List<NotificationChannel> getNotificationChannelsByConversationId(String pkg, int uid,
+-            String conversationId) {
+-        Preconditions.checkNotNull(pkg);
+-        Preconditions.checkNotNull(conversationId);
+-        List<NotificationChannel> channels = new ArrayList<>();
+-        synchronized (mLock) {
+-            PackagePreferences r = getOrCreatePackagePreferencesLocked(pkg, uid);
+-            if (r == null) {
+-                return channels;
+-            }
+-            for (NotificationChannel nc : r.channels.values()) {
+-                if (conversationId.equals(nc.getConversationId())
+-                        && !nc.isDeleted()) {
+-                    channels.add(nc);
+-                }
+-            }
+-            return channels;
+-        }
+-    }
+-
+     @Override
+     public boolean deleteNotificationChannel(String pkg, int uid, String channelId,
+             int callingUid, boolean fromSystemOrSystemUi) {
+@@ -1912,6 +1920,9 @@ public class PreferencesHelper implements RankingConfig {
+     public ParceledListSlice<NotificationChannel> getNotificationChannels(String pkg, int uid,
+             boolean includeDeleted, boolean includeBundles) {
+         Objects.requireNonNull(pkg);
++        if (uid == INVALID_UID) {
++            return ParceledListSlice.emptyList();
++        }
+         List<NotificationChannel> channels = new ArrayList<>();
+         synchronized (mLock) {
+             PackagePreferences r = getPackagePreferencesLocked(pkg, uid);
+@@ -2157,6 +2168,7 @@ public class PreferencesHelper implements RankingConfig {
+      * {@code uid}, have their importance locked by the user. Locked notifications don't get
+      * considered for sentiment adjustments (and thus never show a blocking helper).
+      */
++    @VisibleForTesting
+     public void setAppImportanceLocked(String packageName, int uid) {
+         synchronized (mLock) {
+             PackagePreferences prefs = getOrCreatePackagePreferencesLocked(packageName, uid);
+@@ -2300,7 +2312,7 @@ public class PreferencesHelper implements RankingConfig {
+                 pw.print("  AppSettings: ");
+                 pw.print(r.pkg);
+                 pw.print(" (");
+-                pw.print(r.uid == UNKNOWN_UID ? "UNKNOWN_UID" : Integer.toString(r.uid));
++                pw.print(r.uid == INVALID_UID ? "INVALID_UID" : Integer.toString(r.uid));
+                 pw.print(')');
+                 Pair<Integer, String> key = new Pair<>(r.uid, r.pkg);
+                 if (packagePermissions != null && pkgsWithPermissionsToHandle.contains(key)) {
+@@ -2359,7 +2371,7 @@ public class PreferencesHelper implements RankingConfig {
+                     pw.print("  AppSettings: ");
+                     pw.print(p.second);
+                     pw.print(" (");
+-                    pw.print(p.first == UNKNOWN_UID ? "UNKNOWN_UID" : Integer.toString(p.first));
++                    pw.print(p.first == INVALID_UID ? "INVALID_UID" : Integer.toString(p.first));
+                     pw.print(')');
+                     pw.print(" importance=");
+                     pw.print(NotificationListenerService.Ranking.importanceToString(
+@@ -3134,7 +3146,7 @@ public class PreferencesHelper implements RankingConfig {
+                 synchronized (mLock) {
+                     PackagePreferences p = getOrCreatePackagePreferencesLocked(
+                             pi.packageName, pi.applicationInfo.uid);
+-                    if (p.migrateToPm && p.uid != UNKNOWN_UID) {
++                    if (p.migrateToPm && p.uid != INVALID_UID) {
+                         try {
+                             PackagePermission pkgPerm = new PackagePermission(
+                                     p.pkg, UserHandle.getUserId(p.uid),
+@@ -3164,7 +3176,7 @@ public class PreferencesHelper implements RankingConfig {
+ 
+     private static class PackagePreferences {
+         String pkg;
+-        int uid = UNKNOWN_UID;
++        int uid = INVALID_UID;
+         int importance = DEFAULT_IMPORTANCE;
+         int priority = DEFAULT_PRIORITY;
+         int visibility = DEFAULT_VISIBILITY;
+@@ -3214,7 +3226,7 @@ public class PreferencesHelper implements RankingConfig {
+         }
+ 
+         public boolean isAllowed(String pkg, int uid) {
+-            if (pkg == null || uid == UNKNOWN_UID) {
++            if (pkg == null || uid == INVALID_UID) {
+                 return false;
+             }
+             return pkg.equals(mPkg)
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+index 585bee54a183..808e92de3a48 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -95,6 +95,7 @@ import static android.os.Flags.FLAG_ALLOW_PRIVATE_PROFILE;
+ import static android.os.PowerManager.PARTIAL_WAKE_LOCK;
+ import static android.os.PowerWhitelistManager.REASON_NOTIFICATION_SERVICE;
+ import static android.os.PowerWhitelistManager.TEMPORARY_ALLOWLIST_TYPE_FOREGROUND_SERVICE_ALLOWED;
++import static android.os.Process.INVALID_UID;
+ import static android.os.UserHandle.USER_SYSTEM;
+ import static android.os.UserManager.USER_TYPE_FULL_SECONDARY;
+ import static android.os.UserManager.USER_TYPE_FULL_SYSTEM;
+@@ -214,6 +215,7 @@ import android.app.Person;
+ import android.app.RemoteInput;
+ import android.app.RemoteInputHistoryItem;
+ import android.app.StatsManager;
++import android.app.WallpaperManager;
+ import android.app.ZenBypassingApp;
+ import android.app.admin.DevicePolicyManagerInternal;
+ import android.app.backup.BackupRestoreEventLogger;
+@@ -390,6 +392,7 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+     private static final String TEST_CHANNEL_ID = "NotificationManagerServiceTestChannelId";
+     private static final String TEST_PACKAGE = "The.name.is.Package.Test.Package";
+     private static final String PKG_NO_CHANNELS = "com.example.no.channels";
++    private static final String MISSING_PACKAGE = "MISSING!";
+     private static final int TEST_TASK_ID = 1;
+     private static final int UID_HEADLESS = 1_000_000;
+     private static final int TOAST_DURATION = 2_000;
+@@ -639,6 +642,7 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         mContext.addMockSystemService(Context.USER_SERVICE, mUm);
+         mContext.addMockSystemService(Context.ACCESSIBILITY_SERVICE,
+                 mock(AccessibilityManager.class));
++        mContext.addMockSystemService(WallpaperManager.class, mock(WallpaperManager.class));
+ 
+         doNothing().when(mContext).sendBroadcast(any(), anyString());
+         doNothing().when(mContext).sendBroadcastAsUser(any(), any());
+@@ -656,6 +660,9 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         // MockPackageManager - default returns ApplicationInfo with matching calling UID
+         mContext.setMockPackageManager(mPackageManagerClient);
+ 
++        when(mPackageManager.getPackageUid(eq(mPkg), anyLong(), eq(mUserId))).thenReturn(mUid);
++        when(mPackageManager.getPackageUid(eq(MISSING_PACKAGE), anyLong(), anyInt()))
++                .thenReturn(INVALID_UID);
+         when(mPackageManager.getApplicationInfo(anyString(), anyLong(), anyInt()))
+                 .thenAnswer((Answer<ApplicationInfo>) invocation -> {
+                     Object[] args = invocation.getArguments();
+@@ -667,6 +674,8 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+                     return getApplicationInfo((String) args[0], mUid);
+                 });
+         when(mPackageManagerClient.getPackageUidAsUser(any(), anyInt())).thenReturn(mUid);
++        when(mPackageManagerClient.getPackageUidAsUser(eq(MISSING_PACKAGE), anyInt()))
++                .thenThrow(new PackageManager.NameNotFoundException("Missing package!"));
+         when(mPackageManagerInternal.isSameApp(anyString(), anyInt(), anyInt())).thenAnswer(
+                 (Answer<Boolean>) invocation -> {
+                     // TODO: b/317957802 - This is overly broad and basically makes ANY
+@@ -5357,6 +5366,50 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+         verify(mPreferencesHelper, never()).getNotificationChannelGroups(anyString(), anyInt());
+     }
+ 
++    @Test
++    public void getNotificationChannelsFromPrivilegedListener_invalidPackage_returnsNull()
++            throws Exception {
++        when(mListeners.checkServiceTokenLocked(any())).thenReturn(mListener);
++        when(mCompanionMgr.getAssociations(mPkg, mUserId))
++                .thenReturn(singletonList(mock(AssociationInfo.class)));
++
++        ParceledListSlice<?> channels =
++                mBinderService.getNotificationChannelsFromPrivilegedListener(
++                        mock(INotificationListener.class), MISSING_PACKAGE, mUser);
++
++        assertThat(channels.getList()).isEmpty();
++    }
++
++    @Test
++    public void getNotificationChannelGroupsFromPrivilegedListener_invalidPackage_returnsEmpty()
++            throws Exception {
++        when(mListeners.checkServiceTokenLocked(any())).thenReturn(mListener);
++        when(mCompanionMgr.getAssociations(mPkg, mUserId))
++                .thenReturn(singletonList(mock(AssociationInfo.class)));
++
++        ParceledListSlice<?> groups =
++                mBinderService.getNotificationChannelGroupsFromPrivilegedListener(
++                        mock(INotificationListener.class), MISSING_PACKAGE, mUser);
++
++        assertThat(groups.getList()).isEmpty();
++    }
++
++    @Test
++    public void updateNotificationChannelFromPrivilegedListener_invalidPackage_throws()
++            throws Exception {
++        when(mListeners.checkServiceTokenLocked(any())).thenReturn(mListener);
++        when(mCompanionMgr.getAssociations(mPkg, mUserId))
++                .thenReturn(singletonList(mock(AssociationInfo.class)));
++
++        Exception e = assertThrows(IllegalArgumentException.class,
++                () -> mBinderService.updateNotificationChannelFromPrivilegedListener(
++                        mock(INotificationListener.class), MISSING_PACKAGE, mUser,
++                        mTestNotificationChannel));
++
++        assertThat(e).hasMessageThat().isEqualTo(
++                "Valid uid required to get settings of " + MISSING_PACKAGE);
++    }
++
+     @Test
+     public void testHasCompanionDevice_failure() throws Exception {
+         when(mCompanionMgr.getAssociations(anyString(), anyInt())).thenThrow(
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
+index b015c8cf8225..5ea5d6b00f42 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
+@@ -51,6 +51,7 @@ import static android.content.ContentResolver.SCHEME_CONTENT;
+ import static android.content.ContentResolver.SCHEME_FILE;
+ import static android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION;
+ import static android.media.AudioAttributes.USAGE_NOTIFICATION;
++import static android.os.Process.INVALID_UID;
+ import static android.os.UserHandle.USER_ALL;
+ import static android.os.UserHandle.USER_SYSTEM;
+ import static android.platform.test.flag.junit.SetFlagsRule.DefaultInitValueType.DEVICE_DEFAULT;
+@@ -73,7 +74,6 @@ import static com.android.server.notification.PreferencesHelper.DEFAULT_BUBBLE_P
+ import static com.android.server.notification.PreferencesHelper.LockableAppFields.USER_LOCKED_PROMOTABLE;
+ import static com.android.server.notification.PreferencesHelper.NOTIFICATION_CHANNEL_COUNT_LIMIT;
+ import static com.android.server.notification.PreferencesHelper.NOTIFICATION_CHANNEL_GROUP_COUNT_LIMIT;
+-import static com.android.server.notification.PreferencesHelper.UNKNOWN_UID;
+ 
+ import static com.google.common.truth.Truth.assertThat;
+ 
+@@ -854,9 +854,12 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testReadXml_oldXml_backup_migratesWhenPkgInstalled() throws Exception {
+-        when(mPm.getPackageUidAsUser("pkg1", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
+-        when(mPm.getPackageUidAsUser("pkg2", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
+-        when(mPm.getPackageUidAsUser("pkg3", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser("pkg1", USER_SYSTEM))
++                .thenThrow(new PackageManager.NameNotFoundException("Package pkg1 not found"));
++        when(mPm.getPackageUidAsUser("pkg2", USER_SYSTEM))
++                .thenThrow(new PackageManager.NameNotFoundException("Package pkg2 not found"));
++        when(mPm.getPackageUidAsUser("pkg3", USER_SYSTEM))
++                .thenThrow(new PackageManager.NameNotFoundException("Package pkg3 not found"));
+         when(mPm.getApplicationInfoAsUser(eq("pkg1"), anyInt(), anyInt())).thenThrow(
+                 new PackageManager.NameNotFoundException());
+         when(mPm.getApplicationInfoAsUser(eq("pkg2"), anyInt(), anyInt())).thenThrow(
+@@ -909,9 +912,9 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+         verify(mPermissionHelper, never()).setNotificationPermission(any());
+ 
+-        when(mPm.getPackageUidAsUser("pkg1", USER_SYSTEM)).thenReturn(11);
+-        when(mPm.getPackageUidAsUser("pkg2", USER_SYSTEM)).thenReturn(12);
+-        when(mPm.getPackageUidAsUser("pkg3", USER_SYSTEM)).thenReturn(13);
++        doReturn(11).when(mPm).getPackageUidAsUser("pkg1", USER_SYSTEM);
++        doReturn(12).when(mPm).getPackageUidAsUser("pkg2", USER_SYSTEM);
++        doReturn(13).when(mPm).getPackageUidAsUser("pkg3", USER_SYSTEM);
+ 
+         mXmlHelper.onPackagesChanged(
+                 false, 0, new String[]{"pkg1", "pkg2", "pkg3"}, new int[] {11, 12, 13});
+@@ -1105,7 +1108,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testReadXml_oldXml_migration_NoUid() throws Exception {
+-        when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenThrow(
++                new PackageManager.NameNotFoundException("Package something not found"));
+         String xml = "<ranking version=\"2\">\n"
+                 + "<package name=\"something\" show_badge=\"true\">\n"
+                 + "<channel id=\"idn\" name=\"name\" importance=\"2\"/>\n"
+@@ -1122,7 +1126,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         loadByteArrayXml(xml.getBytes(), true, USER_SYSTEM);
+         verify(mPermissionHelper, never()).setNotificationPermission(any());
+ 
+-        when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenReturn(1234);
++        doReturn(1234).when(mPm).getPackageUidAsUser("something", USER_SYSTEM);
+         final ApplicationInfo app = new ApplicationInfo();
+         app.targetSdkVersion = Build.VERSION_CODES.N_MR1 + 1;
+         when(mPm.getApplicationInfoAsUser(
+@@ -1135,7 +1139,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testReadXml_newXml_noMigration_NoUid() throws Exception {
+-        when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenThrow(
++                new PackageManager.NameNotFoundException("Package something not found"));
+         String xml = "<ranking version=\"3\">\n"
+                 + "<package name=\"something\" show_badge=\"true\">\n"
+                 + "<channel id=\"idn\" name=\"name\" importance=\"2\"/>\n"
+@@ -1151,7 +1156,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+         loadByteArrayXml(xml.getBytes(), true, USER_SYSTEM);
+ 
+-        when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenReturn(1234);
++        doReturn(1234).when(mPm).getPackageUidAsUser("something", USER_SYSTEM);
+         final ApplicationInfo app = new ApplicationInfo();
+         app.targetSdkVersion = Build.VERSION_CODES.N_MR1 + 1;
+         when(mPm.getApplicationInfoAsUser(eq("something"), anyInt(), anyInt())).thenReturn(app);
+@@ -1539,28 +1544,24 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+                 .when(mTestIContentProvider).uncanonicalize(any(), any());
+ 
+         // simulate package not installed
+-        when(mPm.getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM)).thenThrow(
++                new PackageManager.NameNotFoundException("Package PKG_N_MR1 not found"));
+         when(mPm.getApplicationInfoAsUser(eq(PKG_N_MR1), anyInt(), anyInt())).thenThrow(
+                 new PackageManager.NameNotFoundException());
+ 
+         loadStreamXml(baos, true, USER_SYSTEM);
+ 
+-        // 1st restore pass fails
+-        NotificationChannel actualChannel = mXmlHelper.getNotificationChannel(
+-                PKG_N_MR1, UNKNOWN_UID, channel.getId(), false);
+-        // sound is CANONICAL_SOUND_URI, unchanged from backup
+-        assertEquals(CANONICAL_SOUND_URI, actualChannel.getSound());
+-        // sound is flagged as not restored
+-        assertFalse(actualChannel.isSoundRestored());
+-
+         // package is "installed"
+-        when(mPm.getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM)).thenReturn(UID_N_MR1);
++        doReturn(UID_N_MR1).when(mPm).getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM);
+ 
+         // Trigger 2nd restore pass
+         mXmlHelper.onPackagesChanged(false, USER_SYSTEM, new String[]{PKG_N_MR1},
+                 new int[]{UID_N_MR1});
+ 
+         // sound is flagged as restored and set to default URI
++        NotificationChannel actualChannel = mXmlHelper.getNotificationChannel(
++                PKG_N_MR1, UID_N_MR1, channel.getId(), false);
++
+         assertEquals(Settings.System.DEFAULT_NOTIFICATION_URI, actualChannel.getSound());
+         assertTrue(actualChannel.isSoundRestored());
+     }
+@@ -1569,7 +1570,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @EnableFlags(Flags.FLAG_PERSIST_INCOMPLETE_RESTORE_DATA)
+     public void testRestoreXml_delayedRestore() throws Exception {
+         // simulate package not installed
+-        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenThrow(
++                new PackageManager.NameNotFoundException("Package PKG_R not found"));
+         when(mPm.getApplicationInfoAsUser(eq(PKG_R), anyInt(), anyInt())).thenThrow(
+                 new PackageManager.NameNotFoundException());
+         when(mClock.millis()).thenReturn(System.currentTimeMillis());
+@@ -1586,11 +1588,9 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+         // settings are not available with real uid because pkg is not installed
+         assertThat(mXmlHelper.getNotificationChannel(PKG_R, UID_P, id, false)).isNull();
+-        // but the settings are in memory with unknown_uid
+-        assertThat(mXmlHelper.getNotificationChannel(PKG_R, UNKNOWN_UID, id, false)).isNotNull();
+ 
+         // package is "installed"
+-        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenReturn(UID_P);
++        doReturn(UID_P).when(mPm).getPackageUidAsUser(PKG_R, USER_SYSTEM);
+ 
+         // Trigger 2nd restore pass
+         mXmlHelper.onPackagesChanged(false, USER_SYSTEM, new String[]{PKG_R},
+@@ -1603,7 +1603,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         assertThat(channel.canBypassDnd()).isFalse();
+ 
+         // removed from 'pending install' set
+-        assertThat(mXmlHelper.getNotificationChannel(PKG_R, UNKNOWN_UID, id,false)).isNull();
++        assertThat(mXmlHelper.getNotificationChannel(PKG_R, INVALID_UID, id, false)).isNull();
+     }
+ 
+     @Test
+@@ -1616,7 +1616,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+                 .thenReturn(appPermissions);
+ 
+         // simulate package not installed
+-        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenThrow(
++                new PackageManager.NameNotFoundException("Package PKG_R not found"));
+         when(mPm.getApplicationInfoAsUser(eq(PKG_R), anyInt(), anyInt())).thenThrow(
+                 new PackageManager.NameNotFoundException());
+         when(mClock.millis()).thenReturn(System.currentTimeMillis());
+@@ -1647,7 +1648,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         loadByteArrayXml(baos.toByteArray(), false, USER_ALL);
+ 
+         // Trigger 2nd restore pass
+-        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenReturn(UID_R);
++        doReturn(UID_R).when(mPm).getPackageUidAsUser(PKG_R, USER_SYSTEM);
+         mXmlHelper.onPackagesChanged(false, USER_SYSTEM, new String[]{PKG_R},
+                 new int[]{UID_R});
+ 
+@@ -1668,7 +1669,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+                 .thenReturn(appPermissions);
+ 
+         // simulate package not installed
+-        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser(PKG_R, USER_SYSTEM)).thenThrow(
++                new PackageManager.NameNotFoundException("Package PKG_R not found"));
+         when(mPm.getApplicationInfoAsUser(eq(PKG_R), anyInt(), anyInt())).thenThrow(
+                 new PackageManager.NameNotFoundException());
+ 
+@@ -1706,7 +1708,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+                 new int[]{UID_P});
+ 
+         // verify the 2nd restore pass failed because the restore data had been removed
+-        assertThat(mXmlHelper.getNotificationChannel(PKG_R, UNKNOWN_UID, id, false)).isNull();
++        assertThat(mXmlHelper.getNotificationChannel(PKG_R, INVALID_UID, id, false)).isNull();
+     }
+ 
+     /**
+@@ -1790,27 +1792,23 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+                 USER_SYSTEM, channel.getId());
+ 
+         // simulate package not installed
+-        when(mPm.getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM)).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM)).thenThrow(
++                new PackageManager.NameNotFoundException("Package PKG_N_MR1 not found"));
+         when(mPm.getApplicationInfoAsUser(eq(PKG_N_MR1), anyInt(), anyInt())).thenThrow(
+                 new PackageManager.NameNotFoundException());
+ 
+         loadStreamXml(baos, true, USER_SYSTEM);
+ 
+-        NotificationChannel actualChannel = mXmlHelper.getNotificationChannel(
+-                PKG_N_MR1, UNKNOWN_UID, channel.getId(), false);
+-        // sound is ANDROID_RES_SOUND_URI, unchanged from backup
+-        assertEquals(ANDROID_RES_SOUND_URI, actualChannel.getSound());
+-        // sound is flagged as not restored
+-        assertFalse(actualChannel.isSoundRestored());
+-
+         // package is "installed"
+-        when(mPm.getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM)).thenReturn(UID_N_MR1);
++        doReturn(UID_N_MR1).when(mPm).getPackageUidAsUser(PKG_N_MR1, USER_SYSTEM);
+ 
+         // Trigger 2nd restore pass
+         mXmlHelper.onPackagesChanged(false, USER_SYSTEM, new String[]{PKG_N_MR1},
+                 new int[]{UID_N_MR1});
+ 
+         // sound is flagged as restored
++        NotificationChannel actualChannel = mXmlHelper.getNotificationChannel(
++                PKG_N_MR1, UID_N_MR1, channel.getId(), false);
+         assertEquals(ANDROID_RES_SOUND_URI, actualChannel.getSound());
+         assertTrue(actualChannel.isSoundRestored());
+     }
+@@ -3363,19 +3361,15 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         int[] user1Uids = new int[user0Uids.length];
+         for (int i = 0; i < user0Uids.length; i++) {
+             user1Uids[i] = UserHandle.PER_USER_RANGE + user0Uids[i];
+-
+             final ApplicationInfo legacy = new ApplicationInfo();
+             legacy.targetSdkVersion = Build.VERSION_CODES.N_MR1;
+             when(mPm.getApplicationInfoAsUser(eq(PKG_N_MR1), anyInt(), anyInt()))
+                     .thenReturn(legacy);
+-
+             // create records with the default channel for all user 0 and user 1 uids
+-            mHelper.canShowBadge(PKG_N_MR1, user0Uids[i]);
+-            mHelper.canShowBadge(PKG_N_MR1, user1Uids[i]);
++            mHelper.setShowBadge(PKG_N_MR1, user0Uids[i], true);
++            mHelper.setShowBadge(PKG_N_MR1, user1Uids[i], true);
+         }
+-
+         mHelper.onUserRemoved(1);
+-
+         // user 0 records remain
+         for (int i = 0; i < user0Uids.length; i++) {
+             assertEquals(1,
+@@ -3482,6 +3476,9 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testRecordDefaults() throws Exception {
++        // create package preferences
++        mHelper.setValidBubbleSent(PKG_N_MR1, UID_N_MR1);
++
+         assertEquals(true, mHelper.canShowBadge(PKG_N_MR1, UID_N_MR1));
+         assertEquals(1,
+                 mHelper.getNotificationChannels(PKG_N_MR1, UID_N_MR1, false, true)
+@@ -3812,8 +3809,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         // for some reason, even though in practice this should not be how one calls this method
+ 
+         // some packages exist
+-        mHelper.canShowBadge(PKG_O, UID_O);
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         JSONArray actual = (JSONArray) mHelper.dumpJson(
+                 new NotificationManagerService.DumpFilter(), null)
+@@ -3839,7 +3836,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         appPermissions.put(new Pair<>(3, "third"), new Pair<>(false, false)); // not in local prefs
+         appPermissions.put(new Pair<>(UID_O, PKG_O), new Pair<>(false, false)); // in local prefs
+ 
+-        mHelper.canShowBadge(PKG_O, UID_O);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
+ 
+         // expected output
+         ArraySet<Pair<Integer, String>> expected = new ArraySet<>();
+@@ -3877,8 +3874,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         appPermissions.put(new Pair<>(UID_O, PKG_O), new Pair<>(false, false)); // in local prefs
+ 
+         // local package preferences
+-        mHelper.canShowBadge(PKG_O, UID_O);
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         // get dump output as a string so we can inspect the contents later
+         StringWriter sw = new StringWriter();
+@@ -3913,8 +3910,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         // test that this doesn't choke on null input
+ 
+         // local package preferences
+-        mHelper.canShowBadge(PKG_O, UID_O);
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         // get dump output
+         StringWriter sw = new StringWriter();
+@@ -3938,8 +3935,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         appPermissions.put(new Pair<>(UID_O, PKG_O), new Pair<>(false, false)); // in local prefs
+ 
+         // local package preferences
+-        mHelper.canShowBadge(PKG_O, UID_O);
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         // expected output: all the packages, but only the ones provided via appPermissions
+         // should have importance set (aka not PKG_P)
+@@ -4328,7 +4325,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testIsDelegateAllowed_noDelegate() {
+-        mHelper.canShowBadge(PKG_O, UID_O);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
+ 
+         assertFalse(mHelper.isDelegateAllowed(PKG_O, UID_O, "whatever", 0));
+     }
+@@ -4358,7 +4355,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testDelegateXml_noDelegate() throws Exception {
+-        mHelper.canShowBadge(PKG_O, UID_O);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
+ 
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+@@ -4458,7 +4455,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testBubblePrefence_noSAWCheckForUnknownUid() throws Exception {
+         final String xml = "<ranking version=\"1\">\n"
+-                + "<package name=\"" + PKG_O + "\" uid=\"" + UNKNOWN_UID + "\">\n"
++                + "<package name=\"" + PKG_O + "\" uid=\"" + INVALID_UID + "\">\n"
+                 + "<channel id=\"someId\" name=\"hi\""
+                 + " importance=\"3\"/>"
+                 + "</package>"
+@@ -5053,7 +5050,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         String channelId = "channelId";
+         int user0Importance = 3;
+         int user10Importance = 4;
+-        when(mPm.getPackageUidAsUser(eq(pkg), anyInt())).thenReturn(UserHandle.USER_NULL);
++        when(mPm.getPackageUidAsUser(eq(pkg), anyInt())).thenThrow(
++                new PackageManager.NameNotFoundException("Package pkg not found"));
+ 
+         // both users have the same package, but different notification settings
+         final String xmlUser0 = "<ranking version=\"1\">\n"
+@@ -5085,8 +5083,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         String[] pkgList = new String[] {pkg};
+         int[] uidList0 = new int[] {UserHandle.PER_USER_RANGE};
+         int[] uidList10 = new int[] {UserHandle.PER_USER_RANGE + 1};
+-        when(mPm.getPackageUidAsUser(pkg, 0)).thenReturn(uidList0[0]);
+-        when(mPm.getPackageUidAsUser(pkg, 10)).thenReturn(uidList10[0]);
++        doReturn(uidList0[0]).when(mPm).getPackageUidAsUser(pkg, 0);
++        doReturn(uidList10[0]).when(mPm).getPackageUidAsUser(pkg, 10);
+         ApplicationInfo info = new ApplicationInfo();
+         info.targetSdkVersion = Build.VERSION_CODES.Q;
+         when(mPm.getApplicationInfoAsUser(eq(pkg), anyInt(), anyInt())).thenReturn(info);
+@@ -5909,7 +5907,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testInvalidMessageSent() {
+         // create package preferences
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         // check default value
+         assertFalse(mHelper.isInInvalidMsgState(PKG_P, UID_P));
+@@ -5923,7 +5921,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testValidMessageSent() {
+         // create package preferences
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         // get into the bad state
+         mHelper.setInvalidMessageSent(PKG_P, UID_P);
+@@ -5938,7 +5936,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testUserDemotedInvalidMsgApp() {
+         // create package preferences
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         // demotion means nothing before msg notif sent
+         mHelper.setInvalidMsgAppDemoted(PKG_P, UID_P, true);
+@@ -5956,7 +5954,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testValidBubbleSent() {
+         // create package preferences
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+         // false by default
+         assertFalse(mHelper.hasSentValidBubble(PKG_P, UID_P));
+ 
+@@ -6154,8 +6152,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         appPermissions.put(new Pair<>(UID_O, PKG_O), new Pair<>(false, true)); // in local prefs
+ 
+         // local preferences
+-        mHelper.canShowBadge(PKG_O, UID_O);
+-        mHelper.canShowBadge(PKG_P, UID_P);
++        mHelper.setShowBadge(PKG_O, UID_O, true);
++        mHelper.setShowBadge(PKG_P, UID_P, true);
+ 
+         // expected output. format: uid -> importance, as only uid (and not package name)
+         // is in PackageNotificationPreferences
+@@ -6510,7 +6508,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+     @Test
+     public void testRestoredWithoutUid_threadSafety() throws Exception {
+-        when(mPm.getPackageUidAsUser(anyString(), anyInt())).thenReturn(UNKNOWN_UID);
++        when(mPm.getPackageUidAsUser(anyString(), anyInt())).thenThrow(
++                new PackageManager.NameNotFoundException("Package not found"));
+         when(mPm.getApplicationInfoAsUser(anyString(), anyInt(), anyInt())).thenThrow(
+                 new PackageManager.NameNotFoundException());
+         when(mClock.millis()).thenReturn(System.currentTimeMillis());
+@@ -6533,7 +6532,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+ 
+             // trigger a removal from the list
+             mXmlHelper.onPackagesChanged(true, USER_SYSTEM, new String[]{PKG_P},
+-                    new int[]{UNKNOWN_UID});
++                    new int[]{INVALID_UID});
+         }, 20, 50);
+     }
+ 
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java b/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java
+index c1bb3e7408fc..a820ca40f9c0 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/RoleObserverTest.java
+@@ -25,11 +25,15 @@ import static junit.framework.Assert.assertFalse;
+ import static junit.framework.Assert.assertTrue;
+ 
+ import static org.mockito.ArgumentMatchers.anyBoolean;
+-import static org.mockito.Matchers.eq;
++import static org.mockito.ArgumentMatchers.anyLong;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.doThrow;
+ import static org.mockito.Mockito.any;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.times;
+ import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoMoreInteractions;
+ import static org.mockito.Mockito.when;
+ 
+ import static java.util.Arrays.asList;
+@@ -49,6 +53,7 @@ import android.content.pm.IPackageManager;
+ import android.content.pm.PackageManager;
+ import android.os.Looper;
+ import android.os.PowerManager;
++import android.os.RemoteException;
+ import android.os.UserHandle;
+ import android.os.UserManager;
+ import android.permission.PermissionManager;
+@@ -233,6 +238,32 @@ public class RoleObserverTest extends UiServiceTestCase {
+         verify(mPreferencesHelper, times(1)).updateDefaultApps(0, null, emer0Pair);
+     }
+ 
++    @Test
++    public void testInit_withInvalidPackages_invalidIgnored() throws Exception {
++        UserHandle user = new UserHandle(0);
++        when(mUm.getUserHandles(anyBoolean())).thenReturn(List.of(user));
++        String invalidDialerPkg = "invalidDialer";
++        String validEmergencyPkg = "emergency";
++        doThrow(new RemoteException(new PackageManager.NameNotFoundException())).when(mPm)
++                .getPackageUid(eq(invalidDialerPkg), anyLong(), eq(user.getIdentifier()));
++        doReturn(40).when(mPm)
++                .getPackageUid(eq(validEmergencyPkg), anyLong(), eq(user.getIdentifier()));
++        when(mRoleManager.getRoleHoldersAsUser(ROLE_DIALER, user))
++                .thenReturn(List.of(invalidDialerPkg));
++        when(mRoleManager.getRoleHoldersAsUser(ROLE_EMERGENCY, user))
++                .thenReturn(List.of(validEmergencyPkg));
++
++        mRoleObserver.init();
++
++        // Only valid packages were passed to PreferencesHelper
++        ArraySet<Pair<String, Integer>> expectedEmergencyApps = new ArraySet<>();
++        expectedEmergencyApps.add(new Pair<>(validEmergencyPkg, 40));
++        ArraySet<Pair<String, Integer>> expectedDialerApps = new ArraySet<>();
++        verify(mPreferencesHelper).updateDefaultApps(0, null, expectedEmergencyApps);
++        verify(mPreferencesHelper).updateDefaultApps(0, null, expectedDialerApps);
++        verifyNoMoreInteractions(mPreferencesHelper);
++    }
++
+     @Test
+     public void testInit_forTrampolines() throws Exception {
+         when(mPm.getPackageUid("com.browser", MATCH_ALL, 0)).thenReturn(30);
+-- 
+2.34.1
+
