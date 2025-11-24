@@ -1,0 +1,325 @@
+From d8c0bbe35b6a7f760509e5b41f36f0982dac2d07 Mon Sep 17 00:00:00 2001
+From: oli <olit@google.com>
+Date: Wed, 21 May 2025 14:38:32 +0000
+Subject: [PATCH] Add resolveActivityAsUserForExplicitType api to pm
+
+allow checking for resolved activity for an intent with a specific type
+
+allowing the intent to declare its own type can lead to a security
+vulnerability if the intent changes its type after the IntentForwarder#canForward
+check.
+
+Use the new API in IntentForwarderActivity to prevent checking the intent's type twice.
+
+Update other call sites of IntentForwarder#canForward to extract the resolved type from the intent and pass in to to the method call
+
+Check the launch package rather than calling package
+
+sanitize intent selector as well as received intent
+
+Bug: 403565650 407763772 397216638
+Flag: EXEMPT bugfix
+Test: manually tested
+(cherry picked from https://googleplex-android-review.googlesource.com/q/commit:57233409d9bb5aef50373760a9b6551aa618c808)
+Merged-In: I8453f25ed5ddd938718f4d2be4983c881778f281
+Change-Id: I8453f25ed5ddd938718f4d2be4983c881778f281
+---
+ .../app/ApplicationPackageManager.java        | 28 +++++++++++----
+ .../android/content/pm/PackageManager.java    | 32 +++++++++++++++--
+ .../app/AbstractMultiProfilePagerAdapter.java |  2 +-
+ .../internal/app/IntentForwarderActivity.java | 36 ++++++++++++++-----
+ .../app/IntentForwarderActivityTest.java      | 21 ++++++++---
+ 5 files changed, 95 insertions(+), 24 deletions(-)
+
+diff --git a/core/java/android/app/ApplicationPackageManager.java b/core/java/android/app/ApplicationPackageManager.java
+index 5956e2bde242..69c913b8c590 100644
+--- a/core/java/android/app/ApplicationPackageManager.java
++++ b/core/java/android/app/ApplicationPackageManager.java
+@@ -1455,22 +1455,36 @@ public class ApplicationPackageManager extends PackageManager {
+ 
+     @Override
+     public ResolveInfo resolveActivity(Intent intent, ResolveInfoFlags flags) {
+-        return resolveActivityAsUser(intent, flags, getUserId());
++        return resolveActivityAsUser(intent, /* resolvedType= */ null, flags, getUserId());
+     }
+ 
+     @Override
+     public ResolveInfo resolveActivityAsUser(Intent intent, int flags, int userId) {
+-        return resolveActivityAsUser(intent, ResolveInfoFlags.of(flags), userId);
++        return resolveActivityAsUser(intent, /* resolvedType= */ null, ResolveInfoFlags.of(flags),
++                userId);
+     }
+ 
+     @Override
+     public ResolveInfo resolveActivityAsUser(Intent intent, ResolveInfoFlags flags, int userId) {
++        return resolveActivityAsUser(intent, /* resolvedType= */ null, flags, userId);
++    }
++
++    @Override
++    public ResolveInfo resolveActivityAsUser(Intent intent, String resolvedType,
++            int flags, int userId) {
++        return resolveActivityAsUser(intent, resolvedType,
++                ResolveInfoFlags.of(flags), userId);
++    }
++
++    @Override
++    public ResolveInfo resolveActivityAsUser(Intent intent, String resolvedType,
++            ResolveInfoFlags flags, int userId) {
+         try {
+-            return mPM.resolveIntent(
+-                intent,
+-                intent.resolveTypeIfNeeded(mContext.getContentResolver()),
+-                updateFlagsForComponent(flags.getValue(), userId, intent),
+-                userId);
++            return mPM.resolveIntent(intent,
++                    resolvedType == null
++                        ? intent.resolveTypeIfNeeded(mContext.getContentResolver())
++                        : resolvedType,
++                    updateFlagsForComponent(flags.getValue(), userId, intent), userId);
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
+         }
+diff --git a/core/java/android/content/pm/PackageManager.java b/core/java/android/content/pm/PackageManager.java
+index 282ede385ba3..bfa9de7c0b49 100644
+--- a/core/java/android/content/pm/PackageManager.java
++++ b/core/java/android/content/pm/PackageManager.java
+@@ -7604,14 +7604,20 @@ public abstract class PackageManager {
+      * Intent.resolveActivity(PackageManager)} do.
+      * </p>
+      *
+-     * Use {@link #resolveActivityAsUser(Intent, ResolveInfoFlags, int)} when long flags are needed.
++     * Use {@link #resolveActivityAsUser(Intent, String, ResolveInfoFlags, int)}
++     * when long flags are needed.
+      *
+      * @param intent An intent containing all of the desired specification
+      *            (action, data, type, category, and/or component).
++     * @param resolvedType A nullable resolved type for the intent's data.
++     *            Specified explicitly when the data type contained in the
++     *            intent cannot be trusted. If null is provided, the type will
++     *            be obtained from the intent using
++     *            {@link Intent#resolveTypeIfNeeded}.
+      * @param flags Additional option flags to modify the data returned. The
+      *            most important is {@link #MATCH_DEFAULT_ONLY}, to limit the
+      *            resolution to only those activities that support the
+-     *            {@link android.content.Intent#CATEGORY_DEFAULT}.
++     *            {@link Intent#CATEGORY_DEFAULT}.
+      * @param userId The user id.
+      * @return Returns a ResolveInfo object containing the final activity intent
+      *         that was determined to be the best action. Returns null if no
+@@ -7620,6 +7626,26 @@ public abstract class PackageManager {
+      *         containing something else, such as the activity resolver.
+      * @hide
+      */
++    @Nullable
++    public ResolveInfo resolveActivityAsUser(@NonNull Intent intent,
++            @Nullable String resolvedType, int flags, @UserIdInt int userId) {
++        return resolveActivityAsUser(intent, resolvedType, ResolveInfoFlags.of(flags), userId);
++    }
++
++    /**
++     * See {@link #resolveActivityAsUser(Intent, String, int, int)}.
++     * @hide
++     */
++    @Nullable
++    public ResolveInfo resolveActivityAsUser(@NonNull Intent intent,
++            @Nullable String resolvedType, @NonNull ResolveInfoFlags flags, @UserIdInt int userId) {
++        throw new UnsupportedOperationException(
++                "resolveActivityAsUser not implemented in subclass");
++    }
++     /**
++     * See {@link #resolveActivityAsUser(Intent, String, int, int)}.
++     * @hide
++     */
+     @SuppressWarnings("HiddenAbstractMethod")
+     @Nullable
+     @UnsupportedAppUsage
+@@ -7627,7 +7653,7 @@ public abstract class PackageManager {
+             int flags, @UserIdInt int userId);
+ 
+     /**
+-     * See {@link #resolveActivityAsUser(Intent, int, int)}.
++     * See {@link #resolveActivityAsUser(Intent, String, int, int)}.
+      * @hide
+      */
+     @Nullable
+diff --git a/core/java/com/android/internal/app/AbstractMultiProfilePagerAdapter.java b/core/java/com/android/internal/app/AbstractMultiProfilePagerAdapter.java
+index dee49350d93e..540f3332902b 100644
+--- a/core/java/com/android/internal/app/AbstractMultiProfilePagerAdapter.java
++++ b/core/java/com/android/internal/app/AbstractMultiProfilePagerAdapter.java
+@@ -358,7 +358,7 @@ public abstract class AbstractMultiProfilePagerAdapter extends PagerAdapter {
+ 
+             return intents.stream().anyMatch(intent ->
+                     null != IntentForwarderActivity.canForward(intent, source, target,
+-                            packageManager, mContentResolver));
++                            packageManager, intent.resolveTypeIfNeeded(mContentResolver)));
+         }
+     }
+ 
+diff --git a/core/java/com/android/internal/app/IntentForwarderActivity.java b/core/java/com/android/internal/app/IntentForwarderActivity.java
+index a1bb325534dd..6b1e01209083 100644
+--- a/core/java/com/android/internal/app/IntentForwarderActivity.java
++++ b/core/java/com/android/internal/app/IntentForwarderActivity.java
+@@ -41,7 +41,6 @@ import android.app.admin.DevicePolicyManager;
+ import android.app.admin.ManagedSubscriptionsPolicy;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.ComponentName;
+-import android.content.ContentResolver;
+ import android.content.Intent;
+ import android.content.pm.ActivityInfo;
+ import android.content.pm.IPackageManager;
+@@ -160,8 +159,9 @@ public class IntentForwarderActivity extends Activity  {
+         }
+ 
+         final int callingUserId = getUserId();
++        String resolvedType = intentReceived.resolveTypeIfNeeded(getContentResolver());
+         final Intent newIntent = canForward(intentReceived, getUserId(), targetUserId,
+-                mInjector.getIPackageManager(), getContentResolver());
++                mInjector.getIPackageManager(), resolvedType);
+ 
+         if (newIntent == null) {
+             Slog.wtf(TAG, "the intent: " + intentReceived + " cannot be forwarded from user "
+@@ -172,7 +172,11 @@ public class IntentForwarderActivity extends Activity  {
+ 
+         newIntent.prepareToLeaveUser(callingUserId);
+         final CompletableFuture<ResolveInfo> targetResolveInfoFuture =
+-                mInjector.resolveActivityAsUser(newIntent, MATCH_DEFAULT_ONLY, targetUserId);
++                mInjector.resolveActivityAsUser(
++                        newIntent,
++                        resolvedType,
++                        MATCH_DEFAULT_ONLY,
++                        targetUserId);
+ 
+         if (isPrivateProfile(callingUserId)) {
+             buildAndExecuteForPrivateProfile(intentReceived, className, newIntent, callingUserId,
+@@ -235,7 +239,7 @@ public class IntentForwarderActivity extends Activity  {
+         }
+ 
+         int targetUserId = managedProfile == null ? UserHandle.USER_NULL : managedProfile.id;
+-        String callingPackage = getCallingPackage();
++        String callingPackage = getLaunchedFromPackage();
+         boolean privilegedCallerAskedToSkipUserConsent =
+                 launchIntent.getBooleanExtra(
+                         EXTRA_SKIP_USER_CONFIRMATION, /* defaultValue= */ false)
+@@ -512,6 +516,9 @@ public class IntentForwarderActivity extends Activity  {
+                 ? targetUserId : callingUserId;
+         int selectedProfile = findSelectedProfile(className);
+         sanitizeIntent(intentReceived);
++        if (intentReceived.getSelector() != null) {
++            sanitizeIntent(intentReceived.getSelector());
++        }
+         intentReceived.putExtra(EXTRA_SELECTED_PROFILE, selectedProfile);
+         intentReceived.putExtra(EXTRA_CALLING_USER, UserHandle.of(callingUserId));
+         if (singleTabOnly) {
+@@ -580,20 +587,20 @@ public class IntentForwarderActivity extends Activity  {
+      * forwarding if it can be forwarded, {@code null} otherwise.
+      */
+     static Intent canForward(Intent incomingIntent, int sourceUserId, int targetUserId,
+-            IPackageManager packageManager, ContentResolver contentResolver)  {
++            IPackageManager packageManager, String resolvedType)  {
+         Intent forwardIntent = new Intent(incomingIntent);
+         forwardIntent.addFlags(
+                 Intent.FLAG_ACTIVITY_FORWARD_RESULT | Intent.FLAG_ACTIVITY_PREVIOUS_IS_TOP);
+         sanitizeIntent(forwardIntent);
+ 
+         if (!canForwardInner(forwardIntent, sourceUserId, targetUserId, packageManager,
+-                contentResolver)) {
++                resolvedType)) {
+             return null;
+         }
+         if (forwardIntent.getSelector() != null) {
+             sanitizeIntent(forwardIntent.getSelector());
+             if (!canForwardInner(forwardIntent.getSelector(), sourceUserId, targetUserId,
+-                    packageManager, contentResolver)) {
++                    packageManager, resolvedType)) {
+                 return null;
+             }
+         }
+@@ -601,11 +608,10 @@ public class IntentForwarderActivity extends Activity  {
+     }
+ 
+     private static boolean canForwardInner(Intent intent, int sourceUserId, int targetUserId,
+-            IPackageManager packageManager, ContentResolver contentResolver) {
++            IPackageManager packageManager, String resolvedType) {
+         if (Intent.ACTION_CHOOSER.equals(intent.getAction())) {
+             return false;
+         }
+-        String resolvedType = intent.resolveTypeIfNeeded(contentResolver);
+         try {
+             if (packageManager.canForwardTo(
+                     intent, resolvedType, sourceUserId, targetUserId)) {
+@@ -708,6 +714,15 @@ public class IntentForwarderActivity extends Activity  {
+             return IntentForwarderActivity.this.getPackageManager();
+         }
+ 
++        @Override
++        @Nullable
++        public CompletableFuture<ResolveInfo> resolveActivityAsUser(Intent intent,
++                String resolvedType, int flags, int userId) {
++            return CompletableFuture.supplyAsync(
++                    () -> getPackageManager().resolveActivityAsUser(intent,
++                            resolvedType, flags, userId));
++        }
++
+         @Override
+         @Nullable
+         public CompletableFuture<ResolveInfo> resolveActivityAsUser(
+@@ -729,6 +744,9 @@ public class IntentForwarderActivity extends Activity  {
+ 
+         PackageManager getPackageManager();
+ 
++        CompletableFuture<ResolveInfo> resolveActivityAsUser(Intent intent,
++                String resolvedType, int flags, int userId);
++
+         CompletableFuture<ResolveInfo> resolveActivityAsUser(Intent intent, int flags, int userId);
+ 
+         void showToast(String message, int duration);
+diff --git a/core/tests/coretests/src/com/android/internal/app/IntentForwarderActivityTest.java b/core/tests/coretests/src/com/android/internal/app/IntentForwarderActivityTest.java
+index dbabceaaf3cd..c875a0e03381 100644
+--- a/core/tests/coretests/src/com/android/internal/app/IntentForwarderActivityTest.java
++++ b/core/tests/coretests/src/com/android/internal/app/IntentForwarderActivityTest.java
+@@ -135,7 +135,6 @@ public class IntentForwarderActivityTest {
+ 
+     @Before
+     public void setup() {
+-
+         MockitoAnnotations.initMocks(this);
+         mContext = InstrumentationRegistry.getTargetContext();
+         sInjector = spy(new TestInjector());
+@@ -290,10 +289,18 @@ public class IntentForwarderActivityTest {
+         IntentForwarderWrapperActivity activity = mActivityRule.launchActivity(intent);
+ 
+         ArgumentCaptor<Intent> intentCaptor = ArgumentCaptor.forClass(Intent.class);
+-        verify(mIPm).canForwardTo(
++        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
++        verify(mIPm, times(2)).canForwardTo(
+                 intentCaptor.capture(), nullable(String.class), anyInt(), anyInt());
+-        assertEquals(Intent.ACTION_VIEW, intentCaptor.getValue().getAction());
+-
++        List<Intent> capturedIntents = intentCaptor.getAllValues();
++        // Verify root intent is checked and sanitized
++        assertEquals(Intent.ACTION_MAIN, capturedIntents.get(0).getAction());
++        assertNull(capturedIntents.get(0));
++        assertNull(capturedIntents.get(0).getPackage());
++        // Verify selector is checked and sanitized
++        assertEquals(Intent.ACTION_VIEW, capturedIntents.get(1).getAction());
++        assertNull(capturedIntents.get(1));
++        assertNull(capturedIntents.get(1).getPackage());
+         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+         onView(withId(R.id.icon)).check(matches(isDisplayed()));
+         onView(withId(R.id.open_cross_profile)).check(matches(isDisplayed()));
+@@ -769,6 +776,12 @@ public class IntentForwarderActivityTest {
+             return mPm;
+         }
+ 
++        @Override
++        public CompletableFuture<ResolveInfo> resolveActivityAsUser(Intent intent,
++                String resolvedType, int flags, int userId) {
++            return resolveActivityAsUser(intent, flags, userId);
++        }
++
+         @Override
+         public CompletableFuture<ResolveInfo> resolveActivityAsUser(
+                 Intent intent, int flags, int userId) {
+-- 
+2.52.0.rc1.455.g30608eb744-goog
+
