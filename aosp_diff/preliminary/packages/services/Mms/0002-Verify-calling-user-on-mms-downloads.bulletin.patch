@@ -1,0 +1,124 @@
+From 63f54920d620540fccde4ce5539668ec18533728 Mon Sep 17 00:00:00 2001
+From: Tom Taylor <tomtaylor@google.com>
+Date: Wed, 5 Mar 2025 17:34:27 +0000
+Subject: [PATCH] Verify calling user on mms downloads
+
+Bug: 305710989
+Test: manually tested sending/downloading MMS with the primary user. I created a secondary user and also verified that sending/downloading MMS's work on the secondary user's account
+Flag: EXEMPT bugfix
+
+Change-Id: I01782ba1358b64d49ccbab0a106b60deaa9262fa
+Merged-In: I01782ba1358b64d49ccbab0a106b60deaa9262fa
+(cherry picked from commit 0b8c94aa0a37c83d03f6c442c8d111fe8f49bbac)
+---
+ src/com/android/mms/service/DownloadRequest.java    |  6 ++++--
+ src/com/android/mms/service/MmsRequest.java         |  3 ++-
+ src/com/android/mms/service/MmsService.java         | 13 ++++++++++---
+ .../com/android/mms/service/MmsRequestRoboTest.java |  6 +++---
+ 4 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/src/com/android/mms/service/DownloadRequest.java b/src/com/android/mms/service/DownloadRequest.java
+index ebbeb68..87fa95c 100644
+--- a/src/com/android/mms/service/DownloadRequest.java
++++ b/src/com/android/mms/service/DownloadRequest.java
+@@ -59,9 +59,10 @@ public class DownloadRequest extends MmsRequest {
+     private final String mLocationUrl;
+     private final PendingIntent mDownloadedIntent;
+     private final Uri mContentUri;
++    private final int mCallingUser;
+ 
+     public DownloadRequest(RequestManager manager, int subId, String locationUrl,
+-            Uri contentUri, PendingIntent downloadedIntent, String creator,
++            Uri contentUri, PendingIntent downloadedIntent, int callingUser, String creator,
+             Bundle configOverrides, Context context, long messageId, MmsStats mmsStats,
+             TelephonyManager telephonyManager) {
+         super(manager, subId, creator, configOverrides, context, messageId, mmsStats,
+@@ -69,6 +70,7 @@ public class DownloadRequest extends MmsRequest {
+         mLocationUrl = locationUrl;
+         mDownloadedIntent = downloadedIntent;
+         mContentUri = contentUri;
++        mCallingUser = callingUser;
+     }
+ 
+     @Override
+@@ -255,7 +257,7 @@ public class DownloadRequest extends MmsRequest {
+      */
+     @Override
+     protected boolean transferResponse(Intent fillIn, final byte[] response) {
+-        return mRequestManager.writePduToContentUri(mContentUri, response);
++        return mRequestManager.writePduToContentUri(mContentUri, response, mCallingUser);
+     }
+ 
+     @Override
+diff --git a/src/com/android/mms/service/MmsRequest.java b/src/com/android/mms/service/MmsRequest.java
+index 40dde58..b5049a9 100644
+--- a/src/com/android/mms/service/MmsRequest.java
++++ b/src/com/android/mms/service/MmsRequest.java
+@@ -94,9 +94,10 @@ public abstract class MmsRequest {
+          * Write pdu to supplied content uri
+          * @param contentUri content uri to which bytes should be written
+          * @param pdu pdu bytes to write
++         * @param callingUser user id of the calling app
+          * @return true in case of success (else false)
+          */
+-        public boolean writePduToContentUri(final Uri contentUri, final byte[] pdu);
++        boolean writePduToContentUri(Uri contentUri, byte[] pdu, int callingUser);
+     }
+ 
+     // The reference to the pending requests manager (i.e. the MmsService)
+diff --git a/src/com/android/mms/service/MmsService.java b/src/com/android/mms/service/MmsService.java
+index 6897e40..5d9621a 100644
+--- a/src/com/android/mms/service/MmsService.java
++++ b/src/com/android/mms/service/MmsService.java
+@@ -366,8 +366,8 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+             }
+ 
+             final DownloadRequest request = new DownloadRequest(MmsService.this, subId, locationUrl,
+-                    contentUri, downloadedIntent, callingPkg, mmsConfig, MmsService.this,
+-                    messageId, mmsStats, getTelephonyManager(subId));
++                    contentUri, downloadedIntent, callingUser, callingPkg, mmsConfig,
++                    MmsService.this, messageId, mmsStats, getTelephonyManager(subId));
+ 
+             final String carrierMessagingServicePackage =
+                     getCarrierMessagingServicePackageIfExists(subId);
+@@ -1147,12 +1147,19 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+      *
+      * @param contentUri content provider uri to which bytes should be written
+      * @param pdu        Bytes to write
++     * @param callingUser user id of the calling app
+      * @return true if all bytes successfully written else false
+      */
+-    public boolean writePduToContentUri(final Uri contentUri, final byte[] pdu) {
++    public boolean writePduToContentUri(final Uri contentUri, final byte[] pdu, int callingUser) {
+         if (contentUri == null || pdu == null) {
+             return false;
+         }
++        int contentUriUserID = ContentProvider.getUserIdFromUri(contentUri, UserHandle.myUserId());
++        if (callingUser != contentUriUserID) {
++            LogUtil.e("Uri belongs to a different user. contentUriUserId is: " + contentUriUserID
++                    + "and calling User ID is:" + callingUser);
++            return false;
++        }
+         final Callable<Boolean> copyDownloadedPduToOutput = new Callable<Boolean>() {
+             public Boolean call() {
+                 ParcelFileDescriptor.AutoCloseOutputStream outStream = null;
+diff --git a/tests/robotests/src/com/android/mms/service/MmsRequestRoboTest.java b/tests/robotests/src/com/android/mms/service/MmsRequestRoboTest.java
+index 4430f42..183d5f7 100644
+--- a/tests/robotests/src/com/android/mms/service/MmsRequestRoboTest.java
++++ b/tests/robotests/src/com/android/mms/service/MmsRequestRoboTest.java
+@@ -151,9 +151,9 @@ public class MmsRequestRoboTest {
+     public void downloadRequest_noSatellite_downloadSuccessful() {
+         doReturn(150L).when(mSmsManager).getWapMessageSize(sFakeUri);
+         DownloadRequest request = new DownloadRequest(mMmsService, mSubId, sFakeUri,
+-                Uri.parse(sFakeUri), /* downloadIntent= */ null, /* callingPkg= */ null,
+-                mCarrierConfigValues, /* context= */ mMmsService, sFakeMessageId, mMmsStats,
+-                mTelephonyManager);
++                Uri.parse(sFakeUri), /* downloadIntent= */ null, CALLING_USER,
++                /* callingPkg= */ null, mCarrierConfigValues, /* context= */ mMmsService,
++                sFakeMessageId, mMmsStats, mTelephonyManager);
+ 
+         boolean okToDownload = request.canTransferPayloadOnCurrentNetwork();
+ 
+-- 
+2.51.2.1006.ga50a493c49-goog
+
