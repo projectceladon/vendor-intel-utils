@@ -1,0 +1,195 @@
+From eab3dee4a2bb1463822547e12006ff6b2f8379d9 Mon Sep 17 00:00:00 2001
+From: Nate Myren <ntmyren@google.com>
+Date: Thu, 10 Jul 2025 14:57:56 -0700
+Subject: [PATCH] RESTRICT AUTOMERGE Limit usages sent to safety center by user
+
+Only the current users (and profiles) should be sent to the safety
+center when the mic/camera indicator is clicked
+
+Bug: 362492829
+Test: manual
+Flag: EXEMPT see bug
+Change-Id: I4c7ec006c839f331cd8bd6b7ac366382cf2c2f4d
+---
+ .../qs/HeaderPrivacyIconsController.kt        | 23 +++++--
+ .../qs/HeaderPrivacyIconsControllerTest.kt    | 64 ++++++++++++++++++-
+ 2 files changed, 82 insertions(+), 5 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/qs/HeaderPrivacyIconsController.kt b/packages/SystemUI/src/com/android/systemui/qs/HeaderPrivacyIconsController.kt
+index 6f645b562008..97e343042213 100644
+--- a/packages/SystemUI/src/com/android/systemui/qs/HeaderPrivacyIconsController.kt
++++ b/packages/SystemUI/src/com/android/systemui/qs/HeaderPrivacyIconsController.kt
+@@ -6,6 +6,7 @@ import android.content.Intent
+ import android.content.IntentFilter
+ import android.permission.PermissionGroupUsage
+ import android.permission.PermissionManager
++import android.os.UserHandle
+ import android.safetycenter.SafetyCenterManager
+ import android.view.View
+ import androidx.annotation.WorkerThread
+@@ -26,6 +27,7 @@ import java.util.concurrent.Executor
+ import javax.inject.Inject
+ import com.android.systemui.dagger.qualifiers.Background
+ import com.android.systemui.dagger.qualifiers.Main
++import com.android.systemui.settings.UserTracker
+ import com.android.systemui.statusbar.policy.DeviceProvisionedController
+ 
+ interface ChipVisibilityListener {
+@@ -56,7 +58,8 @@ class HeaderPrivacyIconsController @Inject constructor(
+     private val appOpsController: AppOpsController,
+     private val broadcastDispatcher: BroadcastDispatcher,
+     private val safetyCenterManager: SafetyCenterManager,
+-    private val deviceProvisionedController: DeviceProvisionedController
++    private val deviceProvisionedController: DeviceProvisionedController,
++    private val userTracker: UserTracker,
+ ) {
+ 
+     var chipVisibilityListener: ChipVisibilityListener? = null
+@@ -156,7 +159,7 @@ class HeaderPrivacyIconsController @Inject constructor(
+ 
+     private fun showSafetyCenter() {
+         backgroundExecutor.execute {
+-            val usage = ArrayList(permGroupUsage())
++            val usage = permGroupUsage()
+             privacyLogger.logUnfilteredPermGroupUsage(usage)
+             val startSafetyCenter = Intent(Intent.ACTION_VIEW_SAFETY_CENTER_QS)
+             startSafetyCenter.putParcelableArrayListExtra(PermissionManager.EXTRA_PERMISSION_USAGES,
+@@ -170,8 +173,20 @@ class HeaderPrivacyIconsController @Inject constructor(
+     }
+ 
+     @WorkerThread
+-    private fun permGroupUsage(): List<PermissionGroupUsage> {
+-        return permissionManager.getIndicatorAppOpUsageData(appOpsController.isMicMuted)
++    fun permGroupUsage(): ArrayList<PermissionGroupUsage> {
++        val usages =
++            ArrayList(permissionManager.getIndicatorAppOpUsageData(appOpsController.isMicMuted))
++        val invalidUserUsages = mutableListOf<PermissionGroupUsage>()
++        val userProfiles = userTracker.userProfiles
++        for (usage in usages) {
++            val userId = UserHandle.getUserId(usage.uid)
++            if (usage.isPhoneCall || userProfiles.any { it.id == userId }) {
++                continue
++            }
++            invalidUserUsages.add(usage)
++        }
++        usages.removeAll(invalidUserUsages)
++        return usages
+     }
+ 
+     fun onParentInvisible() {
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/qs/HeaderPrivacyIconsControllerTest.kt b/packages/SystemUI/tests/src/com/android/systemui/qs/HeaderPrivacyIconsControllerTest.kt
+index 3620233fc9df..238d57d1f8d2 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/qs/HeaderPrivacyIconsControllerTest.kt
++++ b/packages/SystemUI/tests/src/com/android/systemui/qs/HeaderPrivacyIconsControllerTest.kt
+@@ -4,6 +4,9 @@ import android.content.BroadcastReceiver
+ import android.content.Context
+ import android.content.Intent
+ import android.content.IntentFilter
++import android.content.pm.UserInfo
++import android.os.UserHandle
++import android.permission.PermissionGroupUsage
+ import android.permission.PermissionManager
+ import android.safetycenter.SafetyCenterManager
+ import android.testing.AndroidTestingRunner
+@@ -18,6 +21,7 @@ import com.android.systemui.privacy.OngoingPrivacyChip
+ import com.android.systemui.privacy.PrivacyDialogController
+ import com.android.systemui.privacy.PrivacyItemController
+ import com.android.systemui.privacy.logging.PrivacyLogger
++import com.android.systemui.settings.UserTracker
+ import com.android.systemui.statusbar.phone.StatusIconContainer
+ import com.android.systemui.statusbar.policy.DeviceProvisionedController
+ import com.android.systemui.util.concurrency.FakeExecutor
+@@ -29,6 +33,8 @@ import com.android.systemui.util.time.FakeSystemClock
+ import org.junit.Before
+ import org.junit.Test
+ import org.junit.runner.RunWith
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNotNull
+ import org.mockito.ArgumentMatchers.anyInt
+ import org.mockito.Mock
+ import org.mockito.Mockito
+@@ -69,6 +75,8 @@ class HeaderPrivacyIconsControllerTest : SysuiTestCase() {
+     private lateinit var safetyCenterManager: SafetyCenterManager
+     @Mock
+     private lateinit var deviceProvisionedController: DeviceProvisionedController
++    @Mock
++    private lateinit var userTracker: UserTracker
+ 
+     private val uiExecutor = FakeExecutor(FakeSystemClock())
+     private val backgroundExecutor = FakeExecutor(FakeSystemClock())
+@@ -103,7 +111,8 @@ class HeaderPrivacyIconsControllerTest : SysuiTestCase() {
+                 appOpsController,
+                 broadcastDispatcher,
+                 safetyCenterManager,
+-                deviceProvisionedController
++                deviceProvisionedController,
++                userTracker,
+         )
+ 
+         backgroundExecutor.runAllReady()
+@@ -216,8 +225,61 @@ class HeaderPrivacyIconsControllerTest : SysuiTestCase() {
+         verify(privacyDialogController, never()).showDialog(any(Context::class.java))
+     }
+ 
++    @Test
++    fun testPermGroupUsage_filtersOutInactiveUsers() {
++        whenever(userTracker.userProfiles).thenReturn(listOf(createUserInfo(USER_ID)))
++        whenever(permissionManager.getIndicatorAppOpUsageData(false))
++            .thenReturn(listOf(createPermUsage(USER_ID), createPermUsage(OTHER_USER_ID)))
++        val usages = controller.permGroupUsage()
++        assertEquals(1, usages.size)
++        assertEquals(USER_ID, UserHandle.getUserId(usages[0].uid))
++    }
++
++    @Test
++    fun testPermGroupUsage_alwaysReturnPhoneCallUsage() {
++        whenever(userTracker.userProfiles).thenReturn(listOf(createUserInfo(USER_ID)))
++        whenever(permissionManager.getIndicatorAppOpUsageData(false))
++            .thenReturn(listOf(createPermUsage(OTHER_USER_ID, isPhone = true)))
++        val usages = controller.permGroupUsage()
++        assertEquals(OTHER_USER_ID, UserHandle.getUserId(usages[0].uid))
++    }
++
++    @Test
++    fun testPermGroupUsage_returnsProfileUsages() {
++        whenever(userTracker.userProfiles)
++            .thenReturn(listOf(createUserInfo(USER_ID), createUserInfo(PROFILE_USER_ID)))
++        whenever(permissionManager.getIndicatorAppOpUsageData(false))
++            .thenReturn(listOf(createPermUsage(USER_ID), createPermUsage(PROFILE_USER_ID)))
++        val usages = controller.permGroupUsage()
++        assertEquals(2, usages.size)
++        assertNotNull(usages.firstOrNull { UserHandle.getUserId(it.uid) == USER_ID })
++        assertNotNull(usages.firstOrNull { UserHandle.getUserId(it.uid) == PROFILE_USER_ID })
++    }
++
++    private fun createPermUsage(user: Int, isPhone: Boolean = false): PermissionGroupUsage =
++        PermissionGroupUsage(
++            "",
++            UserHandle.getUid(user, 0),
++            0,
++            "",
++            true,
++            isPhone,
++            null,
++            null,
++            null,
++        )
++
++    private fun createUserInfo(userId: Int) = UserInfo(userId, "", 0)
++
++
+     private fun setPrivacyController(micCamera: Boolean, location: Boolean) {
+         whenever(privacyItemController.micCameraAvailable).thenReturn(micCamera)
+         whenever(privacyItemController.locationAvailable).thenReturn(location)
+     }
++
++    companion object {
++        const val USER_ID = 0
++        const val PROFILE_USER_ID = 1
++        const val OTHER_USER_ID = 2
++    }
+ }
+\ No newline at end of file
+-- 
+2.52.0.rc1.455.g30608eb744-goog
+

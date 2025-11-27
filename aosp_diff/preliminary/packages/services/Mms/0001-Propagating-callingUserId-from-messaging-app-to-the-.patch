@@ -1,0 +1,270 @@
+From 0439f59b5672c3f11ad0031817aed4250f259fee Mon Sep 17 00:00:00 2001
+From: Nikhil Kumar <nykkumar@google.com>
+Date: Mon, 8 Jul 2024 12:30:21 +0100
+Subject: [PATCH] Propagating callingUserId from messaging app to the RADIO
+ process
+
+Convey the originating user ID across the nested binder calls to MMSService to validate the contentURI is coming from the same userId.
+For detailed design please follow: go/mms-failure-multiuser
+
+Bug: 350760118
+Test: manually verfied the functionalities after the change (1) Incoming and outgoing SMS/MMS (2) Incoming and outgoing Voice calls
+Flag: EXEMPT this involves changing the method signature in aidl with flags its not possible currently as aidl doesn't support method overloading
+DISABLE_TOPIC_PROTECTOR
+Do-Not-Cherry-Pick: True
+
+Change-Id: I882e32d372c4f9f73f3ee8cc89c19c7c94cbd41b
+Merged-In: I882e32d372c4f9f73f3ee8cc89c19c7c94cbd41b
+---
+ src/com/android/mms/service/MmsRequest.java   |  4 +-
+ src/com/android/mms/service/MmsService.java   | 58 +++++++++++--------
+ src/com/android/mms/service/SendRequest.java  |  9 ++-
+ .../mms/service/MmsServiceRoboTest.java       |  7 ++-
+ 4 files changed, 48 insertions(+), 30 deletions(-)
+
+diff --git a/src/com/android/mms/service/MmsRequest.java b/src/com/android/mms/service/MmsRequest.java
+index 32e4c6e..a27ff8a 100644
+--- a/src/com/android/mms/service/MmsRequest.java
++++ b/src/com/android/mms/service/MmsRequest.java
+@@ -77,9 +77,11 @@ public abstract class MmsRequest {
+          * Read pdu (up to maxSize bytes) from supplied content uri
+          * @param contentUri content uri from which to read
+          * @param maxSize maximum number of bytes to read
++         * @param callingUser user id of the calling app
+          * @return read pdu (else null in case of error or too big)
+          */
+-        public byte[] readPduFromContentUri(final Uri contentUri, final int maxSize);
++        public byte[] readPduFromContentUri(final Uri contentUri, final int maxSize,
++                int callingUser);
+ 
+         /**
+          * Write pdu to supplied content uri
+diff --git a/src/com/android/mms/service/MmsService.java b/src/com/android/mms/service/MmsService.java
+index 2f3b3aa..092873f 100644
+--- a/src/com/android/mms/service/MmsService.java
++++ b/src/com/android/mms/service/MmsService.java
+@@ -22,6 +22,7 @@ import static com.google.android.mms.pdu.PduHeaders.MESSAGE_TYPE_SEND_REQ;
+ import android.annotation.Nullable;
+ import android.app.PendingIntent;
+ import android.app.Service;
++import android.content.ContentProvider;
+ import android.content.ContentResolver;
+ import android.content.ContentUris;
+ import android.content.ContentValues;
+@@ -209,9 +210,9 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+ 
+     private IMms.Stub mStub = new IMms.Stub() {
+         @Override
+-        public void sendMessage(int subId, String callingPkg, Uri contentUri,
+-                String locationUrl, Bundle configOverrides, PendingIntent sentIntent,
+-                long messageId, String attributionTag) {
++        public void sendMessage(int subId, int callingUser, String callingPkg,
++                Uri contentUri, String locationUrl, Bundle configOverrides,
++                PendingIntent sentIntent, long messageId, String attributionTag) {
+             LogUtil.d("sendMessage " + formatCrossStackMessageId(messageId));
+             enforceSystemUid();
+ 
+@@ -257,8 +258,8 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+             }
+ 
+             final SendRequest request = new SendRequest(MmsService.this, subId, contentUri,
+-                    locationUrl, sentIntent, callingPkg, mmsConfig, MmsService.this,
+-                    messageId, mmsStats);
++                    locationUrl, sentIntent, callingUser, callingPkg, mmsConfig,
++                    MmsService.this, messageId, mmsStats);			    
+ 
+             final String carrierMessagingServicePackage =
+                     getCarrierMessagingServicePackageIfExists(subId);
+@@ -278,7 +279,7 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+                 // ENABLE_MMS_DATA_REQUEST_REASON_OUTGOING_MMS is set for only SendReq case, since
+                 // AcknowledgeInd and NotifyRespInd are parts of downloading sequence.
+                 // TODO: Should consider ReadRecInd(Read Report)?
+-                sendSettingsIntentForFailedMms(!isRawPduSendReq(contentUri), subId);
++		sendSettingsIntentForFailedMms(!isRawPduSendReq(contentUri, callingUser), subId);
+                 handleError(sentIntent, SmsManager.MMS_ERROR_NO_DATA_NETWORK, mmsStats);
+                 return;
+             }
+@@ -287,9 +288,9 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+         }
+ 
+         @Override
+-        public void downloadMessage(int subId, String callingPkg, String locationUrl,
+-                Uri contentUri, Bundle configOverrides, PendingIntent downloadedIntent,
+-                long messageId, String attributionTag) {
++        public void downloadMessage(int subId, int callingUser, String callingPkg,
++                String locationUrl, Uri contentUri, Bundle configOverrides,
++                PendingIntent downloadedIntent, long messageId, String attributionTag) {
+             // If the subId is no longer active it could be caused by an MVNO using multiple
+             // subIds, so we should try to download anyway.
+             // TODO: Fail fast when downloading will fail (i.e. SIM swapped)
+@@ -429,11 +430,12 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+         }
+ 
+         @Override
+-        public Uri importMultimediaMessage(String callingPkg, Uri contentUri,
+-                String messageId, long timestampSecs, boolean seen, boolean read) {
++        public Uri importMultimediaMessage(int callingUser, String callingPkg,
++                Uri contentUri, String messageId, long timestampSecs, boolean seen, boolean read) {
+             LogUtil.d("importMultimediaMessage");
+             enforceSystemUid();
+-            return importMms(contentUri, messageId, timestampSecs, seen, read, callingPkg);
++            return importMms(contentUri, messageId, timestampSecs, seen,
++                read, callingUser, callingPkg);
+         }
+ 
+         @Override
+@@ -523,11 +525,11 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+         }
+ 
+         @Override
+-        public Uri addMultimediaMessageDraft(String callingPkg, Uri contentUri)
+-                throws RemoteException {
++        public Uri addMultimediaMessageDraft(int callingUser,
++                String callingPkg, Uri contentUri) throws RemoteException {
+             LogUtil.d("addMultimediaMessageDraft");
+             enforceSystemUid();
+-            return addMmsDraft(contentUri, callingPkg);
++            return addMmsDraft(contentUri, callingUser, callingPkg);
+         }
+ 
+         @Override
+@@ -576,12 +578,12 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+             }
+         }
+ 
+-        private boolean isRawPduSendReq(Uri contentUri) {
++        private boolean isRawPduSendReq(Uri contentUri, int callingUser) {
+             // X-Mms-Message-Type is at the beginning of the message headers always. 1st byte is
+             // MMS-filed-name and 2nd byte is MMS-value for X-Mms-Message-Type field.
+             // See OMA-TS-MMS_ENC-V1_3-20110913-A, 7. Binary Encoding of ProtocolData Units
+             byte[] pduData = new byte[2];
+-            int bytesRead = readPduBytesFromContentUri(contentUri, pduData);
++            int bytesRead = readPduBytesFromContentUri(contentUri, pduData, callingUser);
+ 
+             // Return true for MESSAGE_TYPE_SEND_REQ only. Otherwise false even wrong PDU case.
+             if (bytesRead == 2
+@@ -785,8 +787,8 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+     }
+ 
+     private Uri importMms(Uri contentUri, String messageId, long timestampSecs,
+-            boolean seen, boolean read, String creator) {
+-        byte[] pduData = readPduFromContentUri(contentUri, MAX_MMS_FILE_SIZE);
++            boolean seen, boolean read, int callingUser, String creator) {
++        byte[] pduData = readPduFromContentUri(contentUri, MAX_MMS_FILE_SIZE, callingUser);
+         if (pduData == null || pduData.length < 1) {
+             LogUtil.e("importMessage: empty PDU");
+             return null;
+@@ -959,8 +961,8 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+         return null;
+     }
+ 
+-    private Uri addMmsDraft(Uri contentUri, String creator) {
+-        byte[] pduData = readPduFromContentUri(contentUri, MAX_MMS_FILE_SIZE);
++    private Uri addMmsDraft(Uri contentUri, int callingUser, String creator) {
++        byte[] pduData = readPduFromContentUri(contentUri, MAX_MMS_FILE_SIZE, callingUser);
+         if (pduData == null || pduData.length < 1) {
+             LogUtil.e("addMmsDraft: empty PDU");
+             return null;
+@@ -1050,10 +1052,11 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+      * @param maxSize    maximum number of bytes to read.
+      * @return pdu bytes if succeeded else null.
+      */
+-    public byte[] readPduFromContentUri(final Uri contentUri, final int maxSize) {
++    public byte[] readPduFromContentUri(final Uri contentUri, final int maxSize,
++            int callingUser) {
+         // Request one extra byte to make sure file not bigger than maxSize
+         byte[] pduData = new byte[maxSize + 1];
+-        int bytesRead = readPduBytesFromContentUri(contentUri, pduData);
++        int bytesRead = readPduBytesFromContentUri(contentUri, pduData, callingUser);
+         if (bytesRead <= 0) {
+             return null;
+         }
+@@ -1071,11 +1074,18 @@ public class MmsService extends Service implements MmsRequest.RequestManager {
+      * @param pduData    the buffer into which the data is read.
+      * @return the total number of bytes read into the pduData.
+      */
+-    public int readPduBytesFromContentUri(final Uri contentUri, byte[] pduData) {
++    public int readPduBytesFromContentUri(final Uri contentUri, byte[] pduData,
++            int callingUser) {
+         if (contentUri == null) {
+             LogUtil.e("Uri is null");
+             return 0;
+         }
++        int contentUriUserID = ContentProvider.getUserIdFromUri(contentUri, UserHandle.myUserId());
++        if (callingUser != contentUriUserID) {
++            LogUtil.e("Uri belongs to a different user. contentUriUserId is: " + contentUriUserID
++                    + "and calling User ID is:" + callingUser);
++            return 0;
++        }
+         Callable<Integer> copyPduToArray = new Callable<Integer>() {
+             public Integer call() {
+                 ParcelFileDescriptor.AutoCloseInputStream inStream = null;
+diff --git a/src/com/android/mms/service/SendRequest.java b/src/com/android/mms/service/SendRequest.java
+index 7e078a6..5effb78 100644
+--- a/src/com/android/mms/service/SendRequest.java
++++ b/src/com/android/mms/service/SendRequest.java
+@@ -57,15 +57,18 @@ public class SendRequest extends MmsRequest {
+     private byte[] mPduData;
+     private final String mLocationUrl;
+     private final PendingIntent mSentIntent;
++    private final int mCallingUser;
+ 
+     public SendRequest(RequestManager manager, int subId, Uri contentUri, String locationUrl,
+-            PendingIntent sentIntent, String creator, Bundle configOverrides, Context context,
+-            long messageId, MmsStats mmsStats) {
++	    PendingIntent sentIntent, int callingUser, String creator, Bundle configOverrides,
++            Context context, long messageId, MmsStats mmsStats) {	    
+         super(manager, subId, creator, configOverrides, context, messageId, mmsStats);
++
+         mPduUri = contentUri;
+         mPduData = null;
+         mLocationUrl = locationUrl;
+         mSentIntent = sentIntent;
++	mCallingUser = callingUser;
+     }
+ 
+     @Override
+@@ -351,7 +354,7 @@ public class SendRequest extends MmsRequest {
+             return true;
+         }
+         final int bytesTobeRead = mMmsConfig.getInt(SmsManager.MMS_CONFIG_MAX_MESSAGE_SIZE);
+-        mPduData = mRequestManager.readPduFromContentUri(mPduUri, bytesTobeRead);
++        mPduData = mRequestManager.readPduFromContentUri(mPduUri, bytesTobeRead, mCallingUser);
+         return (mPduData != null);
+     }
+ 
+diff --git a/tests/robotests/src/com/android/mms/service/MmsServiceRoboTest.java b/tests/robotests/src/com/android/mms/service/MmsServiceRoboTest.java
+index b59e92e..efd4b35 100644
+--- a/tests/robotests/src/com/android/mms/service/MmsServiceRoboTest.java
++++ b/tests/robotests/src/com/android/mms/service/MmsServiceRoboTest.java
+@@ -37,6 +37,7 @@ import org.robolectric.shadows.ShadowBinder;
+ @RunWith(RobolectricTestRunner.class)
+ public final class MmsServiceRoboTest {
+     private IMms.Stub binder;
++    private static final int CALLING_USER = 10;
+ 
+     @Before
+     public void setUp() {
+@@ -55,7 +56,8 @@ public final class MmsServiceRoboTest {
+     @Test
+     public void testSendMessage_DoesNotThrowIfSystemUid() throws RemoteException {
+         ShadowBinder.setCallingUid(Process.SYSTEM_UID);
+-        binder.sendMessage(/* subId= */ 0, "callingPkg", Uri.parse("contentUri"),
++        binder.sendMessage(/* subId= */ 0, /* callingUser= */ CALLING_USER,
++                "callingPkg", Uri.parse("contentUri"),
+                 "locationUrl", /* configOverrides= */ null, /* sentIntent= */ null,
+                 /* messageId= */ 0L, /* attributionTag= */ null);
+     }
+@@ -63,7 +65,8 @@ public final class MmsServiceRoboTest {
+     @Test
+     public void testSendMessageThrows_IfNotSystemUid() {
+         assertThrows(SecurityException.class,
+-                () -> binder.sendMessage(/* subId= */ 0, "callingPkg", Uri.parse("contentUri"),
++                () -> binder.sendMessage(/* subId= */ 0, /* callingUser= */ CALLING_USER,
++                        "callingPkg", Uri.parse("contentUri"),
+                         "locationUrl", /* configOverrides= */ null, /* sentIntent= */ null,
+                         /* messageId= */ 0L, /* attributionTag= */ null));
+     }
+-- 
+2.34.1
+
