@@ -1,0 +1,285 @@
+From a3b3e5279a80ddef3c24e1774d395fc0073cbb4c Mon Sep 17 00:00:00 2001
+From: Nikhil Kumar <nykkumar@google.com>
+Date: Mon, 8 Jul 2024 17:01:09 +0100
+Subject: [PATCH] Systemservice change to propagate userId to MMSService
+
+Convey the originating user ID across the nested binder calls to MMSService to validate the contentURI is coming from the same userId.
+For detailed design please follow: go/mms-failure-multiuser
+
+Bug: 350760118
+Test: manually verfied the functionalities after the change (1) Incoming and outgoing SMS/MMS (2) Incoming and outgoing Voice calls
+Flag: EXEMPT this involves changing the method signature in aidl with flags its not possible currently as aidl doesn't support method overloading
+DISABLE_TOPIC_PROTECTOR
+Do-Not-Cherry-Pick: True
+
+Change-Id: I9beb19f1a94aae76e6cd48a72feeb6c1dc47cf5a
+Merged-In: I9beb19f1a94aae76e6cd48a72feeb6c1dc47cf5a
+---
+ mms/java/android/telephony/MmsManager.java    | 13 ++--
+ .../com/android/internal/telephony/IMms.aidl  | 12 ++--
+ .../com/android/server/MmsServiceBroker.java  | 67 +++++++++++--------
+ 3 files changed, 55 insertions(+), 37 deletions(-)
+
+diff --git a/mms/java/android/telephony/MmsManager.java b/mms/java/android/telephony/MmsManager.java
+index b893b45611fb..ac2927711c9a 100644
+--- a/mms/java/android/telephony/MmsManager.java
++++ b/mms/java/android/telephony/MmsManager.java
+@@ -26,6 +26,7 @@ import android.net.Uri;
+ import android.os.Bundle;
+ import android.os.RemoteException;
+ import android.os.ServiceManager;
++import android.os.UserHandle;
+ 
+ import com.android.internal.telephony.IMms;
+ 
+@@ -69,9 +70,9 @@ public class MmsManager {
+                 return;
+             }
+ 
+-            iMms.sendMessage(subId, ActivityThread.currentPackageName(), contentUri,
+-                    locationUrl, configOverrides, sentIntent, messageId,
+-                    mContext.getAttributionTag());
++            iMms.sendMessage(subId, /* placeholder callingUser= */ UserHandle.USER_NULL,
++                    ActivityThread.currentPackageName(), contentUri, locationUrl,
++                    configOverrides, sentIntent, messageId, mContext.getAttributionTag());
+         } catch (RemoteException e) {
+             // Ignore it
+         }
+@@ -101,9 +102,9 @@ public class MmsManager {
+             if (iMms == null) {
+                 return;
+             }
+-            iMms.downloadMessage(subId, ActivityThread.currentPackageName(),
+-                    locationUrl, contentUri, configOverrides, downloadedIntent,
+-                    messageId, mContext.getAttributionTag());
++            iMms.downloadMessage(subId, /* placeholder callingUser= */ UserHandle.USER_NULL,
++                    ActivityThread.currentPackageName(), locationUrl, contentUri,
++                    configOverrides, downloadedIntent, messageId, mContext.getAttributionTag());
+         } catch (RemoteException e) {
+             // Ignore it
+         }
+diff --git a/mms/java/com/android/internal/telephony/IMms.aidl b/mms/java/com/android/internal/telephony/IMms.aidl
+index 3cdde10e4fc2..1c7595164de2 100644
+--- a/mms/java/com/android/internal/telephony/IMms.aidl
++++ b/mms/java/com/android/internal/telephony/IMms.aidl
+@@ -29,6 +29,7 @@ interface IMms {
+      * Send an MMS message with attribution tag.
+      *
+      * @param subId the SIM id
++     * @param callingUser user id of the calling app
+      * @param callingPkg the package name of the calling app
+      * @param contentUri the content uri from which to read MMS message encoded in standard MMS
+      *  PDU format
+@@ -40,7 +41,7 @@ interface IMms {
+      * @param messageId An id that uniquely identifies the message requested to be sent.
+      * @param attributionTag a tag that attributes the call to a client App.
+      */
+-    void sendMessage(int subId, String callingPkg, in Uri contentUri,
++    void sendMessage(int subId, in int callingUser, String callingPkg, in Uri contentUri,
+             String locationUrl, in Bundle configOverrides, in PendingIntent sentIntent,
+             in long messageId, String attributionTag);
+ 
+@@ -48,6 +49,7 @@ interface IMms {
+      * Download an MMS message using known location and transaction id
+      *
+      * @param subId the SIM id
++     * @param callingUser user id of the calling app
+      * @param callingPkg the package name of the calling app
+      * @param locationUrl the location URL of the MMS message to be downloaded, usually obtained
+      *  from the MMS WAP push notification
+@@ -60,7 +62,7 @@ interface IMms {
+      * @param messageId An id that uniquely identifies the message requested to be downloaded.
+      * @param attributionTag a tag that attributes the call to a client App.
+     */
+-    void downloadMessage(int subId, String callingPkg, String locationUrl,
++    void downloadMessage(int subId, in int callingUser, String callingPkg, String locationUrl,
+             in Uri contentUri, in Bundle configOverrides,
+             in PendingIntent downloadedIntent, in long messageId, String attributionTag);
+ 
+@@ -82,6 +84,7 @@ interface IMms {
+     /**
+       * Import a multimedia message into system's MMS store
+       *
++     * @param callingUser user id of the calling app
+       * @param callingPkg the package name of the calling app
+       * @param contentUri the content uri from which to read PDU of the message to import
+       * @param messageId the optional message id
+@@ -90,7 +93,7 @@ interface IMms {
+       * @param read if the message is read
+       * @return the message URI, null if failed
+       */
+-    Uri importMultimediaMessage(String callingPkg, in Uri contentUri, String messageId,
++    Uri importMultimediaMessage(in int callingUser, String callingPkg, in Uri contentUri, String messageId,
+             long timestampSecs, boolean seen, boolean read);
+ 
+     /**
+@@ -146,11 +149,12 @@ interface IMms {
+     /**
+      * Add a multimedia message draft to system MMS store
+      *
++     * @param callingUser user id of the calling app
+      * @param callingPkg the package name of the calling app
+      * @param contentUri the content Uri from which to read PDU data of the draft MMS
+      * @return the URI of the stored draft message
+      */
+-    Uri addMultimediaMessageDraft(String callingPkg, in Uri contentUri);
++    Uri addMultimediaMessageDraft(in int callingUser, String callingPkg, in Uri contentUri);
+ 
+     /**
+      * Send a system stored MMS message
+diff --git a/services/core/java/com/android/server/MmsServiceBroker.java b/services/core/java/com/android/server/MmsServiceBroker.java
+index 59db68691223..67f06d597658 100644
+--- a/services/core/java/com/android/server/MmsServiceBroker.java
++++ b/services/core/java/com/android/server/MmsServiceBroker.java
+@@ -128,17 +128,18 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public void sendMessage(int subId, String callingPkg, Uri contentUri, String locationUrl,
+-                Bundle configOverrides, PendingIntent sentIntent, long messageId,
++        public void sendMessage(int subId, int callingUser, String callingPkg,
++                Uri contentUri, String locationUrl, Bundle configOverrides,
++                PendingIntent sentIntent, long messageId,
+                 String attributionTag) throws RemoteException {
+             returnPendingIntentWithError(sentIntent);
+         }
+ 
+         @Override
+-        public void downloadMessage(int subId, String callingPkg, String locationUrl,
+-                Uri contentUri, Bundle configOverrides, PendingIntent downloadedIntent,
+-                long messageId, String attributionTag)
+-                throws RemoteException {
++        public void downloadMessage(int subId, int callingUser, String callingPkg,
++                String locationUrl, Uri contentUri, Bundle configOverrides,
++                PendingIntent downloadedIntent,
++                long messageId, String attributionTag) throws RemoteException {
+             returnPendingIntentWithError(downloadedIntent);
+         }
+ 
+@@ -149,8 +150,9 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri importMultimediaMessage(String callingPkg, Uri contentUri, String messageId,
+-                long timestampSecs, boolean seen, boolean read) throws RemoteException {
++        public Uri importMultimediaMessage(int callingUser, String callingPkg,
++                Uri contentUri, String messageId, long timestampSecs,
++                boolean seen, boolean read) throws RemoteException {
+             return null;
+         }
+ 
+@@ -185,8 +187,8 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri addMultimediaMessageDraft(String callingPkg, Uri contentUri)
+-                throws RemoteException {
++        public Uri addMultimediaMessageDraft(int callingUser, String callingPkg,
++                Uri contentUri) throws RemoteException {
+             return null;
+         }
+ 
+@@ -331,9 +333,9 @@ public class MmsServiceBroker extends SystemService {
+         private static final String PHONE_PACKAGE_NAME = "com.android.phone";
+ 
+         @Override
+-        public void sendMessage(int subId, String callingPkg, Uri contentUri,
+-                String locationUrl, Bundle configOverrides, PendingIntent sentIntent,
+-                long messageId, String attributionTag)
++        public void sendMessage(int subId, int callingUser, String callingPkg,
++                Uri contentUri, String locationUrl, Bundle configOverrides,
++                PendingIntent sentIntent, long messageId, String attributionTag)
+                 throws RemoteException {
+             Slog.d(TAG, "sendMessage() by " + callingPkg);
+             mContext.enforceCallingPermission(Manifest.permission.SEND_SMS, "Send MMS message");
+@@ -346,14 +348,15 @@ public class MmsServiceBroker extends SystemService {
+                     CarrierMessagingService.SERVICE_INTERFACE,
+                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                     subId);
+-            getServiceGuarded().sendMessage(subId, callingPkg, contentUri, locationUrl,
+-                    configOverrides, sentIntent, messageId, attributionTag);
++            getServiceGuarded().sendMessage(subId, getCallingUserId(), callingPkg, contentUri,
++                    locationUrl, configOverrides, sentIntent, messageId, attributionTag);
+         }
+ 
+         @Override
+-        public void downloadMessage(int subId, String callingPkg, String locationUrl,
+-                Uri contentUri, Bundle configOverrides, PendingIntent downloadedIntent,
+-                long messageId, String attributionTag) throws RemoteException {
++        public void downloadMessage(int subId, int callingUser, String callingPkg,
++                String locationUrl, Uri contentUri, Bundle configOverrides,
++                PendingIntent downloadedIntent, long messageId, String attributionTag)
++                throws RemoteException {
+             Slog.d(TAG, "downloadMessage() by " + callingPkg);
+             mContext.enforceCallingPermission(Manifest.permission.RECEIVE_MMS,
+                     "Download MMS message");
+@@ -367,8 +370,8 @@ public class MmsServiceBroker extends SystemService {
+                     Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                     subId);
+ 
+-            getServiceGuarded().downloadMessage(subId, callingPkg, locationUrl, contentUri,
+-                    configOverrides, downloadedIntent, messageId, attributionTag);
++            getServiceGuarded().downloadMessage(subId, getCallingUserId(), callingPkg, locationUrl,
++                    contentUri, configOverrides, downloadedIntent, messageId, attributionTag);
+         }
+ 
+         @Override
+@@ -385,8 +388,8 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri importMultimediaMessage(String callingPkg, Uri contentUri,
+-                String messageId, long timestampSecs, boolean seen, boolean read)
++        public Uri importMultimediaMessage(int callingUser, String callingPkg,
++                Uri contentUri, String messageId, long timestampSecs, boolean seen, boolean read)
+                 throws RemoteException {
+             if (getAppOpsManager().noteOp(AppOpsManager.OP_WRITE_SMS, Binder.getCallingUid(),
+                     callingPkg, null, null) != AppOpsManager.MODE_ALLOWED) {
+@@ -394,8 +397,8 @@ public class MmsServiceBroker extends SystemService {
+                 // while writing the TelephonyProvider
+                 return FAKE_MMS_SENT_URI;
+             }
+-            return getServiceGuarded().importMultimediaMessage(
+-                    callingPkg, contentUri, messageId, timestampSecs, seen, read);
++            return getServiceGuarded().importMultimediaMessage(getCallingUserId(), callingPkg,
++                    contentUri, messageId, timestampSecs, seen, read);
+         }
+ 
+         @Override
+@@ -453,15 +456,16 @@ public class MmsServiceBroker extends SystemService {
+         }
+ 
+         @Override
+-        public Uri addMultimediaMessageDraft(String callingPkg, Uri contentUri)
+-                throws RemoteException {
++        public Uri addMultimediaMessageDraft(int callingUser, String callingPkg,
++                Uri contentUri) throws RemoteException {
+             if (getAppOpsManager().noteOp(AppOpsManager.OP_WRITE_SMS, Binder.getCallingUid(),
+                     callingPkg, null, null) != AppOpsManager.MODE_ALLOWED) {
+                 // Silently fail AppOps failure due to not being the default SMS app
+                 // while writing the TelephonyProvider
+                 return FAKE_MMS_DRAFT_URI;
+             }
+-            return getServiceGuarded().addMultimediaMessageDraft(callingPkg, contentUri);
++            return getServiceGuarded().addMultimediaMessageDraft(getCallingUserId(), callingPkg,
++                    contentUri);
+         }
+ 
+         @Override
+@@ -547,4 +551,13 @@ public class MmsServiceBroker extends SystemService {
+         if (info == null) return INVALID_SIM_SLOT_INDEX;
+         return info.getSimSlotIndex();
+     }
++
++    /**
++     * Retrieves the  calling user id.
++     * @return The id of the calling user.
++     */
++    private int getCallingUserId() {
++        return Binder.getCallingUserHandle().getIdentifier();
++    }
++
+ }
+-- 
+2.52.0.rc1.455.g30608eb744-goog
+

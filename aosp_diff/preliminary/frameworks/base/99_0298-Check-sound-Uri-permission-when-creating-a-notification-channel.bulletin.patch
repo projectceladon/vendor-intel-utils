@@ -1,0 +1,726 @@
+From fb1f2c00189ba7f4f9a303fdadadcec874b3c6ba Mon Sep 17 00:00:00 2001
+From: Iavor-Valentin Iftime <valiiftime@google.com>
+Date: Mon, 16 Jun 2025 07:42:41 -0700
+Subject: [PATCH] Check sound Uri permission when creating a notification
+ channel
+
+ Verify that the calling app has the right permissions to read/grant the sound Uri
+ for a channel it creates. Fallback to default notification sound if permission check fails.
+ Previously, Uri permissions would only be checked by NotificationRecord when a notification was posted.
+
+Flag: EXEMPT security fix
+
+Test: atest PreferencesHelperTest
+Test: atest NotificationManagerServiceTest
+Bug: 337775777
+
+Change-Id: I7977a8b6eea4b75873787e0ab75de7b4e788f2df
+(cherry picked from commit f9cbae0ba1125e102e66ce041d7d3b4d87f47a9b)
+Merged-In: I7977a8b6eea4b75873787e0ab75de7b4e788f2df
+---
+ .../NotificationManagerService.java           |   9 +-
+ .../notification/NotificationRecord.java      |  24 ++-
+ .../server/notification/PermissionHelper.java |  20 +++
+ .../notification/PreferencesHelper.java       |  15 ++
+ .../NotificationManagerServiceTest.java       |  35 ++++
+ .../notification/PreferencesHelperTest.java   | 156 +++++++++++++-----
+ 6 files changed, 201 insertions(+), 58 deletions(-)
+
+diff --git a/services/core/java/com/android/server/notification/NotificationManagerService.java b/services/core/java/com/android/server/notification/NotificationManagerService.java
+index f5519f6a3a15..e09c9ac62143 100644
+--- a/services/core/java/com/android/server/notification/NotificationManagerService.java
++++ b/services/core/java/com/android/server/notification/NotificationManagerService.java
+@@ -2288,6 +2288,7 @@ public class NotificationManagerService extends SystemService {
+                 mPermissionHelper,
+                 mNotificationChannelLogger,
+                 mAppOps,
++                mUgmInternal,
+                 new SysUiStatsEvent.BuilderFactory(),
+                 mShowReviewPermissionsNotification);
+         mPreferencesHelper.updateFixedImportance(mUm.getUsers());
+@@ -5728,13 +5729,7 @@ public class NotificationManagerService extends SystemService {
+             final Uri originalSoundUri =
+                     (originalChannel != null) ? originalChannel.getSound() : null;
+             if (soundUri != null && !Objects.equals(originalSoundUri, soundUri)) {
+-                Binder.withCleanCallingIdentity(() -> {
+-                    mUgmInternal.checkGrantUriPermission(sourceUid, null,
+-                            ContentProvider.getUriWithoutUserId(soundUri),
+-                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+-                            ContentProvider.getUserIdFromUri(soundUri,
+-                            UserHandle.getUserId(sourceUid)));
+-                });
++                PermissionHelper.grantUriPermission(mUgmInternal, soundUri, sourceUid);
+             }
+         }
+ 
+diff --git a/services/core/java/com/android/server/notification/NotificationRecord.java b/services/core/java/com/android/server/notification/NotificationRecord.java
+index cbaf485c077f..bb790bfd7676 100644
+--- a/services/core/java/com/android/server/notification/NotificationRecord.java
++++ b/services/core/java/com/android/server/notification/NotificationRecord.java
+@@ -30,10 +30,7 @@ import android.app.IActivityManager;
+ import android.app.Notification;
+ import android.app.NotificationChannel;
+ import android.app.Person;
+-import android.content.ContentProvider;
+-import android.content.ContentResolver;
+ import android.content.Context;
+-import android.content.Intent;
+ import android.content.pm.PackageManager;
+ import android.content.pm.PackageManagerInternal;
+ import android.content.pm.ShortcutInfo;
+@@ -42,7 +39,6 @@ import android.media.AudioAttributes;
+ import android.media.AudioSystem;
+ import android.metrics.LogMaker;
+ import android.net.Uri;
+-import android.os.Binder;
+ import android.os.Build;
+ import android.os.Bundle;
+ import android.os.IBinder;
+@@ -1368,20 +1364,22 @@ public final class NotificationRecord {
+      * {@link #mGrantableUris}. Otherwise, this will either log or throw
+      * {@link SecurityException} depending on target SDK of enqueuing app.
+      */
+-    private void visitGrantableUri(Uri uri, boolean userOverriddenUri, boolean isSound) {
+-        if (uri == null || !ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) return;
++    private void visitGrantableUri(Uri uri, boolean userOverriddenUri,
++            boolean isSound) {
++        if (uri == null) {
++            return;
++        }
++
++        if (mGrantableUris != null && mGrantableUris.contains(uri)) {
++            return; // already verified this URI
++        }
+ 
+         // We can't grant Uri permissions from system
+         final int sourceUid = getSbn().getUid();
+         if (sourceUid == android.os.Process.SYSTEM_UID) return;
+ 
+-        final long ident = Binder.clearCallingIdentity();
+         try {
+-            // This will throw SecurityException if caller can't grant
+-            mUgmInternal.checkGrantUriPermission(sourceUid, null,
+-                    ContentProvider.getUriWithoutUserId(uri),
+-                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+-                    ContentProvider.getUserIdFromUri(uri, UserHandle.getUserId(sourceUid)));
++            PermissionHelper.grantUriPermission(mUgmInternal, uri, sourceUid);
+ 
+             if (mGrantableUris == null) {
+                 mGrantableUris = new ArraySet<>();
+@@ -1401,8 +1399,6 @@ public final class NotificationRecord {
+                     }
+                 }
+             }
+-        } finally {
+-            Binder.restoreCallingIdentity(ident);
+         }
+     }
+ 
+diff --git a/services/core/java/com/android/server/notification/PermissionHelper.java b/services/core/java/com/android/server/notification/PermissionHelper.java
+index 09ed56745e54..54027e413629 100644
+--- a/services/core/java/com/android/server/notification/PermissionHelper.java
++++ b/services/core/java/com/android/server/notification/PermissionHelper.java
+@@ -23,12 +23,18 @@ import static android.content.pm.PackageManager.PERMISSION_GRANTED;
+ import android.Manifest;
+ import android.annotation.NonNull;
+ import android.annotation.UserIdInt;
++import android.content.ContentProvider;
++import android.content.ContentResolver;
++import android.content.Context;
++import android.content.Intent;
+ import android.content.pm.IPackageManager;
+ import android.content.pm.PackageInfo;
+ import android.content.pm.PackageManager;
+ import android.content.pm.ParceledListSlice;
++import android.net.Uri;
+ import android.os.Binder;
+ import android.os.RemoteException;
++import android.os.UserHandle;
+ import android.permission.IPermissionManager;
+ import android.util.ArrayMap;
+ import android.util.Pair;
+@@ -36,6 +42,7 @@ import android.util.Slog;
+ 
+ import com.android.internal.util.ArrayUtils;
+ import com.android.server.pm.permission.PermissionManagerServiceInternal;
++import com.android.server.uri.UriGrantsManagerInternal;
+ 
+ import java.util.Collections;
+ import java.util.HashSet;
+@@ -266,6 +273,19 @@ public final class PermissionHelper {
+         return false;
+     }
+ 
++    static void grantUriPermission(final UriGrantsManagerInternal ugmInternal, Uri uri,
++            int sourceUid) {
++        if (uri == null || !ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) return;
++
++        Binder.withCleanCallingIdentity(() -> {
++            // This will throw a SecurityException if the caller can't grant.
++            ugmInternal.checkGrantUriPermission(sourceUid, null,
++                    ContentProvider.getUriWithoutUserId(uri),
++                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
++                    ContentProvider.getUserIdFromUri(uri, UserHandle.getUserId(sourceUid)));
++        });
++    }
++
+     public static class PackagePermission {
+         public final String packageName;
+         public final @UserIdInt int userId;
+diff --git a/services/core/java/com/android/server/notification/PreferencesHelper.java b/services/core/java/com/android/server/notification/PreferencesHelper.java
+index 5507158f34da..7c0c38fd2f06 100644
+--- a/services/core/java/com/android/server/notification/PreferencesHelper.java
++++ b/services/core/java/com/android/server/notification/PreferencesHelper.java
+@@ -74,6 +74,7 @@ import com.android.internal.logging.MetricsLogger;
+ import com.android.internal.util.Preconditions;
+ import com.android.internal.util.XmlUtils;
+ import com.android.server.notification.PermissionHelper.PackagePermission;
++import com.android.server.uri.UriGrantsManagerInternal;
+ 
+ import org.json.JSONArray;
+ import org.json.JSONException;
+@@ -182,6 +183,7 @@ public class PreferencesHelper implements RankingConfig {
+     private final PermissionHelper mPermissionHelper;
+     private final NotificationChannelLogger mNotificationChannelLogger;
+     private final AppOpsManager mAppOps;
++    private final UriGrantsManagerInternal mUgmInternal;
+ 
+     private SparseBooleanArray mBadgingEnabled;
+     private SparseBooleanArray mBubblesEnabled;
+@@ -198,6 +200,7 @@ public class PreferencesHelper implements RankingConfig {
+             ZenModeHelper zenHelper, PermissionHelper permHelper,
+             NotificationChannelLogger notificationChannelLogger,
+             AppOpsManager appOpsManager,
++            UriGrantsManagerInternal ugmInternal,
+             SysUiStatsEvent.BuilderFactory statsEventBuilderFactory,
+             boolean showReviewPermissionsNotification) {
+         mContext = context;
+@@ -208,6 +211,7 @@ public class PreferencesHelper implements RankingConfig {
+         mNotificationChannelLogger = notificationChannelLogger;
+         mAppOps = appOpsManager;
+         mStatsEventBuilderFactory = statsEventBuilderFactory;
++        mUgmInternal = ugmInternal;
+         mShowReviewPermissionsNotification = showReviewPermissionsNotification;
+ 
+         XML_VERSION = 4;
+@@ -1008,6 +1012,17 @@ public class PreferencesHelper implements RankingConfig {
+                 }
+                 clearLockedFieldsLocked(channel);
+ 
++                // Verify that the app has permission to read the sound Uri
++                // Only check for new channels, as regular apps can only set sound
++                // before creating. See: {@link NotificationChannel#setSound}
++                try {
++                    PermissionHelper.grantUriPermission(mUgmInternal, channel.getSound(), uid);
++                } catch (SecurityException e) {
++                    // Fallback to default Uri to prevent app crashes
++                    channel.setSound(Settings.System.DEFAULT_NOTIFICATION_URI,
++                            Notification.AUDIO_ATTRIBUTES_DEFAULT);
++                }
++
+                 channel.setImportanceLockedByCriticalDeviceFunction(
+                         r.defaultAppLockedImportance || r.fixedImportance);
+ 
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+index 14e9539f0f66..1773e42625dd 100755
+--- a/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/NotificationManagerServiceTest.java
+@@ -3267,6 +3267,41 @@ public class NotificationManagerServiceTest extends UiServiceTestCase {
+                 eq(NotificationListenerService.NOTIFICATION_CHANNEL_OR_GROUP_UPDATED));
+     }
+ 
++    @Test
++    public void
++        testUpdateNotificationChannelFromPrivilegedListener_oldSoundNoUriPerm_newSoundHasUriPerm()
++                throws Exception {
++        mService.setPreferencesHelper(mPreferencesHelper);
++        when(mCompanionMgr.getAssociations(mPkg, mUserId))
++                .thenReturn(singletonList(mock(AssociationInfo.class)));
++        when(mPreferencesHelper.getNotificationChannel(eq(mPkg), anyInt(),
++                eq(mTestNotificationChannel.getId()), anyBoolean()))
++                .thenReturn(mTestNotificationChannel);
++
++        // Missing Uri permissions for the old channel sound
++        final Uri oldSoundUri = Settings.System.DEFAULT_NOTIFICATION_URI;
++        doThrow(new SecurityException("no access")).when(mUgmInternal)
++                .checkGrantUriPermission(eq(Process.myUid()), any(), eq(oldSoundUri),
++                anyInt(), eq(Process.myUserHandle().getIdentifier()));
++
++        // Has Uri permissions for the old channel sound
++        final Uri newSoundUri = Uri.parse("content://media/test/sound/uri");
++        final NotificationChannel updatedNotificationChannel = new NotificationChannel(
++                TEST_CHANNEL_ID, TEST_CHANNEL_ID, IMPORTANCE_DEFAULT);
++        updatedNotificationChannel.setSound(newSoundUri,
++                updatedNotificationChannel.getAudioAttributes());
++
++        mBinderService.updateNotificationChannelFromPrivilegedListener(
++                null, mPkg, Process.myUserHandle(), updatedNotificationChannel);
++
++        verify(mPreferencesHelper, times(1)).updateNotificationChannel(
++                anyString(), anyInt(), any(), anyBoolean());
++
++        verify(mListeners, never()).notifyNotificationChannelChanged(eq(mPkg),
++                eq(Process.myUserHandle()), eq(mTestNotificationChannel),
++                eq(NotificationListenerService.NOTIFICATION_CHANNEL_OR_GROUP_UPDATED));
++    }
++
+     @Test
+     public void testGetNotificationChannelFromPrivilegedListener_cdm_success() throws Exception {
+         mService.setPreferencesHelper(mPreferencesHelper);
+diff --git a/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java b/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
+index 598a22bbde39..541415223967 100644
+--- a/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
++++ b/services/tests/uiservicestests/src/com/android/server/notification/PreferencesHelperTest.java
+@@ -29,6 +29,9 @@ import static android.app.NotificationManager.IMPORTANCE_LOW;
+ import static android.app.NotificationManager.IMPORTANCE_MAX;
+ import static android.app.NotificationManager.IMPORTANCE_NONE;
+ import static android.app.NotificationManager.IMPORTANCE_UNSPECIFIED;
++import static android.content.ContentResolver.SCHEME_ANDROID_RESOURCE;
++import static android.content.ContentResolver.SCHEME_CONTENT;
++import static android.content.ContentResolver.SCHEME_FILE;
+ import static android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION;
+ import static android.media.AudioAttributes.USAGE_NOTIFICATION;
+ import static android.os.UserHandle.USER_SYSTEM;
+@@ -64,6 +67,7 @@ import static org.mockito.ArgumentMatchers.anyString;
+ import static org.mockito.ArgumentMatchers.eq;
+ import static org.mockito.Mockito.doAnswer;
+ import static org.mockito.Mockito.doReturn;
++import static org.mockito.Mockito.doThrow;
+ import static org.mockito.Mockito.mock;
+ import static org.mockito.Mockito.never;
+ import static org.mockito.Mockito.reset;
+@@ -93,6 +97,7 @@ import android.net.Uri;
+ import android.os.AsyncTask;
+ import android.os.Build;
+ import android.os.Bundle;
++import android.os.Process;
+ import android.os.RemoteCallback;
+ import android.os.RemoteException;
+ import android.os.UserHandle;
+@@ -121,6 +126,7 @@ import androidx.test.runner.AndroidJUnit4;
+ import com.android.os.AtomsProto.PackageNotificationPreferences;
+ import com.android.server.UiServiceTestCase;
+ import com.android.server.notification.PermissionHelper.PackagePermission;
++import com.android.server.uri.UriGrantsManagerInternal;
+ 
+ import com.google.common.collect.ImmutableList;
+ 
+@@ -292,7 +298,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         mStatsEventBuilderFactory = new WrappedSysUiStatsEvent.WrappedBuilderFactory();
+ 
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+         resetZenModeHelper();
+ 
+         mAudioAttributes = new AudioAttributes.Builder()
+@@ -621,7 +628,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testReadXml_oldXml_migrates() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, true);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, true);
+ 
+         String xml = "<ranking version=\"2\">\n"
+                 + "<package name=\"" + PKG_N_MR1 + "\" uid=\"" + UID_N_MR1
+@@ -691,7 +699,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testReadXml_oldXml_backup_migratesWhenPkgInstalled() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         when(mPm.getPackageUidAsUser("pkg1", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
+         when(mPm.getPackageUidAsUser("pkg2", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
+@@ -769,7 +778,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testReadXml_newXml_noMigration_showPermissionNotification() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, true);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, true);
+ 
+         String xml = "<ranking version=\"3\">\n"
+                 + "<package name=\"" + PKG_N_MR1 + "\" show_badge=\"true\">\n"
+@@ -826,7 +836,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testReadXml_newXml_permissionNotificationOff() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         String xml = "<ranking version=\"3\">\n"
+                 + "<package name=\"" + PKG_N_MR1 + "\" show_badge=\"true\">\n"
+@@ -883,7 +894,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testReadXml_newXml_noMigration_noPermissionNotification() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, true);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, true);
+ 
+         String xml = "<ranking version=\"4\">\n"
+                 + "<package name=\"" + PKG_N_MR1 + "\" show_badge=\"true\">\n"
+@@ -939,7 +951,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testReadXml_oldXml_migration_NoUid() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
+         String xml = "<ranking version=\"2\">\n"
+@@ -972,7 +985,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testReadXml_newXml_noMigration_NoUid() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         when(mPm.getPackageUidAsUser("something", USER_SYSTEM)).thenReturn(UNKNOWN_UID);
+         String xml = "<ranking version=\"3\">\n"
+@@ -1004,7 +1018,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testChannelXmlForNonBackup_postMigration() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         ArrayMap<Pair<Integer, String>, Pair<Boolean, Boolean>> appPermissions = new ArrayMap<>();
+         appPermissions.put(new Pair(1, "first"), new Pair(true, false));
+@@ -1084,7 +1099,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testChannelXmlForBackup_postMigration() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         ArrayMap<Pair<Integer, String>, Pair<Boolean, Boolean>> appPermissions = new ArrayMap<>();
+         appPermissions.put(new Pair(1, "first"), new Pair(true, false));
+@@ -1170,7 +1186,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testChannelXmlForBackup_postMigration_noExternal() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         ArrayMap<Pair<Integer, String>, Pair<Boolean, Boolean>> appPermissions = new ArrayMap<>();
+         appPermissions.put(new Pair(UID_P, PKG_P), new Pair(true, false));
+@@ -1249,7 +1266,8 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     @Test
+     public void testChannelXmlForBackup_postMigration_noLocalSettings() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+-                mPermissionHelper, mLogger, mAppOpsManager, mStatsEventBuilderFactory, false);
++                mPermissionHelper, mLogger, mAppOpsManager, mUgmInternal,
++                mStatsEventBuilderFactory, false);
+ 
+         ArrayMap<Pair<Integer, String>, Pair<Boolean, Boolean>> appPermissions = new ArrayMap<>();
+         appPermissions.put(new Pair(1, "first"), new Pair(true, false));
+@@ -1339,7 +1357,6 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         assertEquals(Settings.System.DEFAULT_NOTIFICATION_URI, actualChannel.getSound());
+     }
+ 
+-
+     /**
+      * Although we don't make backups with uncanonicalized uris anymore, we used to, so we have to
+      * handle its restore properly.
+@@ -2174,7 +2191,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         when(mMockZenModeHelper.getNotificationPolicy()).thenReturn(mTestNotificationPolicy);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+ 
+         // create notification channel that can bypass dnd, but app is blocked
+@@ -2202,7 +2219,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         when(mMockZenModeHelper.getNotificationPolicy()).thenReturn(mTestNotificationPolicy);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         // create notification channel that can bypass dnd, but app is blocked
+         // expected result: areChannelsBypassingDnd = false
+@@ -2225,7 +2242,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         when(mMockZenModeHelper.getNotificationPolicy()).thenReturn(mTestNotificationPolicy);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         // create notification channel that can bypass dnd, but app is blocked
+         // expected result: areChannelsBypassingDnd = false
+@@ -2277,7 +2294,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         when(mMockZenModeHelper.getNotificationPolicy()).thenReturn(mTestNotificationPolicy);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         assertFalse(mHelper.areChannelsBypassingDnd());
+         verify(mMockZenModeHelper, times(1)).setNotificationPolicy(any());
+         resetZenModeHelper();
+@@ -2290,7 +2307,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         when(mMockZenModeHelper.getNotificationPolicy()).thenReturn(mTestNotificationPolicy);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         assertFalse(mHelper.areChannelsBypassingDnd());
+         verify(mMockZenModeHelper, never()).setNotificationPolicy(any());
+         resetZenModeHelper();
+@@ -2378,6 +2395,71 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+                 PKG_N_MR1, UID_N_MR1, channel.getId(), false).getSound());
+     }
+ 
++    @Test
++    public void testCreateChannel_hasSoundUriPermission_useCustomSound() {
++        final Uri sound = Uri.parse(SCHEME_CONTENT + "://media/test/sound/uri");
++
++        final NotificationChannel channel = new NotificationChannel("id2", "name2",
++                NotificationManager.IMPORTANCE_DEFAULT);
++        channel.setSound(sound, mAudioAttributes);
++        mHelper.createNotificationChannel(PKG_N_MR1, UID_N_MR1, channel, true, false);
++        assertThat(mHelper.getNotificationChannel(PKG_N_MR1, UID_N_MR1, channel.getId(), true)
++                .getSound()).isEqualTo(sound);
++    }
++
++
++    @Test
++    public void testCreateChannel_noSoundUriPermission_replaceWithDefaultSound() {
++        final Uri sound = Uri.parse(SCHEME_CONTENT + "://media/test/sound/uri");
++
++        doThrow(new SecurityException("no access")).when(mUgmInternal)
++                .checkGrantUriPermission(eq(UID_N_MR1), any(), eq(sound),
++                    anyInt(), eq(Process.myUserHandle().getIdentifier()));
++
++        final NotificationChannel channel = new NotificationChannel("id2", "name2",
++                NotificationManager.IMPORTANCE_DEFAULT);
++        channel.setSound(sound, mAudioAttributes);
++        mHelper.createNotificationChannel(PKG_N_MR1, UID_N_MR1, channel, true, false);
++        assertThat(mHelper.getNotificationChannel(PKG_N_MR1, UID_N_MR1, channel.getId(), true))
++                .isNotNull();
++        assertThat(mHelper.getNotificationChannel(PKG_N_MR1, UID_N_MR1, channel.getId(), true)
++                .getSound()).isEqualTo(Settings.System.DEFAULT_NOTIFICATION_URI);
++    }
++
++    @Test
++    public void testCreateChannel_noSoundUriPermission_fileSchemaIgnored() {
++        final Uri sound = Uri.parse(SCHEME_FILE + "://path/sound");
++
++        doThrow(new SecurityException("no access")).when(mUgmInternal)
++                .checkGrantUriPermission(eq(UID_N_MR1), any(), any(),
++                    anyInt(), eq(Process.myUserHandle().getIdentifier()));
++
++        final NotificationChannel channel = new NotificationChannel("id2", "name2",
++                NotificationManager.IMPORTANCE_DEFAULT);
++        channel.setSound(sound, mAudioAttributes);
++
++        mHelper.createNotificationChannel(PKG_N_MR1, UID_N_MR1, channel, true, false);
++        assertThat(mHelper.getNotificationChannel(PKG_N_MR1, UID_N_MR1, channel.getId(), true)
++                .getSound()).isEqualTo(sound);
++    }
++
++    @Test
++    public void testCreateChannel_noSoundUriPermission_resourceSchemaIgnored() {
++        final Uri sound = Uri.parse(SCHEME_ANDROID_RESOURCE + "://resId/sound");
++
++        doThrow(new SecurityException("no access")).when(mUgmInternal)
++                .checkGrantUriPermission(eq(UID_N_MR1), any(), any(),
++                    anyInt(), eq(Process.myUserHandle().getIdentifier()));
++
++        final NotificationChannel channel = new NotificationChannel("id2", "name2",
++                NotificationManager.IMPORTANCE_DEFAULT);
++        channel.setSound(sound, mAudioAttributes);
++
++        mHelper.createNotificationChannel(PKG_N_MR1, UID_N_MR1, channel, true, false);
++        assertThat(mHelper.getNotificationChannel(PKG_N_MR1, UID_N_MR1, channel.getId(), true)
++                .getSound()).isEqualTo(sound);
++    }
++
+     @Test
+     public void testPermanentlyDeleteChannels() throws Exception {
+         NotificationChannel channel1 =
+@@ -3286,7 +3368,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+                 + "</ranking>\n";
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadByteArrayXml(preQXml.getBytes(), true, USER_SYSTEM);
+ 
+         assertEquals(PreferencesHelper.DEFAULT_HIDE_SILENT_STATUS_BAR_ICONS,
+@@ -3300,7 +3382,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         assertEquals(!PreferencesHelper.DEFAULT_HIDE_SILENT_STATUS_BAR_ICONS,
+@@ -3398,7 +3480,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         assertNull(mHelper.getNotificationDelegate(PKG_O, UID_O));
+@@ -3411,7 +3493,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         assertEquals("other", mHelper.getNotificationDelegate(PKG_O, UID_O));
+@@ -3425,7 +3507,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         assertNull(mHelper.getNotificationDelegate(PKG_O, UID_O));
+@@ -3439,7 +3521,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         // appears disabled
+@@ -3459,7 +3541,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         // appears disabled
+@@ -3479,7 +3561,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         assertEquals(BUBBLE_PREFERENCE_NONE, mHelper.getBubblePreference(PKG_O, UID_O));
+@@ -3535,7 +3617,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         assertEquals(BUBBLE_PREFERENCE_SELECTED, mHelper.getBubblePreference(PKG_O, UID_O));
+@@ -3573,7 +3655,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         ByteArrayOutputStream baos = writeXmlAndPurge(PKG_O, UID_O, false, UserHandle.USER_ALL);
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         loadStreamXml(baos, false, UserHandle.USER_ALL);
+ 
+         assertEquals(mHelper.getBubblePreference(PKG_O, UID_O), BUBBLE_PREFERENCE_NONE);
+@@ -4207,7 +4289,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testPlaceholderConversationId_shortcutRequired() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         final String xml = "<ranking version=\"1\">\n"
+                 + "<package name=\"" + PKG_O + "\" uid=\"" + UID_O + "\" >\n"
+@@ -4227,7 +4309,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testNormalConversationId_shortcutRequired() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         final String xml = "<ranking version=\"1\">\n"
+                 + "<package name=\"" + PKG_O + "\" uid=\"" + UID_O + "\" >\n"
+@@ -4247,7 +4329,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testNoConversationId_shortcutRequired() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         final String xml = "<ranking version=\"1\">\n"
+                 + "<package name=\"" + PKG_O + "\" uid=\"" + UID_O + "\" >\n"
+@@ -4267,7 +4349,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testDeleted_noTime() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         final String xml = "<ranking version=\"1\">\n"
+                 + "<package name=\"" + PKG_O + "\" uid=\"" + UID_O + "\" >\n"
+@@ -4287,7 +4369,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testDeleted_twice() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         mHelper.createNotificationChannel(
+                 PKG_P, UID_P, new NotificationChannel("id", "id", 2), true, false);
+@@ -4299,7 +4381,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testDeleted_recentTime() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         mHelper.createNotificationChannel(
+                 PKG_P, UID_P, new NotificationChannel("id", "id", 2), true, false);
+@@ -4317,7 +4399,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+         parser.nextTag();
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+         mHelper.readXml(parser, true, USER_SYSTEM);
+ 
+         NotificationChannel nc = mHelper.getNotificationChannel(PKG_P, UID_P, "id", true);
+@@ -4329,7 +4411,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testUnDelete_time() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         mHelper.createNotificationChannel(
+                 PKG_P, UID_P, new NotificationChannel("id", "id", 2), true, false);
+@@ -4349,7 +4431,7 @@ public class PreferencesHelperTest extends UiServiceTestCase {
+     public void testDeleted_longTime() throws Exception {
+         mHelper = new PreferencesHelper(getContext(), mPm, mHandler, mMockZenModeHelper,
+                 mPermissionHelper, mLogger,
+-                mAppOpsManager, mStatsEventBuilderFactory, false);
++                mAppOpsManager, mUgmInternal, mStatsEventBuilderFactory, false);
+ 
+         long time = System.currentTimeMillis() - (DateUtils.DAY_IN_MILLIS * 30);
+ 
+-- 
+2.52.0.rc1.455.g30608eb744-goog
+
