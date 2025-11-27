@@ -1,0 +1,247 @@
+From 1cdf83b61b533b8174b4fae5b1bd15039751ed42 Mon Sep 17 00:00:00 2001
+From: Tim Yu <yunicorn@google.com>
+Date: Wed, 3 Apr 2024 18:18:05 +0000
+Subject: [PATCH] [RESTRICT AUTOMERGE] Fix Autofill Inflating as User 0
+
+Autofill will inflate views as the current foreground user instead of
+the system_server user (0).
+
+Bug: 327137311
+Test: atest CtsAutoFillServiceTestCases --user-type secondary_user
+Flag: EXEMPT security bug fix
+Change-Id: I8a2c96259976e61d297dec914d10d86e585a6d6f
+---
+ .../com/android/server/autofill/Helper.java   | 29 +++++++++++++++++++
+ .../server/autofill/ui/DialogFillUi.java      | 10 +++++--
+ .../android/server/autofill/ui/FillUi.java    | 14 ++++++---
+ .../android/server/autofill/ui/SaveUi.java    |  5 +++-
+ 4 files changed, 50 insertions(+), 8 deletions(-)
+
+diff --git a/services/autofill/java/com/android/server/autofill/Helper.java b/services/autofill/java/com/android/server/autofill/Helper.java
+index 5f36496a2284..b50477809f1f 100644
+--- a/services/autofill/java/com/android/server/autofill/Helper.java
++++ b/services/autofill/java/com/android/server/autofill/Helper.java
+@@ -16,8 +16,13 @@
+ 
+ package com.android.server.autofill;
+ 
++import static android.Manifest.permission.INTERACT_ACROSS_USERS;
++
++import static com.android.server.autofill.Helper.sDebug;
++
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.annotation.RequiresPermission;
+ import android.annotation.UserIdInt;
+ import android.app.ActivityManager;
+ import android.app.assist.AssistStructure;
+@@ -26,8 +31,11 @@ import android.app.assist.AssistStructure.WindowNode;
+ import android.app.slice.Slice;
+ import android.app.slice.SliceItem;
+ import android.content.ComponentName;
++import android.content.Context;
+ import android.graphics.drawable.Icon;
+ import android.metrics.LogMaker;
++import android.os.UserHandle;
++import android.os.UserManager;
+ import android.service.autofill.Dataset;
+ import android.service.autofill.InternalSanitizer;
+ import android.service.autofill.SaveInfo;
+@@ -41,6 +49,7 @@ import android.view.autofill.AutofillId;
+ import android.view.autofill.AutofillValue;
+ import android.widget.RemoteViews;
+ 
++
+ import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
+ import com.android.internal.util.ArrayUtils;
+ 
+@@ -95,6 +104,26 @@ public final class Helper {
+         return permissionsOk.get();
+     }
+ 
++    /**
++     * Creates the context as the foreground user
++     *
++     * <p>Returns the current context as the current foreground user
++     */
++    @RequiresPermission(INTERACT_ACROSS_USERS)
++    public static Context getUserContext(Context context) {
++        int userId = ActivityManager.getCurrentUser();
++        Context c = context.createContextAsUser(UserHandle.of(userId), /* flags= */ 0);
++        if (sDebug) {
++            Slog.d(
++                    TAG,
++                    "Current User: "
++                            + userId
++                            + ", context created as: "
++                            + c.getContentResolver().getUserId());
++        }
++        return c;
++    }
++
+     /**
+      * Checks the URI permissions of the remote view,
+      * to see if the current userId is able to access it.
+diff --git a/services/autofill/java/com/android/server/autofill/ui/DialogFillUi.java b/services/autofill/java/com/android/server/autofill/ui/DialogFillUi.java
+index 59184e9ed288..a8f468885067 100644
+--- a/services/autofill/java/com/android/server/autofill/ui/DialogFillUi.java
++++ b/services/autofill/java/com/android/server/autofill/ui/DialogFillUi.java
+@@ -93,6 +93,7 @@ final class DialogFillUi {
+     private final ComponentName mComponentName;
+     private final int mThemeId;
+     private final @NonNull Context mContext;
++    private final @NonNull Context mUserContext;
+     private final @NonNull UiCallback mCallback;
+     private final @NonNull ListView mListView;
+     private final @Nullable ItemsAdapter mAdapter;
+@@ -102,6 +103,8 @@ final class DialogFillUi {
+     private @Nullable AnnounceFilterResult mAnnounceFilterResult;
+     private boolean mDestroyed;
+ 
++    // System has all permissions, see b/228957088
++    @SuppressWarnings("AndroidFrameworkRequiresPermission")
+     DialogFillUi(@NonNull Context context, @NonNull FillResponse response,
+             @NonNull AutofillId focusedViewId, @Nullable String filterText,
+             @Nullable Drawable serviceIcon, @Nullable String servicePackageName,
+@@ -115,6 +118,7 @@ final class DialogFillUi {
+         mComponentName = componentName;
+ 
+         mContext = new ContextThemeWrapper(context, mThemeId);
++        mUserContext = Helper.getUserContext(mContext);
+         final LayoutInflater inflater = LayoutInflater.from(mContext);
+         final View decor = inflater.inflate(R.layout.autofill_fill_dialog, null);
+ 
+@@ -213,7 +217,7 @@ final class DialogFillUi {
+         };
+ 
+         final View content = presentation.applyWithTheme(
+-                mContext, (ViewGroup) decor, interceptionHandler, mThemeId);
++                mUserContext, (ViewGroup) decor, interceptionHandler, mThemeId);
+         container.addView(content);
+         container.setVisibility(View.VISIBLE);
+     }
+@@ -252,7 +256,7 @@ final class DialogFillUi {
+             return true;
+         };
+         final View content = presentation.applyWithTheme(
+-                mContext, (ViewGroup) decor, interceptionHandler, mThemeId);
++                mUserContext, (ViewGroup) decor, interceptionHandler, mThemeId);
+         container.addView(content);
+         container.setVisibility(View.VISIBLE);
+         container.setFocusable(true);
+@@ -294,7 +298,7 @@ final class DialogFillUi {
+                 try {
+                     if (sVerbose) Slog.v(TAG, "setting remote view for " + focusedViewId);
+                     view = presentation.applyWithTheme(
+-                            mContext, null, interceptionHandler, mThemeId);
++                            mUserContext, null, interceptionHandler, mThemeId);
+                 } catch (RuntimeException e) {
+                     Slog.e(TAG, "Error inflating remote views", e);
+                     continue;
+diff --git a/services/autofill/java/com/android/server/autofill/ui/FillUi.java b/services/autofill/java/com/android/server/autofill/ui/FillUi.java
+index 76fa258734cc..9a471b2a4533 100644
+--- a/services/autofill/java/com/android/server/autofill/ui/FillUi.java
++++ b/services/autofill/java/com/android/server/autofill/ui/FillUi.java
+@@ -100,6 +100,7 @@ final class FillUi {
+             new AutofillWindowPresenter();
+ 
+     private final @NonNull Context mContext;
++    private final @NonNull Context mUserContext;
+ 
+     private final @NonNull AnchoredWindow mWindow;
+ 
+@@ -132,6 +133,8 @@ final class FillUi {
+         return context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_LEANBACK);
+     }
+ 
++    // System has all permissions, see b/228957088
++    @SuppressWarnings("AndroidFrameworkRequiresPermission")
+     FillUi(@NonNull Context context, @NonNull FillResponse response,
+             @NonNull AutofillId focusedViewId, @Nullable String filterText,
+             @NonNull OverlayControl overlayControl, @NonNull CharSequence serviceLabel,
+@@ -141,6 +144,7 @@ final class FillUi {
+         mCallback = callback;
+         mFullScreen = isFullScreen(context);
+         mContext = new ContextThemeWrapper(context, mThemeId);
++        mUserContext = Helper.getUserContext(mContext);
+ 
+         final LayoutInflater inflater = LayoutInflater.from(mContext);
+ 
+@@ -228,7 +232,7 @@ final class FillUi {
+                     throw new RuntimeException("Permission error accessing RemoteView");
+                 }
+                 content = response.getPresentation().applyWithTheme(
+-                        mContext, decor, interceptionHandler, mThemeId);
++                        mUserContext, decor, interceptionHandler, mThemeId);
+                 container.addView(content);
+             } catch (RuntimeException e) {
+                 callback.onCanceled();
+@@ -269,7 +273,7 @@ final class FillUi {
+             if (headerPresentation != null) {
+                 interactionBlocker = newInteractionBlocker();
+                 mHeader = headerPresentation.applyWithTheme(
+-                        mContext, null, interactionBlocker, mThemeId);
++                        mUserContext, null, interactionBlocker, mThemeId);
+                 final LinearLayout headerContainer =
+                         decor.findViewById(R.id.autofill_dataset_header);
+                 applyCancelAction(mHeader, response.getCancelIds());
+@@ -288,7 +292,7 @@ final class FillUi {
+                         interactionBlocker = newInteractionBlocker();
+                     }
+                     mFooter = footerPresentation.applyWithTheme(
+-                            mContext, null, interactionBlocker, mThemeId);
++                            mUserContext, null, interactionBlocker, mThemeId);
+                     applyCancelAction(mFooter, response.getCancelIds());
+                     // Footer not supported on some platform e.g. TV
+                     if (sVerbose) Slog.v(TAG, "adding footer");
+@@ -317,7 +321,7 @@ final class FillUi {
+                     try {
+                         if (sVerbose) Slog.v(TAG, "setting remote view for " + focusedViewId);
+                         view = presentation.applyWithTheme(
+-                                mContext, null, interceptionHandler, mThemeId);
++                                mUserContext, null, interceptionHandler, mThemeId);
+                     } catch (RuntimeException e) {
+                         Slog.e(TAG, "Error inflating remote views", e);
+                         continue;
+@@ -777,6 +781,8 @@ final class FillUi {
+         pw.print(prefix); pw.print("mContentWidth: "); pw.println(mContentWidth);
+         pw.print(prefix); pw.print("mContentHeight: "); pw.println(mContentHeight);
+         pw.print(prefix); pw.print("mDestroyed: "); pw.println(mDestroyed);
++        pw.print(prefix); pw.print("mContext: "); pw.println(mContext);
++        pw.print(prefix); pw.print("mUserContext: "); pw.println(mUserContext);
+         pw.print(prefix); pw.print("theme id: "); pw.print(mThemeId);
+         switch (mThemeId) {
+             case THEME_ID_DARK:
+diff --git a/services/autofill/java/com/android/server/autofill/ui/SaveUi.java b/services/autofill/java/com/android/server/autofill/ui/SaveUi.java
+index 47ac0ce704a7..eabbb0d14d22 100644
+--- a/services/autofill/java/com/android/server/autofill/ui/SaveUi.java
++++ b/services/autofill/java/com/android/server/autofill/ui/SaveUi.java
+@@ -172,6 +172,8 @@ final class SaveUi {
+ 
+     private boolean mDestroyed;
+ 
++    // System has all permissions, see b/228957088
++    @SuppressWarnings("AndroidFrameworkRequiresPermission")
+     SaveUi(@NonNull Context context, @NonNull PendingUi pendingUi,
+            @NonNull CharSequence serviceLabel, @NonNull Drawable serviceIcon,
+            @Nullable String servicePackageName, @NonNull ComponentName componentName,
+@@ -187,7 +189,7 @@ final class SaveUi {
+         mComponentName = componentName;
+         mCompatMode = compatMode;
+ 
+-        context = new ContextThemeWrapper(context, mThemeId) {
++        context = new ContextThemeWrapper(Helper.getUserContext(context), mThemeId) {
+             @Override
+             public void startActivity(Intent intent) {
+                 if (resolveActivity(intent) == null) {
+@@ -224,6 +226,7 @@ final class SaveUi {
+                 return null;
+             }
+         };
++
+         final LayoutInflater inflater = LayoutInflater.from(context);
+         final View view = inflater.inflate(R.layout.autofill_save, null);
+ 
+-- 
+2.52.0.rc1.455.g30608eb744-goog
+
