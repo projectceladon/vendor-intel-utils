@@ -1,0 +1,296 @@
+From dcb199fca5cba3724148b577ecef64f18c4c0ade Mon Sep 17 00:00:00 2001
+From: John Wu <topjohnwu@google.com>
+Date: Tue, 27 May 2025 10:54:05 -0700
+Subject: [PATCH] Do not recycle Parcel when lazy value is used
+
+Recycling the parcel when all lazy values are consumed in a bundle may
+lead to several UAF issues. However, resources tied to the parcel,
+especially file descriptors, should be released as soon as possible, and
+it should not wait until the next GC cycle.
+
+To workaround this issue, we expose the destroy() method in Parcel, and
+update BaseBundle's implementation to destroy the dangling parcel when
+mLazyValues is zero, and never call recycle that may lead to reuse of
+these Parcel instances. By doing so, we completely remove any
+possibility of UAF with regards to Bundle and lazy values.
+
+Flag: EXEMPT security fix
+Test: TH
+Bug: 377704076
+Bug: 381885240
+Change-Id: Ibb28bf81f9028c18baad4e898e387a3e6192db5d
+Merged-In: Ibb28bf81f9028c18baad4e898e387a3e6192db5d
+---
+ core/java/android/os/BaseBundle.java          | 23 +++----
+ core/java/android/os/Parcel.java              |  5 +-
+ .../src/android/os/BundleRecyclingTest.java   | 68 +++++++++----------
+ 3 files changed, 47 insertions(+), 49 deletions(-)
+
+diff --git a/core/java/android/os/BaseBundle.java b/core/java/android/os/BaseBundle.java
+index 9773134f6419..28d9f9271898 100644
+--- a/core/java/android/os/BaseBundle.java
++++ b/core/java/android/os/BaseBundle.java
+@@ -426,12 +426,11 @@ public class BaseBundle {
+             if (mOwnsLazyValues) {
+                 Preconditions.checkState(mLazyValues >= 0,
+                         "Lazy values ref count below 0");
+-                // No more lazy values in mMap, so we can recycle the parcel early rather than
++                // No more lazy values in mMap, so we can destroy the parcel early rather than
+                 // waiting for the next GC run
+-                if (mLazyValues == 0) {
+-                    Preconditions.checkState(mWeakParcelledData.get() != null,
+-                            "Parcel recycled earlier than expected");
+-                    recycleParcel(mWeakParcelledData.get());
++                Parcel parcel = mWeakParcelledData.get();
++                if (mLazyValues == 0 && parcel != null) {
++                    parcel.destroy();
+                     mWeakParcelledData = null;
+                 }
+             }
+@@ -486,7 +485,8 @@ public class BaseBundle {
+             mWeakParcelledData = null;
+             if (ownsParcel) {
+                 if (numLazyValues[0] == 0) {
+-                    recycleParcel(parcelledData);
++                    // No lazy value, we can directly recycle this parcel
++                    parcelledData.recycle();
+                 } else {
+                     mWeakParcelledData = new WeakReference<>(parcelledData);
+                 }
+@@ -526,12 +526,6 @@ public class BaseBundle {
+         return p == NoImagePreloadHolder.EMPTY_PARCEL;
+     }
+ 
+-    private static void recycleParcel(Parcel p) {
+-        if (p != null && !isEmptyParcel(p)) {
+-            p.recycle();
+-        }
+-    }
+-
+     /**
+      * Returns the backing map of this bundle after deserializing every item.
+      *
+@@ -637,7 +631,10 @@ public class BaseBundle {
+     public void clear() {
+         unparcel();
+         if (mOwnsLazyValues && mWeakParcelledData != null) {
+-            recycleParcel(mWeakParcelledData.get());
++            Parcel parcel = mWeakParcelledData.get();
++            if (parcel != null) {
++                parcel.destroy();
++            }
+         }
+ 
+         mWeakParcelledData = null;
+diff --git a/core/java/android/os/Parcel.java b/core/java/android/os/Parcel.java
+index 11eb5ccb709c..34d71600515f 100644
+--- a/core/java/android/os/Parcel.java
++++ b/core/java/android/os/Parcel.java
+@@ -573,7 +573,6 @@ public final class Parcel {
+         // able to print a stack when a Parcel is recycled twice, that
+         // is cleared in obtain instead.
+ 
+-        mClassCookies = null;
+         freeBuffer();
+ 
+         if (mOwnsNativeParcelObject) {
+@@ -5271,9 +5270,11 @@ public final class Parcel {
+             nativeFreeBuffer(mNativePtr);
+         }
+         mReadWriteHelper = ReadWriteHelper.DEFAULT;
++        mClassCookies = null;
+     }
+ 
+-    private void destroy() {
++    /** @hide */
++    public void destroy() {
+         resetSqaushingState();
+         if (mNativePtr != 0) {
+             if (mOwnsNativeParcelObject) {
+diff --git a/core/tests/mockingcoretests/src/android/os/BundleRecyclingTest.java b/core/tests/mockingcoretests/src/android/os/BundleRecyclingTest.java
+index c88ab903e86e..7994259c17f5 100644
+--- a/core/tests/mockingcoretests/src/android/os/BundleRecyclingTest.java
++++ b/core/tests/mockingcoretests/src/android/os/BundleRecyclingTest.java
+@@ -71,39 +71,39 @@ public class BundleRecyclingTest {
+     }
+ 
+     @Test
+-    public void bundleClear_whenParcelled_recyclesParcel() {
++    public void bundleClear_whenParcelled_destroysParcel() {
+         setUpBundle(/* lazy */ 1);
+         assertTrue(mBundle.isParcelled());
+-        verify(mParcelSpy, times(0)).recycle();
++        verify(mParcelSpy, times(0)).destroy();
+ 
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+         assertTrue(mBundle.isDefinitelyEmpty());
+ 
+-        // Should not recycle again
++        // Should not destroy again
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+     }
+ 
+     @Test
+-    public void bundleClear_whenUnparcelledWithLazy_recyclesParcel() {
++    public void bundleClear_whenUnparcelledWithLazy_destroysParcel() {
+         setUpBundle(/* lazy */ 1);
+ 
+         // Will unparcel but keep the CustomParcelable lazy
+         assertFalse(mBundle.isEmpty());
+-        verify(mParcelSpy, times(0)).recycle();
++        verify(mParcelSpy, times(0)).destroy();
+ 
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+         assertTrue(mBundle.isDefinitelyEmpty());
+ 
+         // Should not recycle again
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+     }
+ 
+     @Test
+-    public void bundleClear_whenClearedWithSharedParcel_doesNotRecycleParcel() {
++    public void bundleClear_whenClearedWithSharedParcel_doesNotDestroyParcel() {
+         setUpBundle(/* lazy */ 1);
+ 
+         Bundle copy = new Bundle();
+@@ -115,11 +115,11 @@ public class BundleRecyclingTest {
+         copy.clear();
+         assertTrue(copy.isDefinitelyEmpty());
+ 
+-        verify(mParcelSpy, never()).recycle();
++        verify(mParcelSpy, never()).destroy();
+     }
+ 
+     @Test
+-    public void bundleClear_whenClearedWithCopiedParcel_doesNotRecycleParcel() {
++    public void bundleClear_whenClearedWithCopiedParcel_doesNotDestroyParcel() {
+         setUpBundle(/* lazy */ 1);
+ 
+         // Will unparcel but keep the CustomParcelable lazy
+@@ -134,75 +134,75 @@ public class BundleRecyclingTest {
+         copy.clear();
+         assertTrue(copy.isDefinitelyEmpty());
+ 
+-        verify(mParcelSpy, never()).recycle();
++        verify(mParcelSpy, never()).destroy();
+     }
+ 
+     @Test
+-    public void bundleGet_whenUnparcelledWithLazyValueUnwrapped_recyclesParcel() {
++    public void bundleGet_whenUnparcelledWithLazyValueUnwrapped_destroysParcel() {
+         setUpBundle(/* lazy */ 1);
+ 
+         // Will unparcel with a lazy value, and immediately unwrap the lazy value,
+         // with no lazy values left at the end of getParcelable
+         // Ref counting should immediately recycle
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+ 
+         // Should not recycle again
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+     }
+ 
+     @Test
+-    public void bundleGet_whenMultipleLazy_recyclesParcelWhenAllUnwrapped() {
++    public void bundleGet_whenMultipleLazy_destroysParcelWhenAllUnwrapped() {
+         setUpBundle(/* lazy */ 2);
+ 
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+-        verify(mParcelSpy, times(0)).recycle();
++        verify(mParcelSpy, times(0)).destroy();
+ 
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+-        verify(mParcelSpy, times(0)).recycle();
++        verify(mParcelSpy, times(0)).destroy();
+ 
+         assertNotNull(mBundle.getParcelable("lazy1", CustomParcelable.class));
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+ 
+         // Should not recycle again
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+         assertTrue(mBundle.isDefinitelyEmpty());
+     }
+ 
+     @Test
+-    public void bundleGet_whenLazyAndNonLazy_recyclesParcelWhenAllUnwrapped() {
++    public void bundleGet_whenLazyAndNonLazy_destroysParcelWhenAllUnwrapped() {
+         setUpBundle(/* lazy */ 1, /* nonLazy */ 1);
+ 
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+ 
+-        // Should not recycle again
++        // Should not destroy again
+         assertNotNull(mBundle.getString("nonLazy0"));
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+     }
+ 
+     @Test
+-    public void bundleGet_whenLazyAndNonLazy_doesNotRecycleWhenOnlyNonLazyRetrieved() {
++    public void bundleGet_whenLazyAndNonLazy_doesNotDestroyWhenOnlyNonLazyRetrieved() {
+         setUpBundle(/* lazy */ 1, /* nonLazy */ 1);
+ 
+         assertNotNull(mBundle.getString("nonLazy0"));
+-        verify(mParcelSpy, times(0)).recycle();
++        verify(mParcelSpy, times(0)).destroy();
+ 
+         assertNotNull(mBundle.getString("nonLazy0"));
+-        verify(mParcelSpy, times(0)).recycle();
++        verify(mParcelSpy, times(0)).destroy();
+ 
+         assertNotNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+     }
+ 
+     @Test
+-    public void bundleGet_withWithSharedParcel_doesNotRecycleParcel() {
++    public void bundleGet_withWithSharedParcel_doesNotDestroyParcel() {
+         setUpBundle(/* lazy */ 1);
+ 
+         Bundle copy = new Bundle();
+@@ -214,17 +214,17 @@ public class BundleRecyclingTest {
+         assertNotNull(copy.getParcelable("lazy0", CustomParcelable.class));
+         copy.clear();
+ 
+-        verify(mParcelSpy, never()).recycle();
++        verify(mParcelSpy, never()).destroy();
+     }
+ 
+     @Test
+-    public void bundleGet_getAfterLazyCleared_doesNotRecycleAgain() {
++    public void bundleGet_getAfterLazyCleared_doesNotDestroyAgain() {
+         setUpBundle(/* lazy */ 1);
+         mBundle.clear();
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+ 
+         assertNull(mBundle.getParcelable("lazy0", CustomParcelable.class));
+-        verify(mParcelSpy, times(1)).recycle();
++        verify(mParcelSpy, times(1)).destroy();
+     }
+ 
+     private void setUpBundle(int lazy) {
+-- 
+2.52.0.rc1.455.g30608eb744-goog
+
